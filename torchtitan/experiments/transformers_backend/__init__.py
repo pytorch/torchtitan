@@ -76,7 +76,7 @@ class DeepSeekV3Args:
 
 # #TODO(3outeille): identify that if MoE model is used, we add a moe_args field
 
-if os.environ.get("MODEL_TYPE") == "llama":
+if os.environ.get("MODEL_TYPE") == "llama3" or os.environ.get("MODEL_TYPE") == "meta-llama/Llama-3.2-1B":
     print("Using llama model")
     patch_hf_llama()
     flavors = {

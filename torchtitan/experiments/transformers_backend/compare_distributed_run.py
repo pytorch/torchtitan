@@ -1,15 +1,46 @@
-#!/usr/bin/env python3
 """
-compare_distributed_run.py - Test different parallelism configurations against baseline
-Based on TorchTitan convergence guidelines
+python compare_distributed_run.py --steps 5 --model-filter llama3 --flavor debugmodel --nd_parallel 2d --verbose
+python compare_distributed_run.py --steps 5 --model-filter llama3 --flavor flavor --nd_parallel 2d --verbose
 
-Copyright (c) Meta Platforms, Inc. and affiliates.
-All rights reserved.
+Methodology:
+    - train on FSDP with TT (baseline)
+    - train on FSDP with HF (baseline)
+    - For all parallelism, train with nd-// with HF
+        - If one train fails:
+            - generated diff between HF FSDP (baseline) HF nd-// 
+            - train the nd-// TT counterpart
+                - diff between TT nd-// and HF nd-//
+                - diff between TT FSDP (baseline) and HF nd-//
+results/
+|_ meta-llama
+	|_ Llama-3.2-1B
+		|_ 2D
+			|_ debugmodel
+				|_ baseline_hf_fsdp_4gpu.log
+				|_ baseline_tt_fsdp_4gpu.log
+				|_ baseline_fsdp_debugmodel_4gpu_huggingface.toml
+				|_ baseline_fsdp_debugmodel_4gpu_torchtitan.toml
+				|_ fsdp1_cp1_tp2_pp2_debugmodel_4gpu_huggingface/
+					|_ fsdp1_cp1_tp2_pp2_debugmodel_4gpu_huggingface.toml
+					|_ fsdp1_cp1_tp2_pp2_debugmodel_4gpu_torchtitan.toml
+					|_ fsdp1_cp1_tp2_pp2_debugmodel_4gpu_huggingface.log
+					|_ diff_hf_baseline_vs_hf_nd_parallelism.log
+					|_ diff_tt_nd_parallelism_vs_hf_nd_parallelism.log
+					|_ diff_tt_baseline_vs_hf_nd_parallelism.log
+			|_ full
+				|_ baseline_hf_fsdp_4gpu.log
+				|_ baseline_tt_fsdp_4gpu.log
+				|_ baseline_fsdp_full_4gpu_huggingface.toml
+				|_ baseline_fsdp_full_4gpu_torchtitan.toml
+				|_ fsdp1_cp1_tp2_pp2_full_4gpu_huggingface/
+					|_ fsdp1_cp1_tp2_pp2_full_4gpu_huggingface.toml
+					|_ fsdp1_cp1_tp2_pp2_full_4gpu_torchtitan.toml
+					|_ fsdp1_cp1_tp2_pp2_full_4gpu_huggingface.log
+					|_ diff_hf_baseline_vs_hf_nd_parallelism.log
+					|_ diff_tt_nd_parallelism_vs_hf_nd_parallelism.log
+					|_ diff_tt_baseline_vs_hf_nd_parallelism.log
 
-This source code is licensed under the BSD-style license found in the
-LICENSE file in the root directory of this source tree.
 """
-
 import argparse
 import os
 import re
@@ -17,12 +48,9 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, NamedTuple
-import tempfile
-import json
+from typing import List, Optional
 from dataclasses import dataclass
 from enum import Enum
-import logging
 
 # Configure logging with colors
 class Colors:
@@ -95,31 +123,32 @@ class CompareDistributedRun:
     DEFAULT_SEED = 42
     DEFAULT_FLAVOR = "debugmodel"
     
-    # HF Model lists - extendable for different model families
-    HF_MODEL_LISTS = {
-        "llama": "meta-llama/Llama-3.2-1B",
-        "deepseek": "deepseek-ai/DeepSeek-V3",
+    MODEL_LISTS = {
+        "torchtitan":  ["llama3", "deepseek_v3"],
+        "huggingface": ["meta-llama/Llama-3.2-1B", "deepseek-ai/DeepSeek-V3"]
     }
     
-    # Available flavors per model type
     MODEL_FLAVORS = {
-        "llama": ["debugmodel", "medium", "full"],
-        "deepseek": ["debugmodel"],
+        "llama3": ["debugmodel", "medium", "full"],
+        "deepseek_v3": ["debugmodel"],
+        "meta-llama/Llama-3.2-1B": ["debugmodel", "medium", "full"],
+        "deepseek-ai/DeepSeek-V3": ["debugmodel"],
     }
 
     # Available ND parallelisms <-> number of GPUs
     ND_PARALLEL_TO_NB_GPUS = {
+        "0d": 1,
         "1d": 2,
         "2d": 4,
         "3d": 8,
         "4d": 16,
+        "5d": 32,
     }
     
     def __init__(self):
         self.script_dir = Path(__file__).parent.absolute()
         self.torchtitan_root = self.script_dir.parent.parent
-        self.results_dir = self.script_dir / "comparison_results"
-        self.config_dir = self.script_dir / "generated_configs"
+        self.base_results_dir = self.script_dir / "results"
         
         # Configuration parameters
         self.loss_threshold = self.DEFAULT_THRESHOLD_LOSS
@@ -131,6 +160,7 @@ class CompareDistributedRun:
         self.flavor = self.DEFAULT_FLAVOR
         self.verbose = False
         self.parallelism_configs: List[ParallelismConfig] = []
+        self.results_dir: Optional[Path] = None
 
     def generate_parallelism_configs(self) -> None:
         """Generate parallelism configurations based on the number of GPUs."""
@@ -148,81 +178,65 @@ class CompareDistributedRun:
         # Baseline FSDP
         configs.append(ParallelismConfig(name="fsdp", dp_replicate=1, dp_shard=ngpu, tp=1, pp=1, pp_schedule="Interleaved1F1B", cp=1, ep=1, eptp=1))
 
+        #NOTE(3outeille): No need to handle DDP (dp_replicate) as DDP is not supported > 1D parallelism"
+        #(cf https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/infra/parallelize.py#L139)
+        possible_fsdp = _get_factors(ngpu) # dp_shard
+        possible_cp = _get_factors(ngpu)
         possible_tp = _get_factors(ngpu)
         possible_pp = _get_factors(ngpu)
-        possible_ep = _get_factors(ngpu)
-        #TODO(3outeille): is CP borrowing degree from DP ?
-        #TODO(3outeille): is EP borrowing degree from DP ? 
 
-        # Is that correct ?
-        for tp in possible_tp:
-            for pp in possible_pp:
-                for ep in possible_ep:
-                    if tp * pp * ep > ngpu:
-                        continue
+        #TODO(3outeille): handle HSDP later
 
-                    if ngpu % (tp * pp * ep) == 0:
-                        dp = ngpu // (tp * pp * ep)
-                        if dp > 0 and (tp > 1 or pp > 1 or ep > 1 or dp > 1):
-                            # DDP style
-                            if dp > 1:
-                                configs.append(
-                                    ParallelismConfig(
-                                        name=f"tp{tp}_pp{pp}_ep{ep}_ddp{dp}",
-                                        dp_replicate=dp,
-                                        dp_shard=1,
-                                        tp=tp,
-                                        pp=pp,
-                                        pp_schedule="Interleaved1F1B",
-                                        cp=1,
-                                        ep=ep,
-                                        eptp=1
-                                    )
-                                )
-                            # FSDP with other parallelisms
-                            if tp > 1 or pp > 1 or ep > 1:
-                                configs.append(
-                                    ParallelismConfig(
-                                        name=f"tp{tp}_pp{pp}_ep{ep}_fsdp",
-                                        dp_replicate=1,
-                                        dp_shard=-1,
-                                        tp=tp,
-                                        pp=pp,
-                                        pp_schedule="Interleaved1F1B",
-                                        cp=1,
-                                        ep=ep,
-                                        eptp=1
-                                    )
-                                )
+        for dp_shard in possible_fsdp:
+            for cp in possible_cp:
+                for tp in possible_tp:
+                    for pp in possible_pp:
+                        
+                        if dp_shard * cp * tp * pp != ngpu:
+                            continue
 
-        # HSDP requires a DP degree that can be split
-        for dp in _get_factors(ngpu):
-            if dp > 1:
-                dp_factors = _get_factors(dp)
-                for replicate in dp_factors:
-                    if replicate > 1:
-                        shard = dp // replicate
-                        if shard > 1:
-                            configs.append(
-                                ParallelismConfig(
-                                    name=f"hsdp_r{replicate}_s{shard}",
-                                    dp_replicate=replicate,
-                                    dp_shard=shard,
-                                    tp=1,
-                                    pp=1,
-                                    pp_schedule="Interleaved1F1B",
-                                    cp=1,
-                                    ep=1,
-                                    eptp=1
-                                )
+                        num_parallelisms_used = sum(parallel_degree > 1 for parallel_degree in [dp_shard, cp, tp, pp])
+                        ndims_required = int(self.nd_parallel[0])
+                        #NOTE(3outeille): if 2D//, we need at least 2 parallelisms to be active (> 1). For 3D //, least 3 parallelisms > 1 etc.
+                        if ndims_required > 1 and num_parallelisms_used < ndims_required:
+                            continue
+
+                        configs.append(
+                            ParallelismConfig(
+                                name=f"fsdp{dp_shard}_cp{cp}_tp{tp}_pp{pp}",
+                                dp_replicate=1,
+                                dp_shard=dp_shard,
+                                tp=tp,
+                                pp=pp,
+                                pp_schedule="Interleaved1F1B",
+                                cp=cp,
+                                ep=1,
+                                eptp=1
                             )
+                        )
+
+                        # NOTE(3outeille): EP borrowing degree from dp_shard
+                        configs.append(
+                            ParallelismConfig(
+                                name=f"fsdp{dp_shard}_cp{cp}_tp{tp}_pp{pp}_ep{dp_shard}",
+                                dp_replicate=1,
+                                dp_shard=dp_shard,
+                                tp=tp,
+                                pp=pp,
+                                pp_schedule="Interleaved1F1B",
+                                cp=cp,
+                                ep=dp_shard,
+                                eptp=1
+                            )
+                        )
         
+    
         # Remove duplicates and assign to instance
         unique_configs = []
         seen_configs = set()
         for config in configs:
             # Create a tuple of the config values to check for duplicates
-            config_tuple = (config.dp_replicate, config.dp_shard, config.tp, config.pp, config.ep)
+            config_tuple = (config.dp_replicate, config.dp_shard, config.tp, config.pp, config.cp, config.ep, config.eptp)
             if config_tuple not in seen_configs:
                 unique_configs.append(config)
                 seen_configs.add(config_tuple)
@@ -232,72 +246,66 @@ class CompareDistributedRun:
         log_message(LogLevel.INFO, f"Generated {len(self.parallelism_configs)} parallelism configurations for {ngpu} GPUs.")
         if self.verbose:
             for config in self.parallelism_configs:
-                log_message(LogLevel.INFO, f"  - {config.name}: dp_replicate={config.dp_replicate}, dp_shard={config.dp_shard}, tp={config.tp}, pp={config.pp}, ep={config.ep}")
-    def generate_config(self, config: ParallelismConfig, model_name: str, model_type: str) -> Path:
+                log_message(LogLevel.INFO, f"  - {config.name}: dp_replicate={config.dp_replicate}, dp_shard={config.dp_shard}, tp={config.tp}, pp={config.pp}, cp={config.cp}, ep={config.ep}, eptp={config.eptp}")
+    
+    def generate_config(self, config_dir: Path, config: ParallelismConfig, model_name: str, backend: str, filename: Optional[str] = None) -> Path:
         """Generate configuration file for a parallelism setup."""
-        config_file = self.config_dir / f"{config.name}_{model_type}_{self.flavor}_{self.nd_parallel_to_nb_gpus[self.nd_parallel]}gpu.toml"
-        
-        #TODO(3outeille): create template instead
-        if model_type == "llama":
-            base_config = self.script_dir / "configs" / "debug_1_gpu_tt.toml"
+        import toml
+
+        if filename:
+            config_file = config_dir / filename
         else:
-            base_config = self.script_dir / "configs" / "debug_1_gpu_hf.toml"
-        
+            config_file = config_dir / f"{config.name}_{self.flavor}_{self.nd_parallel_to_nb_gpus[self.nd_parallel]}gpu_{backend}.toml"
+
+        base_config = self.script_dir / "configs" / "test_template.toml"
         shutil.copy2(base_config, config_file)
 
+        # Load the TOML file as a dict
         with open(config_file, 'r') as f:
-            content = f.read()
-        
-        # Update model name if it's HF backend
-        if model_type != "llama":
-            content = re.sub(r'name = ".*"', f'name = "{model_name}"', content)
-        
-        # Update model flavor
-        content = re.sub(r'flavor = ".*"', f'flavor = "{self.flavor}"', content)
-        
-        # Validate flavor for model type
-        if model_type in self.MODEL_FLAVORS:
-            if self.flavor not in self.MODEL_FLAVORS[model_type]:
-                log_message(LogLevel.WARNING, 
-                           f"Flavor '{self.flavor}' not available for {model_type}. "
-                           f"Available: {self.MODEL_FLAVORS[model_type]}")
-        
-        # Update training steps and seed
-        content = re.sub(r'steps = .*', f'steps = {self.steps}', content)
-        if 'seed = ' in content:
-            content = re.sub(r'seed = .*', f'seed = {self.seed}', content)
-        else:
-            content = re.sub(r'(steps = .*)', f'\\1\nseed = {self.seed}', content)
-        
-        #TODO(3outeille): is this correct ?
-        # Ensure deterministic training
-        if 'deterministic = true' not in content:
-            content = re.sub(r'(seed = .*)', '\\1\ndeterministic = true', content)
-        
-        # Update parallelism configuration
-        content = re.sub(r'data_parallel_replicate_degree = .*', 
-                        f'data_parallel_replicate_degree = {config.dp_replicate}', content)
-        content = re.sub(r'data_parallel_shard_degree = .*', 
-                        f'data_parallel_shard_degree = {config.dp_shard}', content)
-        content = re.sub(r'tensor_parallel_degree = .*', 
-                        f'tensor_parallel_degree = {config.tp}', content)
-        content = re.sub(r'pipeline_parallel_degree = .*', 
-                        f'pipeline_parallel_degree = {config.pp}', content)
-        content = re.sub(r'pipeline_parallel_schedule = .*', 
-                        f'pipeline_parallel_schedule = "{config.pp_schedule}"', content)
-        content = re.sub(r'context_parallel_degree = .*', 
-                        f'context_parallel_degree = {config.cp}', content)
-        content = re.sub(r'expert_parallel_degree = .*', 
-                        f'expert_parallel_degree = {config.ep}', content)
-        
-        content = re.sub(r'expert_tensor_parallel_degree = .*', 
-                        f'expert_tensor_parallel_degree = {config.eptp}', content)
+            config_data = toml.load(f)
 
-        # Write modified config
+        # Update [model] section
+        if "model" not in config_data:
+            config_data["model"] = {}
+        config_data["model"]["name"] = model_name
+        config_data["model"]["flavor"] = self.flavor
+
+        # Validate flavor for model type
+        if model_name in self.MODEL_FLAVORS:
+            if self.flavor not in self.MODEL_FLAVORS[model_name]:
+                log_message(LogLevel.WARNING, 
+                           f"Flavor '{self.flavor}' not available for {model_name}. "
+                           f"Available: {self.MODEL_FLAVORS[model_name]}")
+
+        # Update [training] section
+        if "training" not in config_data:
+            config_data["training"] = {}
+        config_data["training"]["steps"] = self.steps
+        config_data["training"]["seed"] = self.seed
+
+        # Update [parallelism] section
+        if "parallelism" not in config_data:
+            config_data["parallelism"] = {}
+        config_data["parallelism"]["data_parallel_replicate_degree"] = config.dp_replicate
+        config_data["parallelism"]["data_parallel_shard_degree"] = config.dp_shard
+        config_data["parallelism"]["tensor_parallel_degree"] = config.tp
+        config_data["parallelism"]["pipeline_parallel_degree"] = config.pp
+        config_data["parallelism"]["pipeline_parallel_schedule"] = config.pp_schedule
+        config_data["parallelism"]["context_parallel_degree"] = config.cp
+        config_data["parallelism"]["expert_parallel_degree"] = config.ep
+        config_data["parallelism"]["expert_tensor_parallel_degree"] = config.eptp
+
+        # Write back the modified TOML
+        with open(config_file, 'w') as f:
+            toml.dump(config_data, f)
+
+        log_message(LogLevel.INFO, f"Created config file: {config_file} for config '{config.name}' (model: {model_name})")
+        return config_file
+
         with open(config_file, 'w') as f:
             f.write(content)
         
-        log_message(LogLevel.INFO, f"Created config file: {config_file} for config '{config.name}' (model: {model_name}, type: {model_type})")
+        log_message(LogLevel.INFO, f"Created config file: {config_file} for config '{config.name}' (model: {model_name})")
         return config_file
     
     def extract_metrics(self, log_file: Path) -> TrainingMetrics:
@@ -352,7 +360,7 @@ class CompareDistributedRun:
                        f"Grad norm diff: {grad_norm_diff:.2e} (threshold: {self.grad_norm_threshold:.2e})")
             return False
     
-    def generate_diff(self, baseline_log: Path, log_path: Path, diff_file: Path) -> None:
+    def generate_diff(self, baseline_log: Path, test_log: Path, diff_file: Path) -> None:
         """Generate diff between baseline and test logs."""
         
         def _filter_log(log_file: Path) -> Path:
@@ -378,7 +386,7 @@ class CompareDistributedRun:
         try:
             # Filter logs to remove timestamps and volatile information
             baseline_filtered = _filter_log(baseline_log)
-            test_filtered = _filter_log(log_path)
+            test_filtered = _filter_log(test_log)
             
             # Generate colored diff using git diff
             cmd = ["git", "diff", "--no-index", "--color=always", "--word-diff=color",
@@ -410,6 +418,8 @@ class CompareDistributedRun:
         ]
         
         env = os.environ.copy()
+        env["SEED"] = str(self.seed)
+        env["MODEL_TYPE"] = model_name
         
         if self.verbose:
             log_message(LogLevel.INFO, f"Command: {' '.join(cmd)}")
@@ -439,7 +449,7 @@ class CompareDistributedRun:
             description="Test different parallelism configurations against a baseline FSDP model.",
         )      
         parser.add_argument("-m", "--model-filter", default="",
-                          help="Filter models by name pattern (e.g., 'llama')")
+                          help="Filter models by name pattern (e.g., 'llama3')")
         parser.add_argument("-t", "--loss-threshold", type=float, default=self.DEFAULT_THRESHOLD_LOSS,
                           help=f"Loss difference threshold (default: {self.DEFAULT_THRESHOLD_LOSS})")
         parser.add_argument("-g", "--grad-threshold", type=float, default=self.DEFAULT_THRESHOLD_GRAD_NORM,
@@ -448,11 +458,9 @@ class CompareDistributedRun:
                           help=f"Parallelism to use (default: {self.ND_PARALLEL_TO_NB_GPUS.keys()})")
         parser.add_argument("-s", "--steps", type=int, default=self.DEFAULT_STEPS,
                           help=f"Training steps (default: {self.DEFAULT_STEPS})")
-        parser.add_argument("--seed", type=int, default=self.DEFAULT_SEED,
-                          help=f"Random seed (default: {self.DEFAULT_SEED})")
         parser.add_argument("--flavor", default=self.DEFAULT_FLAVOR,
                           help=f"Model flavor/size (default: {self.DEFAULT_FLAVOR}). "
-                               f"Available: llama=[debugmodel, medium, full], deepseek=[debugmodel]")
+                               f"Available: llama3=[debugmodel, medium, full], deepseek_v3=[debugmodel]")
         parser.add_argument("-v", "--verbose", action="store_true",
                           help="Verbose output")
         
@@ -461,97 +469,133 @@ class CompareDistributedRun:
         self.loss_threshold = args.loss_threshold
         self.grad_norm_threshold = args.grad_threshold
         self.nd_parallel = args.nd_parallel
+        self.ngpu = self.nd_parallel_to_nb_gpus[self.nd_parallel]
         self.steps = args.steps
-        self.seed = args.seed
         self.model_filter = args.model_filter
         self.flavor = args.flavor
         self.verbose = args.verbose
         
-        log_message(LogLevel.INFO, "=== TorchTitan Distributed Parallelism Comparison ===")
+        log_message(LogLevel.INFO, "=== Distributed Parallelism Comparison ===")
         log_message(LogLevel.INFO, f"Loss threshold: {self.loss_threshold}")
         log_message(LogLevel.INFO, f"Grad norm threshold: {self.grad_norm_threshold}")
-        log_message(LogLevel.INFO, f"GPUs: {self.nd_parallel_to_nb_gpus[self.nd_parallel]}")
+        log_message(LogLevel.INFO, f"GPUs: {self.ngpu}")
         log_message(LogLevel.INFO, f"Steps: {self.steps}")
         log_message(LogLevel.INFO, f"Seed: {self.seed}")
         log_message(LogLevel.INFO, f"Model filter: {self.model_filter or 'all'}")
         log_message(LogLevel.INFO, f"Model flavor: {self.flavor}")
         print()
         
-        self.results_dir.mkdir(exist_ok=True)
-        self.config_dir.mkdir(exist_ok=True)
-        
-        if self.verbose:
-            log_message(LogLevel.INFO, f"Results directory: {self.results_dir}")
-            log_message(LogLevel.INFO, f"Config directory: {self.config_dir}")
+        self.base_results_dir.mkdir(exist_ok=True)
 
         self.generate_parallelism_configs()
         
-        total_model_failures = 0
+        #TODO(3outeille): make it more generic later
+        if self.model_filter == "llama3":
+            hf_model_name = "meta-llama/Llama-3.2-1B"
+            tt_model_name = "llama3"
+        elif self.model_filter == "deepseek_v3":
+            hf_model_name = "deepseek-ai/DeepSeek-V3"
+            tt_model_name = "deepseek_v3"
+        else:
+            raise ValueError(f"Model filter {self.model_filter} not supported")
+            
+        model_owner, model_repo = hf_model_name.split("/", 1)
+        nd_parallel_upper = self.nd_parallel.upper()
+        self.results_dir = self.base_results_dir / model_owner / model_repo / nd_parallel_upper / self.flavor
+        self.results_dir.mkdir(parents=True, exist_ok=True)
 
-        for model_type, model_name in self.HF_MODEL_LISTS.items():
-            # Apply model filter if specified
-            if self.model_filter and self.model_filter not in model_type:
-                continue
+        if self.verbose:
+            log_message(LogLevel.INFO, f"Results directory: {self.results_dir}")
 
-            log_message(LogLevel.INFO, f"Testing model: {model_type} ({model_name})")
-            total_tests = 0
-            passed_tests = 0
-            failed_tests = 0
-            configs_to_run = []
+        log_message(LogLevel.INFO, "--- Running baseline (FSDP) for huggingface backend ---")
 
-            for config in self.parallelism_configs:
-                # Skip configurations that require more GPUs than available
-                required_gpus = config.dp_replicate * config.tp * config.pp
-                if config.dp_shard != -1:
-                    required_gpus *= config.dp_shard
+        log_message(LogLevel.INFO, f"Testing model {hf_model_name} (HF) for {self.nd_parallel} parallelism")
 
-                if required_gpus > self.nd_parallel_to_nb_gpus[self.nd_parallel]:
-                    log_message(LogLevel.WARNING, 
-                               f"Skipping {config.name}: requires {required_gpus} GPUs but only {self.ngpu} available")
-                    continue
+        baseline_config = next((c for c in self.parallelism_configs if c.name == "fsdp"), None)
+        
+        baseline_config_filename_hf = f"baseline_{baseline_config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.toml"
+        baseline_config_file_hf = self.generate_config(config_dir=self.results_dir, config=baseline_config, model_name=hf_model_name, backend="huggingface", filename=baseline_config_filename_hf)
+        baseline_log_hf = self.results_dir / f"baseline_hf_{baseline_config.name}_{self.ngpu}gpu.log"
+        if not self.run_training(config_file=baseline_config_file_hf, log_file=baseline_log_hf, config_name=baseline_config.name, model_name=hf_model_name):
+            log_message(LogLevel.ERROR, f"Huggingface baseline (FSDP) training failed for {hf_model_name}")
+            # raise ValueError(f"Huggingface baseline (FSDP) training failed for {hf_model_name}")
 
-                config_file = self.generate_config(config, model_name, model_type)
-                configs_to_run.append((config, config_file))
+        hf_baseline_metrics = self.extract_metrics(baseline_log_hf)
+        if hf_baseline_metrics.loss is None or hf_baseline_metrics.grad_norm is None:
+            log_message(LogLevel.ERROR, f"Could not extract huggingface baseline metrics for {hf_model_name}")
+            # raise ValueError(f"Could not extract huggingface baseline metrics for {hf_model_name}")
+        
+        log_message(LogLevel.INFO, "--- Running baseline (FSDP) for torchtitan backend ---")
 
-            # # Test each parallelism configuration
-            # for config, config_file in configs_to_run:
-            #     log_path = self.results_dir / f"{config.name}_{model_type}_{self.flavor}_{self.ngpu}gpu.log"
-            #     if not self.run_training(config_file, log_path, config.name, model_name):
-            #         log_message(LogLevel.TEST_FAIL, f"{config.name} - Training failed")
-            #         failed_tests += 1
-            #         continue
-            #     test_metrics = self.extract_metrics(log_path)
-            #     if self.compare_metrics(baseline_metrics, test_metrics, config.name):
-            #         passed_tests += 1
-            #     else:
-            #         failed_tests += 1
-            #         diff_file = self.results_dir / f"diff_{config.name}_vs_baseline_{model_type}_{self.flavor}_{self.ngpu}gpu.log"
-            #         self.generate_diff(baseline_log, log_path, diff_file)
-            #         log_message(LogLevel.INFO, f"Diff saved to: {diff_file}")
-            #     total_tests += 1
+        log_message(LogLevel.INFO, f"Testing model {hf_model_name} (TT) for {self.nd_parallel} parallelism")
 
-            # Print summary for this model
-            print()
-            log_message(LogLevel.INFO, f"=== TEST SUMMARY for {model_type} ===")
-            log_message(LogLevel.INFO, f"Total tests: {total_tests}")
-            log_message(LogLevel.SUCCESS, f"Passed: {passed_tests}")
-            if failed_tests > 0:
-                log_message(LogLevel.TEST_FAIL, f"Failed: {failed_tests}")
+        baseline_config_filename_tt = f"baseline_{baseline_config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.toml"
+        baseline_config_file_tt = self.generate_config(config_dir=self.results_dir, config=baseline_config, model_name=tt_model_name, backend="torchtitan", filename=baseline_config_filename_tt)
+        baseline_log_tt = self.results_dir / f"baseline_tt_{baseline_config.name}_{self.ngpu}gpu.log"
+        if not self.run_training(config_file=baseline_config_file_tt, log_file=baseline_log_tt, config_name=baseline_config.name, model_name=tt_model_name):
+            raise ValueError(f"TorchTitan baseline (FSDP) training failed for {tt_model_name}")
+
+        tt_baseline_metrics = self.extract_metrics(baseline_log_tt)
+        if tt_baseline_metrics.loss is None or tt_baseline_metrics.grad_norm is None:
+            raise ValueError(f"Could not extract TorchTitan baseline metrics for {tt_model_name}")
+        
+        log_message(LogLevel.INFO, "--- Comparing other parallelism configurations (huggingface) ---")
+        
+        passed_tests = 0
+        failed_tests = 0
+        test_configs = [c for c in self.parallelism_configs if c.name != "fsdp"]
+        total_tests = len(test_configs)
+
+        for config in test_configs:
+            # Create a subdirectory for each test configuration
+            test_dir_name = f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface"
+            test_dir = self.results_dir / test_dir_name
+            test_dir.mkdir(exist_ok=True)
+
+            config_filename_hf = f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.toml"
+            config_file_hf = self.generate_config(config_dir=test_dir, config=config, model_name=hf_model_name, backend="huggingface", filename=config_filename_hf)
+            log_path_hf = test_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.log"
+
+            successful_hf_run = self.run_training(config_file=config_file_hf, log_file=log_path_hf, config_name=config.name, model_name=hf_model_name)
+
+            # Compare metrics between baseline (HF) and current (HF) nd-parallelism run
+            hf_metrics = self.extract_metrics(log_path_hf)
+            successful_hf_extract = self.compare_metrics(hf_baseline_metrics, hf_metrics, f"{config.name} (huggingface)")
+
+            if successful_hf_run and successful_hf_extract:
+                passed_tests += 1
             else:
-                log_message(LogLevel.INFO, f"Failed: {failed_tests}")
-            print()
+                failed_tests += 1
+                # Generate diff with baseline (HF)
+                diff_file_hf_vs_baseline = test_dir / "diff_hf_baseline_vs_hf_nd_parallelism.log"
+                self.generate_diff(baseline_log_hf, log_path_hf, diff_file_hf_vs_baseline)
+                log_message(LogLevel.INFO, f"Diff between baseline (HF) and current (HF) nd-parallelism run saved to: {diff_file_hf_vs_baseline}")
 
-            if failed_tests > 0:
-                total_model_failures += 1
+                # Run TT counterpart and generated diff between nd-paralellism TT and current hf nd-parallelism run
+                config_filename_tt = f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.toml"
+                config_file_tt = self.generate_config(config_dir=test_dir, config=config, model_name=tt_model_name, backend="torchtitan", filename=config_filename_tt)
+                log_path_tt = test_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.log"
+                if not self.run_training(config_file=config_file_tt, log_file=log_path_tt, config_name=config.name, model_name=tt_model_name):
+                    raise ValueError(f"TorchTitan training failed for {tt_model_name}")
+                
+                # generated diff between nd-paralellism TT and current hf nd-parallelism run
+                diff_file_tt_vs_hf = test_dir / "diff_tt_nd_parallelism_vs_hf_nd_parallelism.log"
+                self.generate_diff(log_path_tt, log_path_hf, diff_file_tt_vs_hf)
+                log_message(LogLevel.INFO, f"Diff between nd-paralellism TT and current (HF) nd-parallelism run saved to: {diff_file_tt_vs_hf}")
 
-        # Final summary
+                # generated diff between baseline TT and current hf nd-parallelism run
+                diff_file_tt_baseline_vs_hf = test_dir / "diff_tt_baseline_vs_hf_nd_parallelism.log"
+                self.generate_diff(baseline_log_tt, log_path_hf, diff_file_tt_baseline_vs_hf)
+                log_message(LogLevel.INFO, f"Diff between baseline TT and current (HF) nd-parallelism run saved to: {diff_file_tt_baseline_vs_hf}")
+
         print()
+        
         log_message(LogLevel.INFO, "=== FINAL SUMMARY ===")
-        if total_model_failures == 0:
+        if passed_tests == total_tests:
             log_message(LogLevel.SUCCESS, "All model tests passed! 🎉")
             return 0
         else:
-            log_message(LogLevel.TEST_FAIL, f"{total_model_failures} model(s) had test failures")
+            log_message(LogLevel.TEST_FAIL, f"{failed_tests} model(s) had test failures")
             log_message(LogLevel.INFO, f"Check the diff files in {self.results_dir} for details")
             return 1
 
