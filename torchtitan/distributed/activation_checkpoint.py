@@ -210,7 +210,7 @@ def _apply_op_sac_to_transformer_block_with_flex(
             module = _apply_op_sac(
                 module,
                 ac_config,
-                base_fqn=base_fqn or "",
+                base_fqn=base_fqn,
                 op_sac_save_list=op_sac_save_list,
             )
         else:
@@ -249,6 +249,14 @@ def _apply_ac_to_transformer_block(
     if use_op_sac:
         op_sac_save_list = op_sac_save_list or set()
         if use_flex_attn:
+            """
+            For Flex Attention, we need to apply SAC carefully to avoid invalidating
+            torch.compile. Any torch.compile inside the SAC region will be ignored,
+            and any torch.compile outside the SAC region will also be ignored if the
+            SAC region contains a graph break (e.g., MoE).
+
+            TODO: remove this once SAC issues are resolved.
+            """
             return _apply_op_sac_to_transformer_block_with_flex(
                 module,
                 ac_config,
