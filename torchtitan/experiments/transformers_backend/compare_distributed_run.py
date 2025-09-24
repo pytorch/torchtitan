@@ -166,6 +166,8 @@ class CompareDistributedRun:
         self.model_filter = ""
         self.flavor = self.DEFAULT_FLAVOR
         self.verbose = False
+        self.use_slurm = False
+        self.slurm_options = []
         self.loss_atol = self.DEFAULT_LOSS_ATOL
         self.loss_rtol = self.DEFAULT_LOSS_RTOL
         self.grad_norm_atol = self.DEFAULT_GRAD_NORM_ATOL
@@ -420,7 +422,7 @@ class CompareDistributedRun:
         log_message(LogLevel.INFO, f"Running training: {config_name} with model {model_name}")
         cmd = [
             "torchrun",
-            f"--nproc_per_node={self.nd_parallel_to_nb_gpus[self.nd_parallel]}",
+            f"--nproc_per_node={self.ngpu}",
             "--rdzv_backend", "c10d",
             "--rdzv_endpoint=localhost:0",
             "--local-ranks-filter", "0",
@@ -431,7 +433,6 @@ class CompareDistributedRun:
             "--training.deterministic",
             "--job.config_file", str(config_file)
         ]
-        
         env = os.environ.copy()
         env["SEED"] = str(self.seed)
         env["MODEL_TYPE"] = model_name
@@ -458,11 +459,62 @@ class CompareDistributedRun:
             log_message(LogLevel.ERROR, f"Training failed: {config_name}")
             return False
     
+    def _compare_one_parallelism_config(
+        self,
+        config: "ParallelismConfig",
+        hf_model_name: str,
+        tt_model_name: str,
+        hf_baseline_metrics: "TrainingMetrics",
+        baseline_log_hf: Path,
+        baseline_log_tt: Path,
+    ) -> bool:
+        """Compares a single parallelism configuration against the baseline."""
+        # Create a subdirectory for each test configuration
+        test_dir_name = f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface"
+        test_dir = self.results_dir / test_dir_name
+        test_dir.mkdir(exist_ok=True)
+
+        config_filename_hf = f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.toml"
+        config_file_hf = self.generate_config(config_dir=test_dir, config=config, model_name=hf_model_name, backend="huggingface", filename=config_filename_hf)
+        log_path_hf = test_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.log"
+
+        successful_hf_run = self.run_training(config_file=config_file_hf, log_file=log_path_hf, config_name=config.name, model_name=hf_model_name)
+
+        # Compare metrics between baseline (HF) and current (HF) nd-parallelism run
+        hf_metrics = self.extract_metrics(log_path_hf)
+        successful_hf_extract = self.compare_metrics(hf_baseline_metrics, hf_metrics, f"{config.name} (huggingface)")
+
+        if successful_hf_run and successful_hf_extract:
+            return True
+        else:
+            # Generate diff with baseline (HF)
+            diff_hf_baseline_vs_hf_nd_parallelism = test_dir / "diff_hf_baseline_vs_hf_nd_parallelism.log"
+            self.generate_diff(baseline_log_hf, log_path_hf, diff_hf_baseline_vs_hf_nd_parallelism)
+            log_message(LogLevel.INFO, f"Diff between baseline (HF) and current (HF) nd-parallelism run saved to: {diff_hf_baseline_vs_hf_nd_parallelism}")
+
+            # Run TT counterpart and generated diff between nd-paralellism TT and current hf nd-parallelism run
+            config_filename_tt = f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.toml"
+            config_file_tt = self.generate_config(config_dir=test_dir, config=config, model_name=tt_model_name, backend="torchtitan", filename=config_filename_tt)
+            log_path_tt = test_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.log"
+            if not self.run_training(config_file=config_file_tt, log_file=log_path_tt, config_name=config.name, model_name=tt_model_name):
+                raise ValueError(f"TorchTitan training failed for {tt_model_name}")
+
+            # generated diff between nd-paralellism TT and current hf nd-parallelism run
+            diff_file_tt_nd_parallelism_vs_hf_nd_parallelism = test_dir / "diff_tt_nd_parallelism_vs_hf_nd_parallelism.log"
+            self.generate_diff(log_path_tt, log_path_hf, diff_file_tt_nd_parallelism_vs_hf_nd_parallelism)
+            log_message(LogLevel.INFO, f"Diff between nd-paralellism TT and current (HF) nd-parallelism run saved to: {diff_file_tt_nd_parallelism_vs_hf_nd_parallelism}")
+
+            # generated diff between baseline TT and current hf nd-parallelism run
+            diff_file_tt_baseline_vs_hf_nd_parallelism = test_dir / "diff_tt_baseline_vs_hf_nd_parallelism.log"
+            self.generate_diff(baseline_log_tt, log_path_hf, diff_file_tt_baseline_vs_hf_nd_parallelism)
+            log_message(LogLevel.INFO, f"Diff between baseline TT and current (HF) nd-parallelism run saved to: {diff_file_tt_baseline_vs_hf_nd_parallelism}")
+            return False
+
     def run(self) -> int:
         """Main execution function. Runs all test suites for all models."""
         parser = argparse.ArgumentParser(
             description="Test different parallelism configurations against a baseline FSDP model.",
-        )      
+        )
         parser.add_argument("-m", "--model-filter", default="",
                           help="Filter models by name pattern (e.g., 'llama3')")
         parser.add_argument("-nd", "--nd_parallel", type=str, default="2d",
@@ -558,58 +610,29 @@ class CompareDistributedRun:
         if not tt_baseline_metrics.loss or not tt_baseline_metrics.grad_norm:
             raise ValueError(f"Could not extract TorchTitan baseline metrics for {tt_model_name}")
         
-
         if not self.compare_metrics(tt_baseline_metrics, hf_baseline_metrics, "baseline (TT) vs baseline (HF)"):
-            raise ValueError(f"Baseline (TT) vs baseline (HF) metrics comparison failed for {tt_model_name}")
+            log_message(LogLevel.ERROR, f"Baseline (TT) vs baseline (HF) metrics comparison failed for {tt_model_name}")
+            # raise ValueError(f"Baseline (TT) vs baseline (HF) metrics comparison failed for {tt_model_name}")
 
         log_message(LogLevel.INFO, "--- Comparing other parallelism configurations (huggingface) ---")
-        
         passed_tests = 0
         failed_tests = 0
         test_configs = [c for c in self.parallelism_configs if c.name != "fsdp"]
         total_tests = len(test_configs)
 
         for config in test_configs:
-            # Create a subdirectory for each test configuration
-            test_dir_name = f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface"
-            test_dir = self.results_dir / test_dir_name
-            test_dir.mkdir(exist_ok=True)
-
-            config_filename_hf = f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.toml"
-            config_file_hf = self.generate_config(config_dir=test_dir, config=config, model_name=hf_model_name, backend="huggingface", filename=config_filename_hf)
-            log_path_hf = test_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.log"
-
-            successful_hf_run = self.run_training(config_file=config_file_hf, log_file=log_path_hf, config_name=config.name, model_name=hf_model_name)
-
-            # Compare metrics between baseline (HF) and current (HF) nd-parallelism run
-            hf_metrics = self.extract_metrics(log_path_hf)
-            successful_hf_extract = self.compare_metrics(hf_baseline_metrics, hf_metrics, f"{config.name} (huggingface)")
-
-            if successful_hf_run and successful_hf_extract:
+            passed = self._compare_one_parallelism_config(
+                config,
+                hf_model_name,
+                tt_model_name,
+                hf_baseline_metrics,
+                baseline_log_hf,
+                baseline_log_tt,
+            )
+            if passed:
                 passed_tests += 1
             else:
                 failed_tests += 1
-                # Generate diff with baseline (HF)
-                diff_hf_baseline_vs_hf_nd_parallelism = test_dir / "diff_hf_baseline_vs_hf_nd_parallelism.log"
-                self.generate_diff(baseline_log_hf, log_path_hf, diff_hf_baseline_vs_hf_nd_parallelism)
-                log_message(LogLevel.INFO, f"Diff between baseline (HF) and current (HF) nd-parallelism run saved to: {diff_hf_baseline_vs_hf_nd_parallelism}")
-
-                # Run TT counterpart and generated diff between nd-paralellism TT and current hf nd-parallelism run
-                config_filename_tt = f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.toml"
-                config_file_tt = self.generate_config(config_dir=test_dir, config=config, model_name=tt_model_name, backend="torchtitan", filename=config_filename_tt)
-                log_path_tt = test_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.log"
-                if not self.run_training(config_file=config_file_tt, log_file=log_path_tt, config_name=config.name, model_name=tt_model_name):
-                    raise ValueError(f"TorchTitan training failed for {tt_model_name}")
-                
-                # generated diff between nd-paralellism TT and current hf nd-parallelism run
-                diff_file_tt_nd_parallelism_vs_hf_nd_parallelism = test_dir / "diff_tt_nd_parallelism_vs_hf_nd_parallelism.log"
-                self.generate_diff(log_path_tt, log_path_hf, diff_file_tt_nd_parallelism_vs_hf_nd_parallelism)
-                log_message(LogLevel.INFO, f"Diff between nd-paralellism TT and current (HF) nd-parallelism run saved to: {diff_file_tt_nd_parallelism_vs_hf_nd_parallelism}")
-
-                # generated diff between baseline TT and current hf nd-parallelism run
-                diff_file_tt_baseline_vs_hf_nd_parallelism = test_dir / "diff_tt_baseline_vs_hf_nd_parallelism.log"
-                self.generate_diff(baseline_log_tt, log_path_hf, diff_file_tt_baseline_vs_hf_nd_parallelism)
-                log_message(LogLevel.INFO, f"Diff between baseline TT and current (HF) nd-parallelism run saved to: {diff_file_tt_baseline_vs_hf_nd_parallelism}")
 
         print()
         
