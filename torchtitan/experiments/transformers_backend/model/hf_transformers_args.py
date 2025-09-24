@@ -294,6 +294,22 @@ class HFTransformerModel(nn.Module):
             # Add more cases here if needed for other model architectures
             raise AttributeError("Could not find layers in the model. Please check the model structure.")
 
+    @property
+    def embed_tokens(self):
+        """Returns the model's embed_tokens, handling different Hugging Face model structures."""
+        if hasattr(self.model, "model") and hasattr(self.model.model, "embed_tokens"):  # Llama-like
+            return self.model.model.embed_tokens
+        else:
+            raise AttributeError("Could not find embed_tokens in the model. Please check the model structure.")
+
+    @property
+    def norm(self):
+        """Returns the model's norm, handling different Hugging Face model structures."""
+        if hasattr(self.model, "model") and hasattr(self.model.model, "norm"):  # Llama-like
+            return self.model.model.norm
+        else:
+            raise AttributeError("Could not find norm in the model. Please check the model structure.")
+
     def forward(self, *args, **kwargs):
         output = self.model(*args, **kwargs)
         if isinstance(output, CausalLMOutputWithPast):

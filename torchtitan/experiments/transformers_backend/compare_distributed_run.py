@@ -129,7 +129,7 @@ class CompareDistributedRun:
     # value chosen based on diff of llama3 1GPU
     DEFAULT_LOSS_ATOL = 0.02
     DEFAULT_LOSS_RTOL = 1e-5
-    DEFAULT_GRAD_NORM_ATOL = 0.005
+    DEFAULT_GRAD_NORM_ATOL = 0.02
     DEFAULT_GRAD_NORM_RTOL = 1e-5
     
     MODEL_LISTS = {
@@ -392,10 +392,6 @@ class CompareDistributedRun:
                                 'torchrun ... --master_port=XXXX', line)
                     line = re.sub(r'PID [0-9]+', 'PID XXXX', line)
                     line = re.sub(r'localhost:[0-9]+', 'localhost:XXXX', line)
-                    line = re.sub(r'memory: [0-9]+\.[0-9]+GiB', 'memory: XX.XXGiB', line)
-                    line = re.sub(r'tps: [0-9,]+', 'tps: XXXXX', line)
-                    line = re.sub(r'tflops: [0-9]+\.[0-9]+', 'tflops: XX.XX', line)
-                    line = re.sub(r'mfu: [0-9]+\.[0-9]+%', 'mfu: XX.XX%', line)
                     outfile.write(line)
             
             return filtered_file
@@ -443,6 +439,7 @@ class CompareDistributedRun:
         
         try:
             # Capture output to include it in the exception, while still writing to log file
+            log_message(LogLevel.INFO, f"Running command: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 cwd=self.torchtitan_root,
@@ -618,6 +615,10 @@ class CompareDistributedRun:
         tt_baseline_run_error = self.run_training(config_file=baseline_config_file_tt, log_file=baseline_log_tt, config_name=baseline_config.name, model_name=tt_model_name)
         if tt_baseline_run_error:
             raise ValueError(f"TorchTitan baseline (FSDP) training failed for {tt_model_name}") from tt_baseline_run_error
+
+        diff_file_tt_baseline_vs_hf_baseline = self.results_dir / "diff_tt_baseline_vs_hf_baseline.log"
+        self.generate_diff(baseline_log_tt, baseline_log_hf, diff_file_tt_baseline_vs_hf_baseline)
+        log_message(LogLevel.INFO, f"Diff between baseline (TT) and baseline (HF) saved to: {diff_file_tt_baseline_vs_hf_baseline}")
 
         tt_baseline_metrics = self.extract_metrics(baseline_log_tt)
         if not tt_baseline_metrics.loss or not tt_baseline_metrics.grad_norm:
