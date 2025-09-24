@@ -414,6 +414,8 @@ class CompareDistributedRun:
             "--role", "rank",
             "--tee", "3",
             "-m", "torchtitan.train",
+            "--training.seed", str(self.seed),
+            "--training.deterministic",
             "--job.config_file", str(config_file)
         ]
         
