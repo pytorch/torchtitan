@@ -34,7 +34,7 @@ def _apply_layer_sac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     """
     global _layer_sac_count
     _layer_sac_count += 1
-    ac_freq = int(ac_config.selective_ac_option) if ac_freq is None else ac_freq
+    ac_freq = int(ac_config.selective_ac_option)
     if not ac_freq or _layer_sac_count % ac_freq == 0:
         return ptd_checkpoint_wrapper(
             module, preserve_rng_state=False, early_stop=ac_config.early_stop
@@ -54,7 +54,7 @@ def _apply_op_sac(
 
     Args:
         module (nn.Module): The module to apply selective activation checkpointing to.
-        ac_config (ActivationCheckpoint): The activation checkpointing config.
+        ac_config (ACConfig): The activation checkpointing config.
         base_fqn (str, optional): The base fqn of the module. Defaults to None.
         op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
             of recomputing.
@@ -130,6 +130,15 @@ def _apply_op_sac(
 
 
 def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
+    """Apply full activation checkpointing to the module.
+
+    Args:
+        module (nn.Module): The module to apply full activation checkpointing to.
+        ac_config (ACConfig): The activation checkpointing config.
+
+    Returns:
+        nn.Module: The module with full activation checkpointing applied.
+    """
     return ptd_checkpoint_wrapper(
         module, preserve_rng_state=False, early_stop=ac_config.early_stop
     )
@@ -271,7 +280,7 @@ def apply_ac(
 
     Args:
         model (nn.Module): The model to apply activation checkpointing to.
-        ac_config (ActivationCheckpoint): The activation checkpointing config.
+        ac_config (ACConfig): The activation checkpointing config.
         model_compile_enabled (bool): Whether torch.compile is enabled for the model.
         use_flex_attn (bool): Whether flex attention is enabled for the model.
         op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead

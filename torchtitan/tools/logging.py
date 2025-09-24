@@ -31,6 +31,15 @@ _logged: set[str] = set()
 
 
 def warn_once(logger: logging.Logger, msg: str) -> None:
+    """Log a warning message only once per unique message.
+
+    Uses a global set to track messages that have already been logged
+    to prevent duplicate warning messages from cluttering the output.
+
+    Args:
+        logger (logging.Logger): The logger instance to use for warning.
+        msg (str): The warning message to log.
+    """
     if msg not in _logged:
-        logger.warn(msg)
+        logger.warning(msg)
         _logged.add(msg)
