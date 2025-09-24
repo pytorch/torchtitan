@@ -645,6 +645,9 @@ class Comm:
     save_traces_folder: str = "comm_traces"
     """Flight recorder trace files location"""
 
+    save_traces_file_prefix: str = "rank_"
+    """Flight recorder trace files prefix"""
+
 
 @dataclass
 class MemoryEstimation:
