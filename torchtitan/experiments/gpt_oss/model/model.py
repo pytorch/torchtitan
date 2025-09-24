@@ -180,16 +180,17 @@ def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor):
     return q_out, k_out
 
 # Torch Attention backup implementation (for debugging and sampling) from HuggingFace
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
+    bs, slen, n_kv_heads, head_dim = x.shape
     if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+        return x
+    return (
+        torch.unsqueeze(x, dim=3)
+        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+    )
+
 
 # TODO(jianw): This is eager version from HuggingFace
 def eager_attention_forward(
@@ -200,12 +201,9 @@ def eager_attention_forward(
     attention_mask: torch.Tensor,
     scaling: float,
     dropout: float = 0.0,
-    num_key_value_groups: int = 1,
     **kwargs,
 ):
-    key_states = repeat_kv(key, num_key_value_groups)
-    value_states = repeat_kv(value, num_key_value_groups)
-    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    attn_weights = torch.matmul(query, key.transpose(2, 3)) * scaling
     if attention_mask is not None:
         # attention_mask can be [Tq, Tk] or [B, H, Tq, Tk]
         # Convert boolean "allowed" -> additive mask
@@ -230,7 +228,7 @@ def eager_attention_forward(
     probs = nn.functional.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
     scores = probs[..., :-1]  # we drop the sink here
     attn_weights = nn.functional.dropout(scores, p=dropout, training=False)
-    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = torch.matmul(attn_weights, value)
     return attn_output
 
 class Attention(nn.Module):
@@ -243,6 +241,10 @@ class Attention(nn.Module):
 
         self.sliding_window = model_args.sliding_window if use_sliding_attention else None
         self.head_dim = model_args.head_dim
+        self.n_heads = model_args.num_attention_heads
+        self.n_kv_heads = model_args.num_key_value_heads
+
+        self.n_rep = self.n_heads // self.n_kv_heads
 
         self.wq = nn.Linear(
             model_args.hidden_size, model_args.num_attention_heads * model_args.head_dim, bias=True
@@ -294,17 +296,19 @@ class Attention(nn.Module):
 
         q, k = apply_rotary_emb(q, k, freqs_cis)
 
+        # repeat k/v heads if n_kv_heads < n_heads
+        keys = repeat_kv(k, self.n_rep)
+        values = repeat_kv(v, self.n_rep)
+
         q = q.transpose(1, 2).contiguous()
-        k = k.transpose(1, 2).contiguous()
-        v = v.transpose(1, 2).contiguous()
+        k = keys.transpose(1, 2).contiguous()
+        v = values.transpose(1, 2).contiguous()
 
         if self.use_flex_attn:
             output = self.attn(
                 q, k, v,
                 scale=None,
                 sink_weights=self.sinks.to_local() if isinstance(self.sinks, DTensor) else self.sinks,
-                # sliding_window=self.sliding_window,
-                enable_gqa=True if self.sliding_window else False,
             )
         else:
             # eager attention forward
@@ -313,7 +317,6 @@ class Attention(nn.Module):
                 attention_mask=self.sliding_window_causal(seqlen, x.device),
                 scaling=self.head_dim**-0.5,
                 dropout=0.0,
-                num_key_value_groups=8,
             )
         output = output.transpose(1, 2).contiguous()   # (B, H, T, D) -> (B, T, H, D)
 
