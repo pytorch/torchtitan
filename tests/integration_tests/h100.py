@@ -22,17 +22,6 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--compile.enable",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
-                ],
-            ],
-            "2D async TP compile",
-            "2d_asynctp_compile",
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--model.converters float8",
                     "--float8.enable_fsdp_float8_all_gather",
                     "--float8.precompute_float8_dynamic_scale_for_fsdp",
@@ -40,6 +29,18 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ],
             "Float8 test",
             "float8",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--compile.enable",
+                    "--parallelism.tensor_parallel_degree 8",
+                    "--parallelism.enable_async_tensor_parallel",
+                ],
+            ],
+            "8D async TP compile",
+            "8d_asynctp_compile",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
