@@ -15,171 +15,78 @@ from .args import GptOssModelArgs
 from .moe import GptOssMoE
 
 
-# Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
-def precompute_freqs_cis(args: GptOssModelArgs) -> torch.Tensor:
+def precompute_rope_cache(
+    dim: int, max_seq_len: int, base: float = 1_000_000.0
+) -> torch.Tensor:
+    freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    # Create position indexes `[0, 1, ..., max_seq_len - 1]`
+    t = torch.arange(max_seq_len, dtype=freqs.dtype, device=freqs.device)
+
+    # Outer product of theta and position index; output tensor has
+    # a shape of [max_seq_len, dim // 2]
+    idx_theta = torch.outer(t, freqs).float()
+
+    # We cache the cos and sin embeddings instead of the IDs. This helps
+    # ensure we have correct behavior when training with bf16
+    # Size: [max_seq_len, (dim * 2)]
+    freqs = torch.cat([idx_theta, idx_theta], dim=-1)
+    rope_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
+    return rope_cache
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """
-    Precomputes frequency-based complex exponential values for rotary positional embeddings.
+    Reshape frequency tensor (represented by cos, sin) for broadcasting it with another tensor.
+
+    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
+    for the purpose of broadcasting the frequency tensor during element-wise operations.
+
+    The input freqs_cis tensor is assumed to be of shape (max_seqlen, head_dim * 2),
+    and the first seqlen elements will be sliced, but dim must match x.
 
     Args:
-        args (GptOssModelArgs): Model arguments containing positional embedding parameters.
+        rope_cache (torch.Tensor): RoPE tensor (cos and sin) to be reshaped.
+        x (torch.Tensor): Target tensor for broadcasting compatibility.
 
     Returns:
-        torch.Tensor: Precomputed complex exponential values for positional embeddings.
+        torch.Tensor: Reshaped frequency tensor.
     """
-    dim = args.head_dim
-    seqlen = args.max_seq_len
-    beta_fast = args.beta_fast
-    beta_slow = args.beta_slow
-    base = args.rope_theta
-    factor = args.rope_factor
-    original_seq_len = args.original_seq_len
-
-    # YaRN default m-scale (attention_factor). Matches HF when attention_factor is None.
-    mscale = 0.1 * math.log(factor) + 1.0
-
-    def find_correction_dim(
-        num_rotations: float, dim: int, base: float, max_seq_len: int
-    ) -> float:
-        """
-        Computes the correction dimension for a given number of rotations in the rotary positional embedding.
-
-        Args:
-            num_rotations (float): Number of rotations to compute the correction for.
-            dim (int): Dimensionality of the embedding space.
-            base (float): Base value for the exponential computation.
-            max_seq_len (int): Maximum sequence length.
-
-        Returns:
-            float: The correction dimension based on the input parameters.
-        """
-        return (
-            dim
-            * math.log(max_seq_len / (num_rotations * 2 * math.pi))
-            / (2 * math.log(base))
-        )
-
-    def find_correction_range(
-        low_rot: float, high_rot: float, dim: int, base: float, max_seq_len: int
-    ) -> Tuple[int, int]:
-        """
-        Computes the range of correction dimensions for rotary positional embeddings.
-
-        Args:
-            low_rot (float): Lower bound for the number of rotations.
-            high_rot (float): Upper bound for the number of rotations.
-            dim (int): Dimensionality of the embedding space.
-            base (float): Base value for the exponential computation.
-            max_seq_len (int): Maximum sequence length.
-
-        Returns:
-            Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
-        """
-        low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
-        high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
-        return max(low, 0), min(high, dim - 1)
-
-    def linear_ramp_factor(min: float, max: float, dim: int) -> torch.Tensor:
-        """
-        Computes a linear ramp function used to smooth values between a minimum and maximum range.
-
-        Args:
-            min (float): Minimum value for the ramp function.
-            max (float): Maximum value for the ramp function.
-            dim (int): Dimensionality of the ramp tensor.
-
-        Returns:
-            torch.Tensor: A tensor of shape (dim,) with values linearly interpolated between 0 and 1,
-                clamped to the range [0, 1].
-        """
-        if min == max:
-            max += 0.001
-        linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
-        ramp_func = torch.clamp(linear_func, 0, 1)
-        return ramp_func
-
-    # Basic RoPE frequency calculation
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-
-    # YaRN scaling for extended context. YaRN is used to extend the context length after pre-training.
-    if seqlen > original_seq_len:
-        low, high = find_correction_range(
-            beta_fast, beta_slow, dim, base, original_seq_len
-        )
-        smooth = 1 - linear_ramp_factor(low, high, dim // 2)
-        freqs = freqs / factor * (1 - smooth) + freqs * smooth
-
-    # Create position indices
-    t = torch.arange(seqlen)
-
-    # Outer product: [positions] × [frequencies]
-    freqs = torch.outer(t, freqs)
-
-    # Convert to complex exponentials: e^(i*freq*pos)
-    freqs_cis = torch.polar(torch.full_like(freqs, fill_value=mscale), freqs)
-
-    return freqs_cis
+    ndim = x.ndim
+    assert ndim > 1
+    _, seqlen, _, head_dim = x.shape
+    rope_cache = rope_cache[0:seqlen]
+    # The shape of rope_cache is (seqlen, head_dim * 2) because we concate cos and sin
+    assert rope_cache.shape == (seqlen, head_dim * 2)
+    shape = [-1, seqlen, 1, head_dim * 2]
+    return rope_cache.view(*shape)
 
 
-def apply_rotary_emb_inner(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-    """
-    Applies rotary positional embeddings to the input tensor.
+def apply_rotary_emb(
+    xq: torch.Tensor, xk: torch.Tensor, rope_cache: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # input tensor x has shape [bsz, seq_len, num_heads, head_dim]
+    head_dim = xq.shape[-1]
 
-    Args:
-        x (torch.Tensor): Input tensor with positional embeddings to be applied.
-        freqs_cis (torch.Tensor): Precomputed complex exponential values for positional embeddings.
+    # reshape for broadcast
+    rope_cache = reshape_for_broadcast(rope_cache, xq)
 
-    Returns:
-        torch.Tensor: Tensor with rotary embeddings applied.
-    """
-    dtype = x.dtype
-    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
-    y = torch.view_as_real(x * freqs_cis).flatten(3)
-    return y.to(dtype)
+    # [bsz, seq_len, 1, head_dim]
+    cos = rope_cache[..., :head_dim].to(dtype=xq.dtype, device=xq.device)
+    sin = rope_cache[..., head_dim:].to(dtype=xq.dtype, device=xq.device)
 
-def apply_rotary_emb(q: torch.Tensor, k: torch.Tensor, freqs_cis: torch.Tensor):
-    """
-    HF-style inputs (half-split last dim) -> interleave -> Torchtitan complex RoPE -> de-interleave.
-    Shapes:
-      q, k: [B, T, H, D] with D even (HF half-split: first D/2 real, last D/2 imag)
-      freqs_cis: complex, last dim == D/2. Typically [T, D/2] or [1, T, D/2].
-    Returns:
-      q_out, k_out in HF half-split layout (same shape as q, k).
-    """
-    B, T, H, D = q.shape
-    assert D % 2 == 0, "head_dim must be even for RoPE"
-    rot = D // 2
-    assert freqs_cis.shape[-1] == rot, "freqs_cis last dim must be D/2"
-    freqs_cis = freqs_cis[:T, :]
+    # xq:  [bsz, seq_len, num_heads, head_dim]
+    # xk:  [bsz, seq_len, num_kv_heads, head_dim]
+    xq_out = (xq * cos) + (rotate_half(xq) * sin)
+    xk_out = (xk * cos) + (rotate_half(xk) * sin)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
 
-    # Memory layout comparison for head_dim=8:
-    # HF Format:     [r0][r1][r2][r3][i0][i1][i2][i3]
-    #             ↑-- reals --↑   ↑-- imags --↑
-
-    # Interleaved:   [r0][i0][r1][i1][r2][i2][r3][i3]  
-    #             ↑-pair-↑ ↑-pair-↑ ↑-pair-↑ ↑-pair-↑
-    # --- inline: HF half-split -> interleaved (real0, imag0, real1, imag1, ...)
-    # q_i, k_i: [B, T, H, D]
-    q_i = torch.empty_like(q)
-    k_i = torch.empty_like(k)
-    q_i[..., 0::2] = q[..., :rot]
-    q_i[..., 1::2] = q[..., rot:]
-    k_i[..., 0::2] = k[..., :rot]
-    k_i[..., 1::2] = k[..., rot:]
-
-    # --- Torchtitan default complex apply (expects interleaved last dim)
-    # freqs_cis will be reshaped inside to [1, T, 1, rot]
-    # TODO(jianiw): I think we shoud go with sin/cos representation to simplify the conversion between paired real/imaginary <-> half-split real/imaginary 
-    q_rot_i = apply_rotary_emb_inner(q_i, freqs_cis)  # uses TT's complex path
-    k_rot_i = apply_rotary_emb_inner(k_i, freqs_cis)
-
-    # --- inline: interleaved -> HF half-split
-    # TODO(jianiw): convert it back
-    q_out = torch.cat([q_rot_i[..., 0::2], q_rot_i[..., 1::2]], dim=-1)
-    k_out = torch.cat([k_rot_i[..., 0::2], k_rot_i[..., 1::2]], dim=-1)
-    return q_out, k_out
-
-# Torch Attention backup implementation (for debugging and sampling) from HuggingFace
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
     bs, slen, n_kv_heads, head_dim = x.shape
@@ -215,7 +122,7 @@ def eager_attention_forward(
             add_mask = attention_mask.to(attn_weights.dtype)
 
         # Truncate to current key length and add (broadcasts if needed)
-        add_mask = add_mask[..., : key_states.shape[-2]]
+        add_mask = add_mask[..., : key.shape[-2]]
         attn_weights = attn_weights + add_mask
 
     sinks = sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
@@ -275,14 +182,14 @@ class Attention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        freqs_cis: torch.Tensor,
+        rope_cache: torch.Tensor,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
-            freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
+            rope_cache (torch.Tensor): Precomputed cosine and sine frequencies for rope embedding.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -294,7 +201,7 @@ class Attention(nn.Module):
         k = self.wk(x).view(hidden_shape)
         v = self.wv(x).view(hidden_shape)
 
-        q, k = apply_rotary_emb(q, k, freqs_cis)
+        q, k = apply_rotary_emb(q, k, rope_cache)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(k, self.n_rep)
@@ -369,18 +276,18 @@ class TransformerBlock(nn.Module):
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
+    def forward(self, x: torch.Tensor, rope_cache: torch.Tensor):
         """
         Forward pass for the Transformer block.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
-            freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
+            rope_cache (torch.Tensor): Precomputed cosine and sine frequencies.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        x = x + self.attention(self.attention_norm(x), freqs_cis)
+        x = x + self.attention(self.attention_norm(x), rope_cache)
         x = x + self.moe(self.ffn_norm(x))
         return x
 
@@ -398,16 +305,16 @@ class GptOssModel(nn.Module, ModelProtocol):
 
     def __init__(self, model_args: GptOssModelArgs):
         super().__init__()
+        self.model_args = model_args
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.hidden_size)
         self.register_buffer(
-            "freqs_cis", precompute_freqs_cis(model_args), persistent=True
+            "rope_cache", self._precompute_rope_cache(), persistent=False
         )
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.num_hidden_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args).to(torch.bfloat16)
-            # convert_submodules_to_bf16(self.layers[str(layer_id)])
 
         self.norm = nn.RMSNorm(model_args.hidden_size, eps=model_args.norm_eps)
         self.output = nn.Linear(
@@ -418,12 +325,11 @@ class GptOssModel(nn.Module, ModelProtocol):
         )
         self.model_args = model_args
         self.init_weights()
-        # convert_submodules_to_bf16(self)
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
-        buffer_device = buffer_device or self.freqs_cis.device
+        buffer_device = buffer_device or self.rope_cache.device
         with torch.device(buffer_device):
-            self.freqs_cis = precompute_freqs_cis(self.model_args)
+            self.rope_cache = self._precompute_rope_cache()
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
@@ -442,6 +348,13 @@ class GptOssModel(nn.Module, ModelProtocol):
                 b=cutoff_factor * final_out_std,
             )
 
+    def _precompute_rope_cache(self) -> torch.Tensor:
+        return precompute_rope_cache(
+            self.model_args.head_dim,
+            self.model_args.max_seq_len,
+            self.model_args.rope_theta,
+        )
+
     def forward(self, tokens: torch.Tensor):
         """
         Forward pass for the Transformer model.
@@ -455,7 +368,7 @@ class GptOssModel(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens)
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis)
+            h = layer(h, self.rope_cache)
         h = self.norm(h)
         output = self.output(h)
         return output
