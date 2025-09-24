@@ -49,8 +49,9 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+import torch
 
 # Configure logging with colors
 class Colors:
@@ -110,18 +111,26 @@ class ParallelismConfig:
 @dataclass
 class TrainingMetrics:
     """Training metrics extracted from logs."""
-    loss: Optional[float] = None
-    grad_norm: Optional[float] = None
+    steps: List[int] = field(default_factory=list)
+    loss: List[float] = field(default_factory=list)
+    grad_norm: List[float] = field(default_factory=list)
+    memory: List[float] = field(default_factory=list)
+    tps: List[int] = field(default_factory=list)
+    tflops: List[float] = field(default_factory=list)
+    mfu: List[float] = field(default_factory=list)
 
 class CompareDistributedRun:
     """Main class for running distributed parallelism comparison tests."""
     
     # Default values
-    DEFAULT_THRESHOLD_LOSS = 1e-4
-    DEFAULT_THRESHOLD_GRAD_NORM = 1e-3
     DEFAULT_STEPS = 10
     DEFAULT_SEED = 42
     DEFAULT_FLAVOR = "debugmodel"
+    # value chosen based on diff of llama3 1GPU
+    DEFAULT_LOSS_ATOL = 0.02
+    DEFAULT_LOSS_RTOL = 1e-5
+    DEFAULT_GRAD_NORM_ATOL = 0.005
+    DEFAULT_GRAD_NORM_RTOL = 1e-5
     
     MODEL_LISTS = {
         "torchtitan":  ["llama3", "deepseek_v3"],
@@ -151,14 +160,16 @@ class CompareDistributedRun:
         self.base_results_dir = self.script_dir / "results"
         
         # Configuration parameters
-        self.loss_threshold = self.DEFAULT_THRESHOLD_LOSS
-        self.grad_norm_threshold = self.DEFAULT_THRESHOLD_GRAD_NORM
         self.nd_parallel_to_nb_gpus = self.ND_PARALLEL_TO_NB_GPUS
         self.steps = self.DEFAULT_STEPS
         self.seed = self.DEFAULT_SEED
         self.model_filter = ""
         self.flavor = self.DEFAULT_FLAVOR
         self.verbose = False
+        self.loss_atol = self.DEFAULT_LOSS_ATOL
+        self.loss_rtol = self.DEFAULT_LOSS_RTOL
+        self.grad_norm_atol = self.DEFAULT_GRAD_NORM_ATOL
+        self.grad_norm_rtol = self.DEFAULT_GRAD_NORM_RTOL
         self.parallelism_configs: List[ParallelismConfig] = []
         self.results_dir: Optional[Path] = None
 
@@ -301,12 +312,6 @@ class CompareDistributedRun:
 
         log_message(LogLevel.INFO, f"Created config file: {config_file} for config '{config.name}' (model: {model_name})")
         return config_file
-
-        with open(config_file, 'w') as f:
-            f.write(content)
-        
-        log_message(LogLevel.INFO, f"Created config file: {config_file} for config '{config.name}' (model: {model_name})")
-        return config_file
     
     def extract_metrics(self, log_file: Path) -> TrainingMetrics:
         """Extract metrics from log file."""
@@ -315,20 +320,23 @@ class CompareDistributedRun:
         try:
             with open(log_file, 'r') as f:
                 content = f.read()
-            
-            # Extract final loss and grad_norm from the last step
-            loss_matches = re.findall(r'loss:\s*([0-9]+\.?[0-9]*)', content)
-            grad_norm_matches = re.findall(r'grad_norm:\s*([0-9]+\.?[0-9]*)', content)
-            
-            if loss_matches:
-                metrics.loss = float(loss_matches[-1])
-            if grad_norm_matches:
-                metrics.grad_norm = float(grad_norm_matches[-1])
+
+            # Regex to capture all metrics from a log line, ignoring ANSI color codes
+            pattern = re.compile(
+                r"step:\s*(\d+)\s*"
+                r".*?loss:\s*([0-9]+\.?[0-9]*)\s*"
+                r".*?grad_norm:\s*([0-9]+\.?[0-9]*)\s*"
+            )
+
+            for match in pattern.finditer(content):
+                metrics.steps.append(int(match.group(1)))
+                metrics.loss.append(float(match.group(2)))
+                metrics.grad_norm.append(float(match.group(3)))
                 
         except Exception as e:
             log_message(LogLevel.WARNING, f"Could not extract metrics from {log_file}: {e}")
         
-        if metrics.loss is None or metrics.grad_norm is None:
+        if not metrics.loss or not metrics.grad_norm:
             log_message(LogLevel.WARNING, f"Could not extract metrics from {log_file}")
         
         return metrics
@@ -336,28 +344,33 @@ class CompareDistributedRun:
     def compare_metrics(self, baseline_metrics: TrainingMetrics, test_metrics: TrainingMetrics, 
                        config_name: str) -> bool:
         """Compare metrics between baseline and test configuration."""
-        if (baseline_metrics.loss is None or baseline_metrics.grad_norm is None or
-            test_metrics.loss is None or test_metrics.grad_norm is None):
+        if not baseline_metrics.loss or not test_metrics.loss:
             log_message(LogLevel.TEST_FAIL, f"{config_name} - Unable to extract metrics")
             return False
         
-        # Calculate absolute differences
-        loss_diff = abs(baseline_metrics.loss - test_metrics.loss)
-        grad_norm_diff = abs(baseline_metrics.grad_norm - test_metrics.grad_norm)
+        # Convert to tensors
+        baseline_loss = torch.tensor(baseline_metrics.loss)
+        test_loss = torch.tensor(test_metrics.loss)
+        baseline_grad_norm = torch.tensor(baseline_metrics.grad_norm)
+        test_grad_norm = torch.tensor(test_metrics.grad_norm)
         
-        # Check if differences are within thresholds
-        loss_pass = loss_diff < self.loss_threshold
-        grad_pass = grad_norm_diff < self.grad_norm_threshold
+        # Check if tensors are close
+        loss_pass = torch.allclose(baseline_loss, test_loss, atol=self.loss_atol, rtol=self.loss_rtol)
+        grad_pass = torch.allclose(baseline_grad_norm, test_grad_norm, atol=self.grad_norm_atol, rtol=self.grad_norm_rtol)
+
+        # Calculate max absolute differences for logging
+        loss_diff = torch.max(torch.abs(baseline_loss - test_loss)).item() if baseline_loss.numel() > 0 and test_loss.numel() > 0 else 0.0
+        grad_norm_diff = torch.max(torch.abs(baseline_grad_norm - test_grad_norm)).item() if baseline_grad_norm.numel() > 0 and test_grad_norm.numel() > 0 else 0.0
         
         if loss_pass and grad_pass:
             log_message(LogLevel.TEST_PASS, 
-                       f"{config_name} - Loss diff: {loss_diff:.2e} (< {self.loss_threshold:.2e}), "
-                       f"Grad norm diff: {grad_norm_diff:.2e} (< {self.grad_norm_threshold:.2e})")
+                       f"{config_name} - Max loss diff: {loss_diff:.2e}, "
+                       f"Max grad norm diff: {grad_norm_diff:.2e}")
             return True
         else:
             log_message(LogLevel.TEST_FAIL,
-                       f"{config_name} - Loss diff: {loss_diff:.2e} (threshold: {self.loss_threshold:.2e}), "
-                       f"Grad norm diff: {grad_norm_diff:.2e} (threshold: {self.grad_norm_threshold:.2e})")
+                       f"{config_name} - Max loss diff: {loss_diff:.2e}, "
+                       f"Max grad norm diff: {grad_norm_diff:.2e}")
             return False
     
     def generate_diff(self, baseline_log: Path, test_log: Path, diff_file: Path) -> None:
@@ -452,10 +465,6 @@ class CompareDistributedRun:
         )      
         parser.add_argument("-m", "--model-filter", default="",
                           help="Filter models by name pattern (e.g., 'llama3')")
-        parser.add_argument("-t", "--loss-threshold", type=float, default=self.DEFAULT_THRESHOLD_LOSS,
-                          help=f"Loss difference threshold (default: {self.DEFAULT_THRESHOLD_LOSS})")
-        parser.add_argument("-g", "--grad-threshold", type=float, default=self.DEFAULT_THRESHOLD_GRAD_NORM,
-                          help=f"Grad norm difference threshold (default: {self.DEFAULT_THRESHOLD_GRAD_NORM})")
         parser.add_argument("-nd", "--nd_parallel", type=str, default="2d",
                           help=f"Parallelism to use (default: {self.ND_PARALLEL_TO_NB_GPUS.keys()})")
         parser.add_argument("-s", "--steps", type=int, default=self.DEFAULT_STEPS,
@@ -465,21 +474,29 @@ class CompareDistributedRun:
                                f"Available: llama3=[debugmodel, medium, full], deepseek_v3=[debugmodel]")
         parser.add_argument("-v", "--verbose", action="store_true",
                           help="Verbose output")
+        parser.add_argument("--loss-atol", type=float, default=self.DEFAULT_LOSS_ATOL,
+                          help=f"Absolute tolerance for loss comparison (default: {self.DEFAULT_LOSS_ATOL})")
+        parser.add_argument("--loss-rtol", type=float, default=self.DEFAULT_LOSS_RTOL,
+                          help=f"Relative tolerance for loss comparison (default: {self.DEFAULT_LOSS_RTOL})")
+        parser.add_argument("--grad-norm-atol", type=float, default=self.DEFAULT_GRAD_NORM_ATOL,
+                          help=f"Absolute tolerance for grad norm comparison (default: {self.DEFAULT_GRAD_NORM_ATOL})")
+        parser.add_argument("--grad-norm-rtol", type=float, default=self.DEFAULT_GRAD_NORM_RTOL,
+                          help=f"Relative tolerance for grad norm comparison (default: {self.DEFAULT_GRAD_NORM_RTOL})")
         
         args = parser.parse_args()
         
-        self.loss_threshold = args.loss_threshold
-        self.grad_norm_threshold = args.grad_threshold
         self.nd_parallel = args.nd_parallel
         self.ngpu = self.nd_parallel_to_nb_gpus[self.nd_parallel]
         self.steps = args.steps
         self.model_filter = args.model_filter
         self.flavor = args.flavor
         self.verbose = args.verbose
+        self.loss_atol = args.loss_atol
+        self.loss_rtol = args.loss_rtol
+        self.grad_norm_atol = args.grad_norm_atol
+        self.grad_norm_rtol = args.grad_norm_rtol
         
         log_message(LogLevel.INFO, "=== Distributed Parallelism Comparison ===")
-        log_message(LogLevel.INFO, f"Loss threshold: {self.loss_threshold}")
-        log_message(LogLevel.INFO, f"Grad norm threshold: {self.grad_norm_threshold}")
         log_message(LogLevel.INFO, f"GPUs: {self.ngpu}")
         log_message(LogLevel.INFO, f"Steps: {self.steps}")
         log_message(LogLevel.INFO, f"Seed: {self.seed}")
@@ -523,7 +540,7 @@ class CompareDistributedRun:
             # raise ValueError(f"Huggingface baseline (FSDP) training failed for {hf_model_name}")
 
         hf_baseline_metrics = self.extract_metrics(baseline_log_hf)
-        if hf_baseline_metrics.loss is None or hf_baseline_metrics.grad_norm is None:
+        if not hf_baseline_metrics.loss or not hf_baseline_metrics.grad_norm:
             log_message(LogLevel.ERROR, f"Could not extract huggingface baseline metrics for {hf_model_name}")
             # raise ValueError(f"Could not extract huggingface baseline metrics for {hf_model_name}")
         
@@ -538,9 +555,13 @@ class CompareDistributedRun:
             raise ValueError(f"TorchTitan baseline (FSDP) training failed for {tt_model_name}")
 
         tt_baseline_metrics = self.extract_metrics(baseline_log_tt)
-        if tt_baseline_metrics.loss is None or tt_baseline_metrics.grad_norm is None:
+        if not tt_baseline_metrics.loss or not tt_baseline_metrics.grad_norm:
             raise ValueError(f"Could not extract TorchTitan baseline metrics for {tt_model_name}")
         
+
+        if not self.compare_metrics(tt_baseline_metrics, hf_baseline_metrics, "baseline (TT) vs baseline (HF)"):
+            raise ValueError(f"Baseline (TT) vs baseline (HF) metrics comparison failed for {tt_model_name}")
+
         log_message(LogLevel.INFO, "--- Comparing other parallelism configurations (huggingface) ---")
         
         passed_tests = 0
@@ -569,9 +590,9 @@ class CompareDistributedRun:
             else:
                 failed_tests += 1
                 # Generate diff with baseline (HF)
-                diff_file_hf_vs_baseline = test_dir / "diff_hf_baseline_vs_hf_nd_parallelism.log"
-                self.generate_diff(baseline_log_hf, log_path_hf, diff_file_hf_vs_baseline)
-                log_message(LogLevel.INFO, f"Diff between baseline (HF) and current (HF) nd-parallelism run saved to: {diff_file_hf_vs_baseline}")
+                diff_hf_baseline_vs_hf_nd_parallelism = test_dir / "diff_hf_baseline_vs_hf_nd_parallelism.log"
+                self.generate_diff(baseline_log_hf, log_path_hf, diff_hf_baseline_vs_hf_nd_parallelism)
+                log_message(LogLevel.INFO, f"Diff between baseline (HF) and current (HF) nd-parallelism run saved to: {diff_hf_baseline_vs_hf_nd_parallelism}")
 
                 # Run TT counterpart and generated diff between nd-paralellism TT and current hf nd-parallelism run
                 config_filename_tt = f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.toml"
@@ -581,14 +602,14 @@ class CompareDistributedRun:
                     raise ValueError(f"TorchTitan training failed for {tt_model_name}")
                 
                 # generated diff between nd-paralellism TT and current hf nd-parallelism run
-                diff_file_tt_vs_hf = test_dir / "diff_tt_nd_parallelism_vs_hf_nd_parallelism.log"
-                self.generate_diff(log_path_tt, log_path_hf, diff_file_tt_vs_hf)
-                log_message(LogLevel.INFO, f"Diff between nd-paralellism TT and current (HF) nd-parallelism run saved to: {diff_file_tt_vs_hf}")
+                diff_file_tt_nd_parallelism_vs_hf_nd_parallelism = test_dir / "diff_tt_nd_parallelism_vs_hf_nd_parallelism.log"
+                self.generate_diff(log_path_tt, log_path_hf, diff_file_tt_nd_parallelism_vs_hf_nd_parallelism)
+                log_message(LogLevel.INFO, f"Diff between nd-paralellism TT and current (HF) nd-parallelism run saved to: {diff_file_tt_nd_parallelism_vs_hf_nd_parallelism}")
 
                 # generated diff between baseline TT and current hf nd-parallelism run
-                diff_file_tt_baseline_vs_hf = test_dir / "diff_tt_baseline_vs_hf_nd_parallelism.log"
-                self.generate_diff(baseline_log_tt, log_path_hf, diff_file_tt_baseline_vs_hf)
-                log_message(LogLevel.INFO, f"Diff between baseline TT and current (HF) nd-parallelism run saved to: {diff_file_tt_baseline_vs_hf}")
+                diff_file_tt_baseline_vs_hf_nd_parallelism = test_dir / "diff_tt_baseline_vs_hf_nd_parallelism.log"
+                self.generate_diff(baseline_log_tt, log_path_hf, diff_file_tt_baseline_vs_hf_nd_parallelism)
+                log_message(LogLevel.INFO, f"Diff between baseline TT and current (HF) nd-parallelism run saved to: {diff_file_tt_baseline_vs_hf_nd_parallelism}")
 
         print()
         
