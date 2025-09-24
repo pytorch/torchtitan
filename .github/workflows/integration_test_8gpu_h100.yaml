@@ -52,5 +52,11 @@ jobs:
 
         mkdir artifacts-to-be-uploaded
 
+        free -h
+
+        df -h
+
+        nvidia-smi
+
         # Enable CPP stacktraces for debugging symmetric memory initialization errors.
         USE_PYTORCH_KERNEL_CACHE=0 CUDA_LAUNCH_BLOCKING=1 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 artifacts-to-be-uploaded --ngpu 8
