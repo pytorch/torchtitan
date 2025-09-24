@@ -626,7 +626,7 @@ class Comm:
     init_timeout_seconds: int = 300
     """Timeout for communication operations, during initialization and first train step."""
 
-    train_timeout_seconds: int = 100
+    train_timeout_seconds: int = 30
     """
     Timeout for communication operations after the first train step --
     usually a tighter bound than during initialization.

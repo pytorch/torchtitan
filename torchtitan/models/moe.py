@@ -65,7 +65,7 @@ class FeedForward(nn.Module):
 
 # TODO: keeping this for-loop implementation for comparison
 #       and readability, may remove later
-@expert_parallel
+@expert_parallel  # COMMUNICATION: This decorator handles AllToAll dispatch/combine in distributed settings
 def _run_experts_for_loop(
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -101,7 +101,7 @@ def _run_experts_for_loop(
     return out
 
 
-@expert_parallel
+@expert_parallel  # COMMUNICATION: This decorator handles AllToAll dispatch/combine in distributed settings
 def _run_experts_grouped_mm(
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -370,6 +370,11 @@ class MoE(nn.Module):
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
+        # ================================
+        # COMPUTE PHASE 1: ROUTING
+        # ================================
+        # Determine which tokens go to which experts based on routing scores
+        
         # top_scores and selected_experts_indices shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)
         (
@@ -400,6 +405,7 @@ class MoE(nn.Module):
             num_tokens_per_expert,
         ) = self.reorderer(top_scores, selected_experts_indices)
 
+        # Prepare tokens for expert dispatch
         # shape (bs*slen*top_k, dim)
         token_indices_experts_sorted = token_indices_experts_sorted.reshape(
             -1, 1
@@ -414,21 +420,35 @@ class MoE(nn.Module):
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
+        # ===================================================================
+        # COMMUNICATION PHASE: EXPERT DISPATCH
+        # ===================================================================
+        # DISPATCH: Send tokens to experts (potentially across different ranks)
+        # This call includes AllToAll communication in distributed settings
+        # The @expert_parallel decorator handles the communication automatically
+        
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_tokens_per_expert)
 
+        # ================================
+        # COMPUTE PHASE 2: COMBINE
+        # ================================
+        # Combine expert outputs back into final result
+        
         if not self.score_before_experts:
             routed_output = (
                 routed_output.to(torch.float32)
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
-        # shared expert
+        # shared expert computation (runs locally on original input)
         if self.shared_experts is not None:
             out = self.shared_experts(x)
         else:
             out = torch.zeros_like(x)
 
+        # COMBINE: Aggregate expert outputs back to their original token positions
+        # This scatter_add operation combines the expert-processed tokens
         out = out.scatter_add(
             dim=0, index=token_indices_experts_sorted, src=routed_output
         )
