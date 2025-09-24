@@ -527,7 +527,7 @@ class Checkpoint:
 
 @dataclass
 class ActivationCheckpoint:
-    mode: Literal["selective", "full", "none"] = "selective"
+    mode: Literal["selective", "full", "budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
 
     selective_ac_option: str = "2"
@@ -554,6 +554,10 @@ class ActivationCheckpoint:
     """
     Whether to stop recomputing early when all activations have already been
     rematerialized.
+    """
+    budget_ac_option: float = 1.0
+    """
+    Limit memory budget for AC from 0-100%. Works only with compile enabled.
     """
 
 
