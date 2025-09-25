@@ -6,6 +6,7 @@
 
 import importlib
 import os
+import signal
 import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
@@ -588,6 +589,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 ),
             ),
         ):
+            if torch_profiler:
+
+                def sigabrt_handler(signal, frame):
+                    logger.info("SIGABRT received. Stopping profiler")
+                    for _ in range(config.profiling.profiler_active):
+                        # Step the profiler enough times to trigger a trace
+                        torch_profiler.step()
+                    torch_profiler.stop()
+
+                signal.signal(signal.SIGABRT, sigabrt_handler)
+
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():
                 self.step += 1

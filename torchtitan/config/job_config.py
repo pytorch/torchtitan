@@ -34,6 +34,12 @@ class Profiling:
     profile_freq: int = 10
     """How often to collect profile traces, in iterations"""
 
+    profiler_active: int = 1
+    """The steps profiler is active for"""
+
+    profiler_warmup: int = 3
+    """The number of warmup steps before the active step in each profiling cycle"""
+
     enable_memory_snapshot: bool = False
     """Whether to dump memory snapshot"""
 
