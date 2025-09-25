@@ -310,6 +310,15 @@ class HFTransformerModel(nn.Module):
         else:
             raise AttributeError("Could not find norm in the model. Please check the model structure.")
 
+    @property
+    def output(self):
+        """Returns the model's output layer, handling different Hugging Face model structures."""
+        if hasattr(self.model, "lm_head"):  # For models like LlamaForCausalLM
+            return self.model.lm_head
+        else:
+            # Add more cases here if needed for other model architectures
+            raise AttributeError("Could not find output (lm_head) in the model. Please check the model structure.")
+
     def forward(self, *args, **kwargs):
         output = self.model(*args, **kwargs)
         if isinstance(output, CausalLMOutputWithPast):
