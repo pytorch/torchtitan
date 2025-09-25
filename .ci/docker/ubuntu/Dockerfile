@@ -1,6 +1,6 @@
 ARG OS_VERSION
 
-FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu${OS_VERSION}
+FROM nvidia/cuda:12.6.1-cudnn-runtime-ubuntu${OS_VERSION}
 
 ARG OS_VERSION
 
