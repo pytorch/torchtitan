@@ -304,7 +304,8 @@ class Trainer(ForgeEngine):
                     self.job_config.validation.enable
                     and self.validator.should_validate(self.step)
                 ):
-                    self.validator.validate(self.model_parts, self.step)
+                    with self.loss_fn.no_rescale():
+                        self.validator.validate(self.model_parts, self.step)
 
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)
