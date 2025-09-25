@@ -59,7 +59,7 @@ class MXMoEConverter(ModelConverter):
             )
 
         # For MoE training with mxfp8, token group sizes must be multiples of 32
-        self.moe_fqns = job_config.mx_moe.fqns
+        self.moe_fqns = job_config.mx.moe.fqns
         if self.moe_fqns:
             logger.info(
                 f"Setting token group alignment size to {MXFP8_GROUP_ALIGNMENT_SIZE}"

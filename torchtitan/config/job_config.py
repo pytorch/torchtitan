@@ -600,16 +600,22 @@ class Float8:
     Example: --float8.moe_fqns_prototype="experts"
     """
 
-
 @dataclass
-class MXLinear:
+class MXDense:
     mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
-    """Temp work around for inductor performance gap"""
+    """
+    Temp work around for inductor performance gap.
+
+    CUDA is recommended for best performance.
+
+    Example: --mx.dense.mxfp8_dim1_cast_kernel_choice="cuda"
+    """
 
     recipe_name: str = "mxfp8_cublas"
     """
     If specified, creates MX config from recipe name. See
     https://github.com/pytorch/ao/tree/main/torchao/prototype/mx_formats for more information.
+    Example: --mx.dense.recipe_name="mxfp8_cublas"
     """
 
     filter_fqns: list[str] = field(default_factory=lambda: ["output"])
@@ -617,7 +623,7 @@ class MXLinear:
     Comma-separated list of fully qualified names of modules to skip applying mxfp8 training to.
     nn.Linear modules with any dim size not divisible by 16 are also always skipped due to hardware requirements.
     By default we always skip the output layer.
-    Example: --mx.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    Example: --mx.dense.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
 
 
@@ -625,9 +631,20 @@ class MXLinear:
 class MXMoE:
     fqns: list[str] | str = field(default_factory=list)
     """
-    Comma-separated list of fully qualified names of MoE modules to apply mxfp8 training to.
+    Comma-separated list of fully qualified names of MoE modules to apply the given 
     This is a prototype feature that requires the torchao nightly build.
-    Example: --mx_moe.fqns="experts"
+    Example: --mx.moe.fqns="experts"
+    """
+
+@dataclass
+class MX:
+    dense: MXDense= field(default_factory=MXDense)
+    """
+    MX quantization config for dense layers.
+    """
+    moe: MXMoE = field(default_factory=MXMoE)
+    """
+    MX quantization config for MoE layers.
     """
 
 
@@ -776,8 +793,7 @@ class JobConfig:
     )
     compile: Compile = field(default_factory=Compile)
     float8: Float8 = field(default_factory=Float8)
-    mx: MXLinear = field(default_factory=MXLinear)
-    mx_moe: MXMoE = field(default_factory=MXMoE)
+    mx: MX = field(default_factory=MX)
     comm: Comm = field(default_factory=Comm)
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)

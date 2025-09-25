@@ -10,7 +10,7 @@ from typing import Any, List
 
 import torch.nn as nn
 
-from torchtitan.config.job_config import JobConfig, MXLinear
+from torchtitan.config.job_config import JobConfig, MXDense
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     ModelConverter,
@@ -55,7 +55,7 @@ class MXConverter(ModelConverter):
             MXLinearConfig,
         )
 
-        mx_job_config: MXLinear = job_config.mx
+        mx_job_config: MXDense = job_config.mx.dense
         config = MXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
         config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
