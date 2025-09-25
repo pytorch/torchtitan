@@ -23,12 +23,13 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--compile.enable",
-                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.tensor_parallel_degree 8",
                     "--parallelism.enable_async_tensor_parallel",
                 ],
             ],
-            "2D async TP compile",
-            "2d_asynctp_compile",
+            "8D async TP compile",
+            "8d_asynctp_compile",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [

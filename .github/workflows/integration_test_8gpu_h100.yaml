@@ -36,6 +36,28 @@ jobs:
       script: |
         set -eux
 
+        # sudo echo "GPU_FLAG=--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all" >> "${GITHUB_ENV}"
+
+        sudo killall nvidia-persistenced || true
+        sudo curl -fsL -o /tmp/nvidia_driver "https://s3.amazonaws.com/ossci-linux/nvidia_driver/NVIDIA-Linux-x86_64-580.65.06.run"
+        set +e
+        sudo /bin/bash /tmp/nvidia_driver -s --no-drm
+        NVIDIA_INSTALLATION_STATUS=$?
+        sudo apt-get install -y nvidia-container-toolkit-1.17.8
+        sudo systemctl restart docker
+
+        # Fix https://github.com/NVIDIA/nvidia-docker/issues/1648 on runners with
+        # more than one GPUs. This just needs to be run once. The command fails
+        # on subsequent runs and complains that the mode is already on, but that's
+        # ok
+        nvidia-smi --query-gpu=gpu_name --format=csv,noheader --id=0
+        NVIDIA_SMI_STATUS=$?
+
+        nvidia-smi
+        sudo nvidia-persistenced || true
+        # This should show persistence mode ON
+        nvidia-smi
+
         # The generic Linux job chooses to use base env, not the one setup by the image
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
@@ -46,11 +68,21 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+        # python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
+        
+        python -m pip install --force-reinstall torch==2.10.0.dev20250917+cu126 --index-url https://download.pytorch.org/whl/nightly/cu126
+        # python -m pip install --force-reinstall https://download.pytorch.org/whl/nightly/pytorch_triton-3.5.0%2Bgit5ae38bdb-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+        # python -m pip install --force-reinstall https://download.pytorch.org/whl/nightly/cu128/torch-2.10.0.dev20250921%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
 
-        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
+        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu128
 
         mkdir artifacts-to-be-uploaded
 
+        free -h
+
+        df -h
+
+        nvidia-smi
+
         # Enable CPP stacktraces for debugging symmetric memory initialization errors.
-        TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 artifacts-to-be-uploaded --ngpu 8
+        USE_PYTORCH_KERNEL_CACHE=0 CUDA_LAUNCH_BLOCKING=1 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 artifacts-to-be-uploaded --ngpu 8
