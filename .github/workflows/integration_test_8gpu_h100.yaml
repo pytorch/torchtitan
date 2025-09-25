@@ -48,8 +48,9 @@ jobs:
 
         # python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128
         
-        python -m pip install --force-reinstall https://download.pytorch.org/whl/nightly/pytorch_triton-3.5.0%2Bgit5ae38bdb-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-        python -m pip install --force-reinstall https://download.pytorch.org/whl/nightly/cu128/torch-2.10.0.dev20250921%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
+        # python -m pip install --force-reinstall torch==2.10.0.dev20250921+cu128 --index-url https://download.pytorch.org/whl/nightly/cu128
+        # python -m pip install --force-reinstall https://download.pytorch.org/whl/nightly/pytorch_triton-3.5.0%2Bgit5ae38bdb-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+        # python -m pip install --force-reinstall https://download.pytorch.org/whl/nightly/cu128/torch-2.10.0.dev20250921%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl
 
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu128
 
