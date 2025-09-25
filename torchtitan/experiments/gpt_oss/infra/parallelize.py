@@ -17,23 +17,26 @@ else:
 
 from torchtitan.config.job_config import JobConfig
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelDims, NoParallel
+from torchtitan.distributed.expert_parallel import ExpertParallel, ReordererSequenceParallel
 from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
+from torchtitan.experiments.llama4.infra.parallelize import (
+    apply_fsdp,
+    apply_moe_ep_tp,
+)
+
 from torchtitan.tools.logging import logger
 
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Partial, Replicate, Shard
 
 from .expert_parallel import (
-    ExpertParallel,
     ExpertTensorParallel,
     TensorParallel,
 )
-from torchtitan.distributed import NoParallel
 
 
 # for selective op activation checkpointing
-_save_list = {
+_op_sac_save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
@@ -87,7 +90,7 @@ def parallelize_gptoss(
         apply_non_moe_tp(
             model,
             world_mesh["tp"],
-            loss_parallel=parallel_dims.loss_parallel_enabled,
+            loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
             enable_async_tp=False,
         )
@@ -99,9 +102,10 @@ def parallelize_gptoss(
             ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
             ep_tp_mesh=(
                 world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled and parallel_dims.ep_enabled
+                if parallel_dims.tp_enabled and parallel_dims.ep_enabled and parallel_dims.etp_enabled
                 else None
             ),
+            etp_enabled=parallel_dims.etp_enabled,
         )
     
     model_compile_enabled = (
@@ -114,7 +118,7 @@ def parallelize_gptoss(
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
-            save_list=_save_list,
+            save_list=_op_sac_save_list,
         )
     
     dp_mesh: DeviceMesh | None = None
@@ -263,83 +267,18 @@ def apply_non_moe_tp(
     )
 
 
-def apply_fsdp(
-    model: nn.Module,
-    dp_mesh: DeviceMesh,
-    param_dtype: torch.dtype,
-    reduce_dtype: torch.dtype,
-    pp_enabled: bool,
-    cpu_offload: bool = False,
-    reshard_after_forward_policy: str = "default",
-    dp_mod_ep_mesh: DeviceMesh | None = None,
-):
-    """
-    Apply data parallelism (via FSDP2) to the model.
-
-    Args:
-        model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
-        param_dtype (torch.dtype): The data type to use for model parameters.
-        reduce_dtype (torch.dtype): The data type to use for reduction operations.
-        pp_enabled (bool): Whether pipeline parallelism is enabled.
-        cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str, optional): The policy to use for resharding after forward pass. Defaults to "default".
-            Other options: "never", "always".
-            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
-            - "always" will enable `reshard_after_forward` for all forward passes.
-            - "never" will disable `reshard_after_forward` for all forward passes.
-
-    """
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-    if cpu_offload:
-        fsdp_config["offload_policy"] = CPUOffloadPolicy()
-
-    for layer_id, transformer_block in model.layers.items():
-        if reshard_after_forward_policy == "always":
-            reshard_after_forward = True
-        elif reshard_after_forward_policy == "never":
-            reshard_after_forward = False
-        elif reshard_after_forward_policy == "default":
-            if pp_enabled:
-                # For PP, do not reshard after forward to avoid per-microbatch
-                # all-gathers, which can be expensive and non-overlapped
-                reshard_after_forward = False
-            else:
-                # As an optimization, do not reshard after forward for the last
-                # transformer block since FSDP would prefetch it immediately
-                reshard_after_forward = int(layer_id) < len(model.layers) - 1
-        else:
-            raise ValueError(
-                f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
-            )
-
-        # NOTE: in an MoE layer, the router and the shared experts
-        #       are sharded together with the TransformerBlock
-        if dp_mod_ep_mesh:
-            fsdp_mod_ep_config = fsdp_config.copy()
-            fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
-            fully_shard(
-                transformer_block.moe.experts,
-                **fsdp_mod_ep_config,
-                reshard_after_forward=reshard_after_forward,
-            )
-
-        fully_shard(
-            transformer_block,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
-    fully_shard(model, **fsdp_config, reshard_after_forward=not pp_enabled)
-
-
+# NOTE(jianiw): The function can not be reused now because reimplemented ExpertTensorParallel
 def apply_moe_ep_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
+    etp_enabled: bool,
 ):
     for transformer_block in model.layers.values():
+        if not transformer_block.moe_enabled:
+            continue
+
         if tp_mesh is not None:
             moe_layer_plan = {
                 # input / output sharding on the seqlen dim
@@ -354,13 +293,28 @@ def apply_moe_ep_tp(
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(),
             }
+            if ep_mesh is not None and not etp_enabled:
+                # If TP is borrowed for EP, then split the tokens across TP ranks so that
+                # the reorderer, the all-to-all comms, and routed experts computation
+                # are effectively running Sequence Parallel (split along the folded bs*slen dim)
+                moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
+            if transformer_block.moe.shared_experts is not None:
+                # input Replicate, output Partial
+                moe_layer_plan.update(
+                    {
+                        "moe.shared_experts.w1": ColwiseParallel(),
+                        "moe.shared_experts.w2": RowwiseParallel(
+                            output_layouts=Partial()
+                        ),
+                        "moe.shared_experts.w3": ColwiseParallel(),
+                    }
+                )
             parallelize_module(
                 module=transformer_block,
                 device_mesh=tp_mesh,
                 parallelize_plan=moe_layer_plan,
             )
 
-        # if ep_mesh is not None:
         experts_mesh, experts_plan = None, None
         if ep_mesh is None:
             experts_mesh = tp_mesh
@@ -370,9 +324,13 @@ def apply_moe_ep_tp(
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
-        else:
+        elif etp_enabled:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
+        else:
+            experts_mesh = ep_mesh
+            experts_plan = ExpertParallel()
+
         parallelize_module(
             module=transformer_block.moe.experts,
             device_mesh=experts_mesh,

@@ -34,7 +34,7 @@ gptoss_configs = {
             route_scale=1.0,
             score_before_experts=False,
             top_k=4,
-            use_grouped_mm=False,
+            use_grouped_mm=True,
             load_balance_coeff=1e-3,
         ),
         use_flex_attn=True,
