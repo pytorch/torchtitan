@@ -94,7 +94,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             enable_cpu_backend=job_config.training.enable_cpu_offload,
             base_folder=job_config.job.dump_folder,
         )
-        symm_mem = get_symm_mem_workspace(torch.distributed.group.WORLD.group_name, min_size=100)
+        symm_mem = get_symm_mem_workspace(torch.distributed.group.WORLD.group_name, min_size=1024*1024*64)
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
         self.parallel_dims = parallel_dims = ParallelDims(
