@@ -99,7 +99,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
-# TODO(jianw): This is eager version from HuggingFace
+# TODO(jianw): This is eager version from HuggingFace. Remove it once FlexAttention is ready.
 def eager_attention_forward(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -109,8 +109,15 @@ def eager_attention_forward(
     scaling: float,
     dropout: float = 0.0,
     **kwargs,
-):
-    attn_weights = torch.matmul(query, key.transpose(2, 3)) * scaling
+):  
+    key_values = key.transpose(2, 3)  # When TP is enabled, key should be shard()
+    print(f"key_values : {key_values.placements} {key_values.shape}")
+    print(f"query : {query.placements} {query.shape}")
+
+    # [rank0]:key_values : (Shard(dim=1),) torch.Size([8, 64, 64, 2048])
+    # [rank0]:query : (Shard(dim=1),) torch.Size([8, 64, 2048, 64])
+
+    attn_weights = query @ key_values * scaling
     if attention_mask is not None:
         # attention_mask can be [Tq, Tk] or [B, H, Tq, Tk]
         # Convert boolean "allowed" -> additive mask
