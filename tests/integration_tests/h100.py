@@ -19,6 +19,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
     same root config file.
     """
     integration_tests_flavors = [
+        # TODO: re-enable this test once the async TP issue is fixed
         OverrideDefinitions(
             [
                 [
@@ -42,6 +43,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "Float8 test",
             "float8",
         ),
+        # TODO: re-enable this test once the async TP issue is fixed
         OverrideDefinitions(
             [
                 [

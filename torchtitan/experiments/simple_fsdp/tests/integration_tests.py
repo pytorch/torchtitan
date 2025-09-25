@@ -63,18 +63,19 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             "2d",
         ),
         # TODO: re-enable this test once the async TP issue is fixed
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--model.name simple_fsdp",
-        #             "--compile.enable",
-        #             "--parallelism.tensor_parallel_degree 2",
-        #             "--parallelism.enable_async_tensor_parallel",
-        #         ],
-        #     ],
-        #     "2D async TP",
-        #     "2d_asynctp",
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name simple_fsdp",
+                    "--compile.enable",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.enable_async_tensor_parallel",
+                ],
+            ],
+            "2D async TP",
+            "2d_asynctp",
+            disabled=True,
+        ),
         OverrideDefinitions(
             [
                 [
