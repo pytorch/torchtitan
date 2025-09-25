@@ -36,27 +36,27 @@ jobs:
       script: |
         set -eux
 
-				echo "GPU_FLAG=--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all" >> "${GITHUB_ENV}"
+        echo "GPU_FLAG=--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all" >> "${GITHUB_ENV}"
 
-				sudo killall nvidia-persistenced || true
-				sudo curl -fsL -o /tmp/nvidia_driver "https://s3.amazonaws.com/ossci-linux/nvidia_driver/NVIDIA-Linux-x86_64-580.65.06.run"
-				set +e
-				sudo /bin/bash /tmp/nvidia_driver -s --no-drm
-				NVIDIA_INSTALLATION_STATUS=$?
-				sudo apt-get install -y nvidia-container-toolkit-1.17.8
-				sudo systemctl restart docker
+        sudo killall nvidia-persistenced || true
+        sudo curl -fsL -o /tmp/nvidia_driver "https://s3.amazonaws.com/ossci-linux/nvidia_driver/NVIDIA-Linux-x86_64-580.65.06.run"
+        set +e
+        sudo /bin/bash /tmp/nvidia_driver -s --no-drm
+        NVIDIA_INSTALLATION_STATUS=$?
+        sudo apt-get install -y nvidia-container-toolkit-1.17.8
+        sudo systemctl restart docker
 
-				# Fix https://github.com/NVIDIA/nvidia-docker/issues/1648 on runners with
-				# more than one GPUs. This just needs to be run once. The command fails
-				# on subsequent runs and complains that the mode is already on, but that's
-				# ok
-				nvidia-smi --query-gpu=gpu_name --format=csv,noheader --id=0
-			  NVIDIA_SMI_STATUS=$?
+        # Fix https://github.com/NVIDIA/nvidia-docker/issues/1648 on runners with
+        # more than one GPUs. This just needs to be run once. The command fails
+        # on subsequent runs and complains that the mode is already on, but that's
+        # ok
+        nvidia-smi --query-gpu=gpu_name --format=csv,noheader --id=0
+        NVIDIA_SMI_STATUS=$?
 
-				nvidia-smi
-				sudo nvidia-persistenced || true
-				# This should show persistence mode ON
-				nvidia-smi
+        nvidia-smi
+        sudo nvidia-persistenced || true
+        # This should show persistence mode ON
+        nvidia-smi
 
         # The generic Linux job chooses to use base env, not the one setup by the image
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
