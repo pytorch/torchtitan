@@ -19,13 +19,12 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 
-def apply_local_map_to_moe():
+def apply_local_map_to_moe(mesh):
     """
     TODO: fix HOPs not restoring the original signature.
     TODO: fix tracing with local shapes so that we can use Shard placements
 
-    Current HOP signature we get:
-
+    Current HOP signature we get 9 inputs:
     class subgraph_0(torch.nn.Module):
         def forward(self,
         rms_norm_5: "f32[64, 2048, 256][524288, 256, 1]cuda:0",
@@ -43,28 +42,41 @@ def apply_local_map_to_moe():
     moe._moe_forward = local_map(
         moe._moe_forward,
         out_placements=(
-            (Replicate(),), # (Shard(0),),
+            (Shard(0),),
             (Replicate(),),
         ),
         in_placements=(
-            (Replicate(),), # (Shard(0),),
+            # x
+            (Shard(0),),
+            # (Replicate(),),
+            # router weight
+            (Replicate(),),
+            # expert bias
+            (Replicate(),),
+            # expert
+            # (Shard(0),),
+            # (Shard(0),),
+            # (Shard(0),),
             (Replicate(),),
             (Replicate(),),
             (Replicate(),),
+            # shared
             (Replicate(),),
             (Replicate(),),
             (Replicate(),),
-            (Replicate(),),
-            (Replicate(),),
+            None,
+            None
         ),
         redistribute_inputs=True,
         in_grad_placements=None,
-        device_mesh=None,
+        device_mesh=mesh,
     )
 
 
-# Run workflow with:
-# CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name deepseekv3_auto_parallel
+# Run AP with:
+# CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name deepseek_v3_auto_parallel
+# Non-AP command:
+# CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name deepseek_v3
 def parallelize_deepseekv3(
     model,
     parallel_dims: ParallelDims,
@@ -100,7 +112,7 @@ def parallelize_deepseekv3(
     assert parallel_dims.pp_enabled is False, "PP not supported yet"
 
     # apply local_map to MoE
-    apply_local_map_to_moe()
+    apply_local_map_to_moe(world_mesh)
 
     # torch._inductor.config.bucket_all_gathers_fx_bucket_size_determinator = (
     #     lambda bucket_idx: 500 / parallel_dims.tp
@@ -217,8 +229,15 @@ def _preserve_moe_attributes(original_model, parallel_model):
     # Copy custom attributes from original to parallel MoE modules
     # This is fine to do since these attributes are read only
     for orig_moe, par_moe in zip(original_moe_modules, parallel_moe_modules):
+
         if hasattr(orig_moe, 'moe_enabled'):
             par_moe.load_balance_coeff = orig_moe.load_balance_coeff
+
+            # piggyback in some asserts needed for our modified forward
+            # these can't be in the model code because export thinks they are data-dependent
+            assert orig_moe.score_before_experts
+            assert orig_moe.experts.use_grouped_mm
+            assert orig_moe.shared_experts is not None
 
         # Copy load_balance_coeff
         if hasattr(orig_moe, 'load_balance_coeff'):
