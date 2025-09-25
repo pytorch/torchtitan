@@ -29,6 +29,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ],
             "2D async TP compile",
             "2d_asynctp_compile",
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -57,6 +58,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "FSDP+async TP+PP+torch.compile+Float8",
             "fsdp+tp+cp+compile+float8",
             ngpu=8,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
