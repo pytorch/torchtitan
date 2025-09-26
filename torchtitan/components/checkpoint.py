@@ -13,17 +13,25 @@ import shutil
 import threading
 import time
 from concurrent.futures import Future
-from typing import Any
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torch.distributed.checkpoint import (
-    HuggingFaceStorageReader,
-    HuggingFaceStorageWriter,
-)
-from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
+
+try:
+    from torch.distributed.checkpoint import (
+        HuggingFaceStorageReader,
+        HuggingFaceStorageWriter,
+    )
+    from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
+except ImportError:
+    HuggingFaceStorageWriter = None
+    HuggingFaceStorageReader = None
+    DefaultStager = None
+    StagingOptions = None
+    print("Huggingface Checkpointing is not available, please install torch >= 2.9.0")
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
@@ -43,6 +51,7 @@ from torchtitan.tools.utils import GarbageCollection
 
 
 MODEL = "model"
+REF_MODEL = "ref_model"
 OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
@@ -185,6 +194,7 @@ class CheckpointManager:
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
+        ref_model_parts: list[nn.Module] | None = None,
     ) -> None:
         self.enable = checkpoint_config.enable
 
@@ -229,8 +239,10 @@ class CheckpointManager:
                 OPTIMIZER: optimizers,
                 DATALOADER: dataloader,
                 LR_SCHEDULER: lr_schedulers,
+                REF_MODEL: ref_model_parts,
             }
         )
+        self.has_ref_model = ref_model_parts is not None
         self.ft_states = {DATALOADER: dataloader}
 
         self.staging = False
@@ -346,6 +358,10 @@ class CheckpointManager:
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
         if to_hf:
+            if HuggingFaceStorageWriter is None:
+                raise RuntimeError(
+                    "HuggingFaceStorageWriter is not available. Please install torch >= 2.9.0"
+                )
             assert (
                 self.sd_adapter is not None
             ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
@@ -395,6 +411,7 @@ class CheckpointManager:
     def dcp_load(
         self,
         state_dict: dict[str, Any],
+        ref_state_dict: Optional[dict[str, Any]],
         checkpoint_id: str,
         from_hf: bool,
     ) -> None:
@@ -407,6 +424,10 @@ class CheckpointManager:
         """
 
         if from_hf:
+            if HuggingFaceStorageReader is None:
+                raise RuntimeError(
+                    "HuggingFaceStorageReader is not available. Please install torch >= 2.9.0"
+                )
             assert (
                 self.sd_adapter is not None
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
@@ -419,6 +440,9 @@ class CheckpointManager:
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             self.states[MODEL].load_state_dict(state_dict)
+            if self.has_ref_model:
+                ref_state_dict = self.sd_adapter.from_hf(hf_state_dict)
+                self.states[REF_MODEL].load_state_dict(ref_state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
@@ -426,6 +450,10 @@ class CheckpointManager:
             # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in self.states:
                 self.states[MODEL].load_state_dict(state_dict)
+            if self.has_ref_model:
+                dcp.load(ref_state_dict, checkpoint_id=checkpoint_id)
+                if REF_MODEL in self.states:
+                    self.states[REF_MODEL].load_state_dict(state_dict)
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -464,6 +492,10 @@ class CheckpointManager:
 
             states = self._flattened_model_states_sd()
             if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+                if (DefaultStager is None) or (StagingOptions is None):
+                    raise RuntimeError(
+                        "DefaultStager is not available. Please install torch >= 2.9.0"
+                    )
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 if self.stager is None:
                     self.stager = DefaultStager(StagingOptions(True, True, True, True))
@@ -575,9 +607,10 @@ class CheckpointManager:
 
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
         begin = time.monotonic()
-        states = self._states_to_load(model_only)
+        states, ref_states = self._states_to_load(model_only)
         self.dcp_load(
             states,
+            ref_states,
             checkpoint_id=checkpoint_id,
             from_hf=from_hf,
         )
@@ -675,7 +708,9 @@ class CheckpointManager:
             sd.update(states[MODEL].state_dict())
         return sd
 
-    def _states_to_load(self, model_only: bool) -> dict[str, Any]:
+    def _states_to_load(
+        self, model_only: bool
+    ) -> Tuple[dict[str, Any], Optional[dict[str, Any]]]:
         """Determines which states to load for the given step.
 
         This API is used to determine which states to load based on the
@@ -689,7 +724,12 @@ class CheckpointManager:
         """
         # For the first step, we will only load the model.
         if model_only:
-            return self.states[MODEL].state_dict()
+            if self.has_ref_model:
+                return {MODEL: self.states[MODEL].state_dict()}, {
+                    MODEL: self.states[REF_MODEL].state_dict()
+                }
+            else:
+                return {MODEL: self.states[MODEL].state_dict()}, None
 
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
@@ -704,7 +744,7 @@ class CheckpointManager:
         if self.ft_manager:
             states_to_load.pop(DATALOADER)
 
-        return states_to_load
+        return states_to_load, None
 
     def _save_last_step(self, curr_step: int) -> None:
         # We only consider saving model only at the end of the training. So this

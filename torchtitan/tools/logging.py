@@ -11,15 +11,17 @@ import os
 logger = logging.getLogger()
 
 
-def init_logger():
-    logger.setLevel(logging.INFO)
+def init_logger(level=logging.INFO):
+    logger.setLevel(level)
     ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
+    ch.setLevel(level)
     formatter = logging.Formatter(
         "[titan] %(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     ch.setFormatter(formatter)
     logger.addHandler(ch)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     # suppress verbose torch.profiler logging
     os.environ["KINETO_LOG_LEVEL"] = "5"

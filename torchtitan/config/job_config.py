@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, List, Literal
 
 
 @dataclass
@@ -753,6 +753,64 @@ class Validation:
 
 
 @dataclass
+class GRPO:
+    kl_beta: float = 0.0
+    """KL beta for GRPO"""
+
+    kl_estimator_type: Literal["k3", "mse", "abs"] = "k3"
+    """KL estimator type for GRPO"""
+
+    sglang_slurm_num_nodes: int = -1
+    """Number of nodes for sglang when using slurm, -1 means not using slurm"""
+
+    sglang_urls: List[str] = field(default_factory=list)
+    """List of urls for sglang"""
+
+    sglang_port: int = 29500
+    """Port for sglang weight updates"""
+
+    sglang_tp: int = 1
+    """sglang tensor parallelism"""
+
+    pos_scaler: float = 1.0
+    """Positive reward scaling factor for GRPO"""
+
+    neg_scaler: float = 1.0
+    """Negative reward scaling factor for GRPO"""
+
+    temperature: float = 1.0
+    """Temperature for GRPO"""
+
+    grpo_by_token: bool = False
+    """Whether to use GRPO by token or by sequence, defaults to sequence"""
+
+    num_microbatches: int = 1
+    """Number of microbatches for GRPO"""
+
+    onpolicy_logp_threshold: float = 0.0
+    """Threshold for on-policy logp, 0.0 or 1.0 disables this feature. if you're between 0, 1, this gets converted
+       from probability to log probability."""
+
+    clip_ratio_upper_bound: float = 0.25
+    """Upper bound for clipping ratio in GRPO"""
+
+    clip_ratio_lower_bound: float = 0.25
+    """Lower bound for clipping ratio in GRPO"""
+
+    logit_loss_weight: float = 0.0
+    """Weight for L2 regularization on logits"""
+
+    entropy_loss_weight: float = 0.0
+    """Weight for entropy loss"""
+
+    ref_model_ema: float = 0.0
+    """Ref model EMA from policy weight, 1.0/0.0 disables this feature"""
+
+    scale_adv_by_len: bool = False
+    """Whether to scale advantages by sequence length, defaults to False"""
+
+
+@dataclass
 class JobConfig:
     """
     Default container for training configuration.
@@ -778,6 +836,7 @@ class JobConfig:
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
     experimental: Experimental = field(default_factory=Experimental)
     validation: Validation = field(default_factory=Validation)
+    grpo: GRPO = field(default_factory=GRPO)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
