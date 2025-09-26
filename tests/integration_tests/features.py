@@ -65,17 +65,18 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "2d_compile",
         ),
         # TODO: re-enable this test once the async TP CI issue is fixed
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--compile.enable",
-        #             "--parallelism.tensor_parallel_degree 2",
-        #             "--parallelism.enable_async_tensor_parallel",
-        #         ],
-        #     ],
-        #     "2D async TP compile",
-        #     "2d_asynctp_compile",
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--compile.enable",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.enable_async_tensor_parallel",
+                ],
+            ],
+            "2D async TP compile",
+            "2d_asynctp_compile",
+            disabled=True,
+        ),
         OverrideDefinitions(
             [
                 [
@@ -432,16 +433,17 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "cpu_offload+opt_in_bwd+TP+DP+CP",
             ngpu=8,
         ),
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--memory_estimation.enable",
-        #         ]
-        #     ],
-        #     "FSDP2 Memory Tracking and Estimation",
-        #     "fsdp2_memory_estimation",
-        #     ngpu=2,
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--memory_estimation.enable",
+                ]
+            ],
+            "FSDP2 Memory Tracking and Estimation",
+            "fsdp2_memory_estimation",
+            ngpu=2,
+            disabled=True,
+        ),
         OverrideDefinitions(
             [
                 [

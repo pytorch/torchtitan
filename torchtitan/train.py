@@ -356,7 +356,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
-                loss_fn=self.train_spec.build_loss_fn(job_config),
+                loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
                 metrics_processor=self.metrics_processor,
@@ -607,7 +607,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     self.job_config.validation.enable
                     and self.validator.should_validate(self.step)
                 ):
-                    self.validator.validate(self.model_parts, self.step)
+                    with self.loss_fn.no_rescale():
+                        self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:

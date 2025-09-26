@@ -107,7 +107,7 @@ class Trainer(ForgeEngine):
                 dp_rank=self.dp_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=self.parallel_dims,
-                loss_fn=self.train_spec.build_loss_fn(job_config),
+                loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
             )
@@ -304,7 +304,8 @@ class Trainer(ForgeEngine):
                     self.job_config.validation.enable
                     and self.validator.should_validate(self.step)
                 ):
-                    self.validator.validate(self.model_parts, self.step)
+                    with self.loss_fn.no_rescale():
+                        self.validator.validate(self.model_parts, self.step)
 
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)
