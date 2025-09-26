@@ -1,4 +1,4 @@
-name: 8 GPU Model Tests
+name: 8 GPU Integration Test
 
 on:
   push:
