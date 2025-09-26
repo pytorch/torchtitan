@@ -10,14 +10,27 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Partial, Replicate, Shard
-from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
-    parallelize_module,
-    PrepareModuleInput,
-    PrepareModuleInputOutput,
-    RowwiseParallel,
-    SequenceParallel,
-)
+
+try:
+    from torch.distributed.tensor.parallel import (
+        ColwiseParallel,
+        parallelize_module,
+        PrepareModuleInput,
+        PrepareModuleInputOutput,
+        RowwiseParallel,
+        SequenceParallel,
+    )
+except ImportError:
+    print("PrepareModuleInputOutput not available, please upgrade torch to >=2.8.0")
+    from torch.distributed.tensor.parallel import (
+        ColwiseParallel,
+        parallelize_module,
+        PrepareModuleInput,
+        RowwiseParallel,
+        SequenceParallel,
+    )
+
+    PrepareModuleInputOutput = None
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 
@@ -429,6 +442,11 @@ def apply_moe_ep_tp(
             continue
 
         if tp_mesh is not None:
+            if PrepareModuleInputOutput is None:
+                raise RuntimeError(
+                    "You attempted to use an MoE but on a torch version that does not support this. "
+                    "Please upgrade to torch >= 2.8.0"
+                )
             moe_layer_plan = {
                 # input / output sharding on the seqlen dim
                 # all-gather for input, reduce-scatter for output

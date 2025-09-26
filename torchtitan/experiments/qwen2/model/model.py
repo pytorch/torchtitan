@@ -14,7 +14,7 @@ from torch import nn
 from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
-from .args import TransformerModelArgs
+from .args import Qwen2ModelArgs
 
 
 def apply_scaling(freqs: torch.Tensor) -> torch.Tensor:
@@ -151,7 +151,7 @@ class Attention(nn.Module):
     Multi-head attention module.
 
     Args:
-        model_args (TransformerModelArgs): Model configuration arguments.
+        model_args (Qwen2ModelArgs): Model configuration arguments.
 
     Attributes:
         n_kv_heads (int): Number of key and value heads.
@@ -165,7 +165,7 @@ class Attention(nn.Module):
 
     """
 
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(self, model_args: Qwen2ModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.n_kv_heads = (
@@ -177,10 +177,14 @@ class Attention(nn.Module):
         self.head_dim = model_args.dim // model_args.n_heads
 
         self.wq = nn.Linear(
-            model_args.dim, model_args.n_heads * self.head_dim, bias=False
+            model_args.dim, model_args.n_heads * self.head_dim, bias=model_args.qkv_bias
         )
-        self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(
+            model_args.dim, self.n_kv_heads * self.head_dim, bias=model_args.qkv_bias
+        )
+        self.wv = nn.Linear(
+            model_args.dim, self.n_kv_heads * self.head_dim, bias=model_args.qkv_bias
+        )
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
@@ -261,16 +265,8 @@ class FeedForward(nn.Module):
         self,
         dim: int,
         hidden_dim: int,
-        multiple_of: int,
-        ffn_dim_multiplier: float | None,
     ):
         super().__init__()
-        hidden_dim = int(2 * hidden_dim / 3)
-        # custom dim factor multiplier
-        if ffn_dim_multiplier is not None:
-            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         self.w3 = nn.Linear(dim, hidden_dim, bias=False)
@@ -290,7 +286,7 @@ class TransformerBlock(nn.Module):
 
     Args:
         layer_id (int): Identifier for the layer.
-        model_args (TransformerModelArgs): Model configuration arguments.
+        model_args (Qwen2ModelArgs): Model configuration arguments.
 
     Attributes:
         n_heads (int): Number of attention heads.
@@ -304,16 +300,14 @@ class TransformerBlock(nn.Module):
 
     """
 
-    def __init__(self, layer_id: int, model_args: TransformerModelArgs):
+    def __init__(self, layer_id: int, model_args: Qwen2ModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
         self.attention = Attention(model_args)
         self.feed_forward = FeedForward(
             dim=model_args.dim,
-            hidden_dim=4 * model_args.dim,
-            multiple_of=model_args.multiple_of,
-            ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+            hidden_dim=model_args.hidden_dim,
         )
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
@@ -353,15 +347,15 @@ class TransformerBlock(nn.Module):
         self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Transformer(nn.Module, ModelProtocol):
+class Qwen2Model(nn.Module, ModelProtocol):
     """
     Transformer Module
 
     Args:
-        model_args (TransformerModelArgs): Model configuration arguments.
+        model_args (Qwen2ModelArgs): Model configuration arguments.
 
     Attributes:
-        model_args (TransformerModelArgs): Model configuration arguments.
+        model_args (Qwen2ModelArgs): Model configuration arguments.
         vocab_size (int): Vocabulary size.
         n_layers (int): Number of layers in the model.
         tok_embeddings (ParallelEmbedding): Token embeddings.
@@ -372,7 +366,7 @@ class Transformer(nn.Module, ModelProtocol):
 
     """
 
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(self, model_args: Qwen2ModelArgs):
         super().__init__()
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
@@ -435,7 +429,7 @@ class Transformer(nn.Module, ModelProtocol):
             # relaxing in our CP enablement PR
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
-            self.model_args.rope_scaling,
+            False,
         )
 
     def forward(

@@ -22,8 +22,19 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
-def build_cross_entropy_loss(job_config: JobConfig):
-    loss_fn = cross_entropy_loss
+def cross_entropy_loss_unreduced(
+    pred: torch.Tensor, labels: torch.Tensor
+) -> torch.Tensor:
+    """Common cross-entropy loss function for Transformer models training,"""
+    return torch.nn.functional.cross_entropy(
+        pred.flatten(0, 1).float(), labels.flatten(0, 1), reduction="none"
+    ).view(labels.shape)
+
+
+def build_cross_entropy_loss(job_config: JobConfig, reduction: str = "mean"):
+    loss_fn = (
+        cross_entropy_loss if reduction == "mean" else cross_entropy_loss_unreduced
+    )
     if job_config.compile.enable and "loss" in job_config.compile.components:
         logger.info("Compiling the loss function with torch.compile")
         loss_fn = torch.compile(loss_fn)
