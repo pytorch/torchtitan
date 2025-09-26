@@ -583,7 +583,7 @@ class Float8Dense:
     """
     Comma-separated list of fully qualified names of modules to skip applying float8 training to.
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
-    Example: --float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    Example: --quantize.dense.float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
     emulate: bool = False
     """
@@ -600,7 +600,7 @@ class Float8MoE:
     *Prototype feature, performance optimization still in progress*
     Comma-separated list of fully qualified names of MoE modules to apply float8 rowwise training to.
     This is a prototype feature that requires the torchao nightly build.
-    Example: --float8.fqns="experts"
+    Example: --quantize.dense.float8.fqns="experts"
     """
 
 
