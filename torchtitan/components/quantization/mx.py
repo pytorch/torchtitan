@@ -39,6 +39,8 @@ class MXLinearConverter(ModelConverter):
                 "torchao is not installed. Please install it to use MXFP8 linear layers."
             )
 
+        validate_only_mx_converters(job_config)
+
         # Can be removed if we enable the emulated versions
         assert has_cuda_capability(
             10, 0
@@ -102,6 +104,8 @@ class MXGroupedGemmConverter(ModelConverter):
     enabled: bool
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        validate_only_mx_converters(job_config)
+
         # Ensure minimum torchao versions
         if find_spec("torchao") is None:
             raise ImportError(
@@ -172,6 +176,17 @@ class MXGroupedGemmConverter(ModelConverter):
         MXFP8 MoE training doesn't require any post-optimizer hooks at the moment
         """
         return
+
+
+def validate_only_mx_converters(job_config: JobConfig):
+    """
+    Validates that the job config only specifies one quantization method for dense and MoE layers.
+    """
+    for converter in job_config.model.converters:
+        if converter != "quantize.dense.float8" and converter != "quantize.moe.float8":
+            raise ValueError(
+                f"Cannot combine mxfp8 MoE training with {converter} quantization"
+            )
 
 
 register_model_converter(MXLinearConverter, "quantize.dense.mx")

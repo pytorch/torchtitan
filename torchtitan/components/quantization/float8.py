@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
 
-from torchtitan.config.job_config import Float8Dense, JobConfig
+from torchtitan.config.job_config import Float8Dense, Job, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import (
@@ -25,14 +25,17 @@ AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
 class Float8DenseConverter(ModelConverter):
-    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        self.enabled = False
+    enabled: bool
 
+    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         float8_config: Float8Dense = job_config.quantize.dense.float8
         compile_config = job_config.compile
         model_compile_enabled = (
             compile_config.enable and "model" in compile_config.components
         )
+
+        validate_only_float8_converters(job_config)
+
         if has_cuda_capability(8, 9) or (
             float8_config.emulate and not model_compile_enabled
         ):
@@ -58,7 +61,6 @@ class Float8DenseConverter(ModelConverter):
             )
             return
 
-        self.enabled = True
         self.filter_fqns = float8_config.filter_fqns
         self.filter_fn = self._init_filter_fn(float8_config)
 
@@ -96,6 +98,8 @@ class Float8DenseConverter(ModelConverter):
                 and float8_config.precompute_float8_dynamic_scale_for_fsdp
             )
             logger.info("Float8 tensorwise scaled training active")
+
+        self.enabled = True
 
     def _init_filter_fn(self, float8_config: Float8Dense):
         # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
@@ -170,8 +174,9 @@ class Float8DenseConverter(ModelConverter):
 
 
 class Float8MoEConverter(ModelConverter):
+    enabled: bool
+
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        self.enabled = False
         self.fqns = job_config.quantize.moe.float8.fqns
         compile_config = job_config.compile
         model_compile_enabled = (
@@ -184,6 +189,8 @@ class Float8MoEConverter(ModelConverter):
             logger.warning(
                 "Compile is required for high performance float8 MoE training; enable it with --compile.enable"
             )
+
+        validate_only_float8_converters(job_config)
 
         # Validate MoE training prototype limitations.
         assert (
@@ -229,6 +236,17 @@ class Float8MoEConverter(ModelConverter):
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         pass
+
+
+def validate_only_float8_converters(job_config: JobConfig):
+    """
+    Validates that the job config only specifies one quantization method for dense and MoE layers.
+    """
+    for converter in job_config.model.converters:
+        if converter != "quantize.dense.mx" and converter != "quantize.moe.mx":
+            raise ValueError(
+                f"Cannot combine float8 MoE training with {converter} quantization"
+            )
 
 
 register_model_converter(Float8DenseConverter, "quantize.dense.float8")
