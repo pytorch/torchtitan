@@ -81,22 +81,19 @@ class TensorParallel(ParallelStyle):
 
 
 class ExpertParallel(ParallelStyle):
-    AllToAllImpl = Literal["default", "mxfp8"]
+    """
+    ExpertParallel is a parallel style for MoE, where each experts
+    are distributed across ranks along a given axis of the device mesh.
 
-    def __init__(self, a2a_impl: AllToAllImpl = "default", max_output_len_per_rank: int = -1):
-        """
-        ExpertParallel is a parallel style for MoE, where each experts 
-        are distributed across ranks along a given axis of the device mesh.
+    Args:
+        a2a_impl (str): The implementation of all-to-all. Default is "default". Options are ["default","mxfp8"].
+    """
 
-        Args:
-            a2a_impl (str): The implementation of all-to-all. Default is "default". Options are ["default","mxfp8"].
-            max_output_len_per_rank (int): The maximum length of the output tensor per rank. Default is -1. Required for mxfp8 all-to-all, otherwise not used.
-        """
+    def __init__(self, a2a_impl: str = "default"):
         super().__init__()
         self.input_splits = None
         self.output_splits = None
         self.a2a_impl = a2a_impl
-        self.max_output_len_per_rank = max_output_len_per_rank
 
     # performing all-to-all dispatch on the input
     def _token_dispatch(self, mod, inputs, device_mesh):
@@ -104,34 +101,48 @@ class ExpertParallel(ParallelStyle):
         routed_input, num_tokens_per_expert = inputs
         ep_size = device_mesh.shape[0]
 
-        def default_a2a(routed_input: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-            # generate the input splits and output splits for all-to-all
-            with torch.no_grad():
-                num_tokens_per_expert_group = all_to_all_single(
-                    num_tokens_per_expert,
-                    None,
-                    None,
-                    group=device_mesh.get_group(),
-                )
-                # Need to wait explicitly because it is used by a triton kernel later
-                # which doesn't realize that AsyncCollectiveTensor needs unwrapping
-                num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
-                    num_tokens_per_expert_group
-                )
-                input_splits = (
-                    num_tokens_per_expert.view(ep_size, -1)
-                    .sum(dim=1)
-                    .to(torch.device("cpu"), non_blocking=True)
-                )
-                # NOTE: this would incur a device-to-host sync
-                output_splits = (
-                    num_tokens_per_expert_group.view(ep_size, -1)
-                    .sum(dim=1)
-                    .to(torch.device("cpu"), non_blocking=False)
-                )
-                self.input_splits = input_splits.tolist()
-                self.output_splits = output_splits.tolist()
+        # generate the input splits and output splits for all-to-all
+        with torch.no_grad():
+            num_tokens_per_expert_group = all_to_all_single(
+                num_tokens_per_expert,
+                None,
+                None,
+                group=device_mesh.get_group(),
+            )
+            # Need to wait explicitly because it is used by a triton kernel later
+            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+                num_tokens_per_expert_group
+            )
+            input_splits = (
+                num_tokens_per_expert.view(ep_size, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=True)
+            )
+            # NOTE: this would incur a device-to-host sync
+            output_splits = (
+                num_tokens_per_expert_group.view(ep_size, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=False)
+            )
+            self.input_splits = input_splits.tolist()
+            self.output_splits = output_splits.tolist()
 
+        # Assume 2x tokens routed to an EP rank in worst case
+        self.max_output_tokens_per_ep_rank = routed_input.shape[0] * 2
+        self.input_splits_on_device = input_splits.to(routed_input.device)
+
+        if self.a2a_impl == "mxfp8":
+            from torchao.prototype.moe_training.kernels.mxfp8.comms import (
+                mxfp8_on_device_all_to_all_v,
+            )
+            routed_input, _ = mxfp8_on_device_all_to_all_v(
+                routed_input,
+                self.input_splits_on_device,
+                self.max_output_tokens_per_ep_rank,
+                device_mesh.get_group().group_name,
+            )
+        else:
             # perform all-to-all
             routed_input = all_to_all_single_autograd(
                 routed_input,
@@ -139,18 +150,6 @@ class ExpertParallel(ParallelStyle):
                 self.input_splits,
                 device_mesh.get_group(),
             )
-            return routed_input, num_tokens_per_expert_group
-
-        def mxfp8_a2a(routed_input: torch.Tensor, num_tokens_per_expert: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-            from torchao.prototype.moe_training.kernels.mxfp8.comms import mxfp8_on_device_all_to_all_v
-            assert self.max_output_len_per_rank > 0, "max_output_len_per_rank must be positive for mxfp8 all-to-all"
-            routed_input, num_tokens_per_expert_group = mxfp8_on_device_all_to_all_v(
-                routed_input,
-                num_tokens_per_expert,
-                self.max_output_len_per_rank,
-                device_mesh.get_group().group_name,
-            )
-            return routed_input, num_tokens_per_expert_group
 
         # NOTE: After this all-to-all, the routed input is put on proper EP rank.
         # However, the num_tokens_per_expert_group is not of the final target format
@@ -173,12 +172,23 @@ class ExpertParallel(ParallelStyle):
 
     # performing all-to-all combine on the output
     def _token_combine(self, mod, routed_output, device_mesh):
-        routed_output = all_to_all_single_autograd(
-            routed_output,
-            self.input_splits,
-            self.output_splits,
-            device_mesh.get_group(),
-        )
+        if self.a2a_impl == "mxfp8":
+            from torchao.prototype.moe_training.kernels.mxfp8.comms import (
+                mxfp8_on_device_all_to_all_v,
+            )
+            routed_output, _ = mxfp8_on_device_all_to_all_v(
+                routed_output,
+                self.input_splits_on_device,
+                self.max_output_tokens_per_ep_rank,
+                device_mesh.get_group().group_name,
+            )
+        else:
+            routed_output = all_to_all_single_autograd(
+                routed_output,
+                self.input_splits,
+                self.output_splits,
+                device_mesh.get_group(),
+            )
         return routed_output
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
@@ -189,6 +199,7 @@ class ExpertParallel(ParallelStyle):
             input_fn=self._token_dispatch,
             output_fn=self._token_combine,
         )
+
 
 # This class is for dp2ep with TP (without TP we can just use ExpertParallel)
 class ExpertTensorParallel(ExpertParallel):
