@@ -7,9 +7,15 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.components.quantization import (
+    FP8_DENSE_CONVERTER_NAME,
+    FP8_GROUP_ALIGNMENT_SIZE,
+    FP8_MOE_CONVERTER_NAME,
+    MXFP8_DENSE_CONVERTER_NAME,
+    MXFP8_MOE_CONVERTER_NAME,
+)
 
-from torchtitan.config.job_config import Float8Dense, Job, JobConfig
+from torchtitan.config.job_config import Float8Dense, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import (
@@ -243,11 +249,11 @@ def validate_only_float8_converters(job_config: JobConfig):
     Validates that the job config only specifies one quantization method for dense and MoE layers.
     """
     for converter in job_config.model.converters:
-        if converter == "quantize.dense.mx" or converter == "quantize.moe.mx":
+        if converter in (MXFP8_DENSE_CONVERTER_NAME, MXFP8_MOE_CONVERTER_NAME):
             raise ValueError(
                 f"Cannot combine float8 MoE training with {converter} quantization"
             )
 
 
-register_model_converter(Float8DenseConverter, "quantize.dense.float8")
-register_model_converter(Float8MoEConverter, "quantize.moe.float8")
+register_model_converter(Float8DenseConverter, FP8_DENSE_CONVERTER_NAME)
+register_model_converter(Float8MoEConverter, FP8_MOE_CONVERTER_NAME)
