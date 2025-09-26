@@ -94,6 +94,7 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
+    max_output_len_per_rank = 0 # TODO
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
@@ -107,6 +108,7 @@ def parallelize_llama(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            max_output_len_per_rank=max_output_len_per_rank,
         )
 
     model_compile_enabled = (
@@ -438,6 +440,7 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
+    max_output_len_per_rank: int,
 ):
     for transformer_block in model.layers.values():
         if not transformer_block.moe_enabled:
