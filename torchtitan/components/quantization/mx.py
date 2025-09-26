@@ -10,7 +10,13 @@ from importlib.util import find_spec
 from typing import Any, List
 
 import torch.nn as nn
-from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.components.quantization import (
+    FP8_DENSE_CONVERTER_NAME,
+    FP8_MOE_CONVERTER_NAME,
+    MXFP8_DENSE_CONVERTER_NAME,
+    MXFP8_GROUP_ALIGNMENT_SIZE,
+    MXFP8_MOE_CONVERTER_NAME,
+)
 
 from torchtitan.config.job_config import JobConfig, MXDense
 from torchtitan.distributed import ParallelDims
@@ -183,11 +189,11 @@ def validate_only_mx_converters(job_config: JobConfig):
     Validates that the job config only specifies one quantization method for dense and MoE layers.
     """
     for converter in job_config.model.converters:
-        if converter == "quantize.dense.float8" or converter == "quantize.moe.float8":
+        if converter in (FP8_DENSE_CONVERTER_NAME, FP8_MOE_CONVERTER_NAME):
             raise ValueError(
                 f"Cannot combine mxfp8 MoE training with {converter} quantization"
             )
 
 
-register_model_converter(MXLinearConverter, "quantize.dense.mx")
-register_model_converter(MXGroupedGemmConverter, "quantize.moe.mx")
+register_model_converter(MXLinearConverter, MXFP8_DENSE_CONVERTER_NAME)
+register_model_converter(MXGroupedGemmConverter, MXFP8_MOE_CONVERTER_NAME)

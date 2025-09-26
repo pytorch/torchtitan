@@ -66,5 +66,5 @@ enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
 
-[mx]
+[quantize.dense.mx]
 filter_fqns = ["output", "router.gate"]
