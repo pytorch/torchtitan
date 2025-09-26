@@ -77,6 +77,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     v_head_dim: int = 128
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
+    n_kv_heads: int = 8
 
     # yarn
     original_seq_len: int = 4096
