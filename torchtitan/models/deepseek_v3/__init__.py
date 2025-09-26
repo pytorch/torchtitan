@@ -11,6 +11,7 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.datasets.multi_source_dataset import build_multi_source_dataloader
 from torchtitan.models.llama3.infra.pipeline import pipeline_llama
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
@@ -102,6 +103,32 @@ deepseekv3_configs = {
         use_flex_attn=True,
         attn_mask_type="block_causal",
     ),
+    "30B": DeepSeekV3ModelArgs(
+        vocab_size=102400,
+        dim=2048,
+        inter_dim=10944,
+        moe_inter_dim=1408,
+        n_layers=48,
+        n_dense_layers=1,
+        n_heads=32,
+        n_kv_heads=8,
+        moe_args=MoEArgs(
+            num_experts=64,
+            num_shared_experts=2,
+            top_k=6,
+            score_func="softmax",
+            route_norm=False,
+            score_before_experts=False,
+        ),
+        # q_lora_rank=0,
+        # kv_lora_rank=512,
+        # qk_nope_head_dim=128,
+        # qk_rope_head_dim=64,
+        # v_head_dim=128,
+        mscale=0.70,
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
+    ),
     "236B": DeepSeekV3ModelArgs(
         vocab_size=102400,
         dim=5120,
@@ -159,16 +186,31 @@ deepseekv3_configs = {
 }
 
 
+# def get_train_spec() -> TrainSpec:
+#     return TrainSpec(
+#         name="deepseek_v3",
+#         model_cls=DeepSeekV3Model,
+#         model_args=deepseekv3_configs,
+#         parallelize_fn=parallelize_deepseekv3,
+#         pipelining_fn=pipeline_llama,
+#         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
+#         build_lr_schedulers_fn=build_lr_schedulers,
+#         build_dataloader_fn=build_hf_dataloader,
+#         build_tokenizer_fn=build_hf_tokenizer,
+#         build_loss_fn=build_cross_entropy_loss,
+#         state_dict_adapter=DeepSeekV3StateDictAdapter,
+#     )
+
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="deepseek_v3",
+        name="deepseek_v3_multi",
         model_cls=DeepSeekV3Model,
         model_args=deepseekv3_configs,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llama,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_hf_dataloader,
+        build_dataloader_fn=build_multi_source_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
