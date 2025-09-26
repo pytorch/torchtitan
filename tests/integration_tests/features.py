@@ -7,16 +7,6 @@
 
 from tests.integration_tests import OverrideDefinitions
 
-# tests skipped for ROCm
-skip_for_rocm_test_list = [
-    "pp_looped_zero_bubble",
-    "pp_zbv",
-    "pp_custom_csv",
-    "last_save_model_weights_only_bf16",
-    "last_save_model_weights_only_fp32",
-]
-TEST_WITH_ROCM = os.getenv("TEST_WITH_ROCM", "0") == "1"
-
 
 def build_features_test_list() -> list[OverrideDefinitions]:
     """
@@ -538,4 +528,5 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
     ]
+
     return integration_tests_flavors

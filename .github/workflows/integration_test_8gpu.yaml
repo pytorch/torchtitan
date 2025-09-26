@@ -1,0 +1,88 @@
+name: 8 GPU Model Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+  pull_request:
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+  schedule:
+    # Runs every 6 hours
+    - cron: '0 */6 * * *'
+
+concurrency:
+  group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+jobs:
+  # aws setup
+  aws-setup:
+    runs-on: linux.rocm.gpu.mi300.8
+    steps:
+      - name: configure aws credentials
+        id: aws_creds
+        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
+        with:
+          role-to-assume: arn:aws:iam::308535385114:role/gha_workflow_s3_and_ecr_read_only
+          aws-region: us-east-1
+          role-duration-seconds: 18000
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        continue-on-error: true
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
+
+  build-test:
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      matrix:
+        include:
+          - name: cuda
+            runner: linux.g5.48xlarge.nvidia.gpu
+            gpu-arch-type: cuda
+            gpu-arch-version: "12.6"
+            # This image is faster to clone than the default, but it lacks CC needed by triton
+            # (1m25s vs 2m37s).
+            docker-image: torchtitan-ubuntu-20.04-clang12
+            index-url: https://download.pytorch.org/whl/nightly/cu126
+            is-rocm: 0
+          - name: rocm
+            runner: linux.rocm.gpu.mi300.8
+            gpu-arch-type: rocm
+            gpu-arch-version: "6.4"
+            docker-image: torchtitan-rocm-ubuntu-22.04-clang12
+            index-url: https://download.pytorch.org/whl/nightly/rocm6.4
+            is-rocm: 1
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 45
+      script: |
+        set -eux
+
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        # Log CUDA driver version for debugging.
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
+        pip config --user set global.progress_bar off
+
+        python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
+
+        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+
+        mkdir artifacts-to-be-uploaded
+        TEST_WITH_ROCM=${{ matrix.is-rocm }} python -m tests.integration_tests.run_tests --test_suite features artifacts-to-be-uploaded --ngpu 8
