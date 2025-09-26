@@ -128,6 +128,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.device,
             job_config.training.seed,
             job_config.training.deterministic,
+            job_config.training.deterministic_warn_only,
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 

@@ -239,6 +239,8 @@ class Training:
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
 
+    deterministic_warn_only: bool =False
+    """Only warns about ops without deterministic implementations rather than erroring  """
 
 @dataclass
 class Parallelism:
@@ -556,6 +558,14 @@ class ActivationCheckpoint:
     rematerialized.
     """
 
+    preserve_rng_state: bool = False
+    """If deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower"""
+
+    determinism_check: str = "default"
+    """A string specifying the determinism function. """
+
+    debug: bool = False
+    """ Capture ac debug information. Will be slower. """
 
 @dataclass
 class Compile:
