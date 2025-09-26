@@ -25,101 +25,47 @@ from torch.distributed.tensor.parallel import ParallelStyle
 
 class HookCoordinator:
     def __init__(self):
-        # Only need 2 semaphores - one for forward, one for backward
-        self._forward_semaphore = threading.Semaphore(0)   # Forward waits
-        self._backward_semaphore = threading.Semaphore(1)  # Backward starts first
-        
-        # Semaphore mapping
-        self._semaphores = {
-            'forward': self._forward_semaphore,
-            'backward': self._backward_semaphore
-        }
-        
-        # Cross-signaling mapping (forward signals backward, backward signals forward)
-        self._signal_targets = {
-            'forward': self._backward_semaphore,
-            'backward': self._forward_semaphore
-        }
+        # Barrier for 2 threads (forward and backward) to synchronize
+        # This ensures that we always alternate at executing one compute and one comm op together
+        self._execution_barrier = threading.Barrier(2)
 
         self._coordination_enabled = False
         self._cycle_count = 0
+        self._num_layers = None
 
-    def _acquire_execution(self, direction: str, timeout: float = 20.0):
-        """Generic acquire method for both forward and backward"""
-        if not self._coordination_enabled:
-            return
-        
-        direction_upper = direction.upper()
-        print(f"[{direction_upper}] Attempting acquire {direction} execution")
-        self._semaphores[direction].acquire(timeout=timeout)
-        print(f"[{direction_upper}] Acquired {direction} execution")
-
-    def _release_execution(self, direction: str, async_tensor: Optional[torch.Tensor] = None):
-        """Generic release method for both forward and backward"""
-        if not self._coordination_enabled:
+    def barrier(self):
+        """Barrier for 2 threads to synchronize"""
+        if not self.is_coordination_enabled():
             return
 
-        direction_upper = direction.upper()
-        
-        # Signal the other direction
-        other_direction = 'backward' if direction == 'forward' else 'forward'
-        print(f"[{direction_upper}] Releasing {direction}, signaling {other_direction}")
-        self._signal_targets[direction].release()
-
-        # Forward-specific logic
-        if direction == 'forward':
-            self._cycle_count += 1
-            print(f"cycle count {self._cycle_count}")
-            self.check_should_enable_coordination()
-
-    # Simple wrapper methods
-    def acquire_forward_execution(self):
-        self._acquire_execution('forward')
-        
-    def release_forward_execution(self, async_tensor: Optional[torch.Tensor] = None):
-        self._release_execution('forward', async_tensor)
-        
-    def acquire_backward_execution(self):
-        self._acquire_execution('backward')
-        
-    def release_backward_execution(self, async_tensor: Optional[torch.Tensor] = None):
-        self._release_execution('backward', async_tensor)
+        try:
+            self._execution_barrier.wait()
+            print(f"Both threads ready, proceeding")
+        except threading.BrokenBarrierError:
+            print(f"Barrier broken - one thread has finished!")
 
     def enable_coordination(self, num_layers: Optional[int] = None):
-        self._coordination_enabled = True
-        self._cycle_count = 0
+        if num_layers is not None and num_layers > 0:
+            self._coordination_enabled = True
+            self._cycle_count = 0
 
-        # Reset semaphores
-        self._forward_semaphore = threading.Semaphore(0)
-        self._backward_semaphore = threading.Semaphore(1)
-        
-        # Update semaphore references
-        self._semaphores['forward'] = self._forward_semaphore
-        self._semaphores['backward'] = self._backward_semaphore
-        self._signal_targets['forward'] = self._backward_semaphore
-        self._signal_targets['backward'] = self._forward_semaphore
+            # Reset barrier
+            self._execution_barrier = threading.Barrier(2)
 
-        self._num_layers = num_layers
-        self.check_should_enable_coordination()
-        print(f"[COORDINATION] Simplified hook coordination ENABLED with {num_layers} MoE layers")
+            self._num_layers = num_layers
+            print(f"Compute/Comm hook coordination ENABLED with {num_layers} MoE layers")
         
     def disable_coordination(self):
         self._coordination_enabled = False
-        # Release both semaphores to unblock any waiting threads
-        try:
-            self._forward_semaphore.release()
-            self._backward_semaphore.release()
-        except ValueError:
-            pass
-        print("[COORDINATION] Simplified hook coordination DISABLED")
+        self._cycle_count = 0
+        self._execution_barrier.abort()  # Break barrier to unblock threads
+        print("[COORDINATION] Compute/Comm hook coordination DISABLED")
 
-    def check_should_enable_coordination(self):
-        # TODO: better way to determine when to disable coordination
-        moe_multipler = 4
-        if self._num_layers is not None and self._cycle_count >= moe_multipler * self._num_layers:
+    def check_should_continue_coordination(self):
+        if self._num_layers is not None and self._cycle_count >= self._num_layers:
             print("[COORDINATION] Reached target number of cycles, disabling coordination")
-            self.disable_coordination()
-            return
+            return False
+        return True
         
     def is_coordination_enabled(self):
         return self._coordination_enabled
@@ -129,41 +75,34 @@ _hook_coordinator = HookCoordinator()
 
 class SyncHook(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, hook_name):
+    def forward(ctx, x, hook_name=""):
         ctx.hook_name = hook_name
-        _hook_coordinator.acquire_forward_execution()
+        # handle edge case for transformer level boundary
+        if _hook_coordinator._coordination_enabled and hook_name == "D":
+            _hook_coordinator._cycle_count += 1
+            print(f"[FORWARD] cycle count: {_hook_coordinator._cycle_count}", "=" * 40)
+            if not _hook_coordinator.check_should_continue_coordination():
+                _hook_coordinator.disable_coordination()
+                return x
 
-        
-        try:
-            if _hook_coordinator.is_coordination_enabled():
-                if hook_name == "dispatch_A":
-                    # TODO: is this right?
-                    print("Calling torch.cuda.synchronize() from dispatch_A")
-                    # This does GPU-CPU sync so we need to wait explicitly before starting
-                    torch.cuda.synchronize()
-                print(f"[FORWARD] {hook_name}_fwd")
-            return x
-        finally:
-            _hook_coordinator.release_forward_execution(x)
+        _hook_coordinator.barrier()
+
+        if _hook_coordinator.is_coordination_enabled():
+            print(f"[FORWARD] finished {hook_name}_fwd")
+        return x
     
     @staticmethod
     def backward(ctx, grad_output):
         hook_name = ctx.hook_name
-        _hook_coordinator.acquire_backward_execution()
-        
 
-        try:
-            if _hook_coordinator.is_coordination_enabled():
-                if hook_name == "dispatch_B":
-                    # TODO: is this right?
-                    print("Calling torch.cuda.synchronize() from dispatch_B")
-                    # This does GPU-CPU sync so we need to wait explicitly before starting
-                    torch.cuda.synchronize()
-                print(f"[BACKWARD] {hook_name}_bwd")
-                # grad_output.record_stream(torch.cuda.current_stream())
+        # Edge case, skip initial barrier, all subsequent backward hooks will acquire
+        if hook_name == "D" and _hook_coordinator._cycle_count == 0:
             return grad_output, None
-        finally:
-            _hook_coordinator.release_backward_execution(grad_output)
+
+        _hook_coordinator.barrier()
+        if _hook_coordinator.is_coordination_enabled():
+            print(f"[BACKWARD] finished {hook_name}_bwd")
+        return grad_output, None
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
 ValidTokenGroupAlignmentSize = Literal[8, 16, 32]
@@ -231,17 +170,6 @@ class ExpertParallel(ParallelStyle):
         # annotate module input placements/sharding with input_layouts
         routed_input, num_tokens_per_expert = inputs
         ep_size = device_mesh.shape[0]
-
-        # TODO: what is causing the IMAs???
-        if not torch.isfinite(routed_input).all():
-            raise RuntimeError(f"routed_input contains non-finite values: {routed_input}")
-        
-        if not torch.isfinite(num_tokens_per_expert).all():
-            raise RuntimeError(f"num_tokens_per_expert contains non-finite values: {num_tokens_per_expert}")
-        
-        if routed_input.shape[0] > 1000000:  # Reasonable limit
-            raise RuntimeError(f"routed_input suspiciously large: {routed_input.shape}")
-
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
             num_tokens_per_expert_group = all_to_all_single(
@@ -325,18 +253,18 @@ class ExpertParallel(ParallelStyle):
 
     def _wrap_with_inner_hooks(self, module):
         def inner_pre_hook(module, input):
-            return (SyncHook.apply(input[0], "dispatch_A"),) + input[1:]
+            return (SyncHook.apply(input[0], "A"),) + input[1:]
         def inner_post_hook(module, input, output):
-            return SyncHook.apply(output, "combine_C")
+            return SyncHook.apply(output, "C")
         module.register_forward_pre_hook(inner_pre_hook)
         module.register_forward_hook(inner_post_hook)
         return module
 
     def _wrap_with_outer_hooks(self, module):
         def outer_pre_hook(module, input):
-            return (SyncHook.apply(input[0], "dispatch_B"),) + input[1:]
+            return (SyncHook.apply(input[0], "B"),) + input[1:]
         def outer_post_hook(module, input, output):
-            return SyncHook.apply(output, "combine_D")
+            return SyncHook.apply(output, "D")
         module.register_forward_pre_hook(outer_pre_hook)
         module.register_forward_hook(outer_post_hook)
         return module

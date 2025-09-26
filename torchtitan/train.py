@@ -12,6 +12,7 @@ from typing import Any, Generator, Iterable, Optional
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.profiler import record_function
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
@@ -663,7 +664,6 @@ def _count_moe_modules(model):
     return moe_count
 
 def overlap_callback(action: _Action, ctx: _PipelineContext):
-    print("overlap_callback begin", "=" * 80, torch.distributed.get_rank())
     """Custom callback for OVERLAP_F_B computation that mimics the original implementation."""
     schedule = ctx.schedule_ref
     assert isinstance(schedule, _PipelineScheduleRuntime)
@@ -700,6 +700,7 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
     assert backward_mb_index is not None
     bwd_recv_ops = schedule.bwd_recv_ops
 
+    print(f"overlap_callback begin {forward_stage_index}:{forward_mb_index}, {backward_stage_index}:{backward_mb_index}", "=" * 80, torch.distributed.get_rank())
     # PP communication ========================================================
 
     # Fwd receives
@@ -744,26 +745,27 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
             torch.cuda.set_stream(main_cuda_stream)
             print(f"BACKWARD {backward_stage_index} {torch.cuda.current_stream()}")
             # Backward ========================================================
-            loss = schedule._maybe_get_loss(backward_stage, backward_mb_index)
-            schedule.backward_counter[backward_stage_index] += 1
-            last_backward = (
-                schedule.backward_counter[backward_stage_index] == schedule._n_microbatches
-            )
-            backward_stage.backward_one_chunk(
-                backward_mb_index,
-                loss=loss,
-                full_backward=True,
-                last_backward=last_backward,
-            )
-            grad_scale_factor = schedule._n_microbatches if schedule.scale_grads else 1
-            if last_backward:
-                backward_stage.scale_grads(grad_scale_factor)
-            
-            if backward_is_prev_stage_on_this_rank:
-                stage_index_to_stage[backward_stage_index - 1].set_local_bwd_input(
-                    backward_stage.get_local_bwd_output(backward_mb_index),
-                    backward_mb_index,
+            with record_function(f"backward_stage_{backward_stage_index}_mb_{backward_mb_index}"):
+                loss = schedule._maybe_get_loss(backward_stage, backward_mb_index)
+                schedule.backward_counter[backward_stage_index] += 1
+                last_backward = (
+                    schedule.backward_counter[backward_stage_index] == schedule._n_microbatches
                 )
+                backward_stage.backward_one_chunk(
+                    backward_mb_index,
+                    loss=loss,
+                    full_backward=True,
+                    last_backward=last_backward,
+                )
+                grad_scale_factor = schedule._n_microbatches if schedule.scale_grads else 1
+                if last_backward:
+                    backward_stage.scale_grads(grad_scale_factor)
+                
+                if backward_is_prev_stage_on_this_rank:
+                    stage_index_to_stage[backward_stage_index - 1].set_local_bwd_input(
+                        backward_stage.get_local_bwd_output(backward_mb_index),
+                        backward_mb_index,
+                    )
 
 
         # Forward ========================================================
@@ -783,11 +785,11 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
                 )
 
         # Run forward and backward in parallel
-        if _hook_coordinator.is_coordination_enabled():
-            thread = threading.Thread(target=run_backward, daemon=True)
-            thread.start()
-            run_forward()
-            thread.join()
+        # if _hook_coordinator.is_coordination_enabled():
+        thread = threading.Thread(target=run_backward, daemon=True)
+        thread.start()
+        run_forward()
+        thread.join()
             # with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             #     forward_future = executor.submit(run_forward)
             #     backward_future = executor.submit(run_backward)
@@ -795,13 +797,13 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
             #     # Wait for both to complete simultaneously
             #     done, not_done = concurrent.futures.wait([forward_future, backward_future])
             #     output = forward_future.result()
-        else:
-            run_forward()
-            run_backward()
+        # else:
+        #     run_forward()
+        #     run_backward()
 
         _hook_coordinator.disable_coordination()
     forward_backward_overlapped()
-    print("overlap_callback end", "=" * 80)
+    print(f"overlap_callback end {forward_stage_index}:{forward_mb_index}, {backward_stage_index}:{backward_mb_index}", "=" * 80)
 
 import fbvscode
 fbvscode.attach_debugger()
