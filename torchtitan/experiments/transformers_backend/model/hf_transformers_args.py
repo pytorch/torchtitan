@@ -295,7 +295,7 @@ class HFTransformerModel(nn.Module):
             raise AttributeError("Could not find layers in the model. Please check the model structure.")
 
     @property
-    def embed_tokens(self):
+    def tok_embeddings(self):
         """Returns the model's embed_tokens, handling different Hugging Face model structures."""
         if hasattr(self.model, "model") and hasattr(self.model.model, "embed_tokens"):  # Llama-like
             return self.model.model.embed_tokens
@@ -307,6 +307,13 @@ class HFTransformerModel(nn.Module):
         """Returns the model's norm, handling different Hugging Face model structures."""
         if hasattr(self.model, "model") and hasattr(self.model.model, "norm"):  # Llama-like
             return self.model.model.norm
+        else:
+            raise AttributeError("Could not find norm in the model. Please check the model structure.")
+
+    @norm.setter
+    def norm(self, value):
+        if hasattr(self.model, "model") and hasattr(self.model.model, "norm"):  # Llama-like
+            setattr(self.model.model, "norm", value)
         else:
             raise AttributeError("Could not find norm in the model. Please check the model structure.")
 
@@ -326,4 +333,21 @@ class HFTransformerModel(nn.Module):
         return output
 
     def init_weights(self, *args, **kwargs):
-        self.model.post_init()
+        # This method replicates the behavior of the original PreTrainedModel.init_weights,
+        # but with a custom weight initialization function that skips nn.Identity modules (when PP is enabled)
+
+        if self.model.config.pruned_heads:
+            logger.info("Pruning heads as per model configuration.")
+            self.model.prune_heads(self.model.config.pruned_heads)
+
+        original_init_weights_fn = self.model._init_weights
+
+        def selective_init(module):
+            # For pipeline parallel, we need to skip nn.Identity modules
+            if not isinstance(module, nn.Identity):
+                original_init_weights_fn(module)
+
+        logger.info("Applying selective weight initialization, skipping nn.Identity modules when PP is enabled.")
+        self.model.apply(selective_init)
+
+        self.model.tie_weights()

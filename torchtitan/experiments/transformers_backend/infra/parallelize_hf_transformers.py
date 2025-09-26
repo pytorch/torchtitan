@@ -315,7 +315,7 @@ def apply_non_moe_tp(
         model,
         tp_mesh,
         {
-            "embed_tokens": RowwiseParallel(
+            "tok_embeddings": RowwiseParallel(
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
             ),
@@ -437,9 +437,9 @@ def apply_fsdp(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
             )
 
-    if model.embed_tokens is not None:
+    if model.tok_embeddings is not None:
         fully_shard(
-            model.embed_tokens,
+            model.tok_embeddings,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
@@ -507,8 +507,8 @@ def apply_fsdp(
     transformer_blocks = list(model.layers.values())
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
-    if model.embed_tokens is not None and model.layers is not None:
-        model.embed_tokens.set_modules_to_forward_prefetch([transformer_blocks[0]])
+    if model.tok_embeddings is not None and model.layers is not None:
+        model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
 
     for transformer_block, next_transformer_block in zip(
         transformer_blocks, next_transformer_blocks
@@ -546,8 +546,8 @@ def apply_fsdp(
                 transformer_block.set_modules_to_backward_prefetch(
                     [prev_transformer_block]
                 )
-        elif model.embed_tokens is not None:
-            transformer_block.set_modules_to_backward_prefetch([model.embed_tokens])
+        elif model.tok_embeddings is not None:
+            transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
 
 
 def apply_moe_ep_tp(
