@@ -39,6 +39,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
 
   build-test:
+    needs: aws-setup
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       matrix:
