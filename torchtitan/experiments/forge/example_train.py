@@ -107,7 +107,7 @@ class Trainer(ForgeEngine):
                 dp_rank=self.dp_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=self.parallel_dims,
-                loss_fn=self.train_spec.build_loss_fn(job_config),
+                loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
             )
