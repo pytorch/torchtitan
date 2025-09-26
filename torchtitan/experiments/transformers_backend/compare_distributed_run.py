@@ -68,6 +68,7 @@ console = Console()
 
 
 class LogLevel(Enum):
+    COMMAND = "COMMAND"
     INFO = "INFO"
     SUCCESS = "SUCCESS"
     WARNING = "WARNING"
@@ -76,9 +77,10 @@ class LogLevel(Enum):
     TEST_FAIL = "TEST_FAIL"
 
 
-def log_message(level: LogLevel, message: str) -> None:
+def log_message(level: LogLevel, message: str, indent: int = 0, dim: bool = False) -> None:
     """Log a message with appropriate color coding."""
     style_map = {
+        LogLevel.COMMAND: "dim",
         LogLevel.INFO: "blue",
         LogLevel.SUCCESS: "green",
         LogLevel.WARNING: "yellow",
@@ -88,6 +90,7 @@ def log_message(level: LogLevel, message: str) -> None:
     }
 
     prefix_map = {
+        LogLevel.COMMAND: "[COMMAND]",
         LogLevel.INFO: "[INFO]",
         LogLevel.SUCCESS: "[SUCCESS]",
         LogLevel.WARNING: "[WARNING]",
@@ -98,7 +101,21 @@ def log_message(level: LogLevel, message: str) -> None:
 
     style = style_map[level]
     prefix = prefix_map[level]
-    console.print(f"[{style}]{prefix}[/] {message}")
+    if indent > 0:
+        indent_str = "  " * (indent - 1) + "└─ "
+    else:
+        indent_str = ""
+         
+    output = ""
+    if level == LogLevel.COMMAND:
+        output = f"{indent_str}[{style}]{prefix} {message}[/]"
+    else:
+        output = f"{indent_str}[{style}]{prefix}[/] {message}"
+
+    if dim:
+        console.print(f"[dim]{output}[/dim]")
+    else:
+        console.print(output)
 
 
 @dataclass
@@ -196,7 +213,7 @@ class CompareDistributedRun:
             return sorted(list(factors))
 
         # Baseline FSDP
-        configs.append(ParallelismConfig(name="fsdp", dp_replicate=1, dp_shard=ngpu, tp=1, pp=1, pp_schedule="Interleaved1F1B", cp=1, ep=1, eptp=1))
+        configs.append(ParallelismConfig(name="fsdp", dp_replicate=1, dp_shard=ngpu, tp=1, pp=1, pp_schedule="1F1B", cp=1, ep=1, eptp=1))
 
         #NOTE(3outeille): No need to handle DDP (dp_replicate) as DDP is not supported > 1D parallelism"
         #(cf https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/llama3/infra/parallelize.py#L139)
@@ -228,7 +245,7 @@ class CompareDistributedRun:
                                 dp_shard=dp_shard,
                                 tp=tp,
                                 pp=pp,
-                                pp_schedule="Interleaved1F1B",
+                                pp_schedule="1F1B",
                                 cp=cp,
                                 ep=1,
                                 eptp=1
@@ -243,7 +260,7 @@ class CompareDistributedRun:
                                 dp_shard=dp_shard,
                                 tp=tp,
                                 pp=pp,
-                                pp_schedule="Interleaved1F1B",
+                                pp_schedule="1F1B",
                                 cp=cp,
                                 ep=dp_shard,
                                 eptp=1
@@ -295,7 +312,7 @@ class CompareDistributedRun:
         console.print(table)
         console.print()
     
-    def generate_config(self, config_dir: Path, config: ParallelismConfig, model_name: str, backend: str, filename: Optional[str] = None) -> Path:
+    def generate_config(self, config_dir: Path, config: ParallelismConfig, model_name: str, backend: str, filename: Optional[str] = None, indent: int = 0, dim: bool = False) -> Path:
         """Generate configuration file for a parallelism setup."""
         import toml
 
@@ -322,7 +339,7 @@ class CompareDistributedRun:
             if self.flavor not in self.MODEL_FLAVORS[model_name]:
                 log_message(LogLevel.WARNING, 
                            f"Flavor '{self.flavor}' not available for {model_name}. "
-                           f"Available: {self.MODEL_FLAVORS[model_name]}")
+                           f"Available: {self.MODEL_FLAVORS[model_name]}", indent=indent, dim=dim)
 
         # Update [training] section
         if "training" not in config_data:
@@ -347,10 +364,10 @@ class CompareDistributedRun:
             toml.dump(config_data, f)
 
         if self.verbose:
-            log_message(LogLevel.INFO, f"Created config file: {config_file} for config '{config.name}' (model: {model_name})")
+            log_message(LogLevel.INFO, f"Created config file: {config_file} for config '{config.name}' (model: {model_name})", indent=indent, dim=dim)
         return config_file
     
-    def extract_metrics(self, log_file: Path) -> TrainingMetrics:
+    def extract_metrics(self, log_file: Path, indent: int = 0, dim: bool = False) -> TrainingMetrics:
         """Extract metrics from log file."""
         metrics = TrainingMetrics()
         
@@ -371,18 +388,18 @@ class CompareDistributedRun:
                 metrics.grad_norm.append(float(match.group(3)))
                 
         except Exception as e:
-            log_message(LogLevel.WARNING, f"Could not extract metrics from {log_file}: {e}")
+            log_message(LogLevel.WARNING, f"Could not extract metrics from {log_file}: {e}", indent=indent, dim=dim)
         
         if not metrics.loss or not metrics.grad_norm:
-            log_message(LogLevel.WARNING, f"Could not extract metrics from {log_file}")
+            log_message(LogLevel.WARNING, f"Could not extract metrics from {log_file}", indent=indent, dim=dim)
         
         return metrics
     
     def compare_metrics(self, baseline_metrics: TrainingMetrics, test_metrics: TrainingMetrics, 
-                       config_name: str) -> bool:
+                       config_name: str, indent: int = 0, dim: bool = False) -> bool:
         """Compare metrics between baseline and test configuration."""
         if not baseline_metrics.loss or not test_metrics.loss:
-            log_message(LogLevel.TEST_FAIL, f"{config_name} - Unable to extract metrics")
+            log_message(LogLevel.TEST_FAIL, f"{config_name} - Unable to extract metrics", indent=indent, dim=dim)
             return False
         
         # Convert to tensors
@@ -408,17 +425,17 @@ class CompareDistributedRun:
                        f"{config_name} - Max loss diff: {loss_max_diff:.2e}, "
                        f"Min loss diff: {loss_min_diff:.2e}, "
                        f"Max grad norm diff: {grad_norm_diff:.2e}, "
-                       f"Min grad norm diff: {grad_norm_min_diff:.2e}")
+                       f"Min grad norm diff: {grad_norm_min_diff:.2e}", indent=indent, dim=dim)
             return True
         else:
             log_message(LogLevel.TEST_FAIL,
                        f"{config_name} - Max loss diff: {loss_max_diff:.2e}, "
                        f"Min loss diff: {loss_min_diff:.2e}, "
                        f"Max grad norm diff: {grad_norm_diff:.2e}, "
-                       f"Min grad norm diff: {grad_norm_min_diff:.2e}")
+                       f"Min grad norm diff: {grad_norm_min_diff:.2e}", indent=indent, dim=dim)
             return False
     
-    def generate_diff(self, baseline_log: Path, test_log: Path, diff_file: Path) -> None:
+    def generate_diff(self, baseline_log: Path, test_log: Path, diff_file: Path, indent: int = 0, dim: bool = False) -> None:
         """Generate diff between baseline and test logs."""
         
         def _filter_log(log_file: Path) -> Path:
@@ -454,17 +471,17 @@ class CompareDistributedRun:
             test_filtered.unlink()
             
         except Exception as e:
-            log_message(LogLevel.WARNING, f"Could not generate diff: {e}")
+            log_message(LogLevel.WARNING, f"Could not generate diff: {e}", indent=indent, dim=dim)
     
-    def run_training(self, config_file: Path, log_file: Path, config_name: str, model_name: str) -> Optional[subprocess.CalledProcessError]:
+    def run_training(self, config_file: Path, log_file: Path, config_name: str, model_name: str, indent: int = 0, dim: bool = False) -> Optional[subprocess.CalledProcessError]:
         """Run training with given configuration."""
-        log_message(LogLevel.INFO, f"Running training: {config_name} with model {model_name}")
+        log_message(LogLevel.INFO, f"Running training: {config_name} with model {model_name}", indent=indent, dim=dim)
         cmd = [
             "torchrun",
             f"--nproc_per_node={self.ngpu}",
             "--rdzv_backend", "c10d",
             "--rdzv_endpoint=localhost:0",
-            "--local-ranks-filter", "0",
+            "--local-ranks-filter", str(self.ngpu - 1),
             "--role", "rank",
             "--tee", "3",
             "-m", "torchtitan.train",
@@ -475,10 +492,10 @@ class CompareDistributedRun:
         env = os.environ.copy()
         env["SEED"] = str(self.seed)
         env["MODEL_TYPE"] = model_name
-        
-        if self.verbose:
-            log_message(LogLevel.INFO, f"Command: {' '.join(cmd)}")
-        
+        env["LOG_RANK"] = str(self.ngpu - 1)
+
+        log_message(LogLevel.COMMAND, f"Command: {' '.join(cmd)}", indent=indent, dim=dim)
+
         try:
             # Capture output to include it in the exception, while still writing to log file
             result = subprocess.run(
@@ -494,16 +511,24 @@ class CompareDistributedRun:
                 f.write(result.stdout)
             
             if self.verbose:
-                log_message(LogLevel.SUCCESS, f"Training completed: {config_name}")
+                log_message(LogLevel.SUCCESS, f"Training completed: {config_name}", indent=indent, dim=dim)
             return None
             
         except subprocess.CalledProcessError as e:
-            log_message(LogLevel.ERROR, f"Training failed: {config_name}")
+            log_message(LogLevel.ERROR, f"Training failed: {config_name}", indent=indent, dim=dim)
             
             # Write the failed output to the log file
             with open(log_file, 'w') as f:
                 if e.stdout:
                     f.write(e.stdout)
+
+            # Print the tail of the error log to the console for quick debugging
+            if e.stdout:
+                console.print("[bold red]--- Error Log Tail ---[/bold red]")
+                error_lines = e.stdout.strip().split('\n')
+                for line in error_lines[-15:]:
+                    console.print(f"[red]{line}[/red]")
+                console.print("[bold red]--- End Error Log Tail ---[/bold red]")
 
             e.add_note(f"\n--- Full output from failed process ---\n{e.stdout or '<no output captured>'}")
             return e
@@ -514,8 +539,10 @@ class CompareDistributedRun:
         hf_model_name: str,
         tt_model_name: str,
         hf_baseline_metrics: "TrainingMetrics",
+        tt_baseline_metrics: "TrainingMetrics",
         baseline_log_hf: Path,
         baseline_log_tt: Path,
+        indent: int = 0,
     ) -> bool:
         """Compares a single parallelism configuration against the baseline."""
         # Create a subdirectory for each test configuration
@@ -524,17 +551,23 @@ class CompareDistributedRun:
         test_dir.mkdir(exist_ok=True)
 
         config_filename_hf = f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.toml"
-        config_file_hf = self.generate_config(config_dir=test_dir, config=config, model_name=hf_model_name, backend="huggingface", filename=config_filename_hf)
+        config_file_hf = self.generate_config(config_dir=test_dir, config=config, model_name=hf_model_name, backend="huggingface", filename=config_filename_hf, indent=indent)
         log_path_hf = test_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.log"
 
-        hf_run_error = self.run_training(config_file=config_file_hf, log_file=log_path_hf, config_name=config.name, model_name=hf_model_name)
-        successful_hf_run = hf_run_error is None
+        hf_run_error = self.run_training(config_file=config_file_hf, log_file=log_path_hf, config_name=config.name, model_name=hf_model_name, indent=indent)
+        
+        test_passed = True
+        hf_metrics = None
+        if hf_run_error:
+            log_message(LogLevel.TEST_FAIL, f"{config.name} (huggingface) - Training script failed.", indent=indent + 5, dim=True)
+            test_passed = False
+        else:
+            # Compare metrics only if training was successful
+            hf_metrics = self.extract_metrics(log_path_hf, indent=indent)
+            if not self.compare_metrics(hf_baseline_metrics, hf_metrics, f"{config.name} (huggingface)", indent=indent + 5, dim=True):
+                test_passed = False
 
-        # Compare metrics between baseline (HF) and current (HF) nd-parallelism run
-        hf_metrics = self.extract_metrics(log_path_hf)
-        successful_hf_extract = self.compare_metrics(hf_baseline_metrics, hf_metrics, f"{config.name} (huggingface)")
-
-        if successful_hf_run and successful_hf_extract:
+        if test_passed:
             return True
         else:
             # Generate diff with baseline (HF)
@@ -542,24 +575,28 @@ class CompareDistributedRun:
                 test_dir / "diff_hf_baseline_vs_hf_nd_parallelism.log"
             )
             self.generate_diff(
-                baseline_log_hf, log_path_hf, diff_hf_baseline_vs_hf_nd_parallelism
+                baseline_log_hf, log_path_hf, diff_hf_baseline_vs_hf_nd_parallelism, indent=indent + 5, dim=True
             )
             log_message(
                 LogLevel.INFO,
                 f"Diff between baseline (HF) and current (HF) nd-parallelism run saved to: {diff_hf_baseline_vs_hf_nd_parallelism}",
+                indent=indent + 5,
+                dim=True,
             )
 
             # Run TT counterpart and generated diff between nd-paralellism TT and current hf nd-parallelism run
             config_filename_tt = (
                 test_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.toml"
             )
-            config_file_tt = self.generate_config(config_dir=test_dir, config=config, model_name=tt_model_name, backend="torchtitan", filename=config_filename_tt)
+            config_file_tt = self.generate_config(config_dir=test_dir, config=config, model_name=tt_model_name, backend="torchtitan", filename=config_filename_tt, indent=indent + 5, dim=True)
             log_path_tt = test_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.log"
-            tt_run_error = self.run_training(config_file=config_file_tt, log_file=log_path_tt, config_name=config.name, model_name=tt_model_name)
+            tt_run_error = self.run_training(config_file=config_file_tt, log_file=log_path_tt, config_name=config.name, model_name=tt_model_name, indent=indent + 5, dim=True)
             if tt_run_error:
                 raise ValueError(
                     f"TorchTitan training failed for {tt_model_name}"
                 ) from tt_run_error
+
+            tt_metrics = self.extract_metrics(log_path_tt, indent=indent + 5, dim=True)
 
             # generated diff between nd-paralellism TT and current hf nd-parallelism run
             diff_file_tt_nd_parallelism_vs_hf_nd_parallelism = (
@@ -569,10 +606,22 @@ class CompareDistributedRun:
                 log_path_tt,
                 log_path_hf,
                 diff_file_tt_nd_parallelism_vs_hf_nd_parallelism,
+                indent=indent + 5,
+                dim=True,
             )
+            if hf_metrics:
+                self.compare_metrics(
+                    tt_metrics,
+                    hf_metrics,
+                    f"{config.name} (TT nd-parallel vs HF nd-parallel)",
+                    indent=indent + 5,
+                    dim=True,
+                )
             log_message(
                 LogLevel.INFO,
                 f"Diff between nd-paralellism TT and current (HF) nd-parallelism run saved to: {diff_file_tt_nd_parallelism_vs_hf_nd_parallelism}",
+                indent=indent + 5,
+                dim=True,
             )
 
             # generated diff between baseline TT and current hf nd-parallelism run
@@ -583,10 +632,22 @@ class CompareDistributedRun:
                 baseline_log_tt,
                 log_path_hf,
                 diff_file_tt_baseline_vs_hf_nd_parallelism,
+                indent=indent + 5,
+                dim=True,
             )
+            if hf_metrics:
+                self.compare_metrics(
+                    tt_baseline_metrics,
+                    hf_metrics,
+                    f"{config.name} (TT baseline vs HF nd-parallel)",
+                    indent=indent + 5,
+                    dim=True,
+                )
             log_message(
                 LogLevel.INFO,
                 f"Diff between baseline TT and current (HF) nd-parallelism run saved to: {diff_file_tt_baseline_vs_hf_nd_parallelism}",
+                indent=indent + 5,
+                dim=True,
             )
             return False
 
@@ -679,33 +740,29 @@ class CompareDistributedRun:
         baseline_config = next((c for c in self.parallelism_configs if c.name == "fsdp"), None)
         
         baseline_config_filename_hf = f"baseline_{baseline_config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.toml"
-        baseline_config_file_hf = self.generate_config(config_dir=self.results_dir, config=baseline_config, model_name=hf_model_name, backend="huggingface", filename=baseline_config_filename_hf)
+        baseline_config_file_hf = self.generate_config(config_dir=self.results_dir, config=baseline_config, model_name=hf_model_name, backend="huggingface", filename=baseline_config_filename_hf, indent=0)
         baseline_log_hf = self.results_dir / f"baseline_hf_{baseline_config.name}_{self.ngpu}gpu.log"
-        hf_baseline_run_error = self.run_training(config_file=baseline_config_file_hf, log_file=baseline_log_hf, config_name=baseline_config.name, model_name=hf_model_name)
+        hf_baseline_run_error = self.run_training(config_file=baseline_config_file_hf, log_file=baseline_log_hf, config_name=baseline_config.name, model_name=hf_model_name, indent=0)
         if hf_baseline_run_error:
             raise ValueError(f"Huggingface baseline (FSDP) training failed for {hf_model_name}") from hf_baseline_run_error
 
-        hf_baseline_metrics = self.extract_metrics(baseline_log_hf)
+        hf_baseline_metrics = self.extract_metrics(baseline_log_hf, indent=0)
         if not hf_baseline_metrics.loss or not hf_baseline_metrics.grad_norm:
             raise ValueError(f"Could not extract huggingface baseline metrics for {hf_model_name}")
 
         baseline_config_filename_tt = f"baseline_{baseline_config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.toml"
-        baseline_config_file_tt = self.generate_config(config_dir=self.results_dir, config=baseline_config, model_name=tt_model_name, backend="torchtitan", filename=baseline_config_filename_tt)
+        baseline_config_file_tt = self.generate_config(config_dir=self.results_dir, config=baseline_config, model_name=tt_model_name, backend="torchtitan", filename=baseline_config_filename_tt, indent=0)
         baseline_log_tt = self.results_dir / f"baseline_tt_{baseline_config.name}_{self.ngpu}gpu.log"
-        tt_baseline_run_error = self.run_training(config_file=baseline_config_file_tt, log_file=baseline_log_tt, config_name=baseline_config.name, model_name=tt_model_name)
+        tt_baseline_run_error = self.run_training(config_file=baseline_config_file_tt, log_file=baseline_log_tt, config_name=baseline_config.name, model_name=tt_model_name, indent=0)
         if tt_baseline_run_error:
             raise ValueError(f"TorchTitan baseline (FSDP) training failed for {tt_model_name}") from tt_baseline_run_error
 
-        diff_file_tt_baseline_vs_hf_baseline = self.results_dir / "diff_tt_baseline_vs_hf_baseline.log"
-        self.generate_diff(baseline_log_tt, baseline_log_hf, diff_file_tt_baseline_vs_hf_baseline)
-        log_message(LogLevel.INFO, f"Diff between baseline (TT) and baseline (HF) saved to: {diff_file_tt_baseline_vs_hf_baseline}")
-
-        tt_baseline_metrics = self.extract_metrics(baseline_log_tt)
+        tt_baseline_metrics = self.extract_metrics(baseline_log_tt, indent=0)
         if not tt_baseline_metrics.loss or not tt_baseline_metrics.grad_norm:
             raise ValueError(f"Could not extract TorchTitan baseline metrics for {tt_model_name}")
         
         if not self.compare_metrics(
-            tt_baseline_metrics, hf_baseline_metrics, "baseline (TT) vs baseline (HF)"
+            tt_baseline_metrics, hf_baseline_metrics, "baseline (TT) vs baseline (HF)", indent=0
         ):
             raise ValueError(
                 f"Baseline (TT) vs baseline (HF) metrics comparison failed for {tt_model_name}"
@@ -738,7 +795,10 @@ class CompareDistributedRun:
             task = progress.add_task(
                 "[cyan]Comparing configurations...", total=total_tests
             )
-            for config in test_configs:
+            for i, config in enumerate(test_configs):
+                if i > 0:
+                    console.rule(style="dim")
+
                 progress.update(
                     task, description=f"[cyan]Testing [bold]{config.name}[/bold]"
                 )
@@ -747,8 +807,10 @@ class CompareDistributedRun:
                     hf_model_name,
                     tt_model_name,
                     hf_baseline_metrics,
+                    tt_baseline_metrics,
                     baseline_log_hf,
                     baseline_log_tt,
+                    indent=1,
                 )
                 results.append((config.name, passed))
                 if passed:
@@ -794,7 +856,7 @@ class CompareDistributedRun:
             log_message(LogLevel.SUCCESS, "All model tests passed! 🎉")
             return 0
         else:
-            log_message(LogLevel.TEST_FAIL, f"{failed_tests} model(s) had test failures")
+            log_message(LogLevel.TEST_FAIL, f"{failed_tests} configuration(s) had test failures")
             log_message(
                 LogLevel.INFO, f"Check the diff files in {self.results_dir} for details"
             )
