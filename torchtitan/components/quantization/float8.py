@@ -243,7 +243,7 @@ def validate_only_float8_converters(job_config: JobConfig):
     Validates that the job config only specifies one quantization method for dense and MoE layers.
     """
     for converter in job_config.model.converters:
-        if converter != "quantize.dense.mx" and converter != "quantize.moe.mx":
+        if converter == "quantize.dense.mx" or converter == "quantize.moe.mx":
             raise ValueError(
                 f"Cannot combine float8 MoE training with {converter} quantization"
             )
