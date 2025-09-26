@@ -399,6 +399,12 @@ class Parallelism:
     Note that this is still an experimental feature.
     """
 
+    expert_parallel_a2a_impl: Literal["default", "mxfp8"] = "default"
+    """
+    MXFP8 all-to-all removes the need for device-to-host sync and optimizes network bandwidth usage
+    by using dynamic MXFP8 quantization on the all-to-all inputs, then dequantizes the outputs.
+    """
+
 
 @dataclass
 class Checkpoint:
