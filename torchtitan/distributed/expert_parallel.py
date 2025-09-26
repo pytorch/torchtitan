@@ -261,7 +261,6 @@ def expert_parallel(func: Callable) -> Callable:
             x.shape[0] + experts_per_ep_rank * TOKEN_GROUP_ALIGN_SIZE_M
         )
         padded_max_len = _round_up(x_padded_per_expert, TOKEN_GROUP_ALIGN_SIZE_M)
-
         with torch.no_grad():
             (
                 permuted_indices,

@@ -605,18 +605,6 @@ class Float8MoE:
 
 
 @dataclass
-class Float8:
-    dense: Float8Dense = field(default_factory=Float8Dense)
-    """
-    Float8 quantization config for dense layers.
-    """
-    moe: Float8MoE = field(default_factory=Float8MoE)
-    """
-    Float8 quantization config for MoE layers.
-    """
-
-
-@dataclass
 class MXDense:
     mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
     """
@@ -655,21 +643,30 @@ class MXMoE:
 
 
 @dataclass
-class MX:
-    dense: MXDense = field(default_factory=MXDense)
-    """
-    MX quantization config for dense layers.
-    """
-    moe: MXMoE = field(default_factory=MXMoE)
-    """
-    MX quantization config for MoE layers.
-    """
+class Dense:
+    float8: Float8Dense = field(default_factory=Float8Dense)
+    """Float8 training config for dense layers"""
+
+    mx: MXDense = field(default_factory=MXDense)
+    """MX training config for dense layers"""
+
+
+@dataclass
+class MoE:
+    float8: Float8MoE = field(default_factory=Float8MoE)
+    """Float8 training config for MoE layers"""
+
+    mx: MXMoE = field(default_factory=MXMoE)
+    """MX training config for MoE layers"""
 
 
 @dataclass
 class Quantize:
-    float8: Float8 = field(default_factory=Float8)
-    mx: MX = field(default_factory=MX)
+    dense: Dense = field(default_factory=Dense)
+    """Quantized training config for dense layers."""
+
+    moe: MoE = field(default_factory=MoE)
+    """Quantized training config for MoE layers."""
 
 
 @dataclass

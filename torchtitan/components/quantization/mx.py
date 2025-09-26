@@ -25,7 +25,7 @@ from torchtitan.tools.utils import has_cuda_capability
 from .utils import module_filter_fn
 
 
-class MXDenseConverter(ModelConverter):
+class MXLinearConverter(ModelConverter):
     """Converts the linear layers of `model` to `MXLinear`."""
 
     enabled: bool
@@ -58,7 +58,7 @@ class MXDenseConverter(ModelConverter):
             MXLinearConfig,
         )
 
-        mx_job_config: MXDense = job_config.quantize.mx.dense
+        mx_job_config: MXDense = job_config.quantize.dense.mx
         config = MXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
         config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
@@ -95,7 +95,7 @@ class MXDenseConverter(ModelConverter):
         return
 
 
-class MXMoEConverter(ModelConverter):
+class MXGroupedGemmConverter(ModelConverter):
     """Converts target 3D nn.Parameters of a model, representing 'experts',
     to use MXFP8 scaled grouped GEMMs instead of a high precision grouped GEMMs."""
 
@@ -131,7 +131,7 @@ class MXMoEConverter(ModelConverter):
             )
 
         # For MoE training with mxfp8, token group sizes must be multiples of 32
-        self.moe_fqns = job_config.quantize.mx.moe.fqns
+        self.moe_fqns = job_config.quantize.moe.mx.fqns
         if self.moe_fqns:
             logger.info(
                 f"Setting token group alignment size to {MXFP8_GROUP_ALIGNMENT_SIZE}"
@@ -174,5 +174,5 @@ class MXMoEConverter(ModelConverter):
         return
 
 
-register_model_converter(MXDenseConverter, "quantize.mx.dense")
-register_model_converter(MXMoEConverter, "quantize.mx.moe")
+register_model_converter(MXLinearConverter, "quantize.dense.mx")
+register_model_converter(MXGroupedGemmConverter, "quantize.moe.mx")

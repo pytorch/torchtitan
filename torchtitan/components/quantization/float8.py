@@ -28,7 +28,7 @@ class Float8DenseConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
 
-        float8_config: Float8Dense = job_config.quantize.float8.dense
+        float8_config: Float8Dense = job_config.quantize.dense.float8
         compile_config = job_config.compile
         model_compile_enabled = (
             compile_config.enable and "model" in compile_config.components
@@ -172,7 +172,7 @@ class Float8DenseConverter(ModelConverter):
 class Float8MoEConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
-        self.fqns = job_config.quantize.float8.moe.fqns
+        self.fqns = job_config.quantize.moe.float8.fqns
         compile_config = job_config.compile
         model_compile_enabled = (
             compile_config.enable and "model" in compile_config.components
@@ -231,5 +231,5 @@ class Float8MoEConverter(ModelConverter):
         pass
 
 
-register_model_converter(Float8DenseConverter, "quantize.float8.dense")
-register_model_converter(Float8MoEConverter, "quantize.float8.moe")
+register_model_converter(Float8DenseConverter, "quantize.dense.float8")
+register_model_converter(Float8MoEConverter, "quantize.moe.float8")
