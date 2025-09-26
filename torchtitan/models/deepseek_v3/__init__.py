@@ -203,7 +203,7 @@ deepseekv3_configs = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="deepseek_v3_multi",
+        name="deepseek_v3",
         model_cls=DeepSeekV3Model,
         model_args=deepseekv3_configs,
         parallelize_fn=parallelize_deepseekv3,

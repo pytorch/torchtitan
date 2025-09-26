@@ -144,6 +144,7 @@ class Attention(nn.Module):
         super().__init__()
         self.dim = model_args.dim
         self.n_heads = model_args.n_heads
+        self.n_kv_heads = model_args.n_kv_heads
         self.q_lora_rank = model_args.q_lora_rank
         self.kv_lora_rank = model_args.kv_lora_rank
         self.qk_nope_head_dim = model_args.qk_nope_head_dim
@@ -194,38 +195,50 @@ class Attention(nn.Module):
         """
         bsz, seqlen, _ = x.size()
 
-        # Query projection
-        if self.q_lora_rank == 0:
-            q = self.wq(x)  # (bsz, seqlen, n_heads * qk_head_dim)
+        is_gqa = self.n_kv_heads is not None
+        
+        if is_gqa:
+            q = self.wq(x)  # (bsz, seqlen, n_heads, qk_head_dim)
+            q = q.view(bsz, seqlen, -1, self.qk_head_dim)
+            
+            k = self.wk(x)  # (bsz, seqlen, n_kv_heads, qk_head_dim)
+            k = k.view(bsz, seqlen, -1, self.qk_head_dim)
+            
+            q = apply_rotary_emb(self.q, freqs_cis)
+            k = apply_rotary_emb(self.k, freqs_cis)
         else:
-            q = self.wq_a(x)
-            q = self.wq_b(self.q_norm(q))
-        # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
-        # local heads from sizes of q and kv as TP may have sharded them after
-        # the above linear ops.
-        q = q.view(bsz, seqlen, -1, self.qk_head_dim)
-        q_nope, q_pe = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
-        q_pe = apply_rotary_emb(q_pe, freqs_cis)
-        q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
+            # Query projection
+            if self.q_lora_rank == 0:
+                q = self.wq(x)  # (bsz, seqlen, n_heads * qk_head_dim)
+            else:
+                q = self.wq_a(x)
+                q = self.wq_b(self.q_norm(q))
+            # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
+            # local heads from sizes of q and kv as TP may have sharded them after
+            # the above linear ops.
+            q = q.view(bsz, seqlen, -1, self.qk_head_dim)
+            q_nope, q_pe = torch.split(
+                q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            q_pe = apply_rotary_emb(q_pe, freqs_cis)
+            q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
 
-        # Key-value projection
-        kv = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
-        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            # Key-value projection
+            kv = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
+            kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
-        k_pe = apply_rotary_emb(
-            k_pe.unsqueeze(2), freqs_cis
-        )  # (bsz, seqlen, 1, qk_rope_head_dim)
+            k_pe = apply_rotary_emb(
+                k_pe.unsqueeze(2), freqs_cis
+            )  # (bsz, seqlen, 1, qk_rope_head_dim)
 
-        kv = self.wkv_b(
-            self.kv_norm(kv)
-        )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
-        kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = torch.cat(
-            [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
-        )  # (bsz, seqlen, n_heads, qk_head_dim)
+            kv = self.wkv_b(
+                self.kv_norm(kv)
+            )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
+            kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
+            k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k = torch.cat(
+                [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
+            )  # (bsz, seqlen, n_heads, qk_head_dim)
 
         q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)

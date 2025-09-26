@@ -18,7 +18,7 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
-name = "deepseek_v3_multi"
+name = "deepseek_v3"
 flavor = "30B"
 hf_assets_path = "./assets/hf/deepseek-moe-16b-base"
 # converters = ["float8"]
