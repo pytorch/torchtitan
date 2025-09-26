@@ -4,14 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
 from importlib.metadata import version
 from importlib.util import find_spec
-from typing import List
+from typing import Any, List
 
 import torch.nn as nn
 from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
 
-from torchtitan.config.job_config import JobConfig
+from torchtitan.config.job_config import JobConfig, MXDense
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import (
@@ -21,13 +22,84 @@ from torchtitan.protocols.model_converter import (
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
+from .utils import module_filter_fn
+
+
+class MXDenseConverter(ModelConverter):
+    """Converts the linear layers of `model` to `MXLinear`."""
+
+    enabled: bool
+    filter_fqns: List[str]
+    mx_config: Any  # MXLinearConfig type when imported
+
+    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        # Ensure minimum torchao versions
+        if find_spec("torchao") is None:
+            raise ImportError(
+                "torchao is not installed. Please install it to use MXFP8 linear layers."
+            )
+
+        # Can be removed if we enable the emulated versions
+        assert has_cuda_capability(
+            10, 0
+        ), "MXFP8 is only supported on SM100 or architectures"
+
+        # TP not yet supported with torch.compile
+        model_compile_enabled = (
+            job_config.compile.enable and "model" in job_config.compile.components
+        )
+        assert not (
+            model_compile_enabled and job_config.parallelism.tensor_parallel_degree > 1
+        ), "TP not yet supported with torch.compile for mxfp8"
+
+        # Configure MXFP8
+        from torchao.prototype.mx_formats.config import (
+            MXFP8Dim1CastKernelChoice,
+            MXLinearConfig,
+        )
+
+        mx_job_config: MXDense = job_config.quantize.mx.dense
+        config = MXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
+        config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
+            mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
+        ]
+        self.filter_fqns = mx_job_config.filter_fqns
+        self.config = config
+        self.enabled = True
+        logger.info(f"Float8 training active with recipe {mx_job_config.recipe_name}")
+
+    def convert(self, model: nn.Module):
+        """
+        Converts the linear layers of `model` to `MXLinear`.
+        Note that today, only dynamic tensor scaling (the default) is supported.
+        This will mutate the model inplace.
+        """
+        if not self.enabled:
+            return
+
+        from torchao.prototype.mx_formats.config import MXLinearConfig
+        from torchao.quantization import quantize_
+
+        assert isinstance(self.config, MXLinearConfig)
+        quantize_(
+            model,
+            config=self.config,
+            filter_fn=partial(module_filter_fn, filter_fqns=self.filter_fqns),
+        )
+        logger.info("Swapped to MXLinear layers")
+
+    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
+        """
+        MXFP8 doesn't require any post-optimizer hooks at the moment
+        """
+        return
+
 
 class MXMoEConverter(ModelConverter):
     """Converts target 3D nn.Parameters of a model, representing 'experts',
     to use MXFP8 scaled grouped GEMMs instead of a high precision grouped GEMMs."""
 
     enabled: bool
-    filter_fqns: List[str]
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         # Ensure minimum torchao versions
@@ -59,7 +131,7 @@ class MXMoEConverter(ModelConverter):
             )
 
         # For MoE training with mxfp8, token group sizes must be multiples of 32
-        self.moe_fqns = job_config.mx.moe.fqns
+        self.moe_fqns = job_config.quantize.mx.moe.fqns
         if self.moe_fqns:
             logger.info(
                 f"Setting token group alignment size to {MXFP8_GROUP_ALIGNMENT_SIZE}"
@@ -74,6 +146,8 @@ class MXMoEConverter(ModelConverter):
         Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
         to perform dynamic MXFP8 quantization + scaled grouped GEMMs for the target MoE FQNs.
         """
+        if not self.enabled:
+            return
         from torchao.prototype.moe_training.conversion_utils import (
             MoEScalingType,
             MoETrainingConfig,
@@ -100,4 +174,5 @@ class MXMoEConverter(ModelConverter):
         return
 
 
-register_model_converter(MXMoEConverter, "mx_moe")
+register_model_converter(MXDenseConverter, "quantize.mx.dense")
+register_model_converter(MXMoEConverter, "quantize.mx.moe")

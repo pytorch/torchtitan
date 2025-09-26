@@ -569,7 +569,7 @@ class Compile:
 
 
 @dataclass
-class Float8:
+class Float8Dense:
     enable_fsdp_float8_all_gather: bool = False
     """Whether enable float8 all-gather in FSDP, recommended for tensorwise scaling"""
 
@@ -585,7 +585,6 @@ class Float8:
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
     Example: --float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
-
     emulate: bool = False
     """
     If True, emulation is used instead of hardware accelerated gemm. This is for test purpose only,
@@ -593,12 +592,29 @@ class Float8:
     Not compatible with torch.compile.
     """
 
-    moe_fqns_prototype: list[str] | str = field(default_factory=list)
+
+@dataclass
+class Float8MoE:
+    fqns: list[str] | str = field(default_factory=list)
     """
+    *Prototype feature, performance optimization still in progress*
     Comma-separated list of fully qualified names of MoE modules to apply float8 rowwise training to.
     This is a prototype feature that requires the torchao nightly build.
-    Example: --float8.moe_fqns_prototype="experts"
+    Example: --float8.fqns="experts"
     """
+
+
+@dataclass
+class Float8:
+    dense: Float8Dense = field(default_factory=Float8Dense)
+    """
+    Float8 quantization config for dense layers.
+    """
+    moe: Float8MoE = field(default_factory=Float8MoE)
+    """
+    Float8 quantization config for MoE layers.
+    """
+
 
 @dataclass
 class MXDense:
@@ -631,14 +647,16 @@ class MXDense:
 class MXMoE:
     fqns: list[str] | str = field(default_factory=list)
     """
-    Comma-separated list of fully qualified names of MoE modules to apply the given 
+    *Prototype feature, performance optimization still in progress*
+    Comma-separated list of fully qualified names of MoE modules to apply the given
     This is a prototype feature that requires the torchao nightly build.
     Example: --mx.moe.fqns="experts"
     """
 
+
 @dataclass
 class MX:
-    dense: MXDense= field(default_factory=MXDense)
+    dense: MXDense = field(default_factory=MXDense)
     """
     MX quantization config for dense layers.
     """
@@ -646,6 +664,12 @@ class MX:
     """
     MX quantization config for MoE layers.
     """
+
+
+@dataclass
+class Quantize:
+    float8: Float8 = field(default_factory=Float8)
+    mx: MX = field(default_factory=MX)
 
 
 @dataclass
@@ -792,8 +816,7 @@ class JobConfig:
         default_factory=ActivationCheckpoint
     )
     compile: Compile = field(default_factory=Compile)
-    float8: Float8 = field(default_factory=Float8)
-    mx: MX = field(default_factory=MX)
+    quantize: Quantize = field(default_factory=Quantize)
     comm: Comm = field(default_factory=Comm)
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)

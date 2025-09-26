@@ -7,8 +7,9 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
 
-from torchtitan.config.job_config import Float8, JobConfig
+from torchtitan.config.job_config import Float8Dense, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import (
@@ -23,11 +24,11 @@ from .utils import module_filter_fn
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
-class Float8Converter(ModelConverter):
+class Float8DenseConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = False
 
-        float8_config: Float8 = job_config.float8
+        float8_config: Float8Dense = job_config.quantize.float8.dense
         compile_config = job_config.compile
         model_compile_enabled = (
             compile_config.enable and "model" in compile_config.components
@@ -59,21 +60,7 @@ class Float8Converter(ModelConverter):
 
         self.enabled = True
         self.filter_fqns = float8_config.filter_fqns
-        self.moe_fqns = float8_config.moe_fqns_prototype
         self.filter_fn = self._init_filter_fn(float8_config)
-
-        # Validate MoE training prototype limitations.
-        if self.moe_fqns:
-            assert (
-                job_config.parallelism.pipeline_parallel_degree == 1
-            ), "Float8 MoE training prototype does not yet support pipeline parallelism"
-            assert (
-                job_config.parallelism.context_parallel_degree == 1
-            ), "Float8 MoE training prototype does not yet support context parallelism"
-
-            # For fp8 grouped GEMM, token group sizes must be multiples of 16
-            # (16 byte alignment / 1 byte per elem = 16 elements)
-            set_token_group_alignment_size_m(16)
 
         if float8_config.recipe_name is not None:
             assert not float8_config.enable_fsdp_float8_all_gather, (
@@ -110,7 +97,7 @@ class Float8Converter(ModelConverter):
             )
             logger.info("Float8 tensorwise scaled training active")
 
-    def _init_filter_fn(self, float8_config: Float8):
+    def _init_filter_fn(self, float8_config: Float8Dense):
         # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
         use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
         if use_auto_filter:
@@ -155,13 +142,6 @@ class Float8Converter(ModelConverter):
         if not self.enabled:
             return
 
-        # MoE conversion must take place before Float8Linear conversion, otherwise the Float8Linears will
-        # be converted back to nn.Linear:
-        # https://github.com/pytorch/ao/blob/c2a6568a04075acc371a338206216bb65536fb27/torchao/quantization/quant_api.py#L294-L299
-        # TODO: add warning in torchao when this happens, or find a better way to avoid this.
-        if self.moe_fqns:
-            self._convert_moe_layers(model)
-
         from torchao.float8 import convert_to_float8_training
 
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
@@ -173,35 +153,6 @@ class Float8Converter(ModelConverter):
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
             f"{self.config.enable_fsdp_float8_all_gather}"
-        )
-
-    def _convert_moe_layers(self, model: nn.Module):
-        """
-        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
-        to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
-        """
-        from torchao.quantization.quant_api import quantize_
-
-        try:
-            from torchao.prototype.moe_training.conversion_utils import (
-                MoETrainingConfig,
-            )
-        except ImportError as e:
-            raise ImportError(
-                "torchao installation does not have MoE training support. Please install torchao nightly build."
-            ) from e
-
-        def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
-            for target_fqn in self.moe_fqns:
-                if target_fqn in cur_fqn:
-                    return True
-            return False
-
-        config = MoETrainingConfig()
-        quantize_(model, config=config, filter_fn=moe_module_filter_fn)
-        logger.info(
-            f"Converted MoE layers matching FQNS {self.moe_fqns} "
-            "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
         )
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
@@ -218,4 +169,67 @@ class Float8Converter(ModelConverter):
             precompute_float8_dynamic_scale_for_fsdp(m)
 
 
-register_model_converter(Float8Converter, "float8")
+class Float8MoEConverter(ModelConverter):
+    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        self.enabled = False
+        self.fqns = job_config.quantize.float8.moe.fqns
+        compile_config = job_config.compile
+        model_compile_enabled = (
+            compile_config.enable and "model" in compile_config.components
+        )
+        if not has_cuda_capability(8, 9):
+            raise ValueError("Float8 MoE training only supported on SM89 or later.")
+
+        if not model_compile_enabled:
+            logger.warning(
+                "Compile is required for high performance float8 MoE training; enable it with --compile.enable"
+            )
+
+        # Validate MoE training prototype limitations.
+        assert (
+            job_config.parallelism.pipeline_parallel_degree == 1
+        ), "Float8 MoE training prototype does not yet support pipeline parallelism"
+        assert (
+            job_config.parallelism.context_parallel_degree == 1
+        ), "Float8 MoE training prototype does not yet support context parallelism"
+
+        # For fp8 grouped GEMM, token group sizes must be multiples of 16
+        # (16 byte alignment / 1 byte per elem = 16 elements)
+        set_token_group_alignment_size_m(FP8_GROUP_ALIGNMENT_SIZE)
+        self.enabled = True
+
+    def convert(self, model: nn.Module):
+        """
+        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
+        to perform dynamic float8 rowwise quantization + scaled grouped GEMMs for the target MoE FQNs.
+        """
+        from torchao.quantization.quant_api import quantize_
+
+        try:
+            from torchao.prototype.moe_training.conversion_utils import (
+                MoETrainingConfig,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "torchao installation does not have MoE training support. Please install torchao nightly build."
+            ) from e
+
+        def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
+            for target_fqn in self.fqns:
+                if target_fqn in cur_fqn:
+                    return True
+            return False
+
+        config = MoETrainingConfig()
+        quantize_(model, config=config, filter_fn=moe_module_filter_fn)
+        logger.info(
+            f"Converted MoE layers matching FQNS {self.fqns} "
+            "to use dynamic float8 rowwise quantization with scaled grouped GEMMs"
+        )
+
+    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
+        pass
+
+
+register_model_converter(Float8DenseConverter, "quantize.float8.dense")
+register_model_converter(Float8MoEConverter, "quantize.float8.moe")

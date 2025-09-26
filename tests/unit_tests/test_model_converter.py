@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.quantization.float8 import Float8Converter
+from torchtitan.components.quantization.float8 import Float8DenseConverter
 from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
@@ -48,4 +48,4 @@ def test_build_model_converters_float8_converter():
     model_converters = build_model_converters(config, parallel_dims)
     assert isinstance(model_converters, ModelConvertersContainer)
     assert len(model_converters.converters) == 1
-    assert isinstance(model_converters.converters[0], Float8Converter)
+    assert isinstance(model_converters.converters[0], Float8DenseConverter)
