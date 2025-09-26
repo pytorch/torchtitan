@@ -10,13 +10,17 @@ from importlib.util import find_spec
 from typing import Any, List
 
 import torch.nn as nn
-from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.components.quantization import (
+    MXFP8_DENSE_CONVERTER_NAME,
+    MXFP8_GROUP_ALIGNMENT_SIZE,
+    MXFP8_MOE_CONVERTER_NAME,
+)
 
 from torchtitan.config.job_config import JobConfig, MXDense
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import (
-    ModelConverter,
+    QuantizationConverter,
     register_model_converter,
 )
 from torchtitan.tools.logging import logger
@@ -25,14 +29,14 @@ from torchtitan.tools.utils import has_cuda_capability
 from .utils import module_filter_fn
 
 
-class MXLinearConverter(ModelConverter):
+class MXLinearConverter(QuantizationConverter):
     """Converts the linear layers of `model` to `MXLinear`."""
 
-    enabled: bool
     filter_fqns: List[str]
     mx_config: Any  # MXLinearConfig type when imported
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        super().__init__(job_config, parallel_dims)
         # Ensure minimum torchao versions
         if find_spec("torchao") is None:
             raise ImportError(
@@ -95,13 +99,12 @@ class MXLinearConverter(ModelConverter):
         return
 
 
-class MXGroupedGemmConverter(ModelConverter):
+class MXGroupedGemmConverter(QuantizationConverter):
     """Converts target 3D nn.Parameters of a model, representing 'experts',
     to use MXFP8 scaled grouped GEMMs instead of a high precision grouped GEMMs."""
 
-    enabled: bool
-
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        super().__init__(job_config, parallel_dims)
         # Ensure minimum torchao versions
         if find_spec("torchao") is None:
             raise ImportError(
@@ -174,5 +177,5 @@ class MXGroupedGemmConverter(ModelConverter):
         return
 
 
-register_model_converter(MXLinearConverter, "quantize.dense.mx")
-register_model_converter(MXGroupedGemmConverter, "quantize.moe.mx")
+register_model_converter(MXLinearConverter, MXFP8_DENSE_CONVERTER_NAME)
+register_model_converter(MXGroupedGemmConverter, MXFP8_MOE_CONVERTER_NAME)

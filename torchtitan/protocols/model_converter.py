@@ -7,6 +7,8 @@ from typing import Dict, List, Protocol, Union
 
 import torch.nn as nn
 
+from torchtitan.components.quantization.utils import validate_quantization_converters
+
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
@@ -82,3 +84,14 @@ def build_model_converters(
 ) -> ModelConvertersContainer:
     """Build the collection of model converters to apply to the model."""
     return ModelConvertersContainer(job_config, parallel_dims)
+
+
+class QuantizationConverter(ModelConverter):
+    """
+    Base class for quantization converters, which implements generic validation re-usable across all quantization converters.
+    """
+
+    enabled: bool = False
+
+    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        validate_quantization_converters(job_config)

@@ -7,13 +7,17 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.components.quantization import (
+    FP8_DENSE_CONVERTER_NAME,
+    FP8_GROUP_ALIGNMENT_SIZE,
+    FP8_MOE_CONVERTER_NAME,
+)
 
 from torchtitan.config.job_config import Float8Dense, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import (
-    ModelConverter,
+    QuantizationConverter,
     register_model_converter,
 )
 from torchtitan.tools.logging import logger
@@ -24,15 +28,15 @@ from .utils import module_filter_fn
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
-class Float8DenseConverter(ModelConverter):
+class Float8DenseConverter(QuantizationConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        self.enabled = False
-
+        super().__init__(job_config, parallel_dims)
         float8_config: Float8Dense = job_config.quantize.dense.float8
         compile_config = job_config.compile
         model_compile_enabled = (
             compile_config.enable and "model" in compile_config.components
         )
+
         if has_cuda_capability(8, 9) or (
             float8_config.emulate and not model_compile_enabled
         ):
@@ -58,7 +62,6 @@ class Float8DenseConverter(ModelConverter):
             )
             return
 
-        self.enabled = True
         self.filter_fqns = float8_config.filter_fqns
         self.filter_fn = self._init_filter_fn(float8_config)
 
@@ -96,6 +99,8 @@ class Float8DenseConverter(ModelConverter):
                 and float8_config.precompute_float8_dynamic_scale_for_fsdp
             )
             logger.info("Float8 tensorwise scaled training active")
+
+        self.enabled = True
 
     def _init_filter_fn(self, float8_config: Float8Dense):
         # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
@@ -169,9 +174,9 @@ class Float8DenseConverter(ModelConverter):
             precompute_float8_dynamic_scale_for_fsdp(m)
 
 
-class Float8MoEConverter(ModelConverter):
+class Float8MoEConverter(QuantizationConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        self.enabled = False
+        super().__init__(job_config, parallel_dims)
         self.fqns = job_config.quantize.moe.float8.fqns
         compile_config = job_config.compile
         model_compile_enabled = (
@@ -231,5 +236,5 @@ class Float8MoEConverter(ModelConverter):
         pass
 
 
-register_model_converter(Float8DenseConverter, "quantize.dense.float8")
-register_model_converter(Float8MoEConverter, "quantize.moe.float8")
+register_model_converter(Float8DenseConverter, FP8_DENSE_CONVERTER_NAME)
+register_model_converter(Float8MoEConverter, FP8_MOE_CONVERTER_NAME)
