@@ -569,7 +569,7 @@ class Compile:
 
 
 @dataclass
-class Float8:
+class Float8Dense:
     enable_fsdp_float8_all_gather: bool = False
     """Whether enable float8 all-gather in FSDP, recommended for tensorwise scaling"""
 
@@ -583,9 +583,8 @@ class Float8:
     """
     Comma-separated list of fully qualified names of modules to skip applying float8 training to.
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
-    Example: --float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    Example: --quantize.dense.float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
-
     emulate: bool = False
     """
     If True, emulation is used instead of hardware accelerated gemm. This is for test purpose only,
@@ -593,23 +592,34 @@ class Float8:
     Not compatible with torch.compile.
     """
 
-    moe_fqns_prototype: list[str] | str = field(default_factory=list)
+
+@dataclass
+class Float8MoE:
+    fqns: list[str] | str = field(default_factory=list)
     """
+    *Prototype feature, performance optimization still in progress*
     Comma-separated list of fully qualified names of MoE modules to apply float8 rowwise training to.
     This is a prototype feature that requires the torchao nightly build.
-    Example: --float8.moe_fqns_prototype="experts"
+    Example: --quantize.dense.float8.fqns="experts"
     """
 
 
 @dataclass
-class MX:
+class MXDense:
     mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
-    """Temp work around for inductor performance gap"""
+    """
+    Temp work around for inductor performance gap.
+
+    CUDA is recommended for best performance.
+
+    Example: --mx.dense.mxfp8_dim1_cast_kernel_choice="cuda"
+    """
 
     recipe_name: str = "mxfp8_cublas"
     """
     If specified, creates MX config from recipe name. See
     https://github.com/pytorch/ao/tree/main/torchao/prototype/mx_formats for more information.
+    Example: --mx.dense.recipe_name="mxfp8_cublas"
     """
 
     filter_fqns: list[str] = field(default_factory=lambda: ["output"])
@@ -617,15 +627,46 @@ class MX:
     Comma-separated list of fully qualified names of modules to skip applying mxfp8 training to.
     nn.Linear modules with any dim size not divisible by 16 are also always skipped due to hardware requirements.
     By default we always skip the output layer.
-    Example: --mx.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    Example: --mx.dense.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
 
-    moe_fqns_prototype: list[str] | str = field(default_factory=list)
+
+@dataclass
+class MXMoE:
+    fqns: list[str] | str = field(default_factory=list)
     """
-    Comma-separated list of fully qualified names of MoE modules to apply mxfp8 training to.
+    *Prototype feature, performance optimization still in progress*
+    Comma-separated list of fully qualified names of MoE modules to apply the given
     This is a prototype feature that requires the torchao nightly build.
-    Example: --mx.moe_fqns_prototype="experts"
+    Example: --mx.moe.fqns="experts"
     """
+
+
+@dataclass
+class Dense:
+    float8: Float8Dense = field(default_factory=Float8Dense)
+    """Float8 training config for dense layers"""
+
+    mx: MXDense = field(default_factory=MXDense)
+    """MX training config for dense layers"""
+
+
+@dataclass
+class MoE:
+    float8: Float8MoE = field(default_factory=Float8MoE)
+    """Float8 training config for MoE layers"""
+
+    mx: MXMoE = field(default_factory=MXMoE)
+    """MX training config for MoE layers"""
+
+
+@dataclass
+class Quantize:
+    dense: Dense = field(default_factory=Dense)
+    """Quantized training config for dense layers."""
+
+    moe: MoE = field(default_factory=MoE)
+    """Quantized training config for MoE layers."""
 
 
 @dataclass
@@ -772,8 +813,7 @@ class JobConfig:
         default_factory=ActivationCheckpoint
     )
     compile: Compile = field(default_factory=Compile)
-    float8: Float8 = field(default_factory=Float8)
-    mx: MX = field(default_factory=MX)
+    quantize: Quantize = field(default_factory=Quantize)
     comm: Comm = field(default_factory=Comm)
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)

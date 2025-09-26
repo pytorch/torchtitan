@@ -22,7 +22,7 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from torchtitan.distributed.utils import _round_up
+from torchtitan.tools.utils import _round_up
 
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
