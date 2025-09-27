@@ -87,7 +87,7 @@ class ExpertParallel(ParallelStyle):
 
     Args:
         a2a_impl (str): The implementation of all-to-all. Default is "default". Options are ["default","mxfp8"].
-        max_tokens_per_ep_rank (int): The maximum number of tokens per expert rank. Default is -1. Only used when a2a_impl is "mxfp8".
+        max_tokens_per_ep_rank (int): The maximum number of tokens per expert rank. Only used for "mxfp8".
     """
 
     def __init__(self, a2a_impl: str = "default", max_tokens_per_ep_rank: int = -1):
@@ -146,7 +146,8 @@ class ExpertParallel(ParallelStyle):
                 mxfp8_on_device_all_to_all_v,
             )
 
-            routed_output, _ = mxfp8_on_device_all_to_all_v(
+            # For a2a combine, output splits are the input splits, and input splits are the output splits.
+            routed_output, self.input_splits = mxfp8_on_device_all_to_all_v(
                 routed_output,
                 self.output_splits,
                 self.max_tokens_per_ep_rank,
@@ -364,7 +365,7 @@ def default_a2a_dispatch(
         output_splits: the output splits for all-to-all dispatch
         num_tokens_per_expert_group: the number of tokens per EP rank after all-to-all dispatch
     """
-    ep_size = device_mesh.size(0)
+    ep_degree = device_mesh.size(0)
     # generate the input splits and output splits for all-to-all
     with torch.no_grad():
         num_tokens_per_expert_group = all_to_all_single(
@@ -379,13 +380,13 @@ def default_a2a_dispatch(
             num_tokens_per_expert_group
         )
         input_splits = (
-            num_tokens_per_expert.view(ep_size, -1)
+            num_tokens_per_expert.view(ep_degree, -1)
             .sum(dim=1)
             .to(torch.device("cpu"), non_blocking=True)
         )
         # NOTE: this would incur a device-to-host sync
         output_splits = (
-            num_tokens_per_expert_group.view(ep_size, -1)
+            num_tokens_per_expert_group.view(ep_degree, -1)
             .sum(dim=1)
             .to(torch.device("cpu"), non_blocking=False)
         )
@@ -427,18 +428,26 @@ def mxfp8_a2a_dispatch(
         mxfp8_on_device_all_to_all_v,
     )
 
-    ep_size = device_mesh.size(0)
-    input_splits = num_tokens_per_expert.view(ep_size, -1).sum(dim=1)
-    routed_input, num_tokens_per_expert_group = mxfp8_on_device_all_to_all_v(
+    ep_degree = device_mesh.size(0)
+    input_splits_per_ep_rank = num_tokens_per_expert.view(ep_degree, -1).sum(dim=1)
+    num_tokens_per_expert_group = all_to_all_single(
+        num_tokens_per_expert,
+        None,
+        None,
+        group=device_mesh.get_group(),
+    )
+    num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+        num_tokens_per_expert_group
+    )
+    routed_input, output_splits_per_ep_rank = mxfp8_on_device_all_to_all_v(
         routed_input,
-        input_splits,
+        input_splits_per_ep_rank,
         max_tokens_per_ep_rank,
         device_mesh.get_group().group_name,
     )
-    output_splits = num_tokens_per_expert_group.view(ep_size, -1).sum(dim=1)
     return (
         routed_input,
-        input_splits,
-        output_splits,
+        input_splits_per_ep_rank,
+        output_splits_per_ep_rank,
         num_tokens_per_expert_group,
     )
