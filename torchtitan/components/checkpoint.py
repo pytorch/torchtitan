@@ -709,6 +709,7 @@ class CheckpointManager:
         """
         # For the first step, we will only load the model.
         if model_only:
+
             return self.states[MODEL].state_dict()
 
         for exclude_key in self.exclude_from_loading:
