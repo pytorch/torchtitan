@@ -72,6 +72,20 @@ class ModelWrapper(Stateful):
     def state_dict(self) -> dict[str, Any]:
         return self.cache_state_dict
 
+    def clean_state_dict(self) -> dict[str, Any]:
+        """Return a clean state dict containing only parameters for HF loading.
+        
+        This avoids including hooks, metadata, or other unpicklable objects
+        that might be in the cached state dict.
+        """
+        clean_dict = {}
+        for model in self.model:
+            for name, param in model.named_parameters():
+                clean_dict[name] = param
+            for name, buffer in model.named_buffers():
+                clean_dict[name] = buffer
+        return clean_dict
+
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
             set_model_state_dict,
@@ -709,7 +723,8 @@ class CheckpointManager:
         """
         # For the first step, we will only load the model.
         if model_only:
-            return self.states[MODEL].state_dict()
+            # Use clean_state_dict for HF loading to avoid unpicklable objects
+            return self.states[MODEL].clean_state_dict()
 
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
