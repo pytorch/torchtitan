@@ -94,9 +94,11 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
-    # Assume 2x tokens per EP rank in the worst case. 
+    # Assume 2x tokens per EP rank in the worst case.
     # TODO: explore other options
-    max_tokens_per_ep_rank = job_config.training.seq_len * job_config.training.local_batch_size * model.model_args.moe_args.top_k * 2
+    max_tokens_per_ep_rank = (
+        job_config.training.seq_len * job_config.training.local_batch_size * 2
+    )
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
@@ -494,7 +496,9 @@ def apply_moe_ep_tp(
         elif tp_mesh is None:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel(a2a_impl=a2a_impl, max_tokens_per_ep_rank=max_tokens_per_ep_rank)
+            experts_plan = ExpertParallel(
+                a2a_impl=a2a_impl, max_tokens_per_ep_rank=max_tokens_per_ep_rank
+            )
         elif etp_enabled:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
