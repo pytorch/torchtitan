@@ -87,13 +87,15 @@ class ExpertParallel(ParallelStyle):
 
     Args:
         a2a_impl (str): The implementation of all-to-all. Default is "default". Options are ["default","mxfp8"].
+        max_tokens_per_ep_rank (int): The maximum number of tokens per expert rank. Default is -1. Only used when a2a_impl is "mxfp8".
     """
 
-    def __init__(self, a2a_impl: str = "default"):
+    def __init__(self, a2a_impl: str = "default", max_tokens_per_ep_rank: int = -1):
         super().__init__()
         self.input_splits = None
         self.output_splits = None
         self.a2a_impl = a2a_impl
+        self.max_tokens_per_ep_rank = max_tokens_per_ep_rank
 
     # performing all-to-all dispatch on the input
     def _token_dispatch(self, mod, inputs, device_mesh):
@@ -129,7 +131,6 @@ class ExpertParallel(ParallelStyle):
             self.output_splits = output_splits.tolist()
 
         # Assume 2x tokens routed to an EP rank in worst case
-        self.max_output_tokens_per_ep_rank = routed_input.shape[0] * 2
         self.input_splits_on_device = input_splits.to(routed_input.device)
 
         if self.a2a_impl == "mxfp8":
@@ -139,7 +140,7 @@ class ExpertParallel(ParallelStyle):
             routed_input, _ = mxfp8_on_device_all_to_all_v(
                 routed_input,
                 self.input_splits_on_device,
-                self.max_output_tokens_per_ep_rank,
+                self.max_tokens_per_ep_rank,
                 device_mesh.get_group().group_name,
             )
         else:
@@ -179,7 +180,7 @@ class ExpertParallel(ParallelStyle):
             routed_output, _ = mxfp8_on_device_all_to_all_v(
                 routed_output,
                 self.input_splits_on_device,
-                self.max_output_tokens_per_ep_rank,
+                self.max_tokens_per_ep_rank,
                 device_mesh.get_group().group_name,
             )
         else:
