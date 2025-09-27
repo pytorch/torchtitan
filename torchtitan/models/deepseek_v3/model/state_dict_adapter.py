@@ -8,10 +8,7 @@
 import re
 from typing import Any
 
-import torch
-from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import DeepSeekV3ModelArgs

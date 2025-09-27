@@ -15,7 +15,6 @@ aligned with the HF implementation.
 import re
 from typing import Any
 
-import torch
 from torch.distributed.tensor import DTensor
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
@@ -59,31 +58,6 @@ class Qwen3StateDictAdapter(StateDictAdapter):
         self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}
         self.grouped_expert_weight_shape = {}  # {titan_abstract_key: shape}
         self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
-
-    # def __getstate__(self):
-    #     """Custom pickle support - exclude unpicklable attributes"""
-    #     state = self.__dict__.copy()
-    #     # Remove unpicklable attributes that contain device mesh references
-    #     unpicklable_attrs = [
-    #         "grouped_expert_weight_placements",
-    #         "grouped_expert_weight_shape",
-    #         "local_experts_indices",
-    #     ]
-    #     for attr in unpicklable_attrs:
-    #         if attr in state:
-    #             del state[attr]
-    #     return state
-
-    # def __setstate__(self, state):
-    #     """Custom unpickle support - restore default values for excluded attributes"""
-    #     self.__dict__.update(state)
-    #     # Restore default values for unpicklable attributes
-    #     if not hasattr(self, "grouped_expert_weight_placements"):
-    #         self.grouped_expert_weight_placements = {}
-    #     if not hasattr(self, "grouped_expert_weight_shape"):
-    #         self.grouped_expert_weight_shape = {}
-    #     if not hasattr(self, "local_experts_indices"):
-    #         self.local_experts_indices = {}
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -142,22 +116,14 @@ class Qwen3StateDictAdapter(StateDictAdapter):
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
 
-        # Prepare for dequantization
-        hf_state_dict_with_scale_inv = self._add_quantization_scale_inv_tensors(
-            hf_state_dict
-        )
-        return hf_state_dict_with_scale_inv
+        return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """
-        1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
-        2. Convert between the HF shape and the torchtitan shape.
-        3. Concate separate expert's wegiht into GroupedExperts' weight.
+        1. Convert between the HF shape and the torchtitan shape.
+        2. Concate separate expert's wegiht into GroupedExperts' weight.
         """
 
-        # dequantize the tensor in state_dict and remove the scale_inv tensor
-
-        hf_state_dict = self._dequantize(hf_state_dict)
         state_dict = {}
 
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
