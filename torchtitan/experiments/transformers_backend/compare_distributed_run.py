@@ -198,6 +198,7 @@ class CompareDistributedRun:
         self.grad_norm_rtol = self.DEFAULT_GRAD_NORM_RTOL
         self.parallelism_configs: List[ParallelismConfig] = []
         self.results_dir: Optional[Path] = None
+        self.test_filter = ""
 
     def generate_parallelism_configs(self) -> None:
         """Generate parallelism configurations based on the number of GPUs."""
@@ -284,8 +285,16 @@ class CompareDistributedRun:
             LogLevel.INFO,
             f"Generated {len(self.parallelism_configs)} parallelism configurations for {ngpu} GPUs.",
         )
+        configs_to_display = self.parallelism_configs
+        table_title = "[bold]Generated Parallelism Configurations[/bold]"
+
+        if self.test_filter:
+            # Keep fsdp baseline and anything that matches the filter
+            configs_to_display = [c for c in self.parallelism_configs if c.name == "fsdp" or self.test_filter in c.name]
+            table_title = f"[bold]Filtered Parallelism Configurations (filter: [cyan]'{self.test_filter}'[/cyan])[/bold]"
+
         table = Table(
-            title="[bold]Generated Parallelism Configurations[/bold]",
+            title=table_title,
             show_header=True,
             header_style="bold magenta",
         )
@@ -298,7 +307,7 @@ class CompareDistributedRun:
         table.add_column("ep", justify="right")
         table.add_column("eptp", justify="right")
 
-        for config in self.parallelism_configs:
+        for config in configs_to_display:
             table.add_row(
                 config.name,
                 str(config.dp_replicate),
@@ -658,6 +667,8 @@ class CompareDistributedRun:
         )
         parser.add_argument("-m", "--model-filter", default="",
                           help="Filter models by name pattern (e.g., 'llama3')")
+        parser.add_argument("-t", "--test-filter", default="",
+                          help="Filter parallelism configurations by name pattern (e.g., 'fsdp1_cp1_tp2_pp2')")
         parser.add_argument("-nd", "--nd_parallel", type=str, default="2d",
                           help=f"Parallelism to use (default: {self.ND_PARALLEL_TO_NB_GPUS.keys()})")
         parser.add_argument("-s", "--steps", type=int, default=self.DEFAULT_STEPS,
@@ -682,6 +693,7 @@ class CompareDistributedRun:
         self.ngpu = self.nd_parallel_to_nb_gpus[self.nd_parallel]
         self.steps = args.steps
         self.model_filter = args.model_filter
+        self.test_filter = args.test_filter
         self.flavor = args.flavor
         self.verbose = args.verbose
         self.loss_atol = args.loss_atol
@@ -696,6 +708,7 @@ class CompareDistributedRun:
                     f"[bold]Steps:[/bold] {self.steps}\n"
                     f"[bold]Seed:[/bold] {self.seed}\n"
                     f"[bold]Model filter:[/bold] {self.model_filter or 'all'}\n"
+                    f"[bold]Test filter:[/bold] {self.test_filter or 'all'}\n"
                     f"[bold]Model flavor:[/bold] {self.flavor}"
                 ),
                 title="[bold cyan]Distributed Parallelism Comparison[/bold cyan]",
@@ -780,6 +793,11 @@ class CompareDistributedRun:
         passed_tests = 1 # +1 for the baseline (FSDP)
         failed_tests = 0
         test_configs = [c for c in self.parallelism_configs if c.name != "fsdp"]
+        if self.test_filter:
+            filtered_configs = [c for c in test_configs if self.test_filter in c.name]
+            if not filtered_configs:
+                log_message(LogLevel.WARNING, f"Test filter '{self.test_filter}' did not match any test configurations.")
+            test_configs = filtered_configs
         total_tests = len(test_configs) + 1 # +1 for the baseline (FSDP)
         results = []
 
