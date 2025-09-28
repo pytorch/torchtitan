@@ -6,8 +6,7 @@
 
 import importlib
 from dataclasses import dataclass
-from typing import Optional
-
+import torch
 from torch import nn
 from torchtitan.config import JobConfig
 from torchtitan.protocols import BaseModelArgs
@@ -285,6 +284,12 @@ class HFTransformerModel(nn.Module):
                 )
         self.model = model_cls(config=model_args)
 
+        for layer in self.model.model.layers:
+            if hasattr(model_args, "first_k_dense_replace") and layer.layer_idx >= model_args.first_k_dense_replace:
+                layer.moe_enabled = True
+            else:
+                layer.moe_enabled = False
+
     @property
     def tok_embeddings(self):
         """Returns the model's embed_tokens, handling different Hugging Face model structures."""
@@ -363,9 +368,10 @@ class HFTransformerModel(nn.Module):
             raise AttributeError("Could not find rotary_emb in the model. Please check the model structure.")
 
     def forward(self, *args, **kwargs):
-        output = self.model(*args, **kwargs)
-        if isinstance(output, CausalLMOutputWithPast):
-            return output.logits
+        position_ids = torch.arange(args[0].shape[1], device=args[0].device).unsqueeze(0)
+        kwargs["position_ids"] = position_ids
+        output = self.model.model(*args, **kwargs)
+        output = self.model.lm_head(output.last_hidden_state)
         return output
 
     def init_weights(self, *args, **kwargs):
@@ -382,8 +388,9 @@ class HFTransformerModel(nn.Module):
             # For pipeline parallel, we need to skip nn.Identity modules
             if not isinstance(module, nn.Identity):
                 original_init_weights_fn(module)
+            else:
+                logger.info("Skipping nn.Identity module during weight initialization.")
 
-        logger.info("Applying selective weight initialization, skipping nn.Identity modules when PP is enabled.")
         self.model.apply(selective_init)
 
         self.model.tie_weights()

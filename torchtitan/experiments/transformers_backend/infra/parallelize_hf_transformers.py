@@ -351,29 +351,29 @@ def apply_non_moe_tp(
         )
 
     # Apply tensor + sequence parallelism to every transformer block
-    for transformer_block in model.layers.values():
+    for transformer_block in model.layers:
         layer_plan = {
-            "attention_norm": SequenceParallel(),
-            "attention": prepare_module_input(
-                input_layouts=(Shard(1), None),
-                desired_input_layouts=(Replicate(), None),
+            "input_layernorm": SequenceParallel(),
+            "self_attn": prepare_module_input(
+                input_kwarg_layouts={"hidden_states": Shard(1)},
+                desired_input_kwarg_layouts={"hidden_states": Replicate()},
             ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
+            "self_attn.q_proj": colwise_parallel(),
+            "self_attn.k_proj": colwise_parallel(),
+            "self_attn.v_proj": colwise_parallel(),
+            "self_attn.o_proj": rowwise_parallel(output_layouts=Shard(1)),
+            "post_attention_layernorm": SequenceParallel(),
         }
         if not transformer_block.moe_enabled:
             layer_plan.update(
                 {
-                    "feed_forward": prepare_module_input(
+                    "mlp": prepare_module_input(
                         input_layouts=(Shard(1),),
                         desired_input_layouts=(Replicate(),),
                     ),
-                    "feed_forward.w1": colwise_parallel(),
-                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-                    "feed_forward.w3": colwise_parallel(),
+                    "mlp.gate_proj": colwise_parallel(),
+                    "mlp.up_proj": colwise_parallel(),
+                    "mlp.down_proj": rowwise_parallel(output_layouts=Shard(1)),
                 }
             )
 
@@ -557,7 +557,7 @@ def apply_moe_ep_tp(
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
 ):
-    for transformer_block in model.layers.values():
+    for transformer_block in model.layers:
         if not transformer_block.moe_enabled:
             continue
 

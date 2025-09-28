@@ -37,6 +37,7 @@ def seeded_init_decorator_for_test(seed):
 def _deepseek_v3_decoder_layer_init_patched(self, config: DeepseekV3Config, layer_idx: int):
     _original_deepseek_v3_decoder_layer_init(self, config, layer_idx)
     
+    self.layer_idx = layer_idx
     self.mlp.layer_idx = layer_idx
     
     if hasattr(self.mlp, 'experts'):
