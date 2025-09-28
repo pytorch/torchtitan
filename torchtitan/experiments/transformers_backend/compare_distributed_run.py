@@ -200,8 +200,18 @@ class CompareDistributedRun:
         self.results_dir: Optional[Path] = None
         self.test_filter = ""
 
-    def generate_parallelism_configs(self) -> None:
+    def generate_parallelism_configs(self, hf_model_name: str) -> None:
         """Generate parallelism configurations based on the number of GPUs."""
+        from transformers import AutoConfig
+
+        try:
+            model_config = AutoConfig.from_pretrained(hf_model_name)
+            is_moe = getattr(model_config, "num_local_experts", 0) > 1
+        except Exception:
+            # Fallback for models not on Hub or other errors
+            is_moe = False
+            log_message(LogLevel.WARNING, f"Could not determine if {hf_model_name} is a MoE model from HuggingFace Hub. EP configurations will not be generated.")
+
         ngpu = self.nd_parallel_to_nb_gpus[self.nd_parallel]
         configs = []
 
@@ -253,20 +263,21 @@ class CompareDistributedRun:
                             )
                         )
 
-                        # NOTE(3outeille): EP borrowing degree from dp_shard
-                        configs.append(
-                            ParallelismConfig(
-                                name=f"fsdp{dp_shard}_cp{cp}_tp{tp}_pp{pp}_ep{dp_shard}",
-                                dp_replicate=1,
-                                dp_shard=dp_shard,
-                                tp=tp,
-                                pp=pp,
-                                pp_schedule="1F1B",
-                                cp=cp,
-                                ep=dp_shard,
-                                eptp=1
+                        if is_moe:
+                            # NOTE(3outeille): EP borrowing degree from dp_shard
+                            configs.append(
+                                ParallelismConfig(
+                                    name=f"fsdp{dp_shard}_cp{cp}_tp{tp}_pp{pp}_ep{dp_shard}",
+                                    dp_replicate=1,
+                                    dp_shard=dp_shard,
+                                    tp=tp,
+                                    pp=pp,
+                                    pp_schedule="1F1B",
+                                    cp=cp,
+                                    ep=dp_shard,
+                                    eptp=1
+                                )
                             )
-                        )
         
     
         # Remove duplicates and assign to instance
@@ -721,8 +732,6 @@ class CompareDistributedRun:
 
         self.base_results_dir.mkdir(exist_ok=True)
 
-        self.generate_parallelism_configs()
-
         # TODO(3outeille): make it more generic later
         if self.model_filter == "llama3":
             hf_model_name = "meta-llama/Llama-3.2-1B"
@@ -732,6 +741,8 @@ class CompareDistributedRun:
             tt_model_name = "deepseek_v3"
         else:
             raise ValueError(f"Model filter {self.model_filter} not supported")
+            
+        self.generate_parallelism_configs(hf_model_name)
             
         model_owner, model_repo = hf_model_name.split("/", 1)
         nd_parallel_upper = self.nd_parallel.upper()
