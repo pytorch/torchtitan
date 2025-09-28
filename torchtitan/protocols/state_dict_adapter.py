@@ -16,8 +16,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
 
-from .quantization import calculate_scale_shape, dequantize_from_fp8
-
 logger = logging.getLogger()
 
 from .model import BaseModelArgs
@@ -413,53 +411,3 @@ class StateDictAdapter(BaseStateDictAdapter):
             del expert_weights_by_layer[layer_num]
 
         return stacked_tensor
-
-    def _dequantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        Dequantize the weights from float8 to float32.
-        """
-
-        scale_inv_keys = []
-        for key, weight in state_dict.items():
-            if key.endswith(".weight") and key + "_scale_inv" in state_dict:
-                scale_inv = state_dict[key + "_scale_inv"]
-                dequantized_weight = dequantize_from_fp8(
-                    weight, scale_inv, dtype=torch.float32
-                )
-                # update the weight and remove the scale_inv tensor
-                state_dict[key] = dequantized_weight
-                scale_inv_keys.append(key + "_scale_inv")
-
-        for key in scale_inv_keys:
-            state_dict.pop(key)
-
-        return state_dict
-
-    def _add_quantization_scale_inv_tensors(
-        self, state_dict: dict[str, Any]
-    ) -> dict[str, Any]:
-        """
-        Add quantization scale tensors the state_dict.
-        """
-        non_quantized_keys = [
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
-            "norm.weight",
-            "lm_head.weight",
-            "embed_tokens.weight",
-            "mlp.gate.weight",
-        ]
-
-        weight_scale_inv_state_dict = {}
-        for key, value in state_dict.items():
-            if key.endswith(".weight") and not any(
-                non_quantized_key in key for non_quantized_key in non_quantized_keys
-            ):
-                expected_scale_shape = calculate_scale_shape(value)
-                # add weight_scale_inv to the state_dict
-                weight_scale_inv_state_dict[key + "_scale_inv"] = torch.ones(
-                    expected_scale_shape, dtype=torch.float32
-                )
-
-        state_dict.update(weight_scale_inv_state_dict)
-        return state_dict

@@ -13,6 +13,8 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
 
+from .quantization import calculate_scale_shape, dequantize_from_fp8
+
 
 class DeepSeekV3StateDictAdapter(StateDictAdapter):
     """
@@ -74,6 +76,56 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
         self.grouped_expert_weight_shape = {}  # {titan_abstract_key: shape}
         self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
 
+    def _dequantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """
+        Dequantize the weights from float8 to float32.
+        """
+
+        scale_inv_keys = []
+        for key, weight in state_dict.items():
+            if key.endswith(".weight") and key + "_scale_inv" in state_dict:
+                scale_inv = state_dict[key + "_scale_inv"]
+                dequantized_weight = dequantize_from_fp8(
+                    weight, scale_inv, dtype=torch.float32
+                )
+                # update the weight and remove the scale_inv tensor
+                state_dict[key] = dequantized_weight
+                scale_inv_keys.append(key + "_scale_inv")
+
+        for key in scale_inv_keys:
+            state_dict.pop(key)
+
+        return state_dict
+
+    def _add_quantization_scale_inv_tensors(
+        self, state_dict: dict[str, Any]
+    ) -> dict[str, Any]:
+        """
+        Add quantization scale tensors the state_dict.
+        """
+        non_quantized_keys = [
+            "input_layernorm.weight",
+            "post_attention_layernorm.weight",
+            "norm.weight",
+            "lm_head.weight",
+            "embed_tokens.weight",
+            "mlp.gate.weight",
+        ]
+
+        weight_scale_inv_state_dict = {}
+        for key, value in state_dict.items():
+            if key.endswith(".weight") and not any(
+                non_quantized_key in key for non_quantized_key in non_quantized_keys
+            ):
+                expected_scale_shape = calculate_scale_shape(value)
+                # add weight_scale_inv to the state_dict
+                weight_scale_inv_state_dict[key + "_scale_inv"] = torch.ones(
+                    expected_scale_shape, dtype=torch.float32
+                )
+
+        state_dict.update(weight_scale_inv_state_dict)
+        return state_dict
+
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
@@ -91,9 +143,9 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
 
                 # Store the GroupedExperts Weight metadata for from_hf()
                 if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[abstract_key] = (
-                        value.placements
-                    )
+                    self.grouped_expert_weight_placements[
+                        abstract_key
+                    ] = value.placements
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
 
                     # Split GroupedExperts weight to local individual expert weights
