@@ -253,6 +253,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             del model
 
             for m in self.model_parts:
+                if is_torch_deterministic():
+                    # Otherwise, HF register buffer for ROPE (inv_freq) and this will be by default be initialized to Nan
+                    torch.utils.deterministic.fill_uninitialized_memory = False    
                 m.to_empty(device=init_device)
                 with torch.no_grad():
                     m.init_weights(buffer_device=buffer_device)
