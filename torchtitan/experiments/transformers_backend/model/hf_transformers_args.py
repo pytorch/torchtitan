@@ -286,6 +286,21 @@ class HFTransformerModel(nn.Module):
         self.model = model_cls(config=model_args)
 
     @property
+    def tok_embeddings(self):
+        """Returns the model's embed_tokens, handling different Hugging Face model structures."""
+        if hasattr(self.model, "model") and hasattr(self.model.model, "embed_tokens"):  # Llama-like
+            return self.model.model.embed_tokens
+        else:
+            raise AttributeError("Could not find embed_tokens in the model. Please check the model structure.")
+
+    @tok_embeddings.setter
+    def tok_embeddings(self, value):
+        if hasattr(self.model, "model") and hasattr(self.model.model, "embed_tokens"):  # Llama-like
+            setattr(self.model.model, "embed_tokens", value)
+        else:
+            raise AttributeError("Could not find embed_tokens in the model. Please check the model structure.")
+
+    @property
     def layers(self):
         """Returns the model's layers, handling different Hugging Face model structures."""
         if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):  # Llama-like
@@ -294,13 +309,12 @@ class HFTransformerModel(nn.Module):
             # Add more cases here if needed for other model architectures
             raise AttributeError("Could not find layers in the model. Please check the model structure.")
 
-    @property
-    def tok_embeddings(self):
-        """Returns the model's embed_tokens, handling different Hugging Face model structures."""
-        if hasattr(self.model, "model") and hasattr(self.model.model, "embed_tokens"):  # Llama-like
-            return self.model.model.embed_tokens
+    @layers.setter
+    def layers(self, value):
+        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):  # Llama-like
+            setattr(self.model.model, "layers", value)
         else:
-            raise AttributeError("Could not find embed_tokens in the model. Please check the model structure.")
+            raise AttributeError("Could not find layers in the model. Please check the model structure.")
 
     @property
     def norm(self):
@@ -325,6 +339,28 @@ class HFTransformerModel(nn.Module):
         else:
             # Add more cases here if needed for other model architectures
             raise AttributeError("Could not find output (lm_head) in the model. Please check the model structure.")
+
+    @output.setter
+    def output(self, value):
+        if hasattr(self.model, "lm_head"):  # For models like LlamaForCausalLM
+            setattr(self.model, "lm_head", value)
+        else:
+            raise AttributeError("Could not find output (lm_head) in the model. Please check the model structure.")
+
+    @property
+    def rotary_emb(self):
+        """Returns the model's rotary_emb, handling different Hugging Face model structures."""
+        if hasattr(self.model, "model") and hasattr(self.model.model, "rotary_emb"):  # Llama-like
+            return self.model.model.rotary_emb
+        else:
+            raise AttributeError("Could not find rotary_emb in the model. Please check the model structure.")
+
+    @rotary_emb.setter
+    def rotary_emb(self, value):
+        if hasattr(self.model, "model") and hasattr(self.model.model, "rotary_emb"):  # Llama-like
+            setattr(self.model.model, "rotary_emb", value)
+        else:
+            raise AttributeError("Could not find rotary_emb in the model. Please check the model structure.")
 
     def forward(self, *args, **kwargs):
         output = self.model(*args, **kwargs)
@@ -351,3 +387,28 @@ class HFTransformerModel(nn.Module):
         self.model.apply(selective_init)
 
         self.model.tie_weights()
+    
+    def named_children(self):
+        """
+        Provides a flattened view of the model's main components,
+        making it compatible with TorchTitan's expectations.
+        """
+        yield "tok_embeddings", self.tok_embeddings
+        yield "layers", self.layers
+        yield "norm", self.norm
+        yield "output", self.output
+        yield "rotary_emb", self.rotary_emb
+
+    def __setattr__(self, name, value):
+        # If a property with a setter exists for this name, use it.
+        # This is to bypass the nn.Module.__setattr__ logic that
+        # directly registers modules and skips property setters.
+        cls = self.__class__
+        if hasattr(cls, name):
+            prop = getattr(cls, name)
+            if isinstance(prop, property) and prop.fset is not None:
+                prop.fset(self, value)
+                return
+
+        # Otherwise, fall back to the default nn.Module behavior.
+        super().__setattr__(name, value)

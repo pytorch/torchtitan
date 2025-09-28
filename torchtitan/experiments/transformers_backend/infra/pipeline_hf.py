@@ -4,123 +4,34 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
-import os
-from typing import Callable
+import math
 
 import torch
 import torch.nn as nn
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.pipelining import PipelineStage
-
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
-    _PipelineScheduleRuntime,
     get_schedule_class,
-    PipelineScheduleMulti,
     PipelineScheduleSingle,
+)
+
+from torchtitan.components.loss import LossFunction
+from torchtitan.config import JobConfig
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.pipeline_parallel import (
+    build_pipeline_schedule,
+    pipeline_module_split,
+    stage_ids_this_rank,
+)
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.pipelining import PipelineStage
+from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
+from torchtitan.tools.logging import logger
+from torch.distributed.pipelining.schedules import (
     ScheduleDualPipeV,
     ScheduleZBVZeroBubble,
 )
 
-from torchtitan.config import JobConfig
-from torchtitan.tools.logging import logger
-
-from torchtitan.distributed import ParallelDims
-from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
-from torchtitan.components.loss import LossFunction
-
-import math
-
-
-def build_pipeline_schedule(
-    job_config: JobConfig, stages: list[PipelineStage], loss_fn: Callable
-) -> _PipelineSchedule:
-    """Builds a pipeline schedule for the given job configuration and stages.
-
-    Args:
-        job_config (JobConfig): The job configuration.
-        stages (list[PipelineStage]): The stages to be scheduled.
-        loss_fn (Callable): The loss function.
-
-    Returns:
-        _PipelineSchedule: The pipeline schedule for the given stages.
-    """
-    pp_schedule_csv = job_config.parallelism.pipeline_parallel_schedule_csv
-
-    # Validate that pp_schedule_csv is a valid path
-    if pp_schedule_csv:
-        if not os.path.isfile(pp_schedule_csv):
-            raise FileNotFoundError(
-                f"The specified path {pp_schedule_csv} does not exist or is not a file."
-            )
-        schedule_class = _PipelineScheduleRuntime
-    else:
-        schedule_class = get_schedule_class(
-            job_config.parallelism.pipeline_parallel_schedule
-        )
-
-    looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
-    microbatch_size = job_config.parallelism.pipeline_parallel_microbatch_size
-    batch_size = job_config.training.local_batch_size
-    # validate that the batch size is divisible by the microbatch_size otherwise we'll hang or error during training
-    if batch_size % microbatch_size != 0:
-        raise ValueError(
-            f"Batch size {job_config.training.local_batch_size} must be divisible by microbatch_size {microbatch_size}. "
-            "Update the config arguments for either batch_size or pipeline_parallel_microbatch_size."
-        )
-    n_microbatches = batch_size // microbatch_size
-    # We expect that the number of local stages (`len(stages)`) is the same across all ranks
-    num_total_stages = job_config.parallelism.pipeline_parallel_degree * len(stages)
-    if n_microbatches < num_total_stages:
-        logger.warning(
-            f"Number of microbatches ({n_microbatches}) is less than the total number "
-            f"of stages ({num_total_stages}) which may result in a bubble in the pipeline."
-        )
-
-    schedule = schedule_class(
-        stages if looped_schedule else stages[0],
-        n_microbatches=n_microbatches,
-        loss_fn=loss_fn,
-    )
-    logger.info(
-        f"Using pipeline schedule {job_config.parallelism.pipeline_parallel_schedule} "
-        f"with {n_microbatches} microbatches and {num_total_stages} stages."
-    )
-
-    if pp_schedule_csv:
-        assert schedule_class in [
-            PipelineScheduleSingle,
-            PipelineScheduleMulti,
-            _PipelineScheduleRuntime,
-        ], (
-            "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
-            "and _PipelineScheduleRuntime support csv schedules"
-        )
-        schedule._load_csv(pp_schedule_csv)
-
-    return schedule
-
-
-# TODO(whc) should this be a utility inside torch.pipelining?
-def stage_ids_this_rank(
-    pp_rank: int, pp_size: int, num_stages: int, style: str = "loop"
-) -> tuple[int]:
-    """Compute the stage ids for the stages that will run on this pp rank for either a looped or V style schedule"""
-    assert (
-        num_stages % pp_size == 0
-    ), f"num_stages {num_stages} must be evenly divisible by pp_size {pp_size}"
-    stages_per_rank = num_stages // pp_size
-    if style == "loop":
-        return tuple(pp_rank + s * pp_size for s in range(stages_per_rank))
-    elif style == "v":
-        assert (
-            stages_per_rank == 2
-        ), f"v schedules assume 2 stages per rank, got {stages_per_rank}"
-        stage_v_pairs = list(
-            zip(range(pp_size), range(num_stages - 1, pp_size - 1, -1))
-        )
-        return stage_v_pairs[pp_rank]
-
+# NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
 
 def generate_llm_fqn_per_model_part(
     num_stages: int,
@@ -130,16 +41,13 @@ def generate_llm_fqn_per_model_part(
 ) -> list[list[str]]:
     """
     Programmatically generates module names model part, focused on LLMs models.
-
     Args:
         num_stages: Number of pipeline stages
         num_layers: Total number of transformer layers in the model
         input_weight: Weight for input modules (embed_tokens) in layer calculation
         output_weight: Weight for output modules (norm + output) in layer calculation
-
     Returns:
         List of lists containing module names for each model part
-
     Example:
         generate_llm_fqn_per_model_part(2, 3, input_weight=2, output_weight=2)
         treats embeddings as 2 layers and norm+output as 2 layers for distribution
@@ -149,11 +57,11 @@ def generate_llm_fqn_per_model_part(
 
     if num_stages == 1:
         # Single stage gets everything
-        layer_names = [f"model.model.layers.{i}" for i in range(num_layers)]
+        layer_names = [f"layers.{i}" for i in range(num_layers)]
         return [
-            ["model.model.embed_tokens"]
+            ["tok_embeddings"]
             + layer_names
-            + ["model.model.norm", "model.lm_head", "model.model.rotary_emb"]
+            + ["norm", "output", "rotary_emb"]
         ]
 
     # Calculate effective layers including weights
@@ -201,14 +109,14 @@ def generate_llm_fqn_per_model_part(
 
         # First stage: handle input modules with weighting
         if stage_idx == 0:
-            stage_modules.append("model.model.embed_tokens")
+            stage_modules.append("tok_embeddings")
             # Account for input weight in layer distribution
             remaining_layers_for_stage = effective_layers_for_stage - input_weight
 
             # Add transformer layers
             for _ in range(remaining_layers_for_stage):
                 if current_layer < num_layers:
-                    stage_modules.append(f"model.model.layers.{current_layer}")
+                    stage_modules.append(f"layers.{current_layer}")
                     current_layer += 1
 
         # Last stage: handle output modules with weighting
@@ -219,24 +127,23 @@ def generate_llm_fqn_per_model_part(
             # Add transformer layers
             for _ in range(remaining_layers_for_stage):
                 if current_layer < num_layers:
-                    stage_modules.append(f"model.model.layers.{current_layer}")
+                    stage_modules.append(f"layers.{current_layer}")
                     current_layer += 1
 
             # Add output modules
-            stage_modules.extend(["model.model.norm", "model.lm_head"])
+            stage_modules.extend(["norm", "output"])
 
         # Middle stages: only transformer layers
         else:
             for _ in range(effective_layers_for_stage):
                 if current_layer < num_layers:
-                    stage_modules.append(f"model.model.layers.{current_layer}")
+                    stage_modules.append(f"layers.{current_layer}")
                     current_layer += 1
 
-        stage_modules.append("model.model.rotary_emb")
+        stage_modules.append("rotary_emb")
         module_names_per_stage.append(stage_modules)
 
     return module_names_per_stage
-
 
 def pipeline_module_split(
     whole_model: nn.Module,
@@ -261,7 +168,7 @@ def pipeline_module_split(
         module_names_per_stage: List of lists, where each inner list contains the module names
                                that should be included in that stage. Module names should be
                                dot-separated paths. Examples:
-                               - "embed_tokens" for token embeddings
+                               - "tok_embeddings" for token embeddings
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
                                - "output" for the output projection layer
@@ -272,7 +179,7 @@ def pipeline_module_split(
 
     Example usage:
         module_names_per_stage = [
-            ["embed_tokens", "layers.0"],     # Stage 0: embeddings + first layer
+            ["tok_embeddings", "layers.0"],     # Stage 0: embeddings + first layer
             ["layers.1", "layers.2"],           # Stage 1: middle layers
             ["norm", "output"]                  # Stage 2: final norm + output
         ]
@@ -288,56 +195,42 @@ def pipeline_module_split(
         # Create a set of modules to keep for faster lookup
         modules_to_keep = set(module_names)
         print(f"Stage {stage_idx}: Modules to keep: {modules_to_keep}")
-        
-        def _prune_modules_recursive(current_module: nn.Module, prefix: str):
-            for name, child in current_module.named_children():
-                child_prefix = f"{prefix}{name}"
-
-                # If the child module is a container, we need to check its children
-                if isinstance(child, (nn.ModuleDict, nn.ModuleList)):
-                    layers_to_keep = {
-                        m.split(".")[-1]
-                        for m in modules_to_keep
-                        if m.startswith(f"{child_prefix}.")
-                    }
-                    if layers_to_keep:
-                        # This container has some layers we need to keep.
-                        if isinstance(child, nn.ModuleDict):
-                            for layer_name in list(child.keys()):
-                                if layer_name not in layers_to_keep:
-                                    del child[layer_name]
-                        elif isinstance(child, nn.ModuleList):
-                            indices_to_keep = {
-                                int(idx) for idx in layers_to_keep if idx.isdigit()
-                            }
-                            new_layers = nn.ModuleList(
-                                [
-                                    layer
-                                    for i, layer in enumerate(child)
-                                    if i in indices_to_keep
-                                ]
-                            )
-                            setattr(current_module, name, new_layers)
-                    else:
-                        # If no sub-modules are kept, replace with an empty container.
-                        if isinstance(child, nn.ModuleDict):
-                            setattr(current_module, name, nn.ModuleDict())
-                        elif isinstance(child, nn.ModuleList):
-                            setattr(current_module, name, nn.ModuleList())
-                elif isinstance(child, nn.Module):
-                    # For a generic nn.Module, check if it or its children should be kept
-                    is_kept = child_prefix in modules_to_keep
-                    is_parent_of_kept = any(
-                        m.startswith(f"{child_prefix}.") for m in modules_to_keep
-                    )
-
-                    if is_kept or is_parent_of_kept:
-                        _prune_modules_recursive(child, f"{child_prefix}.")
-                    else:
-                        # Handle simple module attributes (e.g., "linear", "norm")
-                        setattr(current_module, name, nn.Identity())
-
-        _prune_modules_recursive(model, "")
+        for module_name, module_value in model.named_children():
+            # Handle layer-like structures (e.g., "layers.0", "layers.1")
+            if isinstance(module_value, (nn.ModuleDict, nn.ModuleList)):
+                layers_to_keep = {
+                    name.split(".", 1)[1]
+                    for name in modules_to_keep
+                    if name.startswith(f"{module_name}.")
+                }
+                if layers_to_keep:
+                    # Keep only specified layers
+                    if isinstance(module_value, nn.ModuleDict):
+                        for layer_name in list(module_value.keys()):
+                            if layer_name not in layers_to_keep:
+                                del module_value[layer_name]
+                    elif isinstance(module_value, nn.ModuleList):
+                        indices_to_keep = {
+                            int(idx) for idx in layers_to_keep if idx.isdigit()
+                        }
+                        new_layers = nn.ModuleList(
+                            [
+                                layer
+                                for i, layer in enumerate(module_value)
+                                if i in indices_to_keep
+                            ]
+                        )
+                        setattr(model, module_name, new_layers)
+                else:
+                    # No layers from this structure needed, set to empty structure
+                    if isinstance(module_value, nn.ModuleDict):
+                        setattr(model, module_name, nn.ModuleDict())
+                    elif isinstance(module_value, nn.ModuleList):
+                        setattr(model, module_name, nn.ModuleList())
+            # Handle simple module attributes (e.g., "linear", "norm")
+            elif module_name not in modules_to_keep:
+                # Replace with Identity
+                setattr(model, module_name, nn.Identity())
 
         stage = PipelineStage(
             model,
