@@ -1,38 +1,13 @@
 import os
-import torch
 import torch.nn as nn
-import functools
+from torchtitan.utils.test_utils import seeded_init_decorator_for_test
 
 from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3Attention, DeepseekV3MLP, DeepseekV3MoE, DeepseekV3DecoderLayer
 from transformers.modeling_utils import PreTrainedModel
 
+
 _original_deepseek_v3_decoder_layer_init = DeepseekV3DecoderLayer.__init__
-
-def seeded_init_decorator_for_test(seed):
-    """
-    Decorator that adds torch.manual_seed before every nn.init.trunc_normal_ call
-    and prints layer weights after initialization.
-    """
-    import lovely_tensors as lt; lt.monkey_patch()
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(self, module):
-            original_trunc_normal = nn.init.trunc_normal_
-
-            def seeded_trunc_normal(*args, **kwargs):
-                torch.manual_seed(seed)
-                tensor = args[0]  # First argument is always the tensor
-                result = original_trunc_normal(*args, **kwargs)
-                # module_name = getattr(module, "__class__", type(module)).__name__
-                # print(f"Module: {module_name}, Tensor value: {tensor}")
-                return result
-
-            nn.init.trunc_normal_ = seeded_trunc_normal
-            return func(self, module)
-
-        return wrapper
-    return decorator
 
 def _deepseek_v3_decoder_layer_init_patched(self, config: DeepseekV3Config, layer_idx: int):
     _original_deepseek_v3_decoder_layer_init(self, config, layer_idx)

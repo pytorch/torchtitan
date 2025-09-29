@@ -8,12 +8,11 @@ import importlib
 import os
 import time
 from datetime import timedelta
-from transformers.utils import is_torch_deterministic
 from typing import Any, Generator, Iterable, Optional
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
-
+from torchtitan.utils.test_utils import debug_structure_param
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
@@ -178,7 +177,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.metrics_processor.num_flops_per_token,
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
         
-        model_args.debug_structure_param(model)
+        debug_structure_param(model)
         
         logger.info(
             f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
@@ -250,9 +249,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             del model
 
             for m in self.model_parts:
-                if is_torch_deterministic():
-                    # Otherwise, HF register buffer for ROPE (inv_freq) and this will be by default be initialized to Nan
-                    torch.utils.deterministic.fill_uninitialized_memory = False    
                 m.to_empty(device=init_device)
                 with torch.no_grad():
                     m.init_weights(buffer_device=buffer_device)
@@ -263,9 +259,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
-            if is_torch_deterministic():
-                # Otherwise, HF register buffer for ROPE (inv_freq) and this will be by default be initialized to Nan
-                torch.utils.deterministic.fill_uninitialized_memory = False
             model.to_empty(device=init_device)
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)

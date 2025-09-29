@@ -12,6 +12,7 @@ from torchtitan.config import JobConfig
 from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools.logging import logger
 from transformers import AutoConfig
+from transformers.utils import is_torch_deterministic
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import AttentionInterface
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
@@ -246,30 +247,6 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
 
         return nparams, num_flops_per_token
-
-    def debug_structure_param(self, model: nn.Module):
-        logger.info("Model Structure Parameter Breakdown:")
-
-        def _format_module(module: nn.Module, prefix: str = ""):
-            for name, sub_module in module.named_children():
-                sub_module_params = sum(p.numel() for p in sub_module.parameters())
-                if sub_module_params == 0:
-                    continue
-
-                # For HF models, we want to "unwrap" the ".model" attribute
-                # to get a view comparable to the native TorchTitan models.
-                if name == "model":
-                    _format_module(sub_module, prefix)
-                else:
-                    logger.info(
-                        f"{prefix}({name}): {sub_module.__class__.__name__} - {sub_module_params:,} params"
-                    )
-                    _format_module(sub_module, prefix + "  ")
-
-        total_params = sum(p.numel() for p in model.parameters())
-        logger.info(f"{model.__class__.__name__} - {total_params:,} params")
-        _format_module(model, "  ")
-
 
 class HFTransformerModel(nn.Module):
     def __init__(self, model_args: HFTransformerModelArgs):

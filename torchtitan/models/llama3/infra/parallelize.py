@@ -34,6 +34,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
 
+
 def parallelize_llama(
     model: nn.Module,
     parallel_dims: ParallelDims,

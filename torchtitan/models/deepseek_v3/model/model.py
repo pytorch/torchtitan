@@ -6,7 +6,6 @@
 
 import math
 import os
-import functools
 from typing import Tuple
 
 import torch
@@ -15,37 +14,8 @@ from torch import nn
 from torchtitan.models.attention import build_attention
 from torchtitan.models.moe import FeedForward, MoE
 from torchtitan.protocols.train_spec import ModelProtocol
-
+from torchtitan.utils.test_utils import seeded_init_decorator_for_test
 from .args import DeepSeekV3ModelArgs
-
-
-def seeded_init_decorator_for_test(seed):
-    """
-    Decorator that adds torch.manual_seed before every nn.init.trunc_normal_ call
-    and prints layer weights after initialization.
-    """
-    import lovely_tensors as lt; lt.monkey_patch()
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            original_trunc_normal = nn.init.trunc_normal_
- 
-            def seeded_trunc_normal(*trunc_args, **trunc_kwargs):
-                torch.manual_seed(seed)
-                tensor = trunc_args[0]  # First argument is always the tensor
-                result = original_trunc_normal(*trunc_args, **trunc_kwargs)
-                # # Try to get module info from the calling context
-                # module_name = "Unknown"
-                # if len(args) > 0 and hasattr(args[0], "__class__"):
-                #     module_name = args[0].__class__.__name__
-                # print(f"Module: {module_name}, Tensor value: {tensor}")
-                return result
- 
-            nn.init.trunc_normal_ = seeded_trunc_normal
-            return func(*args, **kwargs)
- 
-        return wrapper
-    return decorator
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
