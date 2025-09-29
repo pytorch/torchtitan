@@ -87,6 +87,7 @@ def apply_rotary_emb(
     xk_out = (xk * cos) + (rotate_half(xk) * sin)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
+
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
     bs, slen, n_kv_heads, head_dim = x.shape
@@ -109,7 +110,7 @@ def eager_attention_forward(
     scaling: float,
     dropout: float = 0.0,
     **kwargs,
-):  
+):
     key_values = key.transpose(2, 3)  # When TP is enabled, key should be shard()
     print(f"key_values : {key_values.placements} {key_values.shape}")
     print(f"query : {query.placements} {query.shape}")
@@ -145,15 +146,20 @@ def eager_attention_forward(
     attn_output = torch.matmul(attn_weights, value)
     return attn_output
 
+
 class Attention(nn.Module):
     """
     Multi-head attention (MLA) module.
     """
 
-    def __init__(self, model_args: GptOssModelArgs, use_sliding_attention: bool = False):
+    def __init__(
+        self, model_args: GptOssModelArgs, use_sliding_attention: bool = False
+    ):
         super().__init__()
 
-        self.sliding_window = model_args.sliding_window if use_sliding_attention else None
+        self.sliding_window = (
+            model_args.sliding_window if use_sliding_attention else None
+        )
         self.head_dim = model_args.head_dim
         self.n_heads = model_args.num_attention_heads
         self.n_kv_heads = model_args.num_key_value_heads
@@ -161,16 +167,24 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
 
         self.wq = nn.Linear(
-            model_args.hidden_size, model_args.num_attention_heads * model_args.head_dim, bias=True
+            model_args.hidden_size,
+            model_args.num_attention_heads * model_args.head_dim,
+            bias=True,
         )
         self.wk = nn.Linear(
-            model_args.hidden_size, model_args.num_key_value_heads * model_args.head_dim, bias=True
+            model_args.hidden_size,
+            model_args.num_key_value_heads * model_args.head_dim,
+            bias=True,
         )
         self.wv = nn.Linear(
-            model_args.hidden_size, model_args.num_key_value_heads * model_args.head_dim, bias=True
+            model_args.hidden_size,
+            model_args.num_key_value_heads * model_args.head_dim,
+            bias=True,
         )
         self.wo = nn.Linear(
-            model_args.num_attention_heads * model_args.head_dim, model_args.hidden_size, bias=True
+            model_args.num_attention_heads * model_args.head_dim,
+            model_args.hidden_size,
+            bias=True,
         )
         self.sinks = nn.Parameter(torch.empty(model_args.num_attention_heads))
 
@@ -179,9 +193,15 @@ class Attention(nn.Module):
         if self.use_flex_attn:
             # Only apply sliding window to every other layer
             if use_sliding_attention:
-                self.attn = build_attention(use_flex_attn=True, attn_mask_type="sliding_window", sliding_window=self.sliding_window)
+                self.attn = build_attention(
+                    use_flex_attn=True,
+                    attn_mask_type="sliding_window",
+                    sliding_window=self.sliding_window,
+                )
             else:
-                self.attn = build_attention(use_flex_attn=True, attn_mask_type=model_args.attn_mask_type)
+                self.attn = build_attention(
+                    use_flex_attn=True, attn_mask_type=model_args.attn_mask_type
+                )
         else:
             # NOTE: sampling with FlexAttn seems broken; use TorchAttn if needed
             self.attn = eager_attention_forward
@@ -219,32 +239,39 @@ class Attention(nn.Module):
         v = values.transpose(1, 2).contiguous()
 
         if self.use_flex_attn:
-            # FlexAttention 
+            # FlexAttention
             output, lse = self.attn(
-                q, k, v,
+                q,
+                k,
+                v,
                 scale=None,
-                return_lse=True,
+                return_lse=False,
             )
 
             # Apply attention sink rescaling: rescale by σ(lse - w[h])
-            # This is mathematically equivalent to concatenating learnable sink weights            
-            sink_scale = torch.sigmoid(lse - self.sink.view(1, -1, 1)).unsqueeze(
+            # This is mathematically equivalent to concatenating learnable sink weights
+            sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(
                 -1
             )  # [B,H,S,1]
-            output = output * sink_scale
+            output = output * sink_scale.to(output.dtype)
 
         else:
             # eager attention forward
             output = self.attn(
-                q, k, v, self.sinks,
+                q,
+                k,
+                v,
+                self.sinks,
                 attention_mask=self.sliding_window_causal(seqlen, x.device),
                 scaling=self.head_dim**-0.5,
                 dropout=0.0,
             )
-        output = output.transpose(1, 2).contiguous()   # (B, H, T, D) -> (B, T, H, D)
+        output = output.transpose(1, 2).contiguous()  # (B, H, T, D) -> (B, T, H, D)
 
         # Reshape and project output
-        output = output.reshape(bsz, seqlen, -1).contiguous()  # (bsz, seqlen, n_heads * v_head_dim)
+        output = output.reshape(
+            bsz, seqlen, -1
+        ).contiguous()  # (bsz, seqlen, n_heads * v_head_dim)
         output = self.wo(output)  # (bsz, seqlen, dim)
         return output
 
@@ -263,7 +290,7 @@ class Attention(nn.Module):
     # TODO: statically init the mask using train.seq_len
     def sliding_window_causal(self, seqlen, device):
         i = torch.arange(seqlen, device=device)
-        q_idx  = i[:, None]
+        q_idx = i[:, None]
         kv_idx = i[None, :]
 
         causal_mask = q_idx >= kv_idx
@@ -282,11 +309,17 @@ class TransformerBlock(nn.Module):
 
         super().__init__()
         use_sliding_attention = layer_id % 2 == 0
-        self.attention = Attention(model_args, use_sliding_attention=use_sliding_attention)
-        self.attention_norm = nn.RMSNorm(model_args.hidden_size, eps=model_args.norm_eps)
+        self.attention = Attention(
+            model_args, use_sliding_attention=use_sliding_attention
+        )
+        self.attention_norm = nn.RMSNorm(
+            model_args.hidden_size, eps=model_args.norm_eps
+        )
         self.ffn_norm = nn.RMSNorm(model_args.hidden_size, eps=model_args.norm_eps)
 
-        self.moe = GptOssMoE(model_args, dim=model_args.hidden_size, hidden_dim=model_args.moe_inter_dim)
+        self.moe = GptOssMoE(
+            model_args, dim=model_args.hidden_size, hidden_dim=model_args.moe_inter_dim
+        )
         self.moe_enabled = True  # for composability with load balancing
 
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -323,14 +356,18 @@ class GptOssModel(nn.Module, ModelProtocol):
         super().__init__()
         self.model_args = model_args
         self.max_seq_len = model_args.max_seq_len
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.hidden_size)
+        self.tok_embeddings = nn.Embedding(
+            model_args.vocab_size, model_args.hidden_size
+        )
         self.register_buffer(
             "rope_cache", self._precompute_rope_cache(), persistent=False
         )
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.num_hidden_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args).to(torch.bfloat16)
+            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args).to(
+                torch.bfloat16
+            )
 
         self.norm = nn.RMSNorm(model_args.hidden_size, eps=model_args.norm_eps)
         self.output = nn.Linear(

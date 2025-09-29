@@ -249,11 +249,11 @@ def apply_non_moe_tp(
 
         # shard attention.sinks across heads
         # TODO(jianiw): Fix the sink implementation
-        attn = transformer_block.attention
-        attn.register_parameter(
-            "sinks",
-            nn.Parameter(distribute_tensor(attn.sinks, tp_mesh, [Shard(0)])),
-        )
+        # attn = transformer_block.attention
+        # attn.register_parameter(
+        #     "sinks",
+        #     nn.Parameter(distribute_tensor(attn.sinks, tp_mesh, [Replicate()])),
+        # )
 
     if enable_async_tp:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
