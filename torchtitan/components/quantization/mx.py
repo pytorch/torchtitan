@@ -10,11 +10,7 @@ from importlib.util import find_spec
 from typing import Any, List
 
 import torch.nn as nn
-from torchtitan.components.quantization import (
-    MXFP8_DENSE_CONVERTER_NAME,
-    MXFP8_GROUP_ALIGNMENT_SIZE,
-    MXFP8_MOE_CONVERTER_NAME,
-)
+from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
 
 from torchtitan.config.job_config import JobConfig, MXDense
 from torchtitan.distributed import ParallelDims
@@ -177,5 +173,5 @@ class MXGroupedGemmConverter(QuantizationConverter):
         return
 
 
-register_model_converter(MXLinearConverter, MXFP8_DENSE_CONVERTER_NAME)
-register_model_converter(MXGroupedGemmConverter, MXFP8_MOE_CONVERTER_NAME)
+register_model_converter(MXLinearConverter, "quantize.dense.mx")
+register_model_converter(MXGroupedGemmConverter, "quantize.moe.mx")

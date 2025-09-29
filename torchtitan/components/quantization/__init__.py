@@ -17,12 +17,6 @@
 FP8_GROUP_ALIGNMENT_SIZE = 16
 MXFP8_GROUP_ALIGNMENT_SIZE = 32
 
-# Quantization converter names
-FP8_DENSE_CONVERTER_NAME = "quantize.dense.float8"
-MXFP8_DENSE_CONVERTER_NAME = "quantize.dense.mx"
-FP8_MOE_CONVERTER_NAME = "quantize.moe.float8"
-MXFP8_MOE_CONVERTER_NAME = "quantize.moe.mx"
-
 # Import to register quantization modules as ModelConverter
 import torchtitan.components.quantization.float8  # noqa: F401
 import torchtitan.components.quantization.mx  # noqa: F401

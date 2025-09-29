@@ -33,9 +33,12 @@ def validate_quantization_converters(job_config: JobConfig):
     Validates that the job config uses the same quantization type for dense and MoE layers.
     """
     # TODO: Explore supporting applying different quantization methods to dense and MoE layers.
+    # quantization converter format:
+    # `quantize.[dense|moe].[mx|float8]`
+    quantization_type = lambda converter: converter.split(".")[-1]
     existing_quantization_converter = None
     for converter in job_config.model.converters:
-        if is_quantization_converter(converter):
+        if "quantize" in converter:
             if existing_quantization_converter is None:
                 existing_quantization_converter = converter
             else:
@@ -45,13 +48,3 @@ def validate_quantization_converters(job_config: JobConfig):
                     "Cannot combine model converters with different quantization types: "
                     f"'{quantization_type(converter)}' and '{quantization_type(existing_quantization_converter)}'"
                 )
-
-
-def is_quantization_converter(converter: str):
-    return "quantize" in converter
-
-
-def quantization_type(converter: str):
-    # quantization converter format:
-    # `quantize.[dense|moe].[mx|float8]`
-    return converter.split(".")[-1]

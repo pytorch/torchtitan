@@ -7,11 +7,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-from torchtitan.components.quantization import (
-    FP8_DENSE_CONVERTER_NAME,
-    FP8_GROUP_ALIGNMENT_SIZE,
-    FP8_MOE_CONVERTER_NAME,
-)
+from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
 
 from torchtitan.config.job_config import Float8Dense, JobConfig
 from torchtitan.distributed import ParallelDims
@@ -236,5 +232,5 @@ class Float8MoEConverter(QuantizationConverter):
         pass
 
 
-register_model_converter(Float8DenseConverter, FP8_DENSE_CONVERTER_NAME)
-register_model_converter(Float8MoEConverter, FP8_MOE_CONVERTER_NAME)
+register_model_converter(Float8DenseConverter, "quantize.float8.dense")
+register_model_converter(Float8MoEConverter, "quantize.float8.moe")
