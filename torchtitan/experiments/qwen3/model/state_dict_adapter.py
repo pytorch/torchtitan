@@ -16,12 +16,12 @@ import re
 from typing import Any
 
 from torch.distributed.tensor import DTensor
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torchtitan.models.utils import MoEStateDictAdapter
 
 from .args import Qwen3ModelArgs
 
 
-class Qwen3StateDictAdapter(StateDictAdapter):
+class Qwen3StateDictAdapter(MoEStateDictAdapter):
     def __init__(self, model_args: Qwen3ModelArgs, hf_assets_path: str | None):
         super().__init__(model_args, hf_assets_path)
 

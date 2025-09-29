@@ -9,14 +9,14 @@ import re
 from typing import Any
 
 from torch.distributed.tensor import DTensor
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torchtitan.models.utils import MoEStateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
 
 from .quantization import calculate_scale_shape, dequantize_from_fp8
 
 
-class DeepSeekV3StateDictAdapter(StateDictAdapter):
+class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
     """
     StateDictAdapter for DeepSeekV3 model.
     """
