@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from torch import nn
 
 from torchtitan.config import JobConfig
-from torchtitan.model.utils import get_moe_model_nparams_and_flops
+from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import BaseModelArgs
 

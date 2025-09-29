@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from torch import nn
 
 from torchtitan.config import JobConfig
-from torchtitan.model.utils import get_dense_model_nparams_and_flops
+from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
 
