@@ -136,14 +136,11 @@ def parallelize_llama(
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         dp_mesh_dim_names = ("dp_replicate", "dp_shard")
-        apply_ddp(
+        apply_replicate(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-            enable_compile=model_compile_enabled,
-            enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
-            cpu_offload=job_config.training.enable_cpu_offload,
         )
 
     return model
@@ -316,19 +313,14 @@ def apply_fsdp(
     fully_shard(model, **fsdp_config)
 
 
-def apply_ddp(
+def apply_replicate(
     model: nn.Module,
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
-    enable_compile: bool,
-    enable_compiled_autograd: bool,
-    cpu_offload: bool = False,
 ):
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     replicate_config = {"device_mesh": dp_mesh, "mp_policy": mp_policy}
-    if cpu_offload:
-        replicate_config["offload_policy"] = CPUOffloadPolicy()
 
     if model.tok_embeddings is not None:
         replicate(

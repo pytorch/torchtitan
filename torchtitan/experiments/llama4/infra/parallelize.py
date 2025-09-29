@@ -28,7 +28,7 @@ from torchtitan.distributed.expert_parallel import (
     TensorParallel,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.llama3.infra.parallelize import apply_replicate
 from torchtitan.tools.logging import logger
 
 
@@ -170,14 +170,11 @@ def parallelize_llama(
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         dp_mesh_dim_names = ("dp_replicate", "dp_shard")
-        apply_ddp(
+        apply_replicate(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-            enable_compile=model_compile_enabled,
-            enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
-            cpu_offload=job_config.training.enable_cpu_offload,
         )
 
     return model
