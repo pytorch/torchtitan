@@ -26,7 +26,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    runs-on: linux.rocm.gpu.gfx942.8
+    runs-on: linux.rocm.gpu.gfx942.4
     steps:
       - name: configure aws credentials
         id: aws_creds
@@ -57,7 +57,7 @@ jobs:
             index-url: https://download.pytorch.org/whl/nightly/cu126
             is-rocm: 0
           - name: rocm
-            runner: linux.rocm.gpu.gfx942.8
+            runner: linux.rocm.gpu.gfx942.4
             gpu-arch-type: rocm
             gpu-arch-version: "6.4"
             docker-image: torchtitan-rocm-ubuntu-22.04-clang12
@@ -89,4 +89,4 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
         mkdir artifacts-to-be-uploaded
-        TEST_WITH_ROCM=${{ matrix.is-rocm }} python -m tests.integration_tests.run_tests --test_suite features artifacts-to-be-uploaded --ngpu 8
+        TEST_WITH_ROCM=${{ matrix.is-rocm }} python -m tests.integration_tests.run_tests --test_suite features artifacts-to-be-uploaded --ngpu 4
