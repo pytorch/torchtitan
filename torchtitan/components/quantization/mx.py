@@ -10,22 +10,22 @@ from importlib.util import find_spec
 from typing import Any, List
 
 import torch.nn as nn
-from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.components.quantization import (
+    MXFP8_GROUP_ALIGNMENT_SIZE,
+    QuantizationConverter,
+)
 
 from torchtitan.config.job_config import JobConfig, MXDense
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
-from torchtitan.protocols.model_converter import (
-    QuantizationConverter,
-    register_model_converter,
-)
+from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
 from .utils import module_filter_fn
 
 
-class MXLinearConverter(QuantizationConverter):
+class MXFP8LinearConverter(QuantizationConverter):
     """Converts the linear layers of `model` to `MXLinear`."""
 
     filter_fqns: List[str]
@@ -95,7 +95,7 @@ class MXLinearConverter(QuantizationConverter):
         return
 
 
-class MXGroupedGemmConverter(QuantizationConverter):
+class MXFP8GroupedMMConverter(QuantizationConverter):
     """Converts target 3D nn.Parameters of a model, representing 'experts',
     to use MXFP8 scaled grouped GEMMs instead of a high precision grouped GEMMs."""
 
@@ -173,5 +173,5 @@ class MXGroupedGemmConverter(QuantizationConverter):
         return
 
 
-register_model_converter(MXLinearConverter, "quantize.dense.mx")
-register_model_converter(MXGroupedGemmConverter, "quantize.moe.mx")
+register_model_converter(MXFP8LinearConverter, "quantize.linear.mxfp8")
+register_model_converter(MXFP8GroupedMMConverter, "quantize.grouped_mm.mxfp8")

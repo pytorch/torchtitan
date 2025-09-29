@@ -7,15 +7,15 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.components.quantization import (
+    FP8_GROUP_ALIGNMENT_SIZE,
+    QuantizationConverter,
+)
 
 from torchtitan.config.job_config import Float8Dense, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
-from torchtitan.protocols.model_converter import (
-    QuantizationConverter,
-    register_model_converter,
-)
+from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -24,7 +24,7 @@ from .utils import module_filter_fn
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
-class Float8DenseConverter(QuantizationConverter):
+class FP8LinearConverter(QuantizationConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         super().__init__(job_config, parallel_dims)
         float8_config: Float8Dense = job_config.quantize.dense.float8
@@ -170,7 +170,7 @@ class Float8DenseConverter(QuantizationConverter):
             precompute_float8_dynamic_scale_for_fsdp(m)
 
 
-class Float8MoEConverter(QuantizationConverter):
+class FP8GroupedMMConverter(QuantizationConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         super().__init__(job_config, parallel_dims)
         self.fqns = job_config.quantize.moe.float8.fqns
@@ -232,5 +232,5 @@ class Float8MoEConverter(QuantizationConverter):
         pass
 
 
-register_model_converter(Float8DenseConverter, "quantize.float8.dense")
-register_model_converter(Float8MoEConverter, "quantize.float8.moe")
+register_model_converter(FP8LinearConverter, "quantize.linear.fp8")
+register_model_converter(FP8GroupedMMConverter, "quantize.grouped_mm.fp8")
