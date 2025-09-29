@@ -87,4 +87,7 @@ def get_moe_model_nparams_and_flops(
         + 12 * l * h * q * t
     )
 
+    if model_args.enable_weight_tying:
+        nparams = nparams - nparams_embedding
+
     return nparams, num_flops_per_token
