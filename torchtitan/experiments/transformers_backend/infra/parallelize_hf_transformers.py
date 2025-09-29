@@ -194,7 +194,7 @@ def parallelize_hf_transformers(
         job_config.parallelism.context_parallel_degree > 1
         and model.model_args.use_flex_attn
     ):
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+        logger.warning("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters

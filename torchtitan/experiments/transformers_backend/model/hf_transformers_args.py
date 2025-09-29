@@ -13,7 +13,6 @@ from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools.logging import logger
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_outputs import CausalLMOutputWithPast
 
 @dataclass
 class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):

@@ -34,9 +34,6 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
-from transformers.models.llama.modeling_llama import CausalLMOutputWithPast
-
-
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # core configs
     job_config: JobConfig
@@ -429,11 +426,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
+        cp_buffers = [inputs, labels]
+        cp_seq_dims = [1, 1] 
+        if hasattr(model_parts[0], "freqs_cis"):
+            cp_buffers += [m.freqs_cis for m in model_parts]
+            cp_seq_dims += [0 for _ in model_parts]
+
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],
-                cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
-                cp_seq_dims=[1, 1] + [0 for _ in model_parts],
+                cp_buffers=cp_buffers,
+                cp_seq_dims=cp_seq_dims,
                 cp_no_restore_buffers={inputs, labels},
                 cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
             )
