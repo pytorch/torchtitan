@@ -13,7 +13,8 @@ from torch import nn
 
 from torchtitan.config import JobConfig
 from torchtitan.models.moe import MoEArgs
-from torchtitan.protocols.model import BaseModelArgs, get_moe_nparams_and_flops
+from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -108,4 +109,4 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_moe_nparams_and_flops(self, model, seq_len)
+        return get_moe_model_nparams_and_flops(self, model, seq_len)

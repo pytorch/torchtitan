@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from torch import nn
 
 from torchtitan.config import JobConfig
+from torchtitan.model.utils import get_moe_model_nparams_and_flops
 from torchtitan.models.moe import MoEArgs
-from torchtitan.protocols.model import get_moe_nparams_and_flops
 from torchtitan.protocols.train_spec import BaseModelArgs
 
 from torchtitan.tools.logging import logger
@@ -58,4 +58,4 @@ class Qwen3ModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_moe_nparams_and_flops(self, model, seq_len)
+        return get_moe_model_nparams_and_flops(self, model, seq_len)

@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from torch import nn
 
 from torchtitan.config import JobConfig
-from torchtitan.protocols.model import BaseModelArgs, get_dense_nparams_and_flops
+from torchtitan.model.utils import get_dense_model_nparams_and_flops
+from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
 
 
@@ -53,4 +54,4 @@ class TransformerModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_dense_nparams_and_flops(self, model, seq_len)
+        return get_dense_model_nparams_and_flops(self, model, seq_len)
