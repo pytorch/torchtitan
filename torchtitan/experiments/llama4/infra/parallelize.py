@@ -94,10 +94,12 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
-    # Assume 2x tokens per EP rank in the worst case.
-    # TODO: explore other options
+    # Worst case = single expert receives all tokens
+    # TODO: explore using token dropping to avoid this huge overallocation
     max_tokens_per_ep_rank = (
-        job_config.training.seq_len * job_config.training.local_batch_size * 2
+        job_config.training.seq_len
+        * job_config.training.local_batch_size
+        * model.model_args.moe_args.num_experts
     )
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
@@ -446,7 +448,7 @@ def apply_moe_ep_tp(
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
     a2a_impl: str,
-    max_tokens_per_ep_rank: int,
+    max_tokens_per_ep_rank: int = -1, # Only used for mxfp8 a2a
 ):
     for transformer_block in model.layers.values():
         if not transformer_block.moe_enabled:
@@ -504,7 +506,9 @@ def apply_moe_ep_tp(
             experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
         else:
             experts_mesh = ep_mesh
-            experts_plan = ExpertParallel(a2a_impl=a2a_impl)
+            experts_plan = ExpertParallel(
+                a2a_impl=a2a_impl, max_tokens_per_ep_rank=max_tokens_per_ep_rank
+            )
 
         parallelize_module(
             module=transformer_block.moe.experts,
