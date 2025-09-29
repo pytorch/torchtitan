@@ -192,7 +192,6 @@ def parallelize_hf_transformers(
 
     if (
         job_config.parallelism.context_parallel_degree > 1
-        and model.model_args.use_flex_attn
     ):
         logger.warning("CP support for FlexAttention is still in progress.")
 

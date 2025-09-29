@@ -13,6 +13,8 @@ from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools.logging import logger
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_utils import AttentionInterface
+from transformers.integrations.sdpa_attention import sdpa_attention_forward
 
 @dataclass
 class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
@@ -47,7 +49,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         titan_args,
         deepseek_v3_args=None,
         # HuggingFace specific args
-        attn_implementation: str = "sdpa",
+        attn_implementation: str = "sdpa_torchtitan",
         **kwargs,
     ):
         assert titan_args is not None, "titan_args is required"
@@ -72,6 +74,8 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
         # HuggingFace specific args
         self.attn_implementation = attn_implementation
+        #NOTE:(3outeille):This will force create_causal_mask to return None
+        AttentionInterface._global_mapping[attn_implementation] = sdpa_attention_forward
 
         # Start with passed_args as just titan_args
         self._passed_args = {**titan_args.__dict__, "attn_implementation": attn_implementation}
