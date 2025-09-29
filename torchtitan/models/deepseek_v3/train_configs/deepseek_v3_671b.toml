@@ -25,7 +25,7 @@ hf_assets_path = "./assets/hf/DeepSeek-V3.1-Base"
 
 [optimizer]
 name = "AdamW"
-lr = 2.2e-4
+lr = 2.2e-5
 eps = 1e-8
 
 [lr_scheduler]

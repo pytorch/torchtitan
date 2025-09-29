@@ -409,6 +409,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
+
+        # torch.autograd.set_detect_anomaly(True)
+        
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
@@ -473,7 +476,34 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
                 del pred
+                # with torch.autograd.detect_anomaly():
                 loss.backward()
+                
+                # Check for NaN/Inf gradients after backward pass
+                print(f"[GRAD CHECK] Checking gradients after backward pass...")
+                nan_params = []
+                inf_params = []
+                total_params = 0
+                total_with_grad = 0
+                
+                for name, param in model_parts[0].named_parameters():
+                    total_params += 1
+                    if param.grad is not None:
+                        total_with_grad += 1
+                        if torch.isnan(param.grad).any():
+                            nan_params.append(name)
+                            print(f"[GRAD NaN] {name}: shape={param.grad.shape}, norm={param.grad.norm():.6f}")
+                        elif torch.isinf(param.grad).any():
+                            inf_params.append(name)
+                            print(f"[GRAD INF] {name}: shape={param.grad.shape}, norm={param.grad.norm():.6f}")
+                
+                print(f"[GRAD SUMMARY] Total params: {total_params}, with grad: {total_with_grad}")
+                print(f"[GRAD SUMMARY] NaN gradients: {len(nan_params)}, Inf gradients: {len(inf_params)}")
+                
+                if nan_params:
+                    print(f"[GRAD ERROR] Parameters with NaN gradients: {nan_params[:10]}...")  # Show first 10
+                if inf_params:
+                    print(f"[GRAD ERROR] Parameters with Inf gradients: {inf_params[:10]}...")  # Show first 10
 
         return loss
 

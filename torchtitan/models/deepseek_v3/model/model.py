@@ -15,6 +15,7 @@ from torchtitan.models.moe import FeedForward, MoE
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
+from torchtitan.tools.logging import logger
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -283,6 +284,74 @@ class TransformerBlock(nn.Module):
 
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
+
+        # Register backward hook to monitor gradients
+        self.register_full_backward_hook(self._layer_gradient_hook)
+        logger.info(f"[HOOK REGISTRATION] Layer {self.layer_id} TransformerBlock gradient hook registered")
+
+    def _layer_gradient_hook(self, module, grad_input, grad_output):
+        """Backward hook to monitor gradients of all parameters in this layer."""
+        logger.info(f"[LAYER GRAD HOOK] Layer {self.layer_id} TransformerBlock backward pass")
+        
+        # Collect gradient statistics for this layer
+        layer_grad_norms = []
+        nan_params = []
+        inf_params = []
+        total_params = 0
+        
+        # Check gradients for all named parameters in this layer
+        for name, param in self.named_parameters():
+            total_params += 1
+            if param.grad is not None:
+                if param.grad.dtype.is_floating_point or param.grad.dtype.is_complex:
+                    # Check for NaN and Inf elements first
+                    has_nan = torch.isnan(param.grad).any().item()
+                    has_inf = torch.isinf(param.grad).any().item()
+                    
+                    # Calculate norm safely
+                    try:
+                        grad_norm = param.grad.norm().item()
+                        # Check if norm overflowed to inf (but individual elements might be finite)
+                        if torch.isinf(torch.tensor(grad_norm)) and not has_inf:
+                            print(f"[LAYER GRAD OVERFLOW] Layer {self.layer_id} - {name}: "
+                                  f"norm overflow to inf, max_val={param.grad.abs().max().item():.6e}, "
+                                  f"shape={param.grad.shape}")
+                    except:
+                        grad_norm = float('inf')
+                        print(f"[LAYER GRAD ERROR] Layer {self.layer_id} - {name}: failed to compute norm")
+                    
+                    layer_grad_norms.append(grad_norm)
+                    
+                    if has_nan:
+                        nan_params.append(name)
+                        print(f"[LAYER GRAD NaN] Layer {self.layer_id} - {name}: shape={param.grad.shape}")
+                    elif has_inf:
+                        inf_params.append(name)
+                        print(f"[LAYER GRAD INF] Layer {self.layer_id} - {name}: shape={param.grad.shape}")
+                    elif torch.isinf(torch.tensor(grad_norm)):
+                        print(f"[LAYER GRAD LARGE] Layer {self.layer_id} - {name}: "
+                              f"very large gradients, max={param.grad.abs().max().item():.6e}")
+                else:
+                    print(f"[LAYER GRAD] Layer {self.layer_id} - {name}: dtype={param.grad.dtype} (non-float grad)")
+            else:
+                print(f"[LAYER GRAD] Layer {self.layer_id} - {name}: grad is None")
+        
+        # Compute and logger.info layer statistics
+        if layer_grad_norms:
+            avg_grad_norm = sum(layer_grad_norms) / len(layer_grad_norms)
+            max_grad_norm = max(layer_grad_norms)
+            min_grad_norm = min(layer_grad_norms)
+            
+            logger.info(f"[LAYER GRAD SUMMARY] Layer {self.layer_id}: "
+                  f"avg_norm={avg_grad_norm:.6f}, max_norm={max_grad_norm:.6f}, "
+                  f"min_norm={min_grad_norm:.6f}, total_params={total_params}")
+        else:
+            logger.info(f"[LAYER GRAD SUMMARY] Layer {self.layer_id}: No floating point gradients found, total_params={total_params}")
+            
+        if nan_params:
+            logger.info(f"[LAYER GRAD ERROR] Layer {self.layer_id} NaN gradients: {nan_params}")
+        if inf_params:
+            logger.info(f"[LAYER GRAD ERROR] Layer {self.layer_id} Inf gradients: {inf_params}")
 
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
         """
