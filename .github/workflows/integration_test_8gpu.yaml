@@ -20,13 +20,12 @@ defaults:
   run:
     shell: bash -l -eo pipefail {0}
 
-permissions:
-  id-token: write
-  contents: read
-
 jobs:
   # aws setup
   aws-setup:
+    permissions:
+      id-token: write
+      contents: read
     runs-on: linux.rocm.gpu.gfx942.8
     steps:
       - name: configure aws credentials
