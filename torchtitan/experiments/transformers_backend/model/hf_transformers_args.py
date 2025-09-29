@@ -15,6 +15,8 @@ from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import AttentionInterface
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
+from torchtitan.experiments.transformers_backend.model.hf_llama_patch import patch_hf_llama
+from torchtitan.experiments.transformers_backend.model.hf_deepseek_v3_patch import patch_hf_deepseek_v3
 
 @dataclass
 class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
@@ -81,7 +83,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         self._passed_args = {**titan_args.__dict__, "attn_implementation": attn_implementation}
         self._passed_args.update(kwargs)
 
-        # If DeepSeekV3 args are provided, fill the rest
+        #NOTE(3outeille): Wait for transformers uniformization of MoE args
         if deepseek_v3_args is not None:
             # For DeepSeekV3, setting q_lora_rank to 0 in TorchTitan is equivalent to
             # setting it to None in HuggingFace.
@@ -285,6 +287,14 @@ class HFTransformerModel(nn.Module):
                     f"Could not find model class '{model_class_name}' in globals or transformers. "
                     f"Make sure the class is available. Original error: {e}"
                 )
+        
+        if model_args.architectures[0] == "DeepseekV3Model":
+            print("Patching deepseek")
+            patch_hf_deepseek_v3()
+        else:
+            print("Patching llama")
+            patch_hf_llama()
+
         self.model = model_cls(config=model_args)
 
         for layer in self.model.model.layers:

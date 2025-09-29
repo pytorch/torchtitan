@@ -511,7 +511,6 @@ class CompareDistributedRun:
         ]
         env = os.environ.copy()
         env["SEED"] = str(self.seed)
-        env["MODEL_TYPE"] = model_name
         env["LOG_RANK"] = str(self.ngpu - 1)
 
         log_message(LogLevel.COMMAND, f"Command: {' '.join(cmd)}", indent=indent, dim=dim)
@@ -788,6 +787,15 @@ class CompareDistributedRun:
         if not self.compare_metrics(
             tt_baseline_metrics, hf_baseline_metrics, "baseline (TT) vs baseline (HF)", indent=0
         ):
+            # generate diff between baseline TT and baseline HF
+            diff_file_tt_baseline_vs_hf_baseline = (
+                self.results_dir / "diff_tt_baseline_vs_hf_baseline.log"
+            )
+            self.generate_diff(
+                baseline_log_tt, baseline_log_hf, diff_file_tt_baseline_vs_hf_baseline, indent=0
+            )
+            log_message(LogLevel.INFO, f"Diff between baseline TT and baseline HF saved to: {diff_file_tt_baseline_vs_hf_baseline}", indent=0)
+           
             raise ValueError(
                 f"Baseline (TT) vs baseline (HF) metrics comparison failed for {tt_model_name}"
             )
