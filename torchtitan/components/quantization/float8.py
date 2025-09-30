@@ -7,15 +7,15 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.components.quantization import (
+    FP8_GROUP_ALIGNMENT_SIZE,
+    QuantizationConverter,
+)
 
-from torchtitan.config.job_config import Float8Dense, JobConfig
+from torchtitan.config.job_config import Float8Linear, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
-from torchtitan.protocols.model_converter import (
-    ModelConverter,
-    register_model_converter,
-)
+from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -24,15 +24,15 @@ from .utils import module_filter_fn
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
-class Float8DenseConverter(ModelConverter):
+class Float8LinearConverter(QuantizationConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        self.enabled = False
-
-        float8_config: Float8Dense = job_config.quantize.dense.float8
+        super().__init__(job_config, parallel_dims)
+        float8_config: Float8Linear = job_config.quantize.linear.float8
         compile_config = job_config.compile
         model_compile_enabled = (
             compile_config.enable and "model" in compile_config.components
         )
+
         if has_cuda_capability(8, 9) or (
             float8_config.emulate and not model_compile_enabled
         ):
@@ -43,14 +43,14 @@ class Float8DenseConverter(ModelConverter):
                 "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
             )
         try:
-            from torchao.float8 import Float8LinearConfig
+            from torchao.float8 import Float8LinearConfig as TorchAOFloat8LinearConfig
         except ImportError as e:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 linear layers."
             ) from e
 
         if float8_config.recipe_name is not None and not hasattr(
-            Float8LinearConfig, "from_recipe_name"
+            TorchAOFloat8LinearConfig, "from_recipe_name"
         ):
             logger.warning(
                 "Failed to swap to Float8Linear with recipe lookup because the torchao version "
@@ -58,7 +58,6 @@ class Float8DenseConverter(ModelConverter):
             )
             return
 
-        self.enabled = True
         self.filter_fqns = float8_config.filter_fqns
         self.filter_fn = self._init_filter_fn(float8_config)
 
@@ -68,7 +67,9 @@ class Float8DenseConverter(ModelConverter):
                 "with `float8_config.recipe_name` is not supported"
             )
 
-            self.config = Float8LinearConfig.from_recipe_name(float8_config.recipe_name)
+            self.config = TorchAOFloat8LinearConfig.from_recipe_name(
+                float8_config.recipe_name
+            )
             self.precompute_scale = False
             logger.info(
                 f"Float8 training active with recipe {float8_config.recipe_name}"
@@ -86,7 +87,7 @@ class Float8DenseConverter(ModelConverter):
                 parallel_dims.dp_shard_enabled
                 and float8_config.enable_fsdp_float8_all_gather
             )
-            self.config = Float8LinearConfig(
+            self.config = TorchAOFloat8LinearConfig(
                 enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
                 emulate=float8_config.emulate,
             )
@@ -97,7 +98,9 @@ class Float8DenseConverter(ModelConverter):
             )
             logger.info("Float8 tensorwise scaled training active")
 
-    def _init_filter_fn(self, float8_config: Float8Dense):
+        self.enabled = True
+
+    def _init_filter_fn(self, float8_config: Float8Linear):
         # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
         use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
         if use_auto_filter:
@@ -169,10 +172,10 @@ class Float8DenseConverter(ModelConverter):
             precompute_float8_dynamic_scale_for_fsdp(m)
 
 
-class Float8MoEConverter(ModelConverter):
+class Float8GroupedMMConverter(QuantizationConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        self.enabled = False
-        self.fqns = job_config.quantize.moe.float8.fqns
+        super().__init__(job_config, parallel_dims)
+        self.fqns = job_config.quantize.grouped_mm.float8.fqns
         compile_config = job_config.compile
         model_compile_enabled = (
             compile_config.enable and "model" in compile_config.components
@@ -231,5 +234,5 @@ class Float8MoEConverter(ModelConverter):
         pass
 
 
-register_model_converter(Float8DenseConverter, "quantize.dense.float8")
-register_model_converter(Float8MoEConverter, "quantize.moe.float8")
+register_model_converter(Float8LinearConverter, "quantize.linear.float8")
+register_model_converter(Float8GroupedMMConverter, "quantize.grouped_mm.float8")

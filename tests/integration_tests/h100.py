@@ -35,9 +35,9 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.converters quantize.dense.float8",
-                    "--quantize.dense.float8.enable_fsdp_float8_all_gather",
-                    "--quantize.dense.float8.precompute_float8_dynamic_scale_for_fsdp",
+                    "--model.converters quantize.linear.float8",
+                    "--quantize.linear.float8.enable_fsdp_float8_all_gather",
+                    "--quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp",
                 ],
             ],
             "Float8 test",
@@ -52,9 +52,9 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.enable_async_tensor_parallel",
-                    "--model.converters quantize.dense.float8",
-                    "--quantize.dense.float8.enable_fsdp_float8_all_gather",
-                    "--quantize.dense.float8.precompute_float8_dynamic_scale_for_fsdp",
+                    "--model.converters quantize.linear.float8",
+                    "--quantize.linear.float8.enable_fsdp_float8_all_gather",
+                    "--quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp",
                 ],
             ],
             "FSDP+async TP+PP+torch.compile+Float8",
@@ -69,9 +69,9 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.context_parallel_degree 2",
-                    "--model.converters quantize.dense.float8",
-                    "--quantize.dense.float8.enable_fsdp_float8_all_gather",
-                    "--quantize.dense.float8.precompute_float8_dynamic_scale_for_fsdp",
+                    "--model.converters quantize.linear.float8",
+                    "--quantize.linear.float8.enable_fsdp_float8_all_gather",
+                    "--quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp",
                 ]
             ],
             "HSDP+CP+torch.compile+Float8",
