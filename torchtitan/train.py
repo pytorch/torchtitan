@@ -417,8 +417,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Create Attention masks. Currently, if SDPA is used, the masks should be None.
         # However, this may change in the future if SDPA supports varlen.
+        use_flex_attn = getattr(self.model_args, "use_flex_attn", False)
+        cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
         create_mask_fn = get_create_mask_fn(
-            cp_mesh=parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
+            use_flex_attn=use_flex_attn,
+            cp_mesh=cp_mesh,
         )
         attention_masks = model_parts[0].get_attention_masks(
             create_mask_fn=create_mask_fn,

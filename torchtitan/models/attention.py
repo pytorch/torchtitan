@@ -22,7 +22,16 @@ from torch.nn.attention.flex_attention import (
 )
 
 
-class FlexAttentionWrapper(torch.nn.Module):
+__all__ = [
+    "AttentionOp",
+    "get_causal_mask_mod",
+    "get_document_mask_mod",
+    "get_fixed_block_mask_mod",
+    "get_create_mask_fn",
+]
+
+
+class _FlexAttentionWrapper(torch.nn.Module):
     _flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention, mode="max-autotune-no-cudagraphs"
     )
@@ -38,10 +47,10 @@ class FlexAttentionWrapper(torch.nn.Module):
         # 2. `self._flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttentionOp._flex_attn` is correct.
-        return FlexAttentionWrapper._flex_attn(*args, **kwargs)
+        return _FlexAttentionWrapper._flex_attn(*args, **kwargs)
 
 
-class ScaledDotProductAttentionWrapper(torch.nn.Module):
+class _ScaledDotProductAttentionWrapper(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
 
@@ -56,9 +65,9 @@ class AttentionOp(torch.nn.Module):
         super().__init__()
         self.use_flex_attn = use_flex_attn
         if use_flex_attn:
-            self._attn_op = FlexAttentionWrapper()
+            self._attn_op = _FlexAttentionWrapper()
         else:
-            self._attn_op = ScaledDotProductAttentionWrapper()
+            self._attn_op = _ScaledDotProductAttentionWrapper()
             self._init_sdpa_backend()
 
     @classmethod
@@ -94,6 +103,9 @@ class AttentionOp(torch.nn.Module):
                 return self._attn_op(q, k, v, scale=scale)
 
 
+# We cannot do inner function because we won't be able to cache it --
+# if we an inner function, a new closure will be created every time
+# `get_causal_mask_mod` is called.
 def _causal_mask(
     b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
 ):
@@ -160,8 +172,27 @@ _compiled_create_block_mask: Callable | None = None
 
 
 def get_create_mask_fn(
+    use_flex_attn: bool,
     cp_mesh: torch.distributed.device_mesh.DeviceMesh | None = None,
-) -> None:
+) -> Callable:
+    """
+    Get a function that creates an attention mask. This is currently only
+    mneaningful when FlexAttention is used. For SDPA, the returned
+    function should never be called as SDPA doesn't support varlen yet.
+
+    Note: the returned create_mask_fn will cache the masks if the
+    input is the same.
+
+    Args:
+        use_flex_attn: Whether to use FlexAttention or not.
+        cp_mesh: The device mesh to use for creating the block mask. If None, the
+            function will return a function that creates a block mask for the current
+            device mesh.
+
+    Returns:
+        create_mask_fn: a function hat creates an attention mask. This function
+        will catch the results if the input is the same.
+    """
 
     # This is not functional yet because we currently gate the use of Flex + CP
     # while we continue debugging accuracy issues. However, we want to evaluate
@@ -179,6 +210,14 @@ def get_create_mask_fn(
             )
     elif _compiled_create_block_mask is None:
         _compiled_create_block_mask = torch.compile(create_block_mask)
+
+    def dontcall(*args, **kwargs):
+        raise RuntimeError(
+            "This function should not be called. Please use the compiled version."
+        )
+
+    if not use_flex_attn:
+        return dontcall
 
     # TODO: this cache number is kind of random, we should find a better way to set it.
     @functools.lru_cache(4)
