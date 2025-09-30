@@ -11,6 +11,7 @@ Methodology:
             - train the nd-// TT counterpart
                 - diff between TT nd-// and HF nd-//
                 - diff between TT FSDP (baseline) and HF nd-//
+                - diff between TT FSDP (baseline) and TF nd-//
 results/
 |_ meta-llama
 	|_ Llama-3.2-1B
@@ -668,6 +669,32 @@ class CompareDistributedRun:
                 indent=indent + 5,
                 dim=True,
             )
+
+            # generated diff between baseline TT and current tt nd-parallelism run
+            diff_file_tt_baseline_vs_tt_nd_parallelism = (
+                test_dir / "diff_tt_baseline_vs_tt_nd_parallelism.log"
+            )
+            self.generate_diff(
+                baseline_log_tt,
+                log_path_tt,
+                diff_file_tt_baseline_vs_tt_nd_parallelism,
+                indent=indent + 5,
+                dim=True,
+            )
+            if tt_metrics:
+                self.compare_metrics(
+                    tt_baseline_metrics,
+                    tt_metrics,
+                    f"{config.name} (TT baseline vs TT nd-parallel)",
+                    indent=indent + 5,
+                    dim=True,
+                )
+            log_message(
+                LogLevel.INFO,
+                f"Diff between baseline TT and current (TT) nd-parallelism run saved to: {diff_file_tt_baseline_vs_tt_nd_parallelism}",
+                indent=indent + 5,
+                dim=True,
+            )
             return False
 
     def run(self) -> int:
@@ -784,18 +811,18 @@ class CompareDistributedRun:
         if not tt_baseline_metrics.loss or not tt_baseline_metrics.grad_norm:
             raise ValueError(f"Could not extract TorchTitan baseline metrics for {tt_model_name}")
         
+        # generate diff between baseline TT and baseline HF
+        diff_file_tt_baseline_vs_hf_baseline = (
+            self.results_dir / "diff_tt_baseline_vs_hf_baseline.log"
+        )
+        self.generate_diff(
+            baseline_log_tt, baseline_log_hf, diff_file_tt_baseline_vs_hf_baseline, indent=0
+        )
+        log_message(LogLevel.INFO, f"Diff between baseline TT and baseline HF saved to: {diff_file_tt_baseline_vs_hf_baseline}", indent=0)
+        
         if not self.compare_metrics(
             tt_baseline_metrics, hf_baseline_metrics, "baseline (TT) vs baseline (HF)", indent=0
         ):
-            # generate diff between baseline TT and baseline HF
-            diff_file_tt_baseline_vs_hf_baseline = (
-                self.results_dir / "diff_tt_baseline_vs_hf_baseline.log"
-            )
-            self.generate_diff(
-                baseline_log_tt, baseline_log_hf, diff_file_tt_baseline_vs_hf_baseline, indent=0
-            )
-            log_message(LogLevel.INFO, f"Diff between baseline TT and baseline HF saved to: {diff_file_tt_baseline_vs_hf_baseline}", indent=0)
-           
             raise ValueError(
                 f"Baseline (TT) vs baseline (HF) metrics comparison failed for {tt_model_name}"
             )
