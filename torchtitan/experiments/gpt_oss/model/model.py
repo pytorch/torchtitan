@@ -245,14 +245,18 @@ class Attention(nn.Module):
                 k,
                 v,
                 scale=None,
-                return_lse=False,
+                return_lse=True,
             )
 
             # Apply attention sink rescaling: rescale by σ(lse - w[h])
             # This is mathematically equivalent to concatenating learnable sink weights
+            # TODO: If attention part is, but self.sinks are registered as a DTensor, while lse is a plain tensor
+            # q, k, v are already sharded by TP: [batch, local_heads, seq_len, head_dim] (plain tensor)
+            # sinks shape needs to match: [local_heads],
+            # [rank0]:lse.shape torch.Size([8, 32, 2048]), <class 'torch.Tensor'>
             sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(
                 -1
-            )  # [B,H,S,1]
+            )
             output = output * sink_scale.to(output.dtype)
 
         else:

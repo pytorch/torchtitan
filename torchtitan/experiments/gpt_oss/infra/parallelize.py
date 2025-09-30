@@ -8,6 +8,7 @@ from torch.distributed.tensor.parallel import (
     PrepareModuleInput,
     RowwiseParallel,
     SequenceParallel,
+    PrepareModuleOutput,
 )
 
 if torch.__version__ >= "2.9":
@@ -22,7 +23,6 @@ from torchtitan.distributed.expert_parallel import ExpertParallel, ReordererSequ
 from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.experiments.llama4.infra.parallelize import (
     apply_fsdp,
-    apply_moe_ep_tp,
 )
 
 from torchtitan.tools.logging import logger
@@ -212,18 +212,21 @@ def apply_non_moe_tp(
             Float8ColwiseParallel,
             Float8RowwiseParallel,
             PrepareFloat8ModuleInput,
+            PrepareFloat8ModuleOutput
         )
 
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
+        rowwise_parallel, colwise_parallel, prepare_module_input, prepare_module_output = (
             Float8RowwiseParallel,
             Float8ColwiseParallel,
             PrepareFloat8ModuleInput,
+            PrepareFloat8ModuleOutput,
         )
     else:
-        rowwise_parallel, colwise_parallel, prepare_module_input = (
+        rowwise_parallel, colwise_parallel, prepare_module_input, prepare_module_output= (
             RowwiseParallel,
             ColwiseParallel,
             PrepareModuleInput,
+            PrepareModuleOutput,
         )
 
     # Apply tensor + sequence parallelism to every transformer block
@@ -231,29 +234,29 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate()),
-                desired_input_layouts=(Replicate(), Replicate()),
+                input_layouts=(Shard(1), None),
+                desired_input_layouts=(Replicate(), None),
             ),
-            "attention.wq": colwise_parallel(use_local_output=False),
-            "attention.wk": colwise_parallel(use_local_output=False),
-            "attention.wv": colwise_parallel(use_local_output=False),
+            "attention.wq": colwise_parallel(),
+            "attention.wk": colwise_parallel(),
+            "attention.wv": colwise_parallel(),
+            "attention.attn": prepare_module_output(output_layouts=(Shard(1), Shard(1)), desired_output_layouts=(Shard(1), Shard(1)), use_local_output=False),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }
+
+        # shard attention.sinks across heads
+        attn = transformer_block.attention
+        attn.register_parameter(
+            "sinks",
+            nn.Parameter(distribute_tensor(attn.sinks, tp_mesh, [Shard(0)])),
+        )
 
         parallelize_module(
             module=transformer_block,
             device_mesh=tp_mesh,
             parallelize_plan=layer_plan,
         )
-
-        # shard attention.sinks across heads
-        # TODO(jianiw): Fix the sink implementation
-        # attn = transformer_block.attention
-        # attn.register_parameter(
-        #     "sinks",
-        #     nn.Parameter(distribute_tensor(attn.sinks, tp_mesh, [Replicate()])),
-        # )
 
     if enable_async_tp:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
