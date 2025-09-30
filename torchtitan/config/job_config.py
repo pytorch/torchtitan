@@ -375,7 +375,7 @@ class Parallelism:
 
     expert_parallel_degree: int = 1
     """
-    Expert parallelism degree. 1 means disabled. No effect for non-GroupedMMConfig models.
+    Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
     Currently, it is supported with the following constraints:
     - when etp = tp:
       - cp <= ep <= dp_shard * cp
@@ -391,7 +391,7 @@ class Parallelism:
 
     expert_tensor_parallel_degree: int = 1
     """
-    Expert tensor parallelism degree. 1 means disabled. No effect for non-GroupedMMConfig models, or when ep = 1.
+    Expert tensor parallelism degree. 1 means disabled. No effect for non-MoE models, or when ep = 1.
     With this option, the tensor parallel degree on routed experts can be different from that on other params.
     Currently, we only support either
     - [partial dp -> ep] etp = tp
