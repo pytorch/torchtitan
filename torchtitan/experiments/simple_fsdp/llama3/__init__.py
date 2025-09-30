@@ -20,7 +20,7 @@ from .parallelize import parallelize_llama
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="simple_fsdp",
+        name="simple_fsdp.llama3",
         model_cls=SimpleFSDPTransformer,
         model_args=llama3_configs,
         parallelize_fn=parallelize_llama,
