@@ -12,6 +12,10 @@ on:
     # Runs every 6 hours
     - cron: '0 */6 * * *'
 
+permissions:
+      id-token: write
+      contents: read
+
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
   cancel-in-progress: true
@@ -23,9 +27,6 @@ defaults:
 jobs:
   # aws setup
   aws-setup:
-    permissions:
-      id-token: write
-      contents: read
     runs-on: linux.rocm.gpu.gfx942.4
     steps:
       - name: configure aws credentials
