@@ -488,10 +488,10 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.converters quantize.dense.float8",
-                    "--quantize.dense.float8.enable_fsdp_float8_all_gather",
-                    "--quantize.dense.float8.precompute_float8_dynamic_scale_for_fsdp",
-                    "--quantize.dense.float8.emulate",
+                    "--model.converters quantize.linear.fp8",
+                    "--quantize.linear.fp8.enable_fsdp_float8_all_gather",
+                    "--quantize.linear.fp8.precompute_float8_dynamic_scale_for_fsdp",
+                    "--quantize.linear.fp8.emulate",
                 ],
             ],
             "Float8 emulation test",
