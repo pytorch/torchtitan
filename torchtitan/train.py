@@ -128,9 +128,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         torch._inductor.config.force_disable_caches = True
         # this is necessary for working with reordering passes. Just leave it set for all the jobs for now.
         torch._inductor.config.allow_buffer_reuse = False
-
         # allow configuring inductor comms optimizations from torchtitan commandline
-        if job_config.experimental.enable_simplefsdp_passes:
+        if job_config.experimental.enable_autobucketing_passes == "inductor":
             # enable simplefsdp's autobucketing and reorder passes (original code in https://github.com/pytorch/pytorch/pull/160282)
             from autoparallel.auto_bucketing import (
                 simple_fsdp_autobucketing_reordering_pass,
@@ -143,6 +142,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             simplefsdp_autobucketing_config.save_estimation_path = (
                 "/tmp/torchtitan_simplefsdp_comm_estimation.pkl"
             )
+            simplefsdp_autobucketing_config.calibrate_number = 20
             simple_fsdp_autobucketing_reordering_pass = partial(
                 simple_fsdp_autobucketing_reordering_pass,
                 configs=simplefsdp_autobucketing_config,
@@ -154,6 +154,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # Don't use both sets of passes at the same time!
             torch._inductor.config.bucket_all_gathers_fx = "none"
             torch._inductor.config.bucket_reduce_scatters_fx = "none"
+        elif job_config.experimental.enable_autobucketing_passes == "aten":
+            # enable aten level autobucketing pass (pass entry in: https://github.com/pytorch/pytorch/pull/163960)
+            from autoparallel.auto_bucketing import aten_autobucketing_reordering_pass, aten_autobucketing_config
+            torch._inductor.config.reorder_for_peak_memory = False
+            torch._inductor.config.reorder_for_compute_comm_overlap = False
+            aten_autobucketing_reordering_pass = partial(
+                aten_autobucketing_reordering_pass,
+                configs=aten_autobucketing_config,
+            )
+            torch._inductor.config.post_grad_custom_post_pass = aten_autobucketing_reordering_pass
         else:
             torch._inductor.config.bucket_all_gathers_fx = (
                 job_config.experimental.bucket_all_gathers_fx

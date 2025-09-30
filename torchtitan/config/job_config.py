@@ -737,7 +737,7 @@ class Experimental:
 
     autop_force_bf16: bool = False
 
-    enable_simplefsdp_passes: bool = False
+    enable_autobucketing_passes: str = ""
 
 @dataclass
 class Validation:
