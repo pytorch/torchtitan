@@ -94,13 +94,6 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
-    # Worst case = single expert receives all tokens
-    # TODO: explore using token dropping to avoid this huge overallocation
-    max_tokens_per_ep_rank = (
-        job_config.training.seq_len
-        * job_config.training.local_batch_size
-        * model.model_args.moe_args.num_experts
-    )
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
@@ -115,7 +108,6 @@ def parallelize_llama(
             ),
             etp_enabled=parallel_dims.etp_enabled,
             a2a_impl=job_config.parallelism.expert_parallel_a2a_impl,
-            max_tokens_per_ep_rank=max_tokens_per_ep_rank,
         )
 
     model_compile_enabled = (
@@ -447,8 +439,7 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
-    a2a_impl: str,
-    max_tokens_per_ep_rank: int = -1, # Only used for mxfp8 a2a
+    a2a_impl: str = "default",
 ):
     for transformer_block in model.layers.values():
         if not transformer_block.moe_enabled:
@@ -498,17 +489,13 @@ def apply_moe_ep_tp(
         elif tp_mesh is None:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel(
-                a2a_impl=a2a_impl, max_tokens_per_ep_rank=max_tokens_per_ep_rank
-            )
+            experts_plan = ExpertParallel(a2a_impl=a2a_impl)
         elif etp_enabled:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
         else:
             experts_mesh = ep_mesh
-            experts_plan = ExpertParallel(
-                a2a_impl=a2a_impl, max_tokens_per_ep_rank=max_tokens_per_ep_rank
-            )
+            experts_plan = ExpertParallel(a2a_impl=a2a_impl)
 
         parallelize_module(
             module=transformer_block.moe.experts,
