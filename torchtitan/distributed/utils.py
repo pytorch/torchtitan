@@ -217,7 +217,7 @@ def get_train_context(
 def maybe_enable_amp(
     parallel_dims: ParallelDims, mixed_precision_param: str, device_type: torch.device
 ) -> Generator[None, None, None]:
-    if parallel_dims.fsdp_enabled:
+    if parallel_dims.fsdp_enabled or parallel_dims.dp_replicate_enabled:
         # FSDP handles mixed precision internally
         logger.info("Mixed precision training is handled by fully_shard")
         return contextlib.nullcontext()
@@ -432,9 +432,7 @@ def _clip_grad_norm_with_ep(
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
+        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:
