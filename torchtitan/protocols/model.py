@@ -11,7 +11,12 @@ from typing import Protocol
 import torch
 import torch.nn as nn
 
+from torch.nn.attention.flex_attention import BlockMask
+
 from torchtitan.config import JobConfig
+
+
+AttentionMasksType = dict[str, BlockMask] | BlockMask | None
 
 
 @dataclass
@@ -53,3 +58,6 @@ class ModelProtocol(Protocol):
             buffer_device: Optional device to place buffers on during initialization.
         """
         pass
+
+    def get_attention_masks(self, *args, **kwargs) -> AttentionMasksType:
+        return None

@@ -5,13 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import Tuple
+from typing import Callable
 
 import torch
 from torch import nn
 
-from torchtitan.models.attention import build_attention
+from torch.nn.attention.flex_attention import BlockMask
+
+from torchtitan.models.attention import (
+    AttentionOp,
+    get_causal_mask_mod,
+    get_document_mask_mod,
+)
 from torchtitan.models.moe import FeedForward, MoE
+from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
@@ -58,7 +65,7 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
 
     def find_correction_range(
         low_rot: float, high_rot: float, dim: int, base: float, max_seq_len: int
-    ) -> Tuple[int, int]:
+    ) -> tuple[int, int]:
         """
         Computes the range of correction dimensions for rotary positional embeddings.
 
@@ -70,7 +77,7 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
             max_seq_len (int): Maximum sequence length.
 
         Returns:
-            Tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
+            tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
         """
         low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
         high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
@@ -175,12 +182,13 @@ class Attention(nn.Module):
             mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
+        self.attention_op = AttentionOp(model_args.use_flex_attn)
 
     def forward(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
+        attention_masks: AttentionMasksType,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
@@ -231,7 +239,12 @@ class Attention(nn.Module):
         k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         v = v.transpose(1, 2)  # (bsz, n_heads, seqlen, v_head_dim)
 
-        output = self.sdpa(q, k, v, scale=self.softmax_scale)
+        assert (
+            isinstance(attention_masks, BlockMask) or attention_masks is None
+        ), attention_masks
+        output = self.attention_op(
+            q, k, v, attention_mask=attention_masks, scale=self.softmax_scale
+        )
 
         # Reshape and project output
         output = output.transpose(
@@ -284,7 +297,12 @@ class TransformerBlock(nn.Module):
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
-    def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        attention_masks: AttentionMasksType,
+    ):
         """
         Forward pass for the Transformer block.
 
@@ -295,7 +313,7 @@ class TransformerBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        x = x + self.attention(self.attention_norm(x), freqs_cis)
+        x = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
         else:
@@ -360,9 +378,27 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
                 b=cutoff_factor * final_out_std,
             )
 
+    def get_attention_masks(
+        self, create_mask_fn: Callable, batch: torch.Tensor, eos_id: int
+    ) -> AttentionMasksType:
+        if not self.model_args.use_flex_attn:
+            return None
+
+        mask_mod = get_causal_mask_mod()
+        match self.model_args.attn_mask_type:
+            case "causal":
+                B = 1
+            case "block_causal":
+                B = batch.shape[0]
+                mask_mod = get_document_mask_mod(mask_mod, batch, eos_id)
+            case _:
+                raise ValueError(f"Unknown attention mask type: {self.attn_mask_type}")
+        return create_mask_fn(mask_mod, B, None, batch.shape[1], batch.shape[1])
+
     def forward(
         self,
         tokens: torch.Tensor,
+        attention_masks: AttentionMasksType,
         input_batch: torch.Tensor | None = None,
     ):
         """
@@ -385,7 +421,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis)
+            h = layer(h, self.freqs_cis, attention_masks)
         h = self.norm(h) if self.norm is not None else h
         output = self.output(h) if self.output is not None else h
         return output

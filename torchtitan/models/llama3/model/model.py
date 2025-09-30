@@ -7,11 +7,19 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
+from typing import Callable
+
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.attention import build_attention
+from torchtitan.models.attention import (
+    AttentionOp,
+    get_causal_mask_mod,
+    get_document_mask_mod,
+)
+from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import TransformerModelArgs
@@ -145,7 +153,7 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
-        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
+        self.attention_op = AttentionOp(model_args.use_flex_attn)
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -156,6 +164,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
+        attention_masks: AttentionMasksType,
     ):
         """
         Forward pass of the attention module.
@@ -189,7 +198,10 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        output = self.sdpa(xq, xk, xv)
+        assert (
+            isinstance(attention_masks, BlockMask) or attention_masks is None
+        ), attention_masks
+        output = self.attention_op(xq, xk, xv, attention_mask=attention_masks)
 
         output = output.transpose(
             1, 2
@@ -285,6 +297,7 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
+        attention_masks: AttentionMasksType,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -297,7 +310,7 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis)
+        h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -391,9 +404,27 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.rope_theta,
         )
 
+    def get_attention_masks(
+        self, create_mask_fn: Callable, batch: torch.Tensor, eos_id: int
+    ) -> AttentionMasksType:
+        if not self.model_args.use_flex_attn:
+            return None
+
+        mask_mod = get_causal_mask_mod()
+        match self.model_args.attn_mask_type:
+            case "causal":
+                B = 1
+            case "block_causal":
+                B = batch.shape[0]
+                mask_mod = get_document_mask_mod(mask_mod, batch, eos_id)
+            case _:
+                raise ValueError(f"Unknown attention mask type: {self.attn_mask_type}")
+        return create_mask_fn(mask_mod, B, None, batch.shape[1], batch.shape[1])
+
     def forward(
         self,
         tokens: torch.Tensor,
+        attention_masks: AttentionMasksType,
         input_batch: torch.Tensor | None = None,
     ):
         """
@@ -417,7 +448,7 @@ class Transformer(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis)
+            h = layer(h, self.freqs_cis, attention_masks=attention_masks)
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
