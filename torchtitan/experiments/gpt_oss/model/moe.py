@@ -124,6 +124,7 @@ class GptOssGroupedExperts(nn.Module):
 
         h = torch._grouped_mm(x.bfloat16(), mlp1_weight.bfloat16(), offs=offsets)
         if offsets is not None:
+            # TODO(jianiw): check what is this doing
             b1 = mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
             tail_slack = x.shape[0] - int(offsets[-1])
             if tail_slack:
@@ -131,6 +132,7 @@ class GptOssGroupedExperts(nn.Module):
             h = h + b1.to(h.dtype)
 
         h = swiglu(h, limit=swiglu_limit)
+        # print(f"{h.shape} {mlp2_weight.shape}") # [rank0]:torch.Size([77507, 1440]) torch.Size([2, 2880, 128])
         h = torch._grouped_mm(h, mlp2_weight.bfloat16(), offs=offsets)
         if offsets is not None:
             b2 = mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
