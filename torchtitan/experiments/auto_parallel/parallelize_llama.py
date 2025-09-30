@@ -10,7 +10,6 @@ import torch
 
 from autoparallel.api import AutoParallel
 
-from torch.distributed import DeviceMesh
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
 
@@ -33,6 +32,7 @@ def parallelize_llama(
     the model must fit on GPU or CPU memory.
     """
     world_mesh = parallel_dims.world_mesh
+
     def input_fn():
         global_batch_size = job_config.training.global_batch_size
         if global_batch_size < 0:
@@ -62,6 +62,57 @@ def parallelize_llama(
         lambda bucket_idx: 1000 / parallel_dims.tp
     )
 
+    enable_overlap_scheduling = False
+    enable_overlap_scheduling_bucketing = False
+    if enable_overlap_scheduling_bucketing:
+        assert (
+            enable_overlap_scheduling
+        ), "bucketing can not be used without overlap scheduling"
+    enable_asynctp = False
+
+    if (
+        enable_overlap_scheduling
+        or enable_overlap_scheduling_bucketing
+        or enable_asynctp
+    ):
+        mesh = world_mesh
+        torch._inductor.config.reorder_for_peak_memory = False
+        torch._inductor.config.reorder_for_compute_comm_overlap = False
+        torch._inductor.config.allow_buffer_reuse = False
+        torch._inductor.config.test_configs.aten_fx_overlap_preserving_bucketing = (
+            enable_overlap_scheduling_bucketing
+        )
+
+        if enable_asynctp:
+            from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+            enable_symm_mem_for_group(mesh["tp"].get_group().group_name)
+            enable_symm_mem_for_group(mesh["dp"].get_group().group_name)
+            torch._inductor.config._micro_pipeline_tp = False
+            # Disable inductor AsyncTP passes, in favor of using Autoparallel passes fork.
+            # TODO: Switch to Inductor AsyncTP passes, when all additions landed.
+            from autoparallel.asynctp import micro_pipeline_tp_pass
+
+        existing_post_grad_custom_post_pass = (
+            torch._inductor.config.post_grad_custom_post_pass
+        )
+        from torch._inductor.fx_passes.overlap_scheduling import OverlapScheduler
+
+        def _pass(graph):
+            if existing_post_grad_custom_post_pass is not None:
+                existing_post_grad_custom_post_pass(graph)
+
+            collective_info = None
+            if enable_overlap_scheduling:
+                overlap_scheduler = OverlapScheduler(graph.owning_module)
+                overlap_scheduler.run()
+                collective_info = overlap_scheduler.collective_info
+
+            if enable_asynctp:
+                micro_pipeline_tp_pass(graph, collective_info)
+
+        torch._inductor.config.post_grad_custom_post_pass = _pass
+
     # bail out
     # model = model_fn()
     # return model
@@ -78,6 +129,7 @@ def parallelize_llama(
         world_mesh,
         mp_policy=mp_policy,
         compile=job_config.compile,
+        repeated_subgraphs=True,
     ) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
 
@@ -101,7 +153,8 @@ def parallelize_llama(
         )
         out_sharding = x_sharding
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not job_config.parallelism.disable_loss_parallel
+            parallel_dims.tp_enabled
+            and not job_config.parallelism.disable_loss_parallel
         )
         if loss_parallel_enabled:
             out_sharding = tuple(
