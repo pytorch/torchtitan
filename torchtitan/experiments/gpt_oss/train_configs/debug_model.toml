@@ -51,8 +51,6 @@ enable_async_tensor_parallel = false
 expert_parallel_degree = 4
 
 
-
-
 [checkpoint]
 enable = false
 folder = "checkpoint"
