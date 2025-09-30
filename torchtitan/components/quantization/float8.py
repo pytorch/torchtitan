@@ -12,7 +12,7 @@ from torchtitan.components.quantization import (
     QuantizationConverter,
 )
 
-from torchtitan.config.job_config import FP8LinearConfig, JobConfig
+from torchtitan.config.job_config import Float8Linear, JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import register_model_converter
@@ -24,10 +24,10 @@ from .utils import module_filter_fn
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
-class FP8LinearConverter(QuantizationConverter):
+class Float8LinearConverter(QuantizationConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         super().__init__(job_config, parallel_dims)
-        float8_config: FP8LinearConfig = job_config.quantize.linear.fp8
+        float8_config: Float8Linear = job_config.quantize.linear.float8
         compile_config = job_config.compile
         model_compile_enabled = (
             compile_config.enable and "model" in compile_config.components
@@ -100,7 +100,7 @@ class FP8LinearConverter(QuantizationConverter):
 
         self.enabled = True
 
-    def _init_filter_fn(self, float8_config: FP8LinearConfig):
+    def _init_filter_fn(self, float8_config: Float8Linear):
         # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
         use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
         if use_auto_filter:
@@ -172,10 +172,10 @@ class FP8LinearConverter(QuantizationConverter):
             precompute_float8_dynamic_scale_for_fsdp(m)
 
 
-class FP8GroupedMMConverter(QuantizationConverter):
+class Float8GroupedMMConverter(QuantizationConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         super().__init__(job_config, parallel_dims)
-        self.fqns = job_config.quantize.grouped_mm.fp8.fqns
+        self.fqns = job_config.quantize.grouped_mm.float8.fqns
         compile_config = job_config.compile
         model_compile_enabled = (
             compile_config.enable and "model" in compile_config.components
@@ -234,5 +234,5 @@ class FP8GroupedMMConverter(QuantizationConverter):
         pass
 
 
-register_model_converter(FP8LinearConverter, "quantize.linear.fp8")
-register_model_converter(FP8GroupedMMConverter, "quantize.grouped_mm.fp8")
+register_model_converter(Float8LinearConverter, "quantize.linear.float8")
+register_model_converter(Float8GroupedMMConverter, "quantize.grouped_mm.float8")

@@ -12,7 +12,7 @@ from torchtitan.config.job_config import (
     Checkpoint,
     Comm,
     Compile,
-    FP8LinearConfig,
+    Float8Linear,
     LRScheduler,
     Model,
     Optimizer,
@@ -33,7 +33,7 @@ class ForgeJobConfig:
         default_factory=ActivationCheckpoint
     )
     compile: Compile = field(default_factory=Compile)
-    float8: FP8LinearConfig = field(default_factory=FP8LinearConfig)
+    float8: Float8Linear = field(default_factory=Float8Linear)
     comm: Comm = field(default_factory=Comm)
 
     def to_dict(self) -> dict[str, Any]:

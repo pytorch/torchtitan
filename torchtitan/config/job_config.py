@@ -569,7 +569,7 @@ class Compile:
 
 
 @dataclass
-class FP8LinearConfig:
+class Float8Linear:
     enable_fsdp_float8_all_gather: bool = False
     """Whether enable float8 all-gather in FSDP, recommended for tensorwise scaling"""
 
@@ -583,7 +583,7 @@ class FP8LinearConfig:
     """
     Comma-separated list of fully qualified names of modules to skip applying float8 training to.
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
-    Example: --quantize.linear.fp8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    Example: --quantize.linear.float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
     emulate: bool = False
     """
@@ -594,18 +594,18 @@ class FP8LinearConfig:
 
 
 @dataclass
-class FP8GroupedMMConfig:
+class Float8GroupedMM:
     fqns: list[str] | str = field(default_factory=list)
     """
     *Prototype feature, performance optimization still in progress*
     Comma-separated list of fully qualified names of MoE Layers to apply FP8 dynamic quantization on grouped GEMM operations.
     This is a prototype feature that requires the torchao nightly build.
-    Example: --quantize.grouped_mm.fp8.fqns="experts"
+    Example: --quantize.grouped_mm.float8.fqns="experts"
     """
 
 
 @dataclass
-class MXLinearConfig:
+class MXLinear:
     mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
     """
     Temp work around for inductor performance gap.
@@ -632,7 +632,7 @@ class MXLinearConfig:
 
 
 @dataclass
-class MXGroupedMMConfig:
+class MXGroupedMM:
     recipe_name: Literal["mxfp8"] = "mxfp8"
     """
     Quantization recipe name for grouped GEMMs. Options: ["mxfp8"]
@@ -650,29 +650,29 @@ class MXGroupedMMConfig:
 
 
 @dataclass
-class LinearConfig:
-    fp8: FP8LinearConfig = field(default_factory=FP8LinearConfig)
+class QuantizedLinear:
+    float8: Float8Linear = field(default_factory=Float8Linear)
     """FP8 training config for nn.Linear layers"""
 
-    mx: MXLinearConfig = field(default_factory=MXLinearConfig)
+    mx: MXLinear = field(default_factory=MXLinear)
     """MX training config for nn.Linear layers"""
 
 
 @dataclass
-class GroupedMMConfig:
-    fp8: FP8GroupedMMConfig = field(default_factory=FP8GroupedMMConfig)
+class QuantizedGroupedMM:
+    float8: Float8GroupedMM = field(default_factory=Float8GroupedMM)
     """FP8 training config for grouped GEMMs"""
 
-    mx: MXGroupedMMConfig = field(default_factory=MXGroupedMMConfig)
+    mx: MXGroupedMM = field(default_factory=MXGroupedMM)
     """MX training config for grouped GEMMs"""
 
 
 @dataclass
 class Quantize:
-    linear: LinearConfig = field(default_factory=LinearConfig)
+    linear: QuantizedLinear = field(default_factory=QuantizedLinear)
     """Quantized training config for nn.Linear layers"""
 
-    grouped_mm: GroupedMMConfig = field(default_factory=GroupedMMConfig)
+    grouped_mm: QuantizedGroupedMM = field(default_factory=QuantizedGroupedMM)
     """Quantized training config for grouped GEMMs"""
 
 
