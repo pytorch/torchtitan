@@ -22,6 +22,7 @@ class OverrideDefinitions:
     test_descr: str = "default"
     test_name: str = "default"
     ngpu: int = 4
+    disabled: bool = False
 
     def __repr__(self):
         return self.test_descr

@@ -30,7 +30,7 @@ from torchtitan.tools.logging import logger
 
 
 # for selective op activation checkpointing
-_save_list = {
+_op_sac_save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
@@ -67,7 +67,7 @@ def parallelize_deepseekv3(
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.float8.recipe_name in (
+        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
@@ -112,7 +112,7 @@ def parallelize_deepseekv3(
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
-            save_list=_save_list,
+            op_sac_save_list=_op_sac_save_list,
         )
 
     if model_compile_enabled:
