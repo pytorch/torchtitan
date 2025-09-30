@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
@@ -7,11 +13,10 @@ from typing import Literal
 
 from torch import nn
 
-
 from torchtitan.config.job_config import JobConfig
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import BaseModelArgs
 from torchtitan.tools.logging import logger
-from torchtitan.models.moe import MoEArgs
 from torchtitan.tools.utils import has_cuda_capability
 
 
