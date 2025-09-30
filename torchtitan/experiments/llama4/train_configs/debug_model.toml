@@ -70,16 +70,16 @@ selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac bas
 enable=false
 components = ["model", "loss"]
 
-[quantize.dense.float8]
+[quantize.linear.fp8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
 
-[quantize.moe.float8]
+[quantize.grouped_mm.fp8]
 fqns = ["experts"]
 
-[quantize.dense.mx]
+[quantize.linear.mxfp8]
 filter_fqns = ["output", "router.gate"]
 
-[quantize.moe.mx]
+[quantize.grouped_mm.mxfp8]
 fqns = ["experts"]

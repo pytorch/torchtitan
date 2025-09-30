@@ -63,10 +63,10 @@ mode = "full" # ["none", "selective", "full"]
 enable=false
 components = ["model", "loss"]
 
-[quantize.dense.float8]
+[quantize.linear.fp8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
 
-[quantize.dense.mx]
+[quantize.linear.mxfp8]
 filter_fqns = ["output", "router.gate"]

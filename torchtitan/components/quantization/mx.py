@@ -15,7 +15,7 @@ from torchtitan.components.quantization import (
     QuantizationConverter,
 )
 
-from torchtitan.config.job_config import JobConfig, MXDense
+from torchtitan.config.job_config import JobConfig, MXFP8LinearConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import register_model_converter
@@ -58,7 +58,7 @@ class MXFP8LinearConverter(QuantizationConverter):
             MXLinearConfig,
         )
 
-        mx_job_config: MXDense = job_config.quantize.dense.mx
+        mx_job_config: MXFP8LinearConfig = job_config.quantize.linear.mxfp8
         config = MXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
         config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
@@ -130,7 +130,7 @@ class MXFP8GroupedMMConverter(QuantizationConverter):
             )
 
         # For MoE training with mxfp8, token group sizes must be multiples of 32
-        self.moe_fqns = job_config.quantize.moe.mx.fqns
+        self.moe_fqns = job_config.quantize.grouped_mm.mxfp8.fqns
         if self.moe_fqns:
             logger.info(
                 f"Setting token group alignment size to {MXFP8_GROUP_ALIGNMENT_SIZE}"

@@ -17,10 +17,7 @@
 FP8_GROUP_ALIGNMENT_SIZE = 16
 MXFP8_GROUP_ALIGNMENT_SIZE = 32
 
-# Import to register quantization modules as ModelConverter
-import torchtitan.components.quantization.float8  # noqa: F401
-import torchtitan.components.quantization.mx  # noqa: F401
-from torchtitan.config.job import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 
 from torchtitan.protocols.model_converter import ModelConverter
@@ -57,3 +54,9 @@ class QuantizationConverter(ModelConverter):
                         "Cannot combine model converters with different quantization types: "
                         f"'{quantization_type(converter)}' and '{quantization_type(existing_quantization_converter)}'"
                     )
+
+
+# Import to register quantization modules as ModelConverter
+# (imports down here to avoid circular imports with QuantizationConverter)
+import torchtitan.components.quantization.float8  # noqa: F401
+import torchtitan.components.quantization.mx  # noqa: F401
