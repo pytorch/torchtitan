@@ -1,13 +1,14 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import math
-from typing import Tuple
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
 
 import torch
 from torch import nn
-from torch.distributed.tensor import DTensor
-from torchtitan.experiments.simple_fsdp import model
 from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -100,53 +101,6 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
-# TODO(jianw): This is eager version from HuggingFace. Remove it once FlexAttention is ready.
-def eager_attention_forward(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    sinks: torch.Tensor,
-    attention_mask: torch.Tensor,
-    scaling: float,
-    dropout: float = 0.0,
-    **kwargs,
-):
-    key_values = key.transpose(2, 3)  # When TP is enabled, key should be shard()
-    print(f"key_values : {key_values.placements} {key_values.shape}")
-    print(f"query : {query.placements} {query.shape}")
-
-    # [rank0]:key_values : (Shard(dim=1),) torch.Size([8, 64, 64, 2048])
-    # [rank0]:query : (Shard(dim=1),) torch.Size([8, 64, 2048, 64])
-
-    attn_weights = query @ key_values * scaling
-    if attention_mask is not None:
-        # attention_mask can be [Tq, Tk] or [B, H, Tq, Tk]
-        # Convert boolean "allowed" -> additive mask
-        if attention_mask.dtype == torch.bool:
-            m = attention_mask
-            add_mask = torch.zeros_like(m, dtype=attn_weights.dtype)
-            add_mask = add_mask.masked_fill(~m, -float("inf"))
-        else:
-            add_mask = attention_mask.to(attn_weights.dtype)
-
-        # Truncate to current key length and add (broadcasts if needed)
-        add_mask = add_mask[..., : key.shape[-2]]
-        attn_weights = attn_weights + add_mask
-
-    sinks = sinks.reshape(1, -1, 1, 1).expand(query.shape[0], -1, query.shape[-2], -1)
-    combined_logits = torch.cat([attn_weights, sinks], dim=-1)
-
-    # This was not in the original implementation and slightly affect results; it prevents overflow in BF16/FP16
-    # when training with bsz>1 we clamp max values.
-
-    combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
-    probs = nn.functional.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
-    scores = probs[..., :-1]  # we drop the sink here
-    attn_weights = nn.functional.dropout(scores, p=dropout, training=False)
-    attn_output = torch.matmul(attn_weights, value)
-    return attn_output
-
-
 class Attention(nn.Module):
     """
     Multi-head attention (MLA) module.
@@ -190,21 +144,20 @@ class Attention(nn.Module):
 
         self.use_flex_attn = model_args.use_flex_attn
 
-        if self.use_flex_attn:
-            # Only apply sliding window to every other layer
-            if use_sliding_attention:
-                self.attn = build_attention(
-                    use_flex_attn=True,
-                    attn_mask_type="sliding_window",
-                    sliding_window=self.sliding_window,
-                )
-            else:
-                self.attn = build_attention(
-                    use_flex_attn=True, attn_mask_type=model_args.attn_mask_type
-                )
+        if not self.use_flex_attn:
+            raise ValueError("Only support FlexAttention in Gpt-oss model")
+
+        # Only apply sliding window to every other layer
+        if use_sliding_attention:
+            self.attn = build_attention(
+                use_flex_attn=True,
+                attn_mask_type="sliding_window",
+                sliding_window=self.sliding_window,
+            )
         else:
-            # NOTE: sampling with FlexAttn seems broken; use TorchAttn if needed
-            self.attn = eager_attention_forward
+            self.attn = build_attention(
+                use_flex_attn=True, attn_mask_type=model_args.attn_mask_type
+            )
 
     def forward(
         self,
@@ -238,38 +191,20 @@ class Attention(nn.Module):
         k = keys.transpose(1, 2).contiguous()
         v = values.transpose(1, 2).contiguous()
 
-        if self.use_flex_attn:
-            # FlexAttention
-            output, lse = self.attn(
-                q,
-                k,
-                v,
-                scale=None,
-                return_lse=True,
-            )
+        # FlexAttention
+        output, lse = self.attn(
+            q,
+            k,
+            v,
+            scale=None,
+            return_lse=True,
+        )
 
-            # Apply attention sink rescaling: rescale by σ(lse - w[h])
-            # This is mathematically equivalent to concatenating learnable sink weights
-            # TODO: If attention part is, but self.sinks are registered as a DTensor, while lse is a plain tensor
-            # q, k, v are already sharded by TP: [batch, local_heads, seq_len, head_dim] (plain tensor)
-            # sinks shape needs to match: [local_heads],
-            # [rank0]:lse.shape torch.Size([8, 32, 2048]), <class 'torch.Tensor'>
-            sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(
-                -1
-            )
-            output = output * sink_scale.to(output.dtype)
+        # Apply attention sink rescaling: rescale by σ(lse - w[h])
+        # This is mathematically equivalent to concatenating learnable sink weights
+        sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
+        output = output * sink_scale.to(output.dtype)
 
-        else:
-            # eager attention forward
-            output = self.attn(
-                q,
-                k,
-                v,
-                self.sinks,
-                attention_mask=self.sliding_window_causal(seqlen, x.device),
-                scaling=self.head_dim**-0.5,
-                dropout=0.0,
-            )
         output = output.transpose(1, 2).contiguous()  # (B, H, T, D) -> (B, T, H, D)
 
         # Reshape and project output
@@ -289,7 +224,9 @@ class Attention(nn.Module):
         nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
         for linear in linear_list:
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(linear.bias, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
 
     # TODO: statically init the mask using train.seq_len
     def sliding_window_causal(self, seqlen, device):

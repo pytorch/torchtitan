@@ -1,10 +1,13 @@
-from functools import partial
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 from typing import Callable
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed._functional_collectives import all_to_all_single_autograd
 from torch.distributed.tensor import (
     DeviceMesh,
     distribute_module,
@@ -14,7 +17,6 @@ from torch.distributed.tensor import (
     Shard,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
-from torch.distributed.tensor.placement_types import Placement
 from torchtitan.distributed.expert_parallel import ExpertParallel
 
 
@@ -22,7 +24,10 @@ from torchtitan.distributed.expert_parallel import ExpertParallel
 class TensorParallel(ParallelStyle):
     def _partition_fn(self, name, module, device_mesh):
         module.register_parameter(
-            "mlp1_weight", nn.Parameter(distribute_tensor(module.mlp1_weight, device_mesh, [Shard(2)]))
+            "mlp1_weight",
+            nn.Parameter(
+                distribute_tensor(module.mlp1_weight, device_mesh, [Shard(2)])
+            ),
         )  # Column-wise sharding
         module.register_parameter(
             "mlp1_bias",
@@ -30,11 +35,15 @@ class TensorParallel(ParallelStyle):
         )  # Column-wise sharding
         module.register_parameter(
             "mlp2_weight",
-            nn.Parameter(distribute_tensor(module.mlp2_weight, device_mesh, [Shard(1)])),
+            nn.Parameter(
+                distribute_tensor(module.mlp2_weight, device_mesh, [Shard(1)])
+            ),
         )  # Row-wise sharding
         module.register_parameter(
             "mlp2_bias",
-            nn.Parameter(distribute_tensor(module.mlp2_bias, device_mesh, [Replicate()])),
+            nn.Parameter(
+                distribute_tensor(module.mlp2_bias, device_mesh, [Replicate()])
+            ),
         )  # Replicate
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
@@ -43,6 +52,7 @@ class TensorParallel(ParallelStyle):
             device_mesh,
             self._partition_fn,
         )
+
 
 # This class is for dp2ep with TP (without TP we can just use ExpertParallel)
 class ExpertTensorParallel(ExpertParallel):
@@ -64,20 +74,28 @@ class ExpertTensorParallel(ExpertParallel):
     def _partition_fn_2d(self, name, mod, ep_tp_mesh):
         mod.register_parameter(
             "mlp1_weight",
-            nn.Parameter(distribute_tensor(mod.mlp1_weight, ep_tp_mesh, [Shard(0), Shard(2)])),
+            nn.Parameter(
+                distribute_tensor(mod.mlp1_weight, ep_tp_mesh, [Shard(0), Shard(2)])
+            ),
         )  # Column-wise sharding
         mod.register_parameter(
             "mlp1_bias",
-            nn.Parameter(distribute_tensor(mod.mlp1_bias, ep_tp_mesh, [Shard(0), Shard(1)])),
+            nn.Parameter(
+                distribute_tensor(mod.mlp1_bias, ep_tp_mesh, [Shard(0), Shard(1)])
+            ),
         )  # Column-wise sharding
         mod.register_parameter(
             "mlp2_weight",
-            nn.Parameter(distribute_tensor(mod.mlp2_weight, ep_tp_mesh, [Shard(0), Shard(1)])),
+            nn.Parameter(
+                distribute_tensor(mod.mlp2_weight, ep_tp_mesh, [Shard(0), Shard(1)])
+            ),
         )  # Row-wise sharding
         mod.register_parameter(
             "mlp2_bias",
-            nn.Parameter(distribute_tensor(mod.mlp2_bias, ep_tp_mesh, [Shard(0), Shard(1)])),
-        )  # Row-wise sharding
+            nn.Parameter(
+                distribute_tensor(mod.mlp2_bias, ep_tp_mesh, [Shard(0), Replicate()])
+            ),
+        )  # Replicate
 
     def _token_combine(self, mod, routed_output, device_mesh):
         # token combine happens on the EP mesh, whereas device_mesh is [ep, tp] mesh
@@ -156,7 +174,15 @@ def expert_parallel(func: Callable) -> Callable:
             input_shape = x.shape
             x = x[permuted_indices, :]
 
-        out = func(mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias, swiglu_limit, x, num_tokens_per_expert)
+        out = func(
+            mlp1_weight,
+            mlp1_bias,
+            mlp2_weight,
+            mlp2_bias,
+            swiglu_limit,
+            x,
+            num_tokens_per_expert,
+        )
 
         if num_tokens_per_expert is not None:
             out_unpermuted = out.new_empty(input_shape)

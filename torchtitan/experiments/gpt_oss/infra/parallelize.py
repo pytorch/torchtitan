@@ -1,38 +1,35 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Replicate, Shard, distribute_tensor
+
+from torch.distributed.tensor import distribute_tensor, Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
+    PrepareModuleInputOutput,
+    PrepareModuleOutput,
     RowwiseParallel,
     SequenceParallel,
-    PrepareModuleOutput,
 )
-
-if torch.__version__ >= "2.9":
-    from torch.distributed.tensor.parallel import PrepareModuleInputOutput
-else:
-    print(f"Since torch version {torch.__version__} < 2.9, PrepareModuleInputOutput is not available and MoE EP TP will fail.")
-
-from torchtitan.config.job_config import JobConfig
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims, NoParallel
-from torchtitan.distributed.expert_parallel import ExpertParallel, ReordererSequenceParallel
-from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
-from torchtitan.experiments.llama4.infra.parallelize import (
-    apply_fsdp,
+from torchtitan.config.job_config import JobConfig
+from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed.expert_parallel import (
+    ExpertParallel,
+    ReordererSequenceParallel,
 )
-
+from torchtitan.experiments.llama4.infra.parallelize import apply_fsdp
+from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.tools.logging import logger
 
-from torch.distributed.tensor import Partial, Replicate, Shard
-
-from .expert_parallel import (
-    ExpertTensorParallel,
-    TensorParallel,
-)
+from .expert_parallel import ExpertTensorParallel, TensorParallel
 
 
 # for selective op activation checkpointing
@@ -67,7 +64,7 @@ def parallelize_gptoss(
     use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
     if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
-    
+
     if parallel_dims.tp_enabled:
         if job_config.parallelism.enable_async_tensor_parallel:
             raise NotImplementedError(
@@ -109,7 +106,7 @@ def parallelize_gptoss(
             ),
             etp_enabled=parallel_dims.etp_enabled,
         )
-    
+
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
@@ -122,7 +119,7 @@ def parallelize_gptoss(
             use_flex_attn=use_flex_attn,
             save_list=_op_sac_save_list,
         )
-    
+
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -178,6 +175,7 @@ def parallelize_gptoss(
 
     return model
 
+
 def apply_non_moe_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh,
@@ -207,30 +205,17 @@ def apply_non_moe_tp(
         },
     )
 
-    # Parallel styles used for transformer block linear weights and their
-    # inputs may be different for float8 linears with tensorwise scaling.
-    if enable_float8_tensorwise_tp:
-        # TODO(vkuzo): add the items below to __init__.py of torchao.float8 and import from there
-        from torchao.float8.float8_tensor_parallel import (
-            Float8ColwiseParallel,
-            Float8RowwiseParallel,
-            PrepareFloat8ModuleInput,
-            PrepareFloat8ModuleOutput
-        )
-
-        rowwise_parallel, colwise_parallel, prepare_module_input, prepare_module_output = (
-            Float8RowwiseParallel,
-            Float8ColwiseParallel,
-            PrepareFloat8ModuleInput,
-            PrepareFloat8ModuleOutput,
-        )
-    else:
-        rowwise_parallel, colwise_parallel, prepare_module_input, prepare_module_output= (
-            RowwiseParallel,
-            ColwiseParallel,
-            PrepareModuleInput,
-            PrepareModuleOutput,
-        )
+    (
+        rowwise_parallel,
+        colwise_parallel,
+        prepare_module_input,
+        prepare_module_output,
+    ) = (
+        RowwiseParallel,
+        ColwiseParallel,
+        PrepareModuleInput,
+        PrepareModuleOutput,
+    )
 
     # Apply tensor + sequence parallelism to every transformer block
     for transformer_block in model.layers.values():
@@ -243,7 +228,11 @@ def apply_non_moe_tp(
             "attention.wq": colwise_parallel(),
             "attention.wk": colwise_parallel(),
             "attention.wv": colwise_parallel(),
-            "attention.attn": prepare_module_output(output_layouts=(Shard(1), Shard(1)), desired_output_layouts=(Shard(1), Shard(1)), use_local_output=False),
+            "attention.attn": prepare_module_output(
+                output_layouts=(Shard(1), Shard(1)),
+                desired_output_layouts=(Shard(1), Shard(1)),
+                use_local_output=False,
+            ),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }
@@ -304,17 +293,7 @@ def apply_moe_ep_tp(
                 # the reorderer, the all-to-all comms, and routed experts computation
                 # are effectively running Sequence Parallel (split along the folded bs*slen dim)
                 moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
-            if transformer_block.moe.shared_experts is not None:
-                # input Replicate, output Partial
-                moe_layer_plan.update(
-                    {
-                        "moe.shared_experts.w1": ColwiseParallel(),
-                        "moe.shared_experts.w2": RowwiseParallel(
-                            output_layouts=Partial()
-                        ),
-                        "moe.shared_experts.w3": ColwiseParallel(),
-                    }
-                )
+
             parallelize_module(
                 module=transformer_block,
                 device_mesh=tp_mesh,

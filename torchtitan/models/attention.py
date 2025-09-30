@@ -95,8 +95,9 @@ class FlexAttention(torch.nn.Module):
 
         # Regular path without sink
         block_mask = FlexAttention.block_masks[self.mask_key]
-        return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, return_lse=return_lse, scale=scale)
-
+        return FlexAttention.flex_attn(
+            q, k, v, block_mask=block_mask, return_lse=return_lse, scale=scale
+        )
 
     @staticmethod
     def _get_sliding_window_mask_mod(window: int):

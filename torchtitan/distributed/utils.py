@@ -206,6 +206,7 @@ def get_train_context(
 
                 if SDPBackend.MATH in ScaledDotProductAttention.backends:
                     ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
+
                 stack.enter_context(cp_context)
 
             yield
