@@ -219,14 +219,22 @@ def maybe_enable_amp(
 ) -> Generator[None, None, None]:
     if parallel_dims.fsdp_enabled or parallel_dims.dp_replicate_enabled:
         # FSDP handles mixed precision internally
-        logger.info("Mixed precision training is handled by fully_shard or replicate")
+        logger.info("Mixed precision training is handled by fully_shard")
         return contextlib.nullcontext()
     else:
-        logger.warning(
-            "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP/replicate is enabled."
-        )
-        logger.info("Mixed precision training is disabled")
-        return contextlib.nullcontext()
+        if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
+            logger.warning(
+                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP is enabled."
+            )
+            logger.info("Mixed precision training is disabled")
+            return contextlib.nullcontext()
+        else:
+            # the following code will only be executed for DDP or single-device training
+            logger.info("Mixed precision training is handled by AMP")
+            return torch.autocast(
+                device_type,
+                dtype=TORCH_DTYPE_MAP[mixed_precision_param],
+            )
 
 
 def init_distributed(
