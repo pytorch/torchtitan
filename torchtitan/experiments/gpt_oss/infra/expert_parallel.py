@@ -69,11 +69,11 @@ class ExpertTensorParallel(ExpertParallel):
         mod.register_parameter(
             "mlp1_bias",
             nn.Parameter(distribute_tensor(mod.mlp1_bias, ep_tp_mesh, [Shard(0), Shard(1)])),
-        )  # Row-wise sharding
+        )  # Column-wise sharding
         mod.register_parameter(
             "mlp2_weight",
-            nn.Parameter(distribute_tensor(mod.mlp2_weight, ep_tp_mesh, [Shard(0), Shard(2)])),
-        )  # Column-wise sharding
+            nn.Parameter(distribute_tensor(mod.mlp2_weight, ep_tp_mesh, [Shard(0), Shard(1)])),
+        )  # Row-wise sharding
         mod.register_parameter(
             "mlp2_bias",
             nn.Parameter(distribute_tensor(mod.mlp2_bias, ep_tp_mesh, [Shard(0), Shard(1)])),
