@@ -40,7 +40,7 @@ class QuantizationConverter(ModelConverter):
         """
         # TODO: Explore supporting applying different quantization methods to dense and MoE layers.
         # quantization converter format:
-        # `quantize.[dense|moe].[mx|float8]`
+        # `quantize.[linear | grouped_mm].[fp8 | mx]`
         quantization_type = lambda converter: converter.split(".")[-1]
         existing_quantization_converter = None
         for converter in job_config.model.converters:

@@ -78,8 +78,8 @@ filter_fqns = ["output", "router.gate"]
 [quantize.grouped_mm.fp8]
 fqns = ["experts"]
 
-[quantize.linear.mxfp8]
+[quantize.linear.mx]
 filter_fqns = ["output", "router.gate"]
 
-[quantize.grouped_mm.mxfp8]
+[quantize.grouped_mm.mx]
 fqns = ["experts"]

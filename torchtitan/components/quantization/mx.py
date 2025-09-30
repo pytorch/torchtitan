@@ -15,7 +15,7 @@ from torchtitan.components.quantization import (
     QuantizationConverter,
 )
 
-from torchtitan.config.job_config import JobConfig, MXFP8LinearConfig
+from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import register_model_converter
@@ -25,7 +25,7 @@ from torchtitan.tools.utils import has_cuda_capability
 from .utils import module_filter_fn
 
 
-class MXFP8LinearConverter(QuantizationConverter):
+class MXLinearConverter(QuantizationConverter):
     """Converts the linear layers of `model` to `MXLinear`."""
 
     filter_fqns: List[str]
@@ -55,18 +55,18 @@ class MXFP8LinearConverter(QuantizationConverter):
         # Configure MXFP8
         from torchao.prototype.mx_formats.config import (
             MXFP8Dim1CastKernelChoice,
-            MXLinearConfig,
+            MXLinearConfig as TorchAOMXLinearConfig,
         )
 
-        mx_job_config: MXFP8LinearConfig = job_config.quantize.linear.mxfp8
-        config = MXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
+        mx_job_config: TorchAOMXLinearConfig = job_config.quantize.linear.mx
+        config = TorchAOMXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
         config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
         ]
         self.filter_fqns = mx_job_config.filter_fqns
         self.config = config
         self.enabled = True
-        logger.info(f"Float8 training active with recipe {mx_job_config.recipe_name}")
+        logger.info(f"MX training active with recipe {mx_job_config.recipe_name}")
 
     def convert(self, model: nn.Module):
         """
@@ -77,10 +77,12 @@ class MXFP8LinearConverter(QuantizationConverter):
         if not self.enabled:
             return
 
-        from torchao.prototype.mx_formats.config import MXLinearConfig
+        from torchao.prototype.mx_formats.config import (
+            MXLinearConfig as TorchAOMXLinearConfig,
+        )
         from torchao.quantization import quantize_
 
-        assert isinstance(self.config, MXLinearConfig)
+        assert isinstance(self.config, TorchAOMXLinearConfig)
         quantize_(
             model,
             config=self.config,
@@ -95,7 +97,7 @@ class MXFP8LinearConverter(QuantizationConverter):
         return
 
 
-class MXFP8GroupedMMConverter(QuantizationConverter):
+class MXGroupedMMConverter(QuantizationConverter):
     """Converts target 3D nn.Parameters of a model, representing 'experts',
     to use MXFP8 scaled grouped GEMMs instead of a high precision grouped GEMMs."""
 
@@ -130,20 +132,22 @@ class MXFP8GroupedMMConverter(QuantizationConverter):
             )
 
         # For MoE training with mxfp8, token group sizes must be multiples of 32
-        self.moe_fqns = job_config.quantize.grouped_mm.mxfp8.fqns
+        self.moe_fqns = job_config.quantize.grouped_mm.mx.fqns
         if self.moe_fqns:
             logger.info(
                 f"Setting token group alignment size to {MXFP8_GROUP_ALIGNMENT_SIZE}"
             )
             set_token_group_alignment_size_m(MXFP8_GROUP_ALIGNMENT_SIZE)
 
+        self.recipe_name = job_config.quantize.grouped_mm.mx.recipe_name
         self.enabled = True
         logger.info("MXFP8 MoE training enabled")
 
     def convert(self, model: nn.Module):
         """
-        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor,
-        to perform dynamic MXFP8 quantization + scaled grouped GEMMs for the target MoE FQNs.
+        Mutates the model inplace replacing instances of nn.Parameter with ScaledGroupedMMTensor.
+        This will use low precision grouped GEMMs with dynamic quantization using the specified MX dtype,
+        rather than the default high precision grouped GEMMs, for the target MoE FQNs.
         """
         if not self.enabled:
             return
@@ -163,7 +167,7 @@ class MXFP8GroupedMMConverter(QuantizationConverter):
         quantize_(model, config=config, filter_fn=moe_module_filter_fn)
         logger.info(
             f"Converted MoE layers matching FQNS {self.moe_fqns} "
-            "to use dynamic MXFP8 quantization with scaled grouped GEMMs"
+            f"to use dynamic {self.recipe_name} quantization with scaled grouped GEMMs"
         )
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
@@ -173,5 +177,5 @@ class MXFP8GroupedMMConverter(QuantizationConverter):
         return
 
 
-register_model_converter(MXFP8LinearConverter, "quantize.linear.mxfp8")
-register_model_converter(MXFP8GroupedMMConverter, "quantize.grouped_mm.mxfp8")
+register_model_converter(MXLinearConverter, "quantize.linear.mx")
+register_model_converter(MXGroupedMMConverter, "quantize.grouped_mm.mx")

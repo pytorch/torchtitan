@@ -600,26 +600,26 @@ class FP8GroupedMMConfig:
     *Prototype feature, performance optimization still in progress*
     Comma-separated list of fully qualified names of MoE Layers to apply FP8 dynamic quantization on grouped GEMM operations.
     This is a prototype feature that requires the torchao nightly build.
-    Example: --quantize.linear.fp8.fqns="experts"
+    Example: --quantize.grouped_mm.fp8.fqns="experts"
     """
 
 
 @dataclass
-class MXFP8LinearConfig:
+class MXLinearConfig:
     mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
     """
     Temp work around for inductor performance gap.
 
     CUDA is recommended for best performance.
 
-    Example: --mx.dense.mxfp8_dim1_cast_kernel_choice="cuda"
+    Example: --quantize.linear.mx.mxfp8_dim1_cast_kernel_choice="cuda"
     """
 
     recipe_name: str = "mxfp8_cublas"
     """
     If specified, creates MX config from recipe name. See
     https://github.com/pytorch/ao/tree/main/torchao/prototype/mx_formats for more information.
-    Example: --mx.dense.recipe_name="mxfp8_cublas"
+    Example: --quantize.linear.mx.recipe_name="mxfp8_cublas"
     """
 
     filter_fqns: list[str] = field(default_factory=lambda: ["output"])
@@ -627,18 +627,25 @@ class MXFP8LinearConfig:
     Comma-separated list of fully qualified names of modules to skip applying mxfp8 training to.
     nn.Linear modules with any dim size not divisible by 16 are also always skipped due to hardware requirements.
     By default we always skip the output layer.
-    Example: --mx.dense.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    Example: --quantize.linear.mx.filter_fqns="attention.wq,attention.wk,attention.wv,output"
     """
 
 
 @dataclass
-class MXFP8GroupedMMConfig:
+class MXGroupedMMConfig:
+    recipe_name: Literal["mxfp8"] = "mxfp8"
+    """
+    Quantization recipe name for grouped GEMMs. Options: ["mxfp8"]
+
+    Example: --quantize.grouped_mm.mx.recipe_name="mxfp8"
+    """
+
     fqns: list[str] | str = field(default_factory=list)
     """
     *Prototype feature, performance optimization still in progress*
     Comma-separated list of fully qualified names of MoE modules to apply MXFP8 dynamic quantization on grouped GEMM operations.
     This is a prototype feature that requires the torchao nightly build.
-    Example: --mx.moe.fqns="experts"
+    Example: --quantize.grouped_mm.mx.fqns="experts"
     """
 
 
@@ -647,8 +654,8 @@ class LinearConfig:
     fp8: FP8LinearConfig = field(default_factory=FP8LinearConfig)
     """FP8 training config for nn.Linear layers"""
 
-    mxfp8: MXFP8LinearConfig = field(default_factory=MXFP8LinearConfig)
-    """MXFP8 training config for nn.Linear layers"""
+    mx: MXLinearConfig = field(default_factory=MXLinearConfig)
+    """MX training config for nn.Linear layers"""
 
 
 @dataclass
@@ -656,8 +663,8 @@ class GroupedMMConfig:
     fp8: FP8GroupedMMConfig = field(default_factory=FP8GroupedMMConfig)
     """FP8 training config for grouped GEMMs"""
 
-    mxfp8: MXFP8GroupedMMConfig = field(default_factory=MXFP8GroupedMMConfig)
-    """MXFP8 training config for grouped GEMMs"""
+    mx: MXGroupedMMConfig = field(default_factory=MXGroupedMMConfig)
+    """MX training config for grouped GEMMs"""
 
 
 @dataclass

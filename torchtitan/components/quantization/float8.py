@@ -43,14 +43,14 @@ class FP8LinearConverter(QuantizationConverter):
                 "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
             )
         try:
-            from torchao.float8 import Float8LinearConfig
+            from torchao.float8 import Float8LinearConfig as TorchAOFloat8LinearConfig
         except ImportError as e:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 linear layers."
             ) from e
 
         if float8_config.recipe_name is not None and not hasattr(
-            Float8LinearConfig, "from_recipe_name"
+            TorchAOFloat8LinearConfig, "from_recipe_name"
         ):
             logger.warning(
                 "Failed to swap to Float8Linear with recipe lookup because the torchao version "
@@ -67,7 +67,9 @@ class FP8LinearConverter(QuantizationConverter):
                 "with `float8_config.recipe_name` is not supported"
             )
 
-            self.config = Float8LinearConfig.from_recipe_name(float8_config.recipe_name)
+            self.config = TorchAOFloat8LinearConfig.from_recipe_name(
+                float8_config.recipe_name
+            )
             self.precompute_scale = False
             logger.info(
                 f"Float8 training active with recipe {float8_config.recipe_name}"
@@ -85,7 +87,7 @@ class FP8LinearConverter(QuantizationConverter):
                 parallel_dims.dp_shard_enabled
                 and float8_config.enable_fsdp_float8_all_gather
             )
-            self.config = Float8LinearConfig(
+            self.config = TorchAOFloat8LinearConfig(
                 enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
                 emulate=float8_config.emulate,
             )
