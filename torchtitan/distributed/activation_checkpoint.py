@@ -169,9 +169,10 @@ def apply_ac(
             "effect and provide optimal performance.\n"
             "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
         )
-    if ac_config.mode == "budget":
-        torch._functorch.config.activation_memory_budget = ac_config.budget_ac_option
-        logger.info(f"Selected {ac_config.budget_ac_option} budget option")
+    if ac_config.mode == "memory_budget":
+        assert (model_compile_enabled is True), "Memory budget mode requires model to be compiled"
+        torch._functorch.config.activation_memory_budget = ac_config.activation_memory_budget
+        logger.info(f"Selected {ac_config.activation_memory_budget} budget option")
     else:
         for layer_id, transformer_block in model.layers.named_children():
             transformer_block = _apply_ac_to_transformer_block(

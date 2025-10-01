@@ -527,7 +527,7 @@ class Checkpoint:
 
 @dataclass
 class ActivationCheckpoint:
-    mode: Literal["selective", "full", "budget", "none"] = "selective"
+    mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
 
     selective_ac_option: str = "2"
@@ -555,9 +555,13 @@ class ActivationCheckpoint:
     Whether to stop recomputing early when all activations have already been
     rematerialized.
     """
-    budget_ac_option: float = 1.0
+    activation_memory_budget: float = 1.0
     """
-    Limit memory budget for AC from 0-100%. Works only with compile enabled.
+    When mode is set to "memory_budget", this value determines how much
+    partitioner in the compiler should trade off compute for memory.
+    0.0 corresponds to the activation memory from applying
+    activation checkpointing to the full compiled region, and 1.0 corresponds to
+    the activation memory from the default runtime-optimized strategy.
     """
 
 
