@@ -24,10 +24,6 @@ from .args import Qwen3ModelArgs
 class Qwen3StateDictAdapter(MoEStateDictAdapter):
     def __init__(self, model_args: Qwen3ModelArgs, hf_assets_path: str | None):
         super().__init__(model_args, hf_assets_path)
-
-        self.model_args = model_args
-        self.hf_assets_path = hf_assets_path
-
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention module
@@ -54,11 +50,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "lm_head.weight": "output.weight",
         }
 
-        # Store metadata for GroupedExperts <-> individual experts conversion
-        self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}
-        self.grouped_expert_weight_shape = {}  # {titan_abstract_key: shape}
-        self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
-
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
@@ -77,9 +68,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
                 # Store the GroupedExperts Weight metadata for from_hf()
                 if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[
-                        abstract_key
-                    ] = value.placements
+                    self.grouped_expert_weight_placements[abstract_key] = (
+                        value.placements
+                    )
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
 
                     # Split GroupedExperts weight to local individual expert weights
@@ -118,13 +109,13 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], state_dict: dict[str, Any] = {}
+    ) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Concate separate expert's wegiht into GroupedExperts' weight.
         """
-
-        state_dict = {}
 
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
 

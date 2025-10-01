@@ -27,7 +27,6 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         hf_assets_path: str | None,
     ):
         super().__init__(model_args, hf_assets_path)
-        self.model_args = model_args
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention Module
@@ -70,11 +69,6 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
                 }
             )
-
-        # Store metadata for GroupedExperts <-> individual experts conversion
-        self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}
-        self.grouped_expert_weight_shape = {}  # {titan_abstract_key: shape}
-        self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
 
     def _dequantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
@@ -143,9 +137,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
                 # Store the GroupedExperts Weight metadata for from_hf()
                 if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[
-                        abstract_key
-                    ] = value.placements
+                    self.grouped_expert_weight_placements[abstract_key] = (
+                        value.placements
+                    )
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
 
                     # Split GroupedExperts weight to local individual expert weights

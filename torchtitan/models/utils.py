@@ -16,6 +16,11 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 class MoEStateDictAdapter(StateDictAdapter):
     """
     StateDictAdapter for MoE models.
+    HF MoE models store experts as a module list each with 2D weights. In torchtitan, we
+    store experts as a 3D param with the first dimension being num_experts. The functions
+    in this class help convert 3D param into list of 2D params so that the checkpoint
+    can be loaded without incurring local memory overhead, and then concatenate
+    the results back to 3D param.
     """
 
     def __init__(
@@ -26,7 +31,10 @@ class MoEStateDictAdapter(StateDictAdapter):
         super().__init__(model_args, hf_assets_path)
         self.model_args = model_args
         self.hf_assets_path = hf_assets_path
-        self.local_experts_indices = {}
+        # Store metadata for GroupedExperts <-> individual experts conversion
+        self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}
+        self.grouped_expert_weight_shape = {}  # {titan_abstract_key: shape}
+        self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
 
     def _calculate_strided_shard_shard_indices(
         self,
