@@ -299,6 +299,11 @@ def apply_fsdp(
         )
     for layer_id, transformer_block in model.layers.items():
         fully_shard(
+            transformer_block.feed_forward if not hasattr(transformer_block, "_checkpoint_wrapped_module") else transformer_block._checkpoint_wrapped_module.feed_forward,
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward,
+        )
+        fully_shard(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,

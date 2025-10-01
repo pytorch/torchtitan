@@ -362,6 +362,12 @@ def apply_fsdp(
             transformer_block.moe.experts.set_gradient_divide_factor(
                 gradient_divide_factor,
             )
+        else:
+            fully_shard(
+                transformer_block._checkpoint_wrapped_module.feed_forward if hasattr(transformer_block, "_checkpoint_wrapped_module") else transformer_block.feed_forward,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
 
         fully_shard(
             transformer_block,
