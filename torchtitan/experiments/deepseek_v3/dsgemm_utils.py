@@ -101,26 +101,14 @@ def create_indices_from_offsets_nosync(m_offsets: torch.Tensor) -> torch.Tensor:
     Returns:
         m_indices: Tensor mapping each row to its group index
     """
-    # Get total size from the last offset
     total_size = m_offsets[-1]
-
-    # Pre-allocate output tensor
-    indices = torch.empty(total_size, device=m_offsets.device, dtype=torch.int32)
-
-    # Create a range tensor for each section
-    prev_offset = torch.zeros(1, device=m_offsets.device, dtype=m_offsets.dtype)
-
-    for i in range(len(m_offsets)):
-        # Calculate current section size
-        section_size = m_offsets[i] - prev_offset
-
-        # Only fill if section has elements
-        if section_size > 0:
-            indices[prev_offset : m_offsets[i]] = i
-
-        # Update prev_offset for next iteration
-        prev_offset = m_offsets[i]
-
+    all_indices = torch.arange(total_size,
+                               device=m_offsets.device,
+                               dtype=torch.int32)
+    indices = torch.bucketize(all_indices,
+                              m_offsets,
+                              right=True,
+                              out_int32=True)
     return indices
 
 
