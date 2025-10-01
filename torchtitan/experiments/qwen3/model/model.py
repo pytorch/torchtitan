@@ -17,7 +17,6 @@ from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import Qwen3ModelArgs
 
-
 # Adapted from https://github.com/pytorch/torchtune/blob/main/torchtune/models/qwen2/_positional_embeddings.py
 def precompute_rope_cache(
     dim: int, max_seq_len: int, base: float = 1_000_000.0

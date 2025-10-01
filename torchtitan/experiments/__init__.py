@@ -4,4 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-_supported_experiments = frozenset(["flux", "llama4", "qwen3", "simple_fsdp", "vlm"])
+_supported_experiments = frozenset(
+    ["flux", "llama4", "qwen3", "simple_fsdp.llama3", "simple_fsdp.deepseek_v3", "vlm"]
+)

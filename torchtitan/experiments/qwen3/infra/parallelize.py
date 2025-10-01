@@ -74,7 +74,7 @@ def parallelize_qwen3(
             raise RuntimeError("Async TP requires torch.compile")
 
         enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.quantize.dense.float8.recipe_name in (
+        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
