@@ -21,7 +21,7 @@ results/
 				|_ baseline_tt_fsdp_4gpu.log
 				|_ baseline_fsdp_debugmodel_4gpu_huggingface.toml
 				|_ baseline_fsdp_debugmodel_4gpu_torchtitan.toml
-				|_ fsdp1_cp1_tp2_pp2_debugmodel_4gpu_huggingface/
+				|_ fsdp1_cp1_tp2_pp2_debugmodel_4gpu/
 					|_ fsdp1_cp1_tp2_pp2_debugmodel_4gpu_huggingface.toml
 					|_ fsdp1_cp1_tp2_pp2_debugmodel_4gpu_torchtitan.toml
 					|_ fsdp1_cp1_tp2_pp2_debugmodel_4gpu_huggingface.log
@@ -33,7 +33,7 @@ results/
 				|_ baseline_tt_fsdp_4gpu.log
 				|_ baseline_fsdp_full_4gpu_huggingface.toml
 				|_ baseline_fsdp_full_4gpu_torchtitan.toml
-				|_ fsdp1_cp1_tp2_pp2_full_4gpu_huggingface/
+				|_ fsdp1_cp1_tp2_pp2_full_4gpu/
 					|_ fsdp1_cp1_tp2_pp2_full_4gpu_huggingface.toml
 					|_ fsdp1_cp1_tp2_pp2_full_4gpu_torchtitan.toml
 					|_ fsdp1_cp1_tp2_pp2_full_4gpu_huggingface.log
@@ -494,7 +494,7 @@ class CompareDistributedRun:
         except Exception as e:
             log_message(LogLevel.WARNING, f"Could not generate diff: {e}", indent=indent, dim=dim)
     
-    def run_training(self, config_file: Path, log_file: Path, config_name: str, model_name: str, indent: int = 0, dim: bool = False) -> Optional[subprocess.CalledProcessError]:
+    def run_training_local(self, config_file: Path, log_file: Path, config_name: str, model_name: str, indent: int = 0, dim: bool = False) -> Optional[subprocess.CalledProcessError]:
         """Run training with given configuration."""
         log_message(LogLevel.INFO, f"Running training: {config_name} with model {model_name}", indent=indent, dim=dim)
         cmd = [
@@ -553,6 +553,9 @@ class CompareDistributedRun:
             e.add_note(f"\n--- Full output from failed process ---\n{e.stdout or '<no output captured>'}")
             return e
     
+    def run_training_slurm(self):
+        pass
+
     def _compare_one_parallelism_config(
         self,
         config: "ParallelismConfig",
@@ -568,7 +571,7 @@ class CompareDistributedRun:
         # New flow: launch all training, then all diff, then all extract/compare metrics
 
         # --- 1. Setup directories and config files ---
-        test_dir_name = f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface"
+        test_dir_name = f"{config.name}_{self.flavor}_{self.ngpu}gpu"
         test_dir = self.results_dir / test_dir_name
         test_dir.mkdir(exist_ok=True)
 
@@ -596,14 +599,14 @@ class CompareDistributedRun:
         log_path_tt = test_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.log"
 
         # --- 2. Launch all training (HF and TT) ---
-        hf_run_error = self.run_training(
+        hf_run_error = self.run_training_local(
             config_file=config_file_hf,
             log_file=log_path_hf,
             config_name=config.name,
             model_name=hf_model_name,
             indent=indent,
         )
-        tt_run_error = self.run_training(
+        tt_run_error = self.run_training_local(
             config_file=config_file_tt,
             log_file=log_path_tt,
             config_name=config.name,
@@ -694,35 +697,8 @@ class CompareDistributedRun:
 
         return test_passed
 
-    def run(self) -> int:
+    def run_local(self, args: argparse.Namespace) -> int:
         """Main execution function. Runs all test suites for all models."""
-        parser = argparse.ArgumentParser(
-            description="Test different parallelism configurations against a baseline FSDP model.",
-        )
-        parser.add_argument("-m", "--model-filter", default="",
-                          help="Filter models by name pattern (e.g., 'llama3')")
-        parser.add_argument("-t", "--test-filter", default="",
-                          help="Filter parallelism configurations by name pattern (e.g., 'fsdp1_cp1_tp2_pp2')")
-        parser.add_argument("-nd", "--nd_parallel", type=str, default="2d",
-                          help=f"Parallelism to use (default: {self.ND_PARALLEL_TO_NB_GPUS.keys()})")
-        parser.add_argument("-s", "--steps", type=int, default=self.DEFAULT_STEPS,
-                          help=f"Training steps (default: {self.DEFAULT_STEPS})")
-        parser.add_argument("--flavor", default=self.DEFAULT_FLAVOR,
-                          help=f"Model flavor/size (default: {self.DEFAULT_FLAVOR}). "
-                               f"Available: llama3=[debugmodel, medium, full], deepseek_v3=[debugmodel]")
-        parser.add_argument("-v", "--verbose", action="store_true",
-                          help="Verbose output")
-        parser.add_argument("--loss-atol", type=float, default=self.DEFAULT_LOSS_ATOL,
-                          help=f"Absolute tolerance for loss comparison (default: {self.DEFAULT_LOSS_ATOL})")
-        parser.add_argument("--loss-rtol", type=float, default=self.DEFAULT_LOSS_RTOL,
-                          help=f"Relative tolerance for loss comparison (default: {self.DEFAULT_LOSS_RTOL})")
-        parser.add_argument("--grad-norm-atol", type=float, default=self.DEFAULT_GRAD_NORM_ATOL,
-                          help=f"Absolute tolerance for grad norm comparison (default: {self.DEFAULT_GRAD_NORM_ATOL})")
-        parser.add_argument("--grad-norm-rtol", type=float, default=self.DEFAULT_GRAD_NORM_RTOL,
-                          help=f"Relative tolerance for grad norm comparison (default: {self.DEFAULT_GRAD_NORM_RTOL})")
-        
-        args = parser.parse_args()
-        
         self.nd_parallel = args.nd_parallel
         self.ngpu = self.nd_parallel_to_nb_gpus[self.nd_parallel]
         self.steps = args.steps
@@ -809,7 +785,7 @@ class CompareDistributedRun:
         baseline_log_tt = self.results_dir / f"baseline_tt_{baseline_config.name}_{self.ngpu}gpu.log"
 
         # --- 2. Launch all training ---
-        hf_baseline_run_error = self.run_training(
+        hf_baseline_run_error = self.run_training_local(
             config_file=baseline_config_file_hf,
             log_file=baseline_log_hf,
             config_name=baseline_config.name,
@@ -819,7 +795,7 @@ class CompareDistributedRun:
         if hf_baseline_run_error:
             raise ValueError(f"Huggingface baseline (FSDP) training failed for {hf_model_name}") from hf_baseline_run_error
 
-        tt_baseline_run_error = self.run_training(
+        tt_baseline_run_error = self.run_training_local(
             config_file=baseline_config_file_tt,
             log_file=baseline_log_tt,
             config_name=baseline_config.name,
@@ -960,12 +936,168 @@ class CompareDistributedRun:
                 LogLevel.INFO, f"Check the diff files in {self.results_dir} for details"
             )
             return 1
+        
+    def run_slurm(self, args: argparse.Namespace) -> int:
+        """Main execution function. Runs all test suites for all models."""
+        self.nd_parallel = args.nd_parallel
+        self.ngpu = self.nd_parallel_to_nb_gpus[self.nd_parallel]
+        self.steps = args.steps
+        self.model_filter = args.model_filter
+        self.test_filter = args.test_filter
+        self.flavor = args.flavor
+        self.verbose = args.verbose
+        self.loss_atol = args.loss_atol
+        self.loss_rtol = args.loss_rtol
+        self.grad_norm_atol = args.grad_norm_atol
+        self.grad_norm_rtol = args.grad_norm_rtol
 
+        console.print(
+            Panel(
+                (
+                    f"[bold]GPUs:[/bold] {self.ngpu}\n"
+                    f"[bold]Steps:[/bold] {self.steps}\n"
+                    f"[bold]Seed:[/bold] {self.seed}\n"
+                    f"[bold]Model filter:[/bold] {self.model_filter or 'all'}\n"
+                    f"[bold]Test filter:[/bold] {self.test_filter or 'all'}\n"
+                    f"[bold]Model flavor:[/bold] {self.flavor}"
+                ),
+                title="[bold cyan]Distributed Parallelism Comparison[/bold cyan]",
+                expand=False,
+                border_style="blue",
+                padding=(1, 2),
+            )
+        )
+        console.print()
+
+        self.base_results_dir.mkdir(exist_ok=True)
+
+        # TODO(3outeille): make it more generic later
+        if self.model_filter == "llama3":
+            hf_model_name = "meta-llama/Llama-3.2-1B"
+            tt_model_name = "llama3"
+        elif self.model_filter == "deepseek_v3":
+            hf_model_name = "deepseek-ai/DeepSeek-V3"
+            tt_model_name = "deepseek_v3"
+        else:
+            raise ValueError(f"Model filter {self.model_filter} not supported")
+            
+        self.generate_parallelism_configs(hf_model_name)
+            
+        model_owner, model_repo = hf_model_name.split("/", 1)
+        nd_parallel_upper = self.nd_parallel.upper()
+        self.results_dir = self.base_results_dir / model_owner / model_repo / nd_parallel_upper / self.flavor
+        self.results_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.verbose:
+            log_message(LogLevel.INFO, f"Results directory: {self.results_dir}")
+
+        console.print(
+            Panel(
+                "[bold cyan]Comparing baseline (FSDP) for huggingface & torchtitan[/bold cyan]",
+                expand=False,
+                border_style="blue",
+                padding=(0, 2),
+            )
+        )
+
+        # --- 1. Generate configs ---
+
+        L = []
+
+        for config in self.parallelism_configs:
+
+            config_dir = self.results_dir if config.name == "fsdp" else self.results_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu"
+            config_dir.mkdir(exist_ok=True)
+
+            config_filename_hf = f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.toml"
+            config_file_hf = self.generate_config(
+                config_dir=config_dir,
+                config=config,
+                model_name=hf_model_name,
+                backend="huggingface",
+                filename=config_filename_hf,
+                indent=0
+            )
+            config_filename_tt = f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.toml"
+            config_file_tt = self.generate_config(
+                config_dir=config_dir,
+                config=config,
+                model_name=tt_model_name,
+                backend="torchtitan", 
+                filename=config_filename_tt,
+                indent=0
+            )
+            log_path_hf = config_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_huggingface.log"
+            log_path_tt = config_dir / f"{config.name}_{self.flavor}_{self.ngpu}gpu_torchtitan.log"
+
+            L.append((config_file_hf, config_file_tt, log_path_hf, log_path_tt))
+
+
+        # Launch slurm training
+        jobs = []
+        from slurm_utils import Job, Status
+        for config_file_hf, config_file_tt, log_path_hf, log_path_tt in L:
+            job_hf = Job(config_file_hf, log_path_hf, qos="high")
+            job_tt = Job(config_file_tt, log_path_tt, qos="high")
+
+            job_tt.set_status(Status.INIT)
+            job_hf.set_status(Status.INIT)
+            jobs.append(job_hf)
+            jobs.append(job_tt)
+
+        scheduler = Scheduler()
+
+        scheduler.create_slurm_script(jobs)
+        # submit in subprocess
+        scheduler.submit_jobs(jobs) # -> job.set_status(Status.PENDING)
+
+        scheduler.wait_for_all_jobs_to_complete() # spawn tmux to monitor jobs
+        #NOTE(3outeille): run_slurm() should not be run if <TODO(3outeille): think of the condition to not rerun>
+
+    def run_tests_slurm(self, args: argparse.Namespace) -> int:
+        # TODO(3outeille): do diff + compare metrics
+        pass
 
 def main():
     """Entry point for the script."""
+    parser = argparse.ArgumentParser(
+        description="Test different parallelism configurations against a baseline FSDP model.",
+    )
+    parser.add_argument("--use_slurm", action="store_true",
+                        help="Use SLURM for job submission")
+    parser.add_argument("--run_tests_slurm", action="store_true",
+                        help="Run tests with SLURM")
+    parser.add_argument("-m", "--model-filter", default="",
+                        help="Filter models by name pattern (e.g., 'llama3')")
+    parser.add_argument("-t", "--test-filter", default="",
+                        help="Filter parallelism configurations by name pattern (e.g., 'fsdp1_cp1_tp2_pp2')")
+    parser.add_argument("-nd", "--nd_parallel", type=str, default="2d",
+                        help=f"Parallelism to use (default: {CompareDistributedRun.ND_PARALLEL_TO_NB_GPUS.keys()})")
+    parser.add_argument("-s", "--steps", type=int, default=CompareDistributedRun.DEFAULT_STEPS,
+                        help=f"Training steps (default: {CompareDistributedRun.DEFAULT_STEPS})")
+    parser.add_argument("--flavor", default=CompareDistributedRun.DEFAULT_FLAVOR,
+                        help=f"Model flavor/size (default: {CompareDistributedRun.DEFAULT_FLAVOR}). "
+                            f"Available: llama3=[debugmodel, medium, full], deepseek_v3=[debugmodel]")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Verbose output")
+    parser.add_argument("--loss-atol", type=float, default=CompareDistributedRun.DEFAULT_LOSS_ATOL,
+                        help=f"Absolute tolerance for loss comparison (default: {CompareDistributedRun.DEFAULT_LOSS_ATOL})")
+    parser.add_argument("--loss-rtol", type=float, default=CompareDistributedRun.DEFAULT_LOSS_RTOL,
+                        help=f"Relative tolerance for loss comparison (default: {CompareDistributedRun.DEFAULT_LOSS_RTOL})")
+    parser.add_argument("--grad-norm-atol", type=float, default=CompareDistributedRun.DEFAULT_GRAD_NORM_ATOL,
+                        help=f"Absolute tolerance for grad norm comparison (default: {CompareDistributedRun.DEFAULT_GRAD_NORM_ATOL})")
+    parser.add_argument("--grad-norm-rtol", type=float, default=CompareDistributedRun.DEFAULT_GRAD_NORM_RTOL,
+                        help=f"Relative tolerance for grad norm comparison (default: {CompareDistributedRun.DEFAULT_GRAD_NORM_RTOL})")
+    
+    args = parser.parse_args()
+        
     runner = CompareDistributedRun()
-    return runner.run()
+    if args.use_slurm:
+        return runner.run_slurm(args)
+    elif args.run_tests_slurm:
+        return runner.run_tests_slurm(args)
+    else:
+        return runner.run_local(args)
 
 if __name__ == "__main__":
     sys.exit(main())
