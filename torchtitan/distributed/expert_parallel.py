@@ -103,10 +103,10 @@ class ExpertParallel(ParallelStyle):
         elif a2a_impl == "mxfp8":
             logger.info("Using mxfp8 all-to-all implementation")
             from torchao.prototype.moe_training.kernels.mxfp8.comms import (
-                mxfp8_sync_all_to_all_v,
+                to_mxfp8_a2a_dequant,
             )
 
-            return mxfp8_sync_all_to_all_v
+            return to_mxfp8_a2a_dequant
         else:
             raise ValueError(f"Unknown a2a_impl: {a2a_impl}")
 
