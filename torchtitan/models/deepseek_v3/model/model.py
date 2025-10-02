@@ -313,28 +313,28 @@ class TransformerBlock(nn.Module):
                         grad_norm = param.grad.norm().item()
                         # Check if norm overflowed to inf (but individual elements might be finite)
                         if torch.isinf(torch.tensor(grad_norm)) and not has_inf:
-                            print(f"[LAYER GRAD OVERFLOW] Layer {self.layer_id} - {name}: "
+                            logger.info(f"[LAYER GRAD OVERFLOW] Layer {self.layer_id} - {name}: "
                                   f"norm overflow to inf, max_val={param.grad.abs().max().item():.6e}, "
                                   f"shape={param.grad.shape}")
                     except:
                         grad_norm = float('inf')
-                        print(f"[LAYER GRAD ERROR] Layer {self.layer_id} - {name}: failed to compute norm")
+                        logger.info(f"[LAYER GRAD ERROR] Layer {self.layer_id} - {name}: failed to compute norm")
                     
                     layer_grad_norms.append(grad_norm)
                     
                     if has_nan:
                         nan_params.append(name)
-                        print(f"[LAYER GRAD NaN] Layer {self.layer_id} - {name}: shape={param.grad.shape}")
+                        logger.info(f"[LAYER GRAD NaN] Layer {self.layer_id} - {name}: shape={param.grad.shape}")
                     elif has_inf:
                         inf_params.append(name)
-                        print(f"[LAYER GRAD INF] Layer {self.layer_id} - {name}: shape={param.grad.shape}")
+                        logger.info(f"[LAYER GRAD INF] Layer {self.layer_id} - {name}: shape={param.grad.shape}")
                     elif torch.isinf(torch.tensor(grad_norm)):
-                        print(f"[LAYER GRAD LARGE] Layer {self.layer_id} - {name}: "
+                        logger.info(f"[LAYER GRAD LARGE] Layer {self.layer_id} - {name}: "
                               f"very large gradients, max={param.grad.abs().max().item():.6e}")
                 else:
-                    print(f"[LAYER GRAD] Layer {self.layer_id} - {name}: dtype={param.grad.dtype} (non-float grad)")
+                    logger.info(f"[LAYER GRAD] Layer {self.layer_id} - {name}: dtype={param.grad.dtype} (non-float grad)")
             else:
-                print(f"[LAYER GRAD] Layer {self.layer_id} - {name}: grad is None")
+                logger.info(f"[LAYER GRAD] Layer {self.layer_id} - {name}: grad is None")
         
         # Compute and logger.info layer statistics
         if layer_grad_norms:
