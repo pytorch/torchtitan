@@ -121,7 +121,85 @@ def parallelize_llama(
         )
 
     if job_config.compile.enable and "model" in job_config.compile.components:
-        torch._inductor.config.reorder_for_peak_memory = False
-        model = torch.compile(model, fullgraph=True)
+        # torch._inductor.config.reorder_for_peak_memory = False
+        # model = torch.compile(model, fullgraph=True)
+        model = HijackWrapper(model)
 
     return model
+
+# Just to bootstrap our experiment. NOT the final API.
+class HijackWrapper(torch.nn.Module):
+    def __init__(self, inner: torch.nn.Module, **overrides):
+        super().__init__()
+        self.inner = inner           # register as submodule
+        self._overrides = overrides  # for custom hooks
+
+    def __getattr__(self, name):
+        # check overrides
+        if "_overrides" in self.__dict__ and name in self._overrides:
+            return self._overrides[name]
+        try:
+            # let nn.Module handle registered stuff
+            return super().__getattr__(name)
+        except AttributeError:
+            # fallback to inner model
+            return getattr(self.inner, name)
+
+    def __setattr__(self, name, value):
+        if "_overrides" in self.__dict__ and name in self._overrides:
+            self._overrides[name] = value
+        else:
+            super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        if "_overrides" in self.__dict__ and name in self._overrides:
+            del self._overrides[name]
+        else:
+            super().__delattr__(name)
+
+    def forward(self, *args, **kwargs):
+        assert "forward" not in self._overrides, "forward cannot be overridden"
+        # EDIT ME
+        joint_graph_runner(self.inner, *args, **kwargs)
+        # calling the line below returns control to torchtitan's runner
+        # letting it call the backward, and optimizer.
+        return self.inner(*args, **kwargs)
+
+# Think of this as a "main" function.
+def joint_graph_runner(model, *inputs, **kwargs):
+    from contextlib import ExitStack
+    from torchtitan.experiments.simple_fsdp.llama3.model import SimpleFSDPTransformer
+    from torch._functorch.aot_autograd import (
+        aot_compile_joint_with_descriptors,
+        aot_export_joint_with_descriptors,
+        boxed_nop_preserve_node_meta,
+    )
+    from torch._logging import trace_structured
+
+    assert isinstance(model, SimpleFSDPTransformer)
+    assert isinstance(inputs, tuple)
+    assert not kwargs
+
+    stack = ExitStack()
+    joint_with_descriptors = aot_export_joint_with_descriptors(
+        stack,
+        model,
+        inputs,
+        decompositions=None,
+        fw_compiler=boxed_nop_preserve_node_meta,
+        bw_compiler=boxed_nop_preserve_node_meta,
+    )
+    gm = joint_with_descriptors.graph_module
+
+    trace_structured(
+        "artifact",
+        metadata_fn=lambda: {
+            "name": "aot_export_joint_with_descriptors",
+            "encoding": "string",
+        },
+        payload_fn=lambda: gm.print_readable(
+            print_output=False, include_stride=True, include_device=True
+        ),
+    )
+
+    exit(123)  # just manually force the exit for now
