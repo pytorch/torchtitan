@@ -566,10 +566,11 @@ class Compile:
         default_factory=lambda: ["model", "loss"]
     )
     """Which components to compile"""
+    backend: str = "inductor"
 
 
 @dataclass
-class Float8Dense:
+class Float8Linear:
     enable_fsdp_float8_all_gather: bool = False
     """Whether enable float8 all-gather in FSDP, recommended for tensorwise scaling"""
 
@@ -583,7 +584,7 @@ class Float8Dense:
     """
     Comma-separated list of fully qualified names of modules to skip applying float8 training to.
     nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
-    Example: --quantize.dense.float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    Example: --quantize.linear.float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
     """
     emulate: bool = False
     """
@@ -594,32 +595,32 @@ class Float8Dense:
 
 
 @dataclass
-class Float8MoE:
+class Float8GroupedMM:
     fqns: list[str] | str = field(default_factory=list)
     """
     *Prototype feature, performance optimization still in progress*
-    Comma-separated list of fully qualified names of MoE modules to apply float8 rowwise training to.
+    Comma-separated list of fully qualified names of MoE Layers to apply FP8 dynamic quantization on grouped GEMM operations.
     This is a prototype feature that requires the torchao nightly build.
-    Example: --quantize.dense.float8.fqns="experts"
+    Example: --quantize.grouped_mm.float8.fqns="experts"
     """
 
 
 @dataclass
-class MXDense:
+class MXLinear:
     mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
     """
     Temp work around for inductor performance gap.
 
     CUDA is recommended for best performance.
 
-    Example: --mx.dense.mxfp8_dim1_cast_kernel_choice="cuda"
+    Example: --quantize.linear.mx.mxfp8_dim1_cast_kernel_choice="cuda"
     """
 
     recipe_name: str = "mxfp8_cublas"
     """
     If specified, creates MX config from recipe name. See
     https://github.com/pytorch/ao/tree/main/torchao/prototype/mx_formats for more information.
-    Example: --mx.dense.recipe_name="mxfp8_cublas"
+    Example: --quantize.linear.mx.recipe_name="mxfp8_cublas"
     """
 
     filter_fqns: list[str] = field(default_factory=lambda: ["output"])
@@ -627,46 +628,53 @@ class MXDense:
     Comma-separated list of fully qualified names of modules to skip applying mxfp8 training to.
     nn.Linear modules with any dim size not divisible by 16 are also always skipped due to hardware requirements.
     By default we always skip the output layer.
-    Example: --mx.dense.filter_fqns "attention.wq,attention.wk,attention.wv,output"
+    Example: --quantize.linear.mx.filter_fqns="attention.wq,attention.wk,attention.wv,output"
     """
 
 
 @dataclass
-class MXMoE:
+class MXGroupedMM:
+    recipe_name: Literal["mxfp8"] = "mxfp8"
+    """
+    Quantization recipe name for grouped GEMMs. Options: ["mxfp8"]
+
+    Example: --quantize.grouped_mm.mx.recipe_name="mxfp8"
+    """
+
     fqns: list[str] | str = field(default_factory=list)
     """
     *Prototype feature, performance optimization still in progress*
-    Comma-separated list of fully qualified names of MoE modules to apply the given
+    Comma-separated list of fully qualified names of MoE modules to apply MXFP8 dynamic quantization on grouped GEMM operations.
     This is a prototype feature that requires the torchao nightly build.
-    Example: --mx.moe.fqns="experts"
+    Example: --quantize.grouped_mm.mx.fqns="experts"
     """
 
 
 @dataclass
-class Dense:
-    float8: Float8Dense = field(default_factory=Float8Dense)
-    """Float8 training config for dense layers"""
+class QuantizedLinear:
+    float8: Float8Linear = field(default_factory=Float8Linear)
+    """FP8 training config for nn.Linear layers"""
 
-    mx: MXDense = field(default_factory=MXDense)
-    """MX training config for dense layers"""
+    mx: MXLinear = field(default_factory=MXLinear)
+    """MX training config for nn.Linear layers"""
 
 
 @dataclass
-class MoE:
-    float8: Float8MoE = field(default_factory=Float8MoE)
-    """Float8 training config for MoE layers"""
+class QuantizedGroupedMM:
+    float8: Float8GroupedMM = field(default_factory=Float8GroupedMM)
+    """FP8 training config for grouped GEMMs"""
 
-    mx: MXMoE = field(default_factory=MXMoE)
-    """MX training config for MoE layers"""
+    mx: MXGroupedMM = field(default_factory=MXGroupedMM)
+    """MX training config for grouped GEMMs"""
 
 
 @dataclass
 class Quantize:
-    dense: Dense = field(default_factory=Dense)
-    """Quantized training config for dense layers."""
+    linear: QuantizedLinear = field(default_factory=QuantizedLinear)
+    """Quantized training config for nn.Linear layers"""
 
-    moe: MoE = field(default_factory=MoE)
-    """Quantized training config for MoE layers."""
+    grouped_mm: QuantizedGroupedMM = field(default_factory=QuantizedGroupedMM)
+    """Quantized training config for grouped GEMMs"""
 
 
 @dataclass
