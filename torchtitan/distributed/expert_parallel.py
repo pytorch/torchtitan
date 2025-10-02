@@ -22,7 +22,6 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import _round_up
 
 
@@ -90,18 +89,19 @@ class ExpertParallel(ParallelStyle):
         a2a_impl (str): The implementation of all-to-all. Default is "default". Options are ["default","mxfp8"].
     """
 
-    def __init__(self, a2a_impl: str = "default"):
+    def __init__(
+        self, a2a_dispatch_impl: str = "default", a2a_combine_impl: str = "default"
+    ):
         super().__init__()
         self.input_splits = None
         self.output_splits = None
-        self.a2a_func = self._get_a2a_func(a2a_impl)
+        self.a2a_dispatch_func = self._get_a2a_func(a2a_dispatch_impl)
+        self.a2a_combine_func = self._get_a2a_func(a2a_combine_impl)
 
     def _get_a2a_func(self, a2a_impl: str):
         if a2a_impl == "default":
-            logger.info("Using default all-to-all implementation")
             return all_to_all_single_autograd
         elif a2a_impl == "mxfp8":
-            logger.info("Using mxfp8 all-to-all implementation")
             from torchao.prototype.moe_training.kernels.mxfp8.comms import (
                 to_mxfp8_a2a_dequant,
             )
@@ -143,6 +143,13 @@ class ExpertParallel(ParallelStyle):
             self.input_splits = input_splits.tolist()
             self.output_splits = output_splits.tolist()
 
+        routed_input = self.a2a_dispatch_func(
+            routed_input,
+            self.output_splits,
+            self.input_splits,
+            device_mesh.get_group(),
+        )
+
         # NOTE: After this all-to-all, the routed input is put on proper EP rank.
         # However, the num_tokens_per_expert_group is not of the final target format
         # [#tokens for local expert 0, #tokens for local expert 1, ...]
@@ -152,12 +159,7 @@ class ExpertParallel(ParallelStyle):
         # We need to perform another shuffle to get the correct format -- this is done via the function
         # generate_permute_indices in moe.py, which also does padding to make sure the number of tokens
         # each expert gets locally is a multiple of ALIGN_SIZE_M.
-        routed_input = self.a2a_func(
-            routed_input,
-            self.output_splits,
-            self.input_splits,
-            device_mesh.get_group(),
-        )
+
         return routed_input, num_tokens_per_expert_group
 
     @staticmethod
@@ -170,7 +172,7 @@ class ExpertParallel(ParallelStyle):
     # performing all-to-all combine on the output
     def _token_combine(self, mod, routed_output, device_mesh):
         # For a2a combine, input splits and output splits are opposite of a2a dispatch.
-        routed_output = self.a2a_func(
+        routed_output = self.a2a_combine_func(
             routed_output,
             self.input_splits,
             self.output_splits,

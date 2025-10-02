@@ -107,7 +107,8 @@ def parallelize_llama(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
-            a2a_impl=job_config.parallelism.expert_parallel_a2a_impl,
+            a2a_dispatch_impl=job_config.parallelism.expert_parallel_a2a_dispatch_impl,
+            a2a_combine_impl=job_config.parallelism.expert_parallel_a2a_combine_impl,
         )
 
     model_compile_enabled = (
@@ -439,8 +440,11 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
-    a2a_impl: str = "default",
+    a2a_dispatch_impl: str = "default",
+    a2a_combine_impl: str = "default",
 ):
+    logger.info(f"Using all-to-all dispatch: {a2a_dispatch_impl}")
+    logger.info(f"Using all-to-all combine: {a2a_combine_impl}")
     for transformer_block in model.layers.values():
         if not transformer_block.moe_enabled:
             continue
@@ -489,13 +493,19 @@ def apply_moe_ep_tp(
         elif tp_mesh is None:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel(a2a_impl=a2a_impl)
+            experts_plan = ExpertParallel(
+                a2a_dispatch_impl=a2a_dispatch_impl,
+                a2a_combine_impl=a2a_combine_impl,
+            )
         elif etp_enabled:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
         else:
             experts_mesh = ep_mesh
-            experts_plan = ExpertParallel(a2a_impl=a2a_impl)
+            experts_plan = ExpertParallel(
+                a2a_dispatch_impl=a2a_dispatch_impl,
+                a2a_combine_impl=a2a_combine_impl,
+            )
 
         parallelize_module(
             module=transformer_block.moe.experts,
