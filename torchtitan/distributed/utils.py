@@ -85,6 +85,7 @@ def set_determinism(
     device: torch.device,
     seed: int | None = None,
     deterministic: bool = False,
+    deterministic_warn_only: bool = False,
     distinct_seed_mesh_dim: str = "pp",
 ) -> None:
     """
@@ -99,7 +100,7 @@ def set_determinism(
     """
     if deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
-        torch.use_deterministic_algorithms(True)
+        torch.use_deterministic_algorithms(True, warn_only=deterministic_warn_only)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         # env var for deterministic CuBLAS
