@@ -70,8 +70,8 @@ def parallelize_vlm(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if job_config.compile.enable:
-        apply_compile(model)
-        apply_compile(model.encoder)
+        apply_compile(model, job_config.compile)
+        apply_compile(model.encoder, job_config.compile)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel

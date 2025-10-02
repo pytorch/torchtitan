@@ -566,6 +566,7 @@ class Compile:
         default_factory=lambda: ["model", "loss"]
     )
     """Which components to compile"""
+    backend: str = "inductor"
 
 
 @dataclass

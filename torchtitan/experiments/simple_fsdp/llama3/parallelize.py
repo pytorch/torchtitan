@@ -122,6 +122,6 @@ def parallelize_llama(
 
     if job_config.compile.enable and "model" in job_config.compile.components:
         torch._inductor.config.reorder_for_peak_memory = False
-        model = torch.compile(model, fullgraph=True)
+        model = torch.compile(model, backend=job_config.compile.backend, fullgraph=True)
 
     return model
