@@ -103,7 +103,8 @@ def _apply_op_sac(
             mm_count_key = f"{mode}_mm_count"
             if func == torch.ops.aten.mm.default:
                 if args[1].shape in mm_recompute_shapes:
-                    return CheckpointPolicy.PREFER_RECOMPUTE
+                    # return CheckpointPolicy.PREFER_RECOMPUTE
+                    return CheckpointPolicy.MUST_SAVE  # TODO(jianiw): testing
                 meta[mm_count_key] += 1
             # Saves output of all compute ops, except every second mm
             to_save = func in op_sac_save_list and not (

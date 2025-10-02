@@ -155,6 +155,7 @@ deepseekv3_configs = {
         v_head_dim=128,
         use_flex_attn=True,
         attn_mask_type="block_causal",
+        hf_weight_quantized=True,
     ),
 }
 

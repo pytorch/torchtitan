@@ -431,10 +431,16 @@ class CheckpointManager:
                 self.sd_adapter is not None
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
+            hf_storage_reader = self.sd_adapter.get_hf_storage_reader(checkpoint_id)
 
+            begin_load = time.monotonic()
+            logger.info(f"Starting dcp.load with {hf_storage_reader}")
             dcp.load(
                 hf_state_dict,
-                storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
+                storage_reader=hf_storage_reader,
+            )
+            logger.info(
+                f"dcp.load with HuggingFaceStorageReader completed in {time.monotonic() - begin_load:.2f} seconds"
             )
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)

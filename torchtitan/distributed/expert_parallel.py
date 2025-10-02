@@ -272,6 +272,7 @@ def expert_parallel(func: Callable) -> Callable:
                 num_ep_ranks,
                 padded_max_len,
                 TOKEN_GROUP_ALIGN_SIZE_M,
+                use_cpu=True
             )
 
         x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
