@@ -42,13 +42,14 @@ def apply_local_map_to_moe(mesh):
     moe._moe_forward = local_map(
         moe._moe_forward,
         out_placements=(
-            (Shard(0),),
+            # (Shard(0),),
+            (Replicate(),),
             (Replicate(),),
         ),
         in_placements=(
             # x
-            (Shard(0),),
-            # (Replicate(),),
+            # (Shard(0),),
+            (Replicate(),),
             # router weight
             (Replicate(),),
             # expert bias
