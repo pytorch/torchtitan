@@ -14,9 +14,6 @@ import torch
 from torchtitan.config import Profiling as ProfilingConfig
 from torchtitan.tools.logging import logger
 
-# the number of warmup steps before the active step in each profiling cycle
-WARMUP = 3
-
 # how much memory allocation/free ops to record in memory snapshots
 MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
 
@@ -58,7 +55,10 @@ def maybe_enable_profiling(
         if not os.path.exists(trace_dir):
             os.makedirs(trace_dir, exist_ok=True)
 
-        warmup, active = WARMUP, 1
+        warmup, active = (
+            profiling_config.profiler_warmup,
+            profiling_config.profiler_active,
+        )
         wait = profile_freq - (active + warmup)
         assert (
             wait >= 0
