@@ -3,7 +3,7 @@
 name = "torchtitan"
 description = "A PyTorch native platform for training generative AI models"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 license = {file = "LICENSE"}
 authors = [
     { name = "PyTorch Team", email = "packages@pytorch.org" },
