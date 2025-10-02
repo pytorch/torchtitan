@@ -39,7 +39,7 @@ register_train_spec(
 )
 register_train_spec(
     TrainSpec(
-        name="deepseekv3_auto_parallel",
+        name="deepseek_v3_auto_parallel",
         model_cls=DeepSeekV3Model,
         model_args=deepseekv3_configs,
         parallelize_fn=parallelize_deepseekv3,
