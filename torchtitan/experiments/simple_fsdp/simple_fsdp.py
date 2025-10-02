@@ -7,7 +7,7 @@
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import cast, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -20,6 +20,8 @@ from torch.distributed._tensor import (
     Shard,
 )
 from torch.distributed.device_mesh import _mesh_resources, DeviceMesh
+from torch.distributed.distributed_c10d import ReduceOp
+from torch.distributed.fsdp._fully_shard._fsdp_collectives import _div_if_needed
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
@@ -47,6 +49,82 @@ def disable_active_parametrization():
 class MixedPrecisionPolicy:
     param_dtype: Optional[torch.dtype] = None
     reduce_dtype: Optional[torch.dtype] = None
+
+
+@dataclass(frozen=True)
+class SimpleFSDPPartial(Partial):
+    gradient_divide_factor: Optional[float] = None
+    reduce_dtype: Optional[torch.dtype] = None
+
+    def _get_gradient_divide_factors(
+        self,
+    ) -> tuple[
+        Optional[float],
+        Optional[float],
+        str,
+        str,
+    ]:
+        """
+        the logic follows
+        https://github.com/pytorch/pytorch/blob/main/torch/distributed/fsdp/_fully_shard/_fsdp_collectives.py#L688
+        """
+        if self.gradient_divide_factor is None:
+            return None, None, None, None
+        overflow_risk = self.reduce_dtype not in (torch.float32, torch.bfloat16)
+        pre_factor: Optional[float] = None
+        post_factor: Optional[float] = None
+        # Since fp16 has smaller dynamic range than fp32/bf16, we want to avoid
+        # overflow/underflow. For N data parallel workers, each worker computes
+        # g_i, and they collectively reduce (g_1 + ... + g_N) / N. To avoid
+        # overflow/underflow, we divide by ~sqrt(N) before/after the reduction.
+        pre_factor = 1
+        while (
+            self.gradient_divide_factor % pre_factor == 0
+            and self.gradient_divide_factor / pre_factor > pre_factor
+        ):
+            pre_factor *= 2
+        post_factor = self.gradient_divide_factor / pre_factor
+        reduce_scatter_op, all_reduce_op = "sum", "sum"
+        return pre_factor, post_factor, reduce_scatter_op, all_reduce_op
+
+    def _reduce_value(
+        self, tensor: torch.Tensor, mesh: DeviceMesh, mesh_dim: int
+    ) -> torch.Tensor:
+        (
+            pre_factor,
+            post_factor,
+            reduce_scatter_op,
+            all_reduce_op,
+        ) = self._get_gradient_divide_factors()
+        if pre_factor is not None:
+            _div_if_needed(tensor, pre_factor)
+        reduced = super()._reduce_value(tensor, mesh, mesh_dim)
+        if post_factor is not None:
+            _div_if_needed(reduced, post_factor)
+        return reduced
+
+    def _reduce_shard_value(
+        self,
+        tensor: torch.Tensor,
+        mesh: DeviceMesh,
+        mesh_dim: int,
+        shard_spec: Placement,
+    ) -> torch.Tensor:
+        (
+            pre_factor,
+            post_factor,
+            reduce_scatter_op,
+            all_reduce_op,
+        ) = self._get_gradient_divide_factors()
+
+        if pre_factor is not None:
+            _div_if_needed(tensor, pre_factor)
+        shard_spec = cast(Shard, shard_spec)
+        reduced = shard_spec._reduce_shard_tensor_test(tensor, mesh, reduce_scatter_op, mesh_dim)
+
+        if post_factor is not None:
+            _div_if_needed(reduced, post_factor)
+        return reduced
 
 
 def _distribute_dtensor(
@@ -192,18 +270,26 @@ class ReplicateComputation(torch.nn.Module):
         mode,
         regional_ac,
         mp_policy,
+        gradient_divide_factor,
     ):
         super().__init__()
         self.device_mesh = device_mesh
         self.param_sharding = param_sharding
         self.mode = mode
         self.compute_placements = [Replicate()] * self.device_mesh.ndim
-        self.grad_placements = [Partial(reduce_op="avg")] * self.device_mesh.ndim
+        self.grad_placements = [
+            SimpleFSDPPartial(
+                reduce_op="avg",
+                gradient_divide_factor=gradient_divide_factor,
+                reduce_dtype=mp_policy.reduce_dtype,
+            )
+            if gradient_divide_factor is not None
+            else Partial(reduce_op="avg")
+        ] * self.device_mesh.ndim
         self.regional_ac = regional_ac
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype = mp_policy.param_dtype
         self.reduce_dtype = mp_policy.reduce_dtype
-        self.ep_mesh_name, self.tp_mesh_name = "ep", "tp"
 
     def replicate_compute(self, x):
         # data parallel runtime replicate parameters and do local compute
@@ -286,6 +372,7 @@ def data_parallel(
     ac_mode: str = "none",
     mp_policy: Optional[MixedPrecisionPolicy] = None,
     shard_dim: int = 0,
+    gradient_divide_factor: Optional[float] = None,
 ):
     if mode == "replicate":
         param_sharding = (Replicate(),)
@@ -348,6 +435,7 @@ def data_parallel(
                 mode,
                 regional_ac,
                 mp_policy=mp_policy,
+                gradient_divide_factor=gradient_divide_factor,
             ),
         )
     return model
