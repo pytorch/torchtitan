@@ -494,6 +494,7 @@ class CheckpointManager:
                 )
                 self.save_future = result.upload_completion
                 self.staging_future = result.staging_completion
+                self.staging = True
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 self.save_future = self.dcp_save(
@@ -615,6 +616,7 @@ class CheckpointManager:
         """
         if self.enable_staging and self.staging:
             self.staging_future.result()
+            self.staging = False
 
     def _find_load_step(self, folder: str = "") -> int:
         """Find the step to load the checkpoint for.
