@@ -424,12 +424,18 @@ class TestCheckpointManager(unittest.TestCase):
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torch.cuda.Stream")
+    @mock.patch("torchtitan.components.checkpoint.DefaultStager")
     @mock.patch("torchtitan.components.checkpoint.dist.new_group")
     @mock.patch(
         "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
     )
     def test_async_save_with_pinned_mem_sets_staging_flag(
-        self, mock_async_save, mock_new_group, mock_cuda_stream, mock_rank
+        self,
+        mock_async_save,
+        mock_new_group,
+        mock_default_stager,
+        mock_cuda_stream,
+        mock_rank,
     ):
         """
         Test that AsyncMode.ASYNC_WITH_PINNED_MEM correctly sets staging flag.
