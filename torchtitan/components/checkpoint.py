@@ -259,6 +259,7 @@ class CheckpointManager:
         self.initial_load_path = checkpoint_config.initial_load_path
         self.last_save_model_only = checkpoint_config.last_save_model_only
         self.last_save_in_hf = checkpoint_config.last_save_in_hf
+        self.initial_load_legacy = checkpoint_config.initial_load_legacy
         if self.last_save_in_hf:
             assert (
                 sd_adapter is not None
@@ -725,11 +726,20 @@ class CheckpointManager:
         # For the first step, we will only load the model.
         if model_only:
             if self.has_ref_model:
-                return {MODEL: self.states[MODEL].state_dict()}, {
-                    MODEL: self.states[REF_MODEL].state_dict()
-                }
+                if self.initial_load_legacy:
+                    return {MODEL: self.states[MODEL].state_dict()}, {
+                        MODEL: self.states[REF_MODEL].state_dict()
+                    }
+                else:
+                    return (
+                        self.states[MODEL].state_dict(),
+                        self.states[REF_MODEL].state_dict(),
+                    )
             else:
-                return {MODEL: self.states[MODEL].state_dict()}, None
+                if self.initial_load_legacy:
+                    return {MODEL: self.states[MODEL].state_dict()}, None
+                else:
+                    return self.states[MODEL].state_dict(), None
 
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:

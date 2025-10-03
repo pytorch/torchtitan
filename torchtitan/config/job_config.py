@@ -451,6 +451,11 @@ class Checkpoint:
     `--checkpoint.no_initial_load_model_only` to override the default setting.
     """
 
+    initial_load_legacy: bool = True
+    """
+    From model checkpoint paths converted in our old branch
+    """
+
     initial_load_in_hf: bool = False
     """
     Enable the use of HuggingFace's safetensors format for checkpointing. The option
