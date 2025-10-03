@@ -7,6 +7,7 @@
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Shard, Replicate
+from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
@@ -164,8 +165,6 @@ def parallelize_llama(
         )
 
     if job_config.compile.enable and "model" in job_config.compile.components:
-        # torch._inductor.config.reorder_for_peak_memory = False
-        # model = torch.compile(model, fullgraph=True)
         model = HijackWrapper(model, parallel_dims)
 
     return model
@@ -210,6 +209,7 @@ class HijackWrapper(torch.nn.Module):
         # 2-D device mesh with ['dp_shard', 'tp'], [2, 4]
 
         # Hack: convert args and kwargs to DTensor. This should be fixed at data loader. 
+        # This works, but kinda cheating?
         dt_args = tuple(DTensor.from_local(arg, self.parallel_dims.world_mesh["tp"], [Replicate()]) for arg in args)
 
         # RuntimeError('Sharding propagation failed for Op(op=aten.embedding.default, args_schema=Spec(S(0) on (2048, 256)), Spec((Shard(dim=0), Replicate()) on (16, 2048)) @ mesh: (2, 4))')
@@ -220,13 +220,17 @@ class HijackWrapper(torch.nn.Module):
 
         # HACK: doing graph capture on the fly, we should do it AOT
         if self.joint_graph_module is None:
+            # needed to avoid having fwd_rng_state in the fw_gm inp
+            # this doesn't work!
+            # torch._functorch.config.graphsafe_rng_functionalization = False
+
             # first time, we need to initialize the runner
             self.joint_graph_module = joint_graph_builder(self.inner, *dt_args, **kwargs)
 
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
         # return self.joint_graph_module(*args, **kwargs)
-        return self.inner(*args, **kwargs)
+        return self.joint_graph_module(args)
 
 
 def joint_graph_builder(model, *inputs, **kwargs):
@@ -266,8 +270,12 @@ def joint_graph_builder(model, *inputs, **kwargs):
     # print_if_rank0(bw_gm.print_readable(print_output=False))
 
     # Run graph passes here
-    ## Apply bucketing here
-    ## Apply Flex Attention compilation here
+
+    ## Apply bucketing
+    # schedule_overlap_bucketing(fw_gm)
+    # schedule_overlap_bucketing(bw_gm)
+
+    ## TODO: Apply Flex Attention compilation here
 
     # Codgen Autograd.Function Wrappers
 
@@ -287,16 +295,12 @@ def joint_graph_builder(model, *inputs, **kwargs):
             local_buffers.append(b)
 
 
-    # local_inputs = tuple(input.clone().detach() for input in inputs)
-
     joint_graph_module = JointGraphModule(
-        local_params, local_buffers, fw_metadata, fw_gm, bw_gm, RunMode.CODEGEN
+        local_params, local_buffers, fw_metadata, fw_gm, bw_gm, RunMode.CODEGEN_AUTOGRAD, f"rank{torch.distributed.get_rank()}"
     )
 
     return joint_graph_module
 
-    # Run forward pass through the custom function
-    # outputs = joint_graph_module(local_inputs)
 
     # trace_structured(
     #     "artifact",
@@ -308,6 +312,3 @@ def joint_graph_builder(model, *inputs, **kwargs):
     #         print_output=False, include_stride=True, include_device=True
     #     ),
     # )
-
-
-    # exit(123)  # just manually force the exit for now
