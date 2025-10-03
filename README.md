@@ -21,6 +21,7 @@ To use the latest features of `torchtitan`, we recommend using the most recent P
 
 
 ## Latest News
+- [2025/10] SkyPilot now supports TorchTitan! See the tutorial [here](https://docs.skypilot.co/en/latest/examples/training/torchtitan.html).
 - [2025/07] We published [instructions](/torchtitan/models/README.md) on how to add a model to `torchtitan`.
 - [2025/07] We released `torchtitan` [v0.1.0](https://github.com/pytorch/torchtitan/releases), and also set up nightly builds.
 - [2025/04] Our paper was accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620).
