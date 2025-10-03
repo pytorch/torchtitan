@@ -25,7 +25,7 @@ hf_assets_path = "./assets/hf/DeepSeek-V3.1-Base"
 
 [optimizer]
 name = "AdamW"
-lr = 2.2e-5
+lr = 2.2e-6
 eps = 1e-8
 
 [lr_scheduler]
@@ -67,7 +67,7 @@ mode = "full"  # ["none", "selective", "full"]
 selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]
-enable = false
+enable = true
 components = ["loss"] # ["model", "loss"]
 
 [quantize.dense.float8]

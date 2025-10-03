@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 from torchtitan.models.attention import build_attention
-from torchtitan.models.moe import FeedForward, MoE
+from torchtitan.models.moe import FeedForward, MoE, create_tensor_hook
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import DeepSeekV3ModelArgs
@@ -286,17 +286,13 @@ class TransformerBlock(nn.Module):
         self.layer_id = layer_id
 
         # Register backward hook to monitor gradients
-        self.register_full_backward_hook(self._layer_gradient_hook)
-        logger.info(f"[HOOK REGISTRATION] Layer {self.layer_id} TransformerBlock gradient hook registered")
+        # self.register_full_backward_hook(self._layer_gradient_hook)
+        # logger.info(f"[HOOK REGISTRATION] Layer {self.layer_id} TransformerBlock gradient hook registered")
 
     def _layer_gradient_hook(self, module, grad_input, grad_output):
         """Backward hook to monitor gradients of all parameters in this layer."""
         logger.info(f"[LAYER GRAD HOOK] Layer {self.layer_id} TransformerBlock backward pass")
         
-        # Collect gradient statistics for this layer
-        layer_grad_norms = []
-        nan_params = []
-        inf_params = []
         total_params = 0
         
         # Check gradients for all named parameters in this layer
@@ -308,50 +304,32 @@ class TransformerBlock(nn.Module):
                     has_nan = torch.isnan(param.grad).any().item()
                     has_inf = torch.isinf(param.grad).any().item()
                     
-                    # Calculate norm safely
-                    try:
-                        grad_norm = param.grad.norm().item()
-                        # Check if norm overflowed to inf (but individual elements might be finite)
-                        if torch.isinf(torch.tensor(grad_norm)) and not has_inf:
-                            logger.info(f"[LAYER GRAD OVERFLOW] Layer {self.layer_id} - {name}: "
-                                  f"norm overflow to inf, max_val={param.grad.abs().max().item():.6e}, "
-                                  f"shape={param.grad.shape}")
-                    except:
-                        grad_norm = float('inf')
-                        logger.info(f"[LAYER GRAD ERROR] Layer {self.layer_id} - {name}: failed to compute norm")
-                    
-                    layer_grad_norms.append(grad_norm)
-                    
                     if has_nan:
-                        nan_params.append(name)
-                        logger.info(f"[LAYER GRAD NaN] Layer {self.layer_id} - {name}: shape={param.grad.shape}")
+                        logger.info(f"[PARAM GRAD] Layer {self.layer_id} - {name}: "
+                              f"norm=NaN, max=NaN, mean=NaN, shape={param.grad.shape}")
                     elif has_inf:
-                        inf_params.append(name)
-                        logger.info(f"[LAYER GRAD INF] Layer {self.layer_id} - {name}: shape={param.grad.shape}")
-                    elif torch.isinf(torch.tensor(grad_norm)):
-                        logger.info(f"[LAYER GRAD LARGE] Layer {self.layer_id} - {name}: "
-                              f"very large gradients, max={param.grad.abs().max().item():.6e}")
+                        logger.info(f"[PARAM GRAD] Layer {self.layer_id} - {name}: "
+                              f"norm=Inf, max=Inf, mean=Inf, shape={param.grad.shape}")
+                    else:
+                        # Calculate gradient statistics safely
+                        try:
+                            grad_norm = param.grad.norm().item()
+                            grad_max = param.grad.abs().max().item()
+                            grad_mean = param.grad.mean().item()
+                            
+                            logger.info(f"[PARAM GRAD] Layer {self.layer_id} - {name}: "
+                                  f"norm={grad_norm:.6e}, max={grad_max:.6e}, mean={grad_mean:.6e}, "
+                                  f"shape={param.grad.shape}")
+                        except:
+                            logger.info(f"[PARAM GRAD] Layer {self.layer_id} - {name}: "
+                                  f"failed to compute stats, shape={param.grad.shape}")
                 else:
-                    logger.info(f"[LAYER GRAD] Layer {self.layer_id} - {name}: dtype={param.grad.dtype} (non-float grad)")
+                    logger.info(f"[PARAM GRAD] Layer {self.layer_id} - {name}: "
+                          f"dtype={param.grad.dtype} (non-float grad)")
             else:
-                logger.info(f"[LAYER GRAD] Layer {self.layer_id} - {name}: grad is None")
+                logger.info(f"[PARAM GRAD] Layer {self.layer_id} - {name}: grad is None")
         
-        # Compute and logger.info layer statistics
-        if layer_grad_norms:
-            avg_grad_norm = sum(layer_grad_norms) / len(layer_grad_norms)
-            max_grad_norm = max(layer_grad_norms)
-            min_grad_norm = min(layer_grad_norms)
-            
-            logger.info(f"[LAYER GRAD SUMMARY] Layer {self.layer_id}: "
-                  f"avg_norm={avg_grad_norm:.6f}, max_norm={max_grad_norm:.6f}, "
-                  f"min_norm={min_grad_norm:.6f}, total_params={total_params}")
-        else:
-            logger.info(f"[LAYER GRAD SUMMARY] Layer {self.layer_id}: No floating point gradients found, total_params={total_params}")
-            
-        if nan_params:
-            logger.info(f"[LAYER GRAD ERROR] Layer {self.layer_id} NaN gradients: {nan_params}")
-        if inf_params:
-            logger.info(f"[LAYER GRAD ERROR] Layer {self.layer_id} Inf gradients: {inf_params}")
+        logger.info(f"[LAYER GRAD SUMMARY] Layer {self.layer_id}: total_params={total_params}")
 
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor):
         """
@@ -364,11 +342,22 @@ class TransformerBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        x = x + self.attention(self.attention_norm(x), freqs_cis)
+        t1 = self.attention_norm(x)
+        # t1.register_hook(create_tensor_hook("t_after_attention_norm"))
+        x = x + self.attention(t1, freqs_cis)
+        # x.register_hook(create_tensor_hook("t_after_attn"))
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x))
+            t = self.ffn_norm(x)
+            # t.register_hook(create_tensor_hook("t_after_ffn_norm"))
+            x = x + self.moe(t)
+            # x.register_hook(create_tensor_hook("x_after_moe"))
+
         else:
-            x = x + self.feed_forward(self.ffn_norm(x))
+            t = self.ffn_norm(x)
+            # t.register_hook(create_tensor_hook("t_after_ffn_norm"))
+            x = x + self.feed_forward(t)
+            # x.register_hook(create_tensor_hook("x_after_feedforward"))
+
         return x
 
     def init_weights(self, buffer_device: torch.device):

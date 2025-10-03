@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 from dataclasses import dataclass
 from typing import Literal
 
@@ -12,6 +13,77 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.distributed.expert_parallel import expert_parallel
+from torchtitan.tools.logging import logger
+
+
+def _tensor_gradient_hook_fn(tensor_name: str, grad):
+    """
+    Utility function for tensor gradient hooks that prints gradient statistics.
+    This function signature matches the format expected by tensor.register_hook().
+
+    Args:
+        tensor_name (str): Name identifier for the tensor
+        grad (torch.Tensor): Gradient tensor
+    """
+    if grad is None:
+        logger.info(f"[TENSOR GRAD] {tensor_name}: grad is None")
+        return
+
+    if not (grad.dtype.is_floating_point or grad.dtype.is_complex):
+        logger.info(f"[TENSOR GRAD] {tensor_name}: dtype={grad.dtype} (non-float grad)")
+        return
+
+    # Check for NaN and Inf elements
+    has_nan = torch.isnan(grad).any().item()
+    has_inf = torch.isinf(grad).any().item()
+
+    if has_nan:
+        logger.info(
+            f"[TENSOR GRAD] {tensor_name}: "
+            f"mean=NaN, max=NaN, min=NaN, has_nan=True, has_inf={has_inf}, "
+            f"shape={grad.shape}"
+        )
+    elif has_inf:
+        logger.info(
+            f"[TENSOR GRAD] {tensor_name}: "
+            f"mean=Inf, max=Inf, min=Inf, has_nan=False, has_inf=True, "
+            f"shape={grad.shape}"
+        )
+    else:
+        # Calculate gradient statistics safely
+        try:
+            grad_mean = grad.mean().item()
+            grad_max = grad.max().item()
+            grad_min = grad.min().item()
+
+            logger.info(
+                f"[TENSOR GRAD] {tensor_name}: "
+                f"mean={grad_mean:.6e}, max={grad_max:.6e}, min={grad_min:.6e}, "
+                f"has_nan=False, has_inf=False, shape={grad.shape}"
+            )
+        except Exception as e:
+            logger.info(
+                f"[TENSOR GRAD] {tensor_name}: "
+                f"failed to compute stats: {e}, shape={grad.shape}"
+            )
+
+
+def create_tensor_hook(tensor_name: str):
+    """
+    Utility function to create a tensor gradient hook using functools.partial.
+    This follows the pattern shown in the user's example.
+
+    Args:
+        tensor_name (str): Name identifier for the tensor being hooked
+
+    Returns:
+        Callable: Hook function that can be registered on a tensor using tensor.register_hook()
+
+    Example usage:
+        hook_fn = create_tensor_hook("my_tensor")
+        tensor.register_hook(hook_fn)
+    """
+    return functools.partial(_tensor_gradient_hook_fn, tensor_name)
 
 
 @dataclass
@@ -370,13 +442,18 @@ class MoE(nn.Module):
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
-        # top_scores and selected_experts_indices shape (bs*slen*top_k,)
-        # num_tokens_per_expert shape (num_experts,)
+        # Register hook on input tensor
+        # x.register_hook(create_tensor_hook("moe_input"))
+
+        # Router forward pass - compute expert scores and routing
         (
             top_scores,
             selected_experts_indices,
             num_tokens_per_expert,
         ) = self.router(x, self.expert_bias)
+
+        # Register hooks on router outputs for gradient monitoring
+        # top_scores.register_hook(create_tensor_hook("router_top_scores"))
 
         # tokens_per_expert will be used to update the expert bias for load balancing.
         # and also to count the expert usage
@@ -407,21 +484,25 @@ class MoE(nn.Module):
 
         # shape (bs*slen*top_k, dim)
         routed_input = torch.gather(x, dim=0, index=token_indices_experts_sorted)
+        # routed_input.register_hook(create_tensor_hook("routed_input"))
 
         if self.score_before_experts:
             routed_input = (
                 routed_input.to(torch.float32)
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
+            # routed_input.register_hook(create_tensor_hook("routed_input_after_scoring"))
 
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_tokens_per_expert)
+        # routed_output.register_hook(create_tensor_hook("experts_output"))
 
         # shared expert
         # Note: we execute the shared expert before scoring the output of the routed expert
         # to "implicitly" overlap the shared expert compute with token combine communication
         if self.shared_experts is not None:
             out = self.shared_experts(x)
+            # out.register_hook(create_tensor_hook("shared_experts_output"))
         else:
             out = torch.zeros_like(x)
 
@@ -430,10 +511,13 @@ class MoE(nn.Module):
                 routed_output.to(torch.float32)
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
+            # routed_output.register_hook(create_tensor_hook("routed_output_after_scoring"))
 
         out = out.scatter_add(
             dim=0, index=token_indices_experts_sorted, src=routed_output
         )
+        # out.register_hook(create_tensor_hook("moe_final_output"))
+
         out = out.reshape(bs, slen, dim)
         return out
 

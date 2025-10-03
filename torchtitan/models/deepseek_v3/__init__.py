@@ -100,8 +100,8 @@ deepseekv3_configs = {
         qk_rope_head_dim=64,
         v_head_dim=128,
         mscale=0.70,
-        use_flex_attn=True,
-        attn_mask_type="block_causal",
+        # use_flex_attn=True,
+        # attn_mask_type="block_causal",
     ),
     "236B": DeepSeekV3ModelArgs(
         vocab_size=102400,
@@ -135,7 +135,7 @@ deepseekv3_configs = {
         dim=7168,
         inter_dim=18432,
         moe_inter_dim=2048,
-        n_layers=45,
+        n_layers=61,
         n_dense_layers=3,
         n_heads=128,
         moe_args=MoEArgs(
@@ -154,8 +154,8 @@ deepseekv3_configs = {
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,
-        # use_flex_attn=True,
-        # attn_mask_type="block_causal",
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
         hf_weight_quantized=True,
     ),
 }
