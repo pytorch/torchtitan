@@ -132,11 +132,8 @@ def parallelize_deepseekv3(
                     ac_mode=job_config.activation_checkpoint.mode,
                     mp_policy=mp_policy,
                     shard_dim=experts_shard_dim,
+                    gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
                 )
-                # TODO(ruisizhang123): support set_gradient_divide_factor in simplefsdp
-                # transformer_block.moe.experts.set_gradient_divide_factor(
-                #     parallel_dims.fsdp_gradient_divide_factor,
-                # )
 
         model = data_parallel(
             model,
