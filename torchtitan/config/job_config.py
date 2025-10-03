@@ -408,6 +408,13 @@ class Checkpoint:
     enable: bool = False
     """Whether to enable checkpoint"""
 
+    enable_ft: bool = True
+    """
+    Checkpoints data loader state if enabled. Otherwise infers the data loader
+    position based on the number of steps completed.
+    """
+
+
     folder: str = "checkpoint"
     """
     The folder to store the checkpoints.

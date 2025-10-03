@@ -190,6 +190,7 @@ class CheckpointManager:
         ft_manager: FTManager | None = None,
     ) -> None:
         self.enable = checkpoint_config.enable
+        self.enable_ft = checkpoint_config.enable_ft
 
         self.ft_manager = (
             ft_manager.manager if ft_manager and ft_manager.enabled else None
@@ -222,7 +223,7 @@ class CheckpointManager:
             self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
         ) or self.ft_manager
 
-        if not self.enable and self.ft_manager is None:
+        if not self.enable and (self.ft_manager is None or not self.enable_ft):
             return
 
         self.states = states
@@ -464,7 +465,7 @@ class CheckpointManager:
             None
         """
 
-        if self.ft_manager:
+        if self.ft_manager and self.enable_ft:
             self._ft_save(curr_step)
 
         if not self._should_save(curr_step, last_step):
@@ -536,6 +537,8 @@ class CheckpointManager:
         """
 
         if self.ft_manager:
+            if not self.enable_ft:
+                return False
             self._ft_load()
 
         if not self.enable:
