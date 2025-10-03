@@ -35,7 +35,7 @@ decay_type = "cosine"
 min_lr_factor = 0.1
 
 [training]
-local_batch_size = 8
+local_batch_size = 4
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
 steps = 1000
