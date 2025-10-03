@@ -6,6 +6,7 @@
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
@@ -16,7 +17,25 @@ from torchtitan.tools.logging import logger
 
 from torchtitan.experiments.simple_fsdp.simple_fsdp import data_parallel, MixedPrecisionPolicy
 
+from torch._functorch.aot_autograd import aot_export_joint_with_descriptors
+from torch._functorch.partitioners import min_cut_rematerialization_partition
 
+from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
+
+from torch._functorch._aot_autograd.aot_eager_runner import (
+    get_num_mutate_inputs,
+    get_num_user_outputs,
+    JointGraphModule,
+    RunMode,
+)
+import contextlib
+from torchtitan.experiments.simple_fsdp.llama3.model import SimpleFSDPTransformer
+from torch._functorch.aot_autograd import (
+    aot_export_joint_with_descriptors,
+    boxed_nop_preserve_node_meta,
+)
+from torch._logging import trace_structured
+    
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
@@ -29,6 +48,29 @@ _op_sac_save_list = {
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
 }
+
+def print_if_rank0(msg):
+    if torch.distributed.get_rank() == 0:
+        print(msg)
+
+def graph_capture_and_aot_export_joint_with_descriptors(model, inputs):
+    assert isinstance(inputs, tuple)
+    with torch._dynamo.config.patch(install_free_tensors=True):
+        # TODO: switch to use the official graph_capture API once it is ready
+        gm = _dynamo_graph_capture_for_export(model)(*inputs)
+    return aot_export_joint_with_descriptors_alone(gm, inputs)
+
+
+def aot_export_joint_with_descriptors_alone(model, inputs):
+    assert isinstance(inputs, tuple)
+    with contextlib.ExitStack() as stack:
+        joint_with_descriptors = aot_export_joint_with_descriptors(
+            stack,
+            model,
+            inputs,
+        )
+        return joint_with_descriptors
+
 
 
 def parallelize_llama(
@@ -132,6 +174,8 @@ class HijackWrapper(torch.nn.Module):
     def __init__(self, inner: torch.nn.Module, **overrides):
         super().__init__()
         self.inner = inner           # register as submodule
+
+        self.joint_graph_module = None
         self._overrides = overrides  # for custom hooks
 
     def __getattr__(self, name):
@@ -159,47 +203,98 @@ class HijackWrapper(torch.nn.Module):
 
     def forward(self, *args, **kwargs):
         assert "forward" not in self._overrides, "forward cannot be overridden"
-        # EDIT ME
-        joint_graph_runner(self.inner, *args, **kwargs)
+
+        # HACK: doing graph capture on the fly, we should do it AOT
+        if self.joint_graph_module is None:
+            # first time, we need to initialize the runner
+            self.joint_graph_module = joint_graph_runner(self.inner, *args, **kwargs)
+
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
+        # return self.joint_graph_module(*args, **kwargs)
         return self.inner(*args, **kwargs)
 
 # Think of this as a "main" function.
 def joint_graph_runner(model, *inputs, **kwargs):
-    from contextlib import ExitStack
-    from torchtitan.experiments.simple_fsdp.llama3.model import SimpleFSDPTransformer
-    from torch._functorch.aot_autograd import (
-        aot_compile_joint_with_descriptors,
-        aot_export_joint_with_descriptors,
-        boxed_nop_preserve_node_meta,
-    )
-    from torch._logging import trace_structured
-
     assert isinstance(model, SimpleFSDPTransformer)
     assert isinstance(inputs, tuple)
     assert not kwargs
 
-    stack = ExitStack()
-    joint_with_descriptors = aot_export_joint_with_descriptors(
-        stack,
-        model,
-        inputs,
-        decompositions=None,
-        fw_compiler=boxed_nop_preserve_node_meta,
-        bw_compiler=boxed_nop_preserve_node_meta,
-    )
-    gm = joint_with_descriptors.graph_module
+    # convert args and kwargs to DTensor
+    # local_inputs = tuple(DTensor.from_local(input,  ) for input in inputs)
 
-    trace_structured(
-        "artifact",
-        metadata_fn=lambda: {
-            "name": "aot_export_joint_with_descriptors",
-            "encoding": "string",
-        },
-        payload_fn=lambda: gm.print_readable(
-            print_output=False, include_stride=True, include_device=True
-        ),
+    # get fw/bw graphs
+    joint_with_descriptors = graph_capture_and_aot_export_joint_with_descriptors(model, inputs)
+
+    # Now partition the joint grapg 
+    joint_gm = joint_with_descriptors.graph_module
+    aot_state = joint_with_descriptors._aot_state
+    aot_graph_capture = joint_with_descriptors._aot_graph_capture
+
+    # Get the joint graph module
+    joint_inputs = aot_graph_capture.updated_flat_args
+    fw_metadata = aot_state.fw_metadata
+
+    num_user_outputs = get_num_user_outputs(fw_metadata)
+    num_mutate_inputs = get_num_mutate_inputs(fw_metadata)
+    num_inner_fwd_outputs = num_mutate_inputs + num_user_outputs
+
+    fw_gm, bw_gm = min_cut_rematerialization_partition(
+        joint_gm,
+        joint_inputs,
+        num_fwd_outputs=num_inner_fwd_outputs,
+        static_lifetime_input_indices=fw_metadata.static_input_indices or [],
     )
 
-    exit(123)  # just manually force the exit for now
+    # print_if_rank0(f"fw_gm:")
+    # print_if_rank0(fw_gm.print_readable(print_output=False))
+
+    # print_if_rank0(f"bw_gm:")
+    # print_if_rank0(bw_gm.print_readable(print_output=False))
+
+    # Run graph passes here
+    ## Apply bucketing here
+    ## Apply Flex Attention compilation here
+
+    # Codgen Autograd.Function Wrappers
+
+    # Get the model parameters and buffers - the partitioned graphs expect these as arguments
+    local_params = []
+    for p in model.parameters():
+        if isinstance(p, DTensor):
+            local_params.append(p.to_local())
+        else:
+            local_params.append(p)
+
+    local_buffers = []
+    for b in model.buffers():
+        if isinstance(b, DTensor):
+            local_buffers.append(b.to_local())
+        else:
+            local_buffers.append(b)
+
+
+    # local_inputs = tuple(input.clone().detach() for input in inputs)
+
+    joint_graph_module = JointGraphModule(
+        local_params, local_buffers, fw_metadata, fw_gm, bw_gm, RunMode.CODEGEN
+    )
+
+    return joint_graph_module
+
+    # Run forward pass through the custom function
+    # outputs = joint_graph_module(local_inputs)
+
+    # trace_structured(
+    #     "artifact",
+    #     metadata_fn=lambda: {
+    #         "name": "aot_export_joint_with_descriptors",
+    #         "encoding": "string",
+    #     },
+    #     payload_fn=lambda: gm.print_readable(
+    #         print_output=False, include_stride=True, include_device=True
+    #     ),
+    # )
+
+
+    # exit(123)  # just manually force the exit for now
