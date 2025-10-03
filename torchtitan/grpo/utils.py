@@ -81,8 +81,11 @@ def log_tensor_stats(tensor: torch.Tensor, name: str, num_bins: int = 64):  # no
     )
 
 
-def masked_mean(tensor, mask):
-    return (tensor * mask).sum() / mask.sum()
+def masked_mean(tensor, mask, per_seq=False):
+    if per_seq:
+        return ((tensor * mask).sum(dim=-1) / mask.sum(dim=-1)).mean()
+    else:
+        return (tensor * mask).sum() / mask.sum()
 
 
 @register_sharding(torch.ops.aten.amax.default)

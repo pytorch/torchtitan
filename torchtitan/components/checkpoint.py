@@ -239,7 +239,7 @@ class CheckpointManager:
                 OPTIMIZER: optimizers,
                 DATALOADER: dataloader,
                 LR_SCHEDULER: lr_schedulers,
-                REF_MODEL: ref_model_parts,
+                REF_MODEL: ModelWrapper(ref_model_parts) if ref_model_parts else None,
             }
         )
         self.has_ref_model = ref_model_parts is not None

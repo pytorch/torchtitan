@@ -235,6 +235,7 @@ def compute_grpo_loss_from_predictions(
 
     # For off-policy, apply clipping to ratio
     if old_logp is not None:
+        logger.debug("Applying ratio clipping to off-policy loss")
         coef_1 = torch.clamp(ratio, None, 1 + job_config.grpo.clip_ratio_upper_bound)
         coef_2 = torch.clamp(ratio, 1 - job_config.grpo.clip_ratio_lower_bound, None)
         # Use different clipping for positive/negative rewards
@@ -242,6 +243,7 @@ def compute_grpo_loss_from_predictions(
             coef_2 * (reward <= 0).float()
         )
     else:
+        logger.debug("On-policy: no ratio clipping applied")
         clipped_ratio = ratio
 
     # Compute auxiliary losses
@@ -381,23 +383,31 @@ def compute_grpo_loss_from_predictions(
 
         # Collect all metrics
         metrics = {
-            "logp": masked_mean(logp, mask),
-            "ratio": masked_mean(ratio, mask),
-            "logit_loss": masked_mean(logit_loss, mask),
-            "entropy_loss": masked_mean(entropy_loss, mask),
-            "logits_mean": logits_mean,
-            "total_pos": total_pos,
-            "total_neg": total_neg,
-            "pos_logp": pos_logp,
-            "neg_logp": neg_logp,
-            "pos_reward": (reward > 0).float().mean(),
-            "neg_reward": (reward <= 0).float().mean(),
-            "advantages": reward.mean(),
+            "loss_metrics/global_logp": masked_mean(logp, orig_mask, per_seq=True),
+            "loss_metrics/global_ratio": masked_mean(ratio, mask, per_seq=True),
+            "loss_metrics/global_logit_loss": masked_mean(
+                logit_loss, mask, per_seq=True
+            ),
+            "loss_metrics/global_entropy_loss": masked_mean(
+                entropy_loss, mask, per_seq=True
+            ),
+            "loss_metrics/global_logits_mean": logits_mean,
+            "loss_metrics/global_total_pos": total_pos,
+            "loss_metrics/global_total_neg": total_neg,
+            "loss_metrics/global_pos_logp": masked_mean(
+                pos_logp, orig_mask, per_seq=True
+            ),
+            "loss_metrics/global_neg_logp": masked_mean(
+                neg_logp, orig_mask, per_seq=True
+            ),
+            "loss_metrics/global_pos_reward": (reward > 0).float().mean(),
+            "loss_metrics/global_neg_reward": (reward <= 0).float().mean(),
+            "loss_metrics/global_advantages": reward.mean(),
             # Logp distribution metrics
-            "logp_mean": logp_mean,
-            "logp_min": logp_min,
-            "logp_max": logp_max,
-            "logp_threshold_filter_ratio": threshold_filter_ratio,
+            "logp_dist/mean": logp_mean,
+            "logp_dist/min": logp_min,
+            "logp_dist/max": logp_max,
+            "logp_dist/threshold_filter_ratio": threshold_filter_ratio,
         }
 
         if raw_ratio is not None:
@@ -406,14 +416,14 @@ def compute_grpo_loss_from_predictions(
         if use_ref_model and ref_logp is not None:
             metrics.update(
                 {
-                    "ref_logp": masked_mean(ref_logp, mask),
-                    "kl_div_est": masked_mean(kl_div_est, mask),
-                    "margin": masked_mean(margin, mask),
-                    "pos_margin": pos_margin,
-                    "neg_margin": neg_margin,
-                    "pos_ref_logp": pos_ref_logp,
-                    "neg_ref_logp": neg_ref_logp,
-                    "logits_mean_ref": logits_mean_ref,
+                    "loss_metrics/ref_logp": masked_mean(ref_logp, orig_mask),
+                    "loss_metrics/kl_div_est": masked_mean(kl_div_est, mask),
+                    "loss_metrics/margin": masked_mean(margin, mask),
+                    "loss_metrics/pos_margin": pos_margin,
+                    "loss_metrics/neg_margin": neg_margin,
+                    "loss_metrics/pos_ref_logp": pos_ref_logp,
+                    "loss_metrics/neg_ref_logp": neg_ref_logp,
+                    "loss_metrics/logits_mean_ref": logits_mean_ref,
                 }
             )
 
@@ -430,11 +440,15 @@ def compute_grpo_loss_from_predictions(
 
             metrics.update(
                 {
-                    "clip_ratio": masked_mean(is_clipped, mask),
-                    "pos_clip_ratio": masked_mean(is_clipped_pos, mask),
-                    "neg_clip_ratio": masked_mean(is_clipped_neg, mask),
-                    "offp_logp": masked_mean(logp, mask),
-                    "offp_ref_logp": masked_mean(ref_logp, mask)
+                    "loss_metrics/global_clip_ratio": masked_mean(is_clipped, mask),
+                    "loss_metrics/global_clip_ratio_pos": masked_mean(
+                        is_clipped_pos, mask
+                    ),
+                    "loss_metrics/global_clip_ratio_neg": masked_mean(
+                        is_clipped_neg, mask
+                    ),
+                    "loss_metrics/global_offp_logp": masked_mean(logp, mask),
+                    "loss_metrics/global_offp_ref_logp": masked_mean(ref_logp, mask)
                     if ref_logp is not None
                     else torch.tensor(0.0, device=device),
                 }
