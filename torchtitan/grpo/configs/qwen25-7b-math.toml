@@ -15,7 +15,6 @@ log_freq = 1
 enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = true
-wandb_project = "qwen7b_debug"
 seed = 42
 
 [model]
@@ -33,15 +32,17 @@ beta2 = 0.999
 weight_decay = 0.1
 # reset_state_every_n_steps = 100
 
+[lr_scheduler]
+warmup_steps = 10
+decay_type="linear"
+decay_ratio=0.1
+
 [training]
-base_model_dir = "/home/shared/torchtitan-conversions/qwen_2-5_7b"
 train_type = "online"
-batch_size = 1
+local_batch_size = 1
 seq_len = 32768
 warmup_steps = 10  # lr scheduler warm up
 cooldown_steps = 100 # lr scheduler cooldown
-cooldown_final_lr_ratio = 0.0 # final lr ratio after cooldown
-lr_ramp_type = "constant"
 global_batch_size = 256
 log_tensor_stats_every_n_steps = -1
 
@@ -71,7 +72,7 @@ neg_scaler = 1.00
 num_iterations_grpo = 1
 grpo_by_token = true
 grpo_scale_adv_by_len = false
-grpo_num_microbatches = 2
+num_microbatches = 2
 onpolicy_logp_threshold=-6.0
 
 [experimental]
@@ -79,8 +80,9 @@ context_parallel_degree = 1
 pipeline_parallel_degree = 1
 
 [checkpoint]
-enable_checkpoint = true
+enable = true
 folder = "checkpoints"
+initial_load_path = "/home/shared/torchtitan-conversions/qwen_2-5_7b"
 interval_type = "steps"
 interval = 1000
 model_weights_only = false

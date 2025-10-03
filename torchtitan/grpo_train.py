@@ -857,7 +857,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     else None
                 )
                 with torch.no_grad():
-                    if job_config.grpo.num_microbatches > 1:
+                    if (job_config.grpo.num_microbatches > 1) and (microbatch_idx > 0):
                         with self.train_context(optional_context_parallel_ctx):
                             pred, logp = compute_logp_from_model(
                                 self.model_parts[0],
@@ -952,10 +952,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
                 all_metrics.append(nb_metrics)
                 all_weights.append(
+                    # len(nanobatch["batch"][0])
                     nanobatch["dynamic_scale"]
-                    / (nanobatch["dynamic_grad_accum_size"] * actual_grad_accum)
+                    / nanobatch["dynamic_grad_accum_size"]
                 )
-                nb_loss = nb_loss / actual_grad_accum
+                nb_loss = nb_loss
                 loss += nb_loss.mean().item() / len(microbatches)
                 self.ntokens_seen += n_tokens_seen
 
@@ -970,9 +971,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
             grad_norms.append(grad_norm.mean().item())
             self.optimizers.step()
-            self.lr_schedulers.step()
         self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
         self.lr_schedulers.step()
 
         # log metrics
@@ -1002,7 +1001,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         extra_metrics.update(
             {
                 "n_tokens_seen": global_ntokens_seen,
-                "lr": lr,
+                "loss_metrics/lr": lr,
                 "time_metrics/data_prep_s": data_loading_time,
                 "time_metrics/batch_prep_s": batch_prep_time,
             }
@@ -1018,7 +1017,60 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     def collate_metrics(self, metrics_per_nb, weights_per_nb):
         # For now we'll just assume we'll average them all together
         out_metrics = {}
-        for key in list(metrics_per_nb[0].keys()):
+        keys = list()
+        for metrics_dict in metrics_per_nb:
+            keys.extend(metrics_dict.keys())
+        # remove duplicates
+        keys = sorted(set(keys))
+        ft_pg = self.ft_manager.loss_sync_pg
+        for key in keys:
+            total_weight = 0.0
+            value = None
+            for metrics, weight in zip(metrics_per_nb, weights_per_nb):
+                if key in metrics:
+                    if "min" in key:
+                        value = (
+                            min(value, metrics[key])
+                            if value is not None
+                            else metrics[key]
+                        )
+                        total_weight = 1
+                    elif "max" in key:
+                        value = (
+                            max(value, metrics[key])
+                            if value is not None
+                            else metrics[key]
+                        )
+                        total_weight = 1
+                    else:
+                        if value is not None:
+                            value += metrics[key] * weight
+                        else:
+                            value = metrics[key] * weight
+                        total_weight += weight
+            value /= total_weight
+            logging.debug(f"Metric: {key}, Weight: {total_weight}, value: {value}")
+            if "min" in key:
+                out_metrics[key] = -dist_utils.dist_max(
+                    torch.tensor(-value, dtype=torch.float32, device=self.device),
+                    self.parallel_dims.world_mesh["dp_cp"],
+                    ft_pg,
+                )
+            elif "max" in key:
+                out_metrics[key] = dist_utils.dist_max(
+                    torch.tensor(value, dtype=torch.float32, device=self.device),
+                    self.parallel_dims.world_mesh["dp_cp"],
+                    ft_pg,
+                )
+            else:
+                out_metrics[key] = dist_utils.dist_mean(
+                    torch.tensor(value, device=self.device, dtype=torch.float32),
+                    self.parallel_dims.world_mesh["dp_cp"],
+                    ft_pg,
+                )
+        return out_metrics
+        for key in list(metrics_per_nb[-1].keys()):
+            # check to see which indexes the key is in
             out_metrics[key] = sum(
                 [m[key] * w for m, w in zip(metrics_per_nb, weights_per_nb)]
             )
