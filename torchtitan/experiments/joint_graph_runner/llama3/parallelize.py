@@ -6,7 +6,8 @@
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard, Replicate
+
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
@@ -165,15 +166,16 @@ def parallelize_llama(
     if job_config.compile.enable and "model" in job_config.compile.components:
         # torch._inductor.config.reorder_for_peak_memory = False
         # model = torch.compile(model, fullgraph=True)
-        model = HijackWrapper(model)
+        model = HijackWrapper(model, parallel_dims)
 
     return model
 
 # Just to bootstrap our experiment. NOT the final API.
 class HijackWrapper(torch.nn.Module):
-    def __init__(self, inner: torch.nn.Module, **overrides):
+    def __init__(self, inner: torch.nn.Module, parallel_dims, **overrides):
         super().__init__()
         self.inner = inner           # register as submodule
+        self.parallel_dims = parallel_dims
 
         self.joint_graph_module = None
         self._overrides = overrides  # for custom hooks
@@ -204,24 +206,35 @@ class HijackWrapper(torch.nn.Module):
     def forward(self, *args, **kwargs):
         assert "forward" not in self._overrides, "forward cannot be overridden"
 
+        # print_if_rank0(self.parallel_dims.world_mesh)
+        # 2-D device mesh with ['dp_shard', 'tp'], [2, 4]
+
+        # Hack: convert args and kwargs to DTensor. This should be fixed at data loader. 
+        dt_args = tuple(DTensor.from_local(arg, self.parallel_dims.world_mesh["tp"], [Replicate()]) for arg in args)
+
+        # RuntimeError('Sharding propagation failed for Op(op=aten.embedding.default, args_schema=Spec(S(0) on (2048, 256)), Spec((Shard(dim=0), Replicate()) on (16, 2048)) @ mesh: (2, 4))')
+        # dt_args = tuple(DTensor.from_local(arg, self.parallel_dims.world_mesh, [Shard(0), Replicate()]) for arg in args)
+
+        # RuntimeError('Sharding propagation failed for Op(op=aten.embedding.default, args_schema=Spec(S(0) on (2048, 256)), Spec(S(0) on (16, 2048)) @ mesh: (2,))')
+        # dt_args = tuple(DTensor.from_local(arg, self.parallel_dims.world_mesh["dp_shard"], [Shard(0)]) for arg in args) 
+
         # HACK: doing graph capture on the fly, we should do it AOT
         if self.joint_graph_module is None:
             # first time, we need to initialize the runner
-            self.joint_graph_module = joint_graph_runner(self.inner, *args, **kwargs)
+            self.joint_graph_module = joint_graph_builder(self.inner, *dt_args, **kwargs)
 
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
         # return self.joint_graph_module(*args, **kwargs)
         return self.inner(*args, **kwargs)
 
-# Think of this as a "main" function.
-def joint_graph_runner(model, *inputs, **kwargs):
+
+def joint_graph_builder(model, *inputs, **kwargs):
     assert isinstance(model, SimpleFSDPTransformer)
     assert isinstance(inputs, tuple)
+    for input in inputs:
+        assert isinstance(input, DTensor)
     assert not kwargs
-
-    # convert args and kwargs to DTensor
-    # local_inputs = tuple(DTensor.from_local(input,  ) for input in inputs)
 
     # get fw/bw graphs
     joint_with_descriptors = graph_capture_and_aot_export_joint_with_descriptors(model, inputs)
