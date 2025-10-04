@@ -4,7 +4,7 @@
 dump_folder = "./outputs"
 description = "Llama 3 debug training"
 print_args = false
-use_for_integration_test = true
+use_for_integration_test = false
 
 [profiling]
 enable_profiling = true
@@ -24,7 +24,8 @@ enable_wandb = false
 name = "llama3"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
-hf_assets_path = "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/tokenizer"
+#hf_assets_path = "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/tokenizer"
+hf_assets_path = ""
 # converters = ["float8"]
 
 [optimizer]
