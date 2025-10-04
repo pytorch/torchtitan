@@ -378,6 +378,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         tokens: torch.Tensor,
         input_batch: torch.Tensor | None = None,
         position_ids: torch.Tensor | None = None,
+        sequence_lengths: list[torch.Tensor] | None = None,
     ):
         """
         Forward pass for the Transformer model.
