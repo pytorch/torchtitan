@@ -81,16 +81,40 @@ class TensorParallel(ParallelStyle):
 
 
 class ExpertParallel(ParallelStyle):
-    def __init__(self):
+    """
+    ExpertParallel is a parallel style for MoE, where each experts
+    are distributed across ranks along a given axis of the device mesh.
+
+    Args:
+        a2a_impl (str): The implementation of all-to-all. Default is "default". Options are ["default","mxfp8"].
+    """
+
+    def __init__(
+        self, a2a_dispatch_impl: str = "default", a2a_combine_impl: str = "default"
+    ):
         super().__init__()
         self.input_splits = None
         self.output_splits = None
+        self.a2a_dispatch_func = self._get_a2a_func(a2a_dispatch_impl)
+        self.a2a_combine_func = self._get_a2a_func(a2a_combine_impl)
+
+    def _get_a2a_func(self, a2a_impl: str):
+        if a2a_impl == "default":
+            return all_to_all_single_autograd
+        elif a2a_impl == "mxfp8":
+            from torchao.prototype.moe_training.kernels.mxfp8.comms import (
+                to_mxfp8_a2a_dequant,
+            )
+
+            return to_mxfp8_a2a_dequant
+        else:
+            raise ValueError(f"Unknown a2a_impl: {a2a_impl}")
 
     # performing all-to-all dispatch on the input
     def _token_dispatch(self, mod, inputs, device_mesh):
         # annotate module input placements/sharding with input_layouts
         routed_input, num_tokens_per_expert = inputs
-        ep_size = device_mesh.shape[0]
+        ep_size = device_mesh.size(0)
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
@@ -119,8 +143,7 @@ class ExpertParallel(ParallelStyle):
             self.input_splits = input_splits.tolist()
             self.output_splits = output_splits.tolist()
 
-        # perform all-to-all
-        routed_input = all_to_all_single_autograd(
+        routed_input = self.a2a_dispatch_func(
             routed_input,
             self.output_splits,
             self.input_splits,
@@ -148,7 +171,8 @@ class ExpertParallel(ParallelStyle):
 
     # performing all-to-all combine on the output
     def _token_combine(self, mod, routed_output, device_mesh):
-        routed_output = all_to_all_single_autograd(
+        # For a2a combine, input splits and output splits are opposite of a2a dispatch.
+        routed_output = self.a2a_combine_func(
             routed_output,
             self.input_splits,
             self.output_splits,
