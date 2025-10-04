@@ -24,7 +24,6 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.models.attention import init_attention_mask
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -414,15 +413,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        # Create the FlexAttention mask according to the input
-        if getattr(self.model_args, "use_flex_attn", False):
-            cp_mesh = (
-                parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
+
+        # Create the attention mask(s) if use_flex_attn is True
+        attention_masks = (
+            model_parts[0].get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
+                extra_inputs=extra_inputs,
             )
-            init_attention_mask(inputs, self.tokenizer.eos_id, cp_mesh)
+            if getattr(self.model_args, "use_flex_attn", False)
+            else None
+        )
 
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
+        cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],
@@ -445,13 +450,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     self.pp_schedule.step(
                         inputs,
                         **extra_inputs,
+                        attention_masks=attention_masks,
                         target=targets,
                         losses=losses,
                         input_batch=inputs,
                     )
                 else:
                     self.pp_schedule.step(
-                        target=targets, losses=losses, input_batch=inputs
+                        attention_masks=attention_masks,
+                        target=targets,
+                        losses=losses,
+                        input_batch=inputs,
                     )
 
             # accumulate losses across pipeline microbatches
@@ -469,7 +478,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_inputs)
+                    pred = model_parts[0](
+                        inputs, **extra_inputs, attention_masks=attention_masks
+                    )
                     loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
                 del pred
