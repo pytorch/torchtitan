@@ -466,7 +466,7 @@ class Transformer(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis)
+            h = layer(h, self.freqs_cis, position_ids=position_ids)
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
