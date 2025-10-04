@@ -44,6 +44,14 @@ from torchtitan.protocols import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
+try:
+    # allow unpicking of WeightWithDynamicFloat8CastTensor, which are saved
+    # when doing FP8 training
+    from torchao.float8.fsdp_utils import WeightWithDynamicFloat8CastTensor
+    torch.serialization.add_safe_globals([WeightWithDynamicFloat8CastTensor])
+except:
+    pass
+
 
 MODEL = "model"
 OPTIMIZER = "optimizer"
