@@ -425,6 +425,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else None
         )
 
+        # Get the order sensitive buffers
+        order_sensitive_buffers = model_parts[0].get_order_sensitive_buffers(
+            inputs.size(0), inputs.size(1)
+        )
+
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
@@ -449,6 +454,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
+                        *order_sensitive_buffers[0],
                         **extra_inputs,
                         attention_masks=attention_masks,
                         target=targets,
@@ -457,6 +463,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     )
                 else:
                     self.pp_schedule.step(
+                        *order_sensitive_buffers[0],
                         attention_masks=attention_masks,
                         target=targets,
                         losses=losses,
@@ -479,7 +486,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
                     pred = model_parts[0](
-                        inputs, **extra_inputs, attention_masks=attention_masks
+                        inputs,
+                        *order_sensitive_buffers[0],
+                        **extra_inputs,
+                        attention_masks=attention_masks,
                     )
                     loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
