@@ -5,17 +5,19 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import Callable
 
 import torch
 from torch import nn
 
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
-    AttentionOp,
+    create_attention_mask,
+    FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
+    ScaledDotProductAttentionWrapper,
 )
 from torchtitan.models.moe import FeedForward, MoE
 from torchtitan.protocols.model import AttentionMasksType
@@ -182,13 +184,17 @@ class Attention(nn.Module):
             mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.attention_op = AttentionOp(model_args.use_flex_attn)
+        self.use_flex_attn = model_args.use_flex_attn
+        if self.use_flex_attn:
+            self.inner_attention = FlexAttentionWrapper()
+        else:
+            self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def forward(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_masks: AttentionMasksType | None,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
@@ -239,12 +245,14 @@ class Attention(nn.Module):
         k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         v = v.transpose(1, 2)  # (bsz, n_heads, seqlen, v_head_dim)
 
-        assert (
-            isinstance(attention_masks, BlockMask) or attention_masks is None
-        ), attention_masks
-        output = self.attention_op(
-            q, k, v, attention_mask=attention_masks, scale=self.softmax_scale
-        )
+        if self.use_flex_attn:
+            assert isinstance(attention_masks, BlockMask)
+            output = self.inner_attention(
+                q, k, v, block_mask=attention_masks, scale=self.softmax_scale
+            )
+        else:
+            assert attention_masks is None
+            output = self.inner_attention(q, k, v, scale=self.softmax_scale)
 
         # Reshape and project output
         output = output.transpose(
@@ -301,7 +309,7 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_masks: AttentionMasksType | None,
     ):
         """
         Forward pass for the Transformer block.
@@ -379,26 +387,30 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
             )
 
     def get_attention_masks(
-        self, create_mask_fn: Callable, batch: torch.Tensor, eos_id: int
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-        if not self.model_args.use_flex_attn:
-            return None
-
         mask_mod = get_causal_mask_mod()
         match self.model_args.attn_mask_type:
             case "causal":
                 B = 1
             case "block_causal":
-                B = batch.shape[0]
-                mask_mod = get_document_mask_mod(mask_mod, batch, eos_id)
+                B = input_batch.shape[0]
+                mask_mod = get_document_mask_mod(
+                    mask_mod, input_batch, tokenizer.eos_id
+                )
             case _:
                 raise ValueError(f"Unknown attention mask type: {self.attn_mask_type}")
-        return create_mask_fn(mask_mod, B, None, batch.shape[1], batch.shape[1])
+        return create_attention_mask(
+            mask_mod, B, None, input_batch.shape[1], input_batch.shape[1]
+        )
 
     def forward(
         self,
         tokens: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_masks: AttentionMasksType | None = None,
         input_batch: torch.Tensor | None = None,
     ):
         """

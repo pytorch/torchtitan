@@ -13,10 +13,12 @@ import torch.nn as nn
 
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.components.tokenizer import BaseTokenizer
+
 from torchtitan.config import JobConfig
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask | None
+AttentionMasksType = dict[str, BlockMask] | BlockMask
 
 
 @dataclass
@@ -59,5 +61,12 @@ class ModelProtocol(Protocol):
         """
         pass
 
-    def get_attention_masks(self, *args, **kwargs) -> AttentionMasksType:
-        return None
+    def get_attention_masks(
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
+    ) -> AttentionMasksType:
+        raise NotImplementedError(
+            "This model does not support attention masking/Flex Attention."
+        )

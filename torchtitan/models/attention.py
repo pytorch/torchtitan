@@ -7,11 +7,11 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import functools
-from typing import Callable, ClassVar
+from collections.abc import Callable
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor.experimental._attention import create_cp_block_mask
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
@@ -23,16 +23,29 @@ from torch.nn.attention.flex_attention import (
 
 
 __all__ = [
-    "AttentionOp",
+    "FlexAttentionWrapper",
+    "ScaledDotProductAttentionWrapper",
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_fixed_block_mask_mod",
-    "get_create_mask_fn",
+    "create_attention_mask",
 ]
 
 
-class _FlexAttentionWrapper(torch.nn.Module):
-    _flex_attn: ClassVar[Callable] = torch.compile(
+class FlexAttentionWrapper(torch.nn.Module):
+    """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
+
+    This wrapper surves two purposes:
+    1) Invoke `torch.compile` with a valid mode "max-autotune-no-cudagraphs" to
+       achieve a good performance.
+    2) This wrapper being a wrapper allows us to apply _ContextParallal to it.
+
+    Note:
+    The forward function must have q, k, v as the first three arguments, and
+    block_mask as a keyword argument to be compatible with _ContextParallel.
+    """
+
+    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention, mode="max-autotune-no-cudagraphs"
     )
 
@@ -40,42 +53,48 @@ class _FlexAttentionWrapper(torch.nn.Module):
         super().__init__()
 
     def forward(
-        self, *args: object, **kwargs: object
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        block_mask: BlockMask,
+        scale: float | None = None,
     ) -> [torch.Tensor | tuple[torch.Tensor, AuxOutput]]:
-        # 1. _flex_attn has to be a class variable, otherwise there will
+        # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple complied flex_attention, which can be slow.
-        # 2. `self._flex_attn` is not correct, `self` will be passed in
+        # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
-        #    `FlexAttentionOp._flex_attn` is correct.
-        return _FlexAttentionWrapper._flex_attn(*args, **kwargs)
+        #    `FlexAttentionOp._compiled_flex_attn` is correct.
+        return FlexAttentionWrapper._compiled_flex_attn(
+            q, k, v, block_mask=block_mask, scale=scale
+        )
 
 
-class _ScaledDotProductAttentionWrapper(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
+class ScaledDotProductAttentionWrapper(torch.nn.Module):
+    """Wrapper around `F.scaled_dot_product_attention` to make it CP compatible.
 
-    def forward(self, *args: object, **kwargs: object) -> torch.Tensor:
-        return F.scaled_dot_product_attention(*args, **kwargs)
+    This wrapper is needed because `F.scaled_dot_product_attention` is not
+    a torch.nn.Module, and thus cannot be applied _ContextParallel.
+    So we need to wrap it into a torch.nn.Module.
 
+    Note:
+    The forward function must have q, k, v as the first three arguments to be
+    compatible with _ContextParallel.
+    """
 
-class AttentionOp(torch.nn.Module):
+    # TODO: remove sdpa_backends after PyTorch 2.9 is released.
     sdpa_backends: ClassVar[list[SDPBackend]] = []
 
-    def __init__(self, use_flex_attn: bool) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.use_flex_attn = use_flex_attn
-        if use_flex_attn:
-            self._attn_op = _FlexAttentionWrapper()
-        else:
-            self._attn_op = _ScaledDotProductAttentionWrapper()
-            self._init_sdpa_backend()
+        self._init_sdpa_backend()
 
     @classmethod
     def _init_sdpa_backend(cls) -> None:
         if cls.sdpa_backends:
             return
 
-        # Add CuDNN on B200 w/ highest priority
         # Always make CuDNN as the highest priority if available.
         cls.sdpa_backends = [
             SDPBackend.CUDNN_ATTENTION,
@@ -90,20 +109,14 @@ class AttentionOp(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
-        attention_mask: BlockMask | None = None,
         scale: float | None = None,
     ) -> torch.Tensor:
-        if self.use_flex_attn:
-            assert attention_mask is not None
-            return self._attn_op(q, k, v, block_mask=attention_mask, scale=scale)
-        else:
-            assert attention_mask is None
-            assert self.sdpa_backends, "SDPA Backends should not be empty."
-            with sdpa_kernel(self.sdpa_backends, set_priority=True):
-                return self._attn_op(q, k, v, scale=scale)
+        assert self.sdpa_backends, "SDPA Backends should not be empty."
+        with sdpa_kernel(self.sdpa_backends, set_priority=True):
+            return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
 
 
-# We cannot do inner function because we won't be able to cache it --
+# We cannot do inner function/closure because we won't be able to cache it --
 # if we an inner function, a new closure will be created every time
 # `get_causal_mask_mod` is called.
 def _causal_mask(
@@ -168,60 +181,9 @@ def get_fixed_block_mask_mod(
     return blocked_mask_mod
 
 
-_compiled_create_block_mask: Callable | None = None
+_compiled_create_block_mask = torch.compile(create_block_mask)
 
 
-def get_create_mask_fn(
-    use_flex_attn: bool,
-    cp_mesh: torch.distributed.device_mesh.DeviceMesh | None = None,
-) -> Callable:
-    """
-    Get a function that creates an attention mask. This is currently only
-    mneaningful when FlexAttention is used. For SDPA, the returned
-    function should never be called as SDPA doesn't support varlen yet.
-
-    Note: the returned create_mask_fn will cache the masks if the
-    input is the same.
-
-    Args:
-        use_flex_attn: Whether to use FlexAttention or not.
-        cp_mesh: The device mesh to use for creating the block mask. If None, the
-            function will return a function that creates a block mask for the current
-            device mesh.
-
-    Returns:
-        create_mask_fn: a function hat creates an attention mask. This function
-        will catch the results if the input is the same.
-    """
-
-    # This is not functional yet because we currently gate the use of Flex + CP
-    # while we continue debugging accuracy issues. However, we want to evaluate
-    # the user experience with CP enabled.
-    global _compiled_create_block_mask
-    if cp_mesh is not None:
-        from torch.distributed.tensor.experimental._attention import _DispatchMode
-
-        torch.distributed.tensor.experimental._attention._dispatch_mode = (
-            _DispatchMode.MODULE_WRAPPER
-        )
-        if _compiled_create_block_mask is None:
-            _compiled_create_block_mask = functools.partial(
-                create_cp_block_mask, device_mesh=cp_mesh
-            )
-    elif _compiled_create_block_mask is None:
-        _compiled_create_block_mask = torch.compile(create_block_mask)
-
-    def dontcall(*args, **kwargs):
-        raise RuntimeError(
-            "This function should not be called. Please use the compiled version."
-        )
-
-    if not use_flex_attn:
-        return dontcall
-
-    # TODO: this cache number is kind of random, we should find a better way to set it.
-    @functools.lru_cache(4)
-    def create_block_mask_fn(*args, **kwargs):
-        return _compiled_create_block_mask(*args, **kwargs)
-
-    return create_block_mask_fn
+@functools.lru_cache(4)
+def create_attention_mask(*args, **kwargs):
+    return _compiled_create_block_mask(*args, **kwargs)

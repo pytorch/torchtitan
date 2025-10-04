@@ -24,7 +24,6 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.models.attention import get_create_mask_fn
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -415,22 +414,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
 
-        # Create Attention masks. Currently, if SDPA is used, the masks should be None.
-        # However, this may change in the future if SDPA supports varlen.
-        use_flex_attn = getattr(self.model_args, "use_flex_attn", False)
-        cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
-        create_mask_fn = get_create_mask_fn(
-            use_flex_attn=use_flex_attn,
-            cp_mesh=cp_mesh,
-        )
-        attention_masks = model_parts[0].get_attention_masks(
-            create_mask_fn=create_mask_fn,
-            batch=inputs,
-            eos_id=self.tokenizer.eos_id,
+        # Create the attention mask(s) if use_flex_attn is True
+        attention_masks = (
+            model_parts[0].get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
+                extra_inputs=extra_inputs,
+            )
+            if getattr(self.model_args, "use_flex_attn", False)
+            else None
         )
 
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
+        cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],

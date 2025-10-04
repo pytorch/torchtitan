@@ -19,6 +19,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.expert_parallel import (
@@ -76,7 +77,7 @@ def parallelize_llama(
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.quantize.dense.float8.recipe_name in (
+        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
@@ -123,7 +124,7 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model)
+        apply_compile(model, job_config.compile)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -502,7 +503,7 @@ def apply_moe_ep_tp(
         )
 
 
-def apply_compile(model: nn.Module):
+def apply_compile(model: nn.Module, compile_config: CompileConfig):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
@@ -515,7 +516,11 @@ def apply_compile(model: nn.Module):
         fullgraph = True
         if transformer_block.moe_enabled:
             fullgraph = False
-        transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
+        transformer_block = torch.compile(
+            transformer_block,
+            backend=compile_config.backend,
+            fullgraph=fullgraph,
+        )
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
