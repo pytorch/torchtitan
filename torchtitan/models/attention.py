@@ -6,7 +6,6 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import functools
 from typing import Callable, ClassVar
 
 import torch
