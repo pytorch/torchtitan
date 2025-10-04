@@ -446,8 +446,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             init_attention_mask(
                 inputs,
-                self.tokenizer.eos_id,
-                cp_mesh,
+                eos_id=self.tokenizer.eos_id if self.tokenizer else None,
+                cp_mesh=cp_mesh,
                 sequence_lengths=sequence_lengths,
             )
         elif sequence_lengths is not None:
@@ -469,7 +469,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else None
         )
 
-        inputs = input_dict.pop("input")
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
             with self.train_context(optional_context_parallel_ctx):
