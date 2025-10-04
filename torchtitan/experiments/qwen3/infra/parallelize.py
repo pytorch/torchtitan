@@ -74,7 +74,7 @@ def parallelize_qwen3(
             raise RuntimeError("Async TP requires torch.compile")
 
         enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.quantize.dense.float8.recipe_name in (
+        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
@@ -118,7 +118,7 @@ def parallelize_qwen3(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model)
+        apply_compile(model, job_config.compile)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
