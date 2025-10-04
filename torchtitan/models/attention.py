@@ -11,7 +11,6 @@ from typing import Callable, ClassVar
 
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor.experimental._attention import create_cp_block_mask
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
@@ -241,18 +240,5 @@ def build_attention(
         return ScaledDotProductAttention(attn_mask_type)
 
 
-def init_attention_mask(
-    batch: torch.Tensor,
-    eos_id: int | None,
-    cp_mesh: torch.distributed.device_mesh.DeviceMesh | None = None,
-) -> None:
-
-    # This is not functional yet because we currently gate the use of Flex + CP
-    # while we continue debugging accuracy issues. However, we want to evaluate
-    # the user experience with CP enabled.
-    if cp_mesh is not None:
-        FlexAttention.compiled_create_block_mask = functools.partial(
-            create_cp_block_mask, device_mesh=cp_mesh
-        )
-
+def init_attention_mask(batch: torch.Tensor, eos_id: int | None) -> None:
     FlexAttention.init_attention_mask(batch, eos_id)
