@@ -70,3 +70,11 @@ class ModelProtocol(Protocol):
         raise NotImplementedError(
             "This model does not support attention masking/Flex Attention."
         )
+
+    def get_order_sensitive_buffers(
+        self,
+        batch_size: int,
+        seq_len: int,
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[int, ...]]:
+        raise NotImplementedError()
+        return ((), ())
