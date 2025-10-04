@@ -442,7 +442,6 @@ class Transformer(nn.Module, ModelProtocol):
         tokens: torch.Tensor,
         input_batch: torch.Tensor | None = None,
         position_ids: torch.Tensor | None = None,
-        sequence_lengths: list[torch.Tensor] | None = None,
     ):
         """
         Perform a forward pass through the Transformer model.
