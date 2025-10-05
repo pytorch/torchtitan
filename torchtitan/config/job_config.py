@@ -527,6 +527,14 @@ class Checkpoint:
     Could be implemented as a separate script, but this way shares more code.
     """
 
+    load_seed_checkpoint_only: bool = False
+    """
+    Seed checkpoint loading requires checkpoint.enable to be True. However,
+    when using seed checkpoints, users typically don't want to save subsequent
+    checkpoints since seed checkpoints serve verification purposes only.
+    This option disables later checkpoint saving to conserve resources and time.
+    """
+
 
 @dataclass
 class ActivationCheckpoint:

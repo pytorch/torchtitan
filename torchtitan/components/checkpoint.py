@@ -190,6 +190,7 @@ class CheckpointManager:
         ft_manager: FTManager | None = None,
     ) -> None:
         self.enable = checkpoint_config.enable
+        self.load_seed_checkpoint_only = checkpoint_config.load_seed_checkpoint_only
 
         self.ft_manager = (
             ft_manager.manager if ft_manager and ft_manager.enabled else None
@@ -761,7 +762,7 @@ class CheckpointManager:
         )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
-        if not self.enable:
+        if not self.enable or self.load_seed_checkpoint_only:
             return False
 
         if curr_step == 1 and self.enable_first_step_checkpoint:
