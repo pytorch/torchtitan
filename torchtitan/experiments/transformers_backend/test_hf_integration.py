@@ -131,8 +131,7 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
     seed_config["parallelism"]["context_parallel_degree"] = 1
     seed_checkpoint_dir = out_path / "seed_checkpoint"
     seed_checkpoint_dir.mkdir(exist_ok=True)
-    seed_config["model"]["hf_assets_path"] = str(seed_checkpoint_dir / Path(model_name).name)
-    seed_config["model"]["tokenizer_path"] = str(seed_checkpoint_dir / Path(model_name).name)
+    seed_config["job"]["dump_folder"] = str(seed_checkpoint_dir)
     seed_config_path = seed_checkpoint_dir / "config.toml"
     with open(seed_config_path, "w") as f:
         toml.dump(seed_config, f)
@@ -164,7 +163,7 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
         iter_config["parallelism"]["context_parallel_degree"] = cp
         iter_config["parallelism"]["pipeline_parallel_degree"] = pp
         iter_config["parallelism"]["pipeline_parallel_schedule"] = "1F1B"
-        iter_config["model"]["hf_assets_path"] = str(seed_checkpoint_dir / Path(model_name).name)
+        iter_config["job"]["dump_folder"] = str(pc_dir)
 
         config_path = pc_dir / "config.toml"
         with open(config_path, "w") as f:
@@ -175,7 +174,7 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
             config_path,
             pc_dir / "nd_parallelism.slurm",
             pc,
-            initial_load_path=str(seed_checkpoint_dir / "step-0"),
+            initial_load_path=str(seed_checkpoint_dir / "checkpoint/step-0"),
             repo_id=model_name,
         )
 

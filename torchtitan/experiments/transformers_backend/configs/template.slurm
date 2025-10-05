@@ -35,16 +35,14 @@ module load cuda/12.4
 echo "Running training job: {{ name }}"
 echo "Config file: {{ config_path }}"
 
-{% if name == "seed_checkpoint" %}
-python /fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/scripts/download_hf_assets.py --repo_id {{ repo_id }} --local_dir {{ root_path }} --assets tokenizer
-{% endif %}
-
 torchrun \
    --nproc_per_node {{ n_proc_per_node }} \
    --nnodes {{ nodes }} \
    --rdzv_endpoint ${MASTER_ADDR}:${MASTER_PORT} \
    --rdzv_backend c10d \
    --max_restarts 0 \
+   --local-ranks-filter {{ n_proc_per_node - 1 }} \
+   --role rank \
    --tee 3 \
    -m torchtitan.train \
    --checkpoint.enable \
