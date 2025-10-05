@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 # This script compares training losses between different git commits and/or different training configurations.
 # --training.deterministic is always enabled and seed checkpoint is also enabled by default for reproducible
 # comparisons. You can disable seed checkpoint with --no-seed-checkpoint if you don't need it to speed up comparisons.
