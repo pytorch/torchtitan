@@ -113,9 +113,9 @@ show_usage() {
     echo "$LOG_PREFIX   $0 abc123 def456"
     echo "$LOG_PREFIX   $0 abc123 def456 --steps=200"
     echo "$LOG_PREFIX   $0 abc123 def456 --config=./custom.toml --steps=50"
-    echo "$LOG_PREFIX   $0 abc123 def456 --baseline-train-options=\"--training.seed=12\""
-    echo "$LOG_PREFIX   $0 abc123 def456 --baseline-train-options=\"--training.seed=12\" --benchmark-train-options=\"--training.seed=42\""
     echo "$LOG_PREFIX   $0 abc123 def456 --no-seed-checkpoint"
+    echo "$LOG_PREFIX   $0 . . --baseline-train-options=\"--parallelism.data_parallel_replicate_degree=1\" --benchmark-train-options=\"--parallelism.data_parallel_replicate_degree=2\" --steps=30"
+    echo "$LOG_PREFIX"
 }
 
 # Function to validate arguments
