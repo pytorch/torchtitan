@@ -677,15 +677,15 @@ class TestCheckpointManager(unittest.TestCase):
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
-    def test_load_seed_checkpoint_only_prevents_saving(self, mock_save, mock_rank):
+    def test_load_only_prevents_saving(self, mock_save, mock_rank):
         """
-        Test that load_seed_checkpoint_only=True prevents checkpoint saving.
+        Test that load_only=True prevents checkpoint saving.
         """
         mock_save.side_effect = self.fake_save
 
-        # Configure load_seed_checkpoint_only=True
+        # Configure load_only=True
         cfg = self.job_config.checkpoint
-        cfg.load_seed_checkpoint_only = True
+        cfg.load_only = True
         cfg.interval = 1  # Set low interval to ensure saves would normally trigger
 
         manager = CheckpointManager(
@@ -712,9 +712,9 @@ class TestCheckpointManager(unittest.TestCase):
 
         manager.close()
 
-        # Verify that saves work normally when load_seed_checkpoint_only=False
+        # Verify that saves work normally when load_only=False
         mock_save.reset_mock()
-        cfg.load_seed_checkpoint_only = False
+        cfg.load_only = False
 
         manager2 = CheckpointManager(
             dataloader=self.data_loader,

@@ -527,12 +527,12 @@ class Checkpoint:
     Could be implemented as a separate script, but this way shares more code.
     """
 
-    load_seed_checkpoint_only: bool = False
+    load_only: bool = False
     """
-    Seed checkpoint loading requires checkpoint.enable to be True. However,
-    when using seed checkpoints, users typically don't want to save subsequent
-    checkpoints since seed checkpoints serve verification purposes only.
-    This option disables later checkpoint saving to conserve resources and time.
+    In certain scenarios, you may only need to load checkpoints for verification or debugging
+    purposes, without saving any new checkpoints. For example, you might use seed checkpoints
+    to validate model correctness. Enabling this option allows checkpoints to be loaded
+    without saving any during the training.
     """
 
 
