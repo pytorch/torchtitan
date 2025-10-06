@@ -739,6 +739,9 @@ class Experimental:
 
     enable_simplefsdp_passes: bool = False
 
+    enable_autoparallel_asynctp: bool = False
+
+
 @dataclass
 class Validation:
     enable: bool = False
