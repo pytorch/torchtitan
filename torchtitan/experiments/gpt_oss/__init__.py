@@ -30,8 +30,8 @@ __all__ = [
 
 gptoss_configs = {
     "debugmodel": GptOssModelArgs(
-        hidden_size=256,
-        num_hidden_layers=4,
+        dim=256,
+        n_layers=4,
         moe_args=MoEArgs(
             num_experts=8,
             num_shared_experts=0,
@@ -43,11 +43,10 @@ gptoss_configs = {
             use_grouped_mm=True,
             load_balance_coeff=1e-3,
         ),
-        use_flex_attn=True,
         attn_mask_type="causal",
     ),
     "20b": GptOssModelArgs(
-        num_hidden_layers=24,
+        n_layers=24,
         moe_args=MoEArgs(
             num_experts=32,
             num_shared_experts=0,
@@ -61,7 +60,7 @@ gptoss_configs = {
         ),
     ),
     "120b": GptOssModelArgs(
-        num_hidden_layers=36,
+        n_layers=36,
         moe_args=MoEArgs(
             num_experts=128,
             num_shared_experts=0,

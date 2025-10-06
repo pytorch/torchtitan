@@ -72,7 +72,7 @@ def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Te
 def apply_rotary_emb(
     xq: torch.Tensor, xk: torch.Tensor, rope_cache: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # input tensor x has shape [bsz, seq_len, num_heads, head_dim]
+    # input tensor x has shape [bsz, seq_len, n_heads, head_dim]
     head_dim = xq.shape[-1]
 
     # reshape for broadcast
@@ -82,8 +82,8 @@ def apply_rotary_emb(
     cos = rope_cache[..., :head_dim].to(dtype=xq.dtype, device=xq.device)
     sin = rope_cache[..., head_dim:].to(dtype=xq.dtype, device=xq.device)
 
-    # xq:  [bsz, seq_len, num_heads, head_dim]
-    # xk:  [bsz, seq_len, num_kv_heads, head_dim]
+    # xq:  [bsz, seq_len, n_heads, head_dim]
+    # xk:  [bsz, seq_len, n_kv_heads, head_dim]
     xq_out = (xq * cos) + (rotate_half(xq) * sin)
     xk_out = (xk * cos) + (rotate_half(xk) * sin)
     return xq_out.type_as(xq), xk_out.type_as(xk)
@@ -115,32 +115,32 @@ class Attention(nn.Module):
             model_args.sliding_window if use_sliding_attention else None
         )
         self.head_dim = model_args.head_dim
-        self.n_heads = model_args.num_attention_heads
-        self.n_kv_heads = model_args.num_key_value_heads
+        self.n_heads = model_args.n_heads
+        self.n_kv_heads = model_args.n_kv_heads
 
         self.n_rep = self.n_heads // self.n_kv_heads
 
         self.wq = nn.Linear(
-            model_args.hidden_size,
-            model_args.num_attention_heads * model_args.head_dim,
+            model_args.dim,
+            model_args.n_heads * model_args.head_dim,
             bias=True,
         )
         self.wk = nn.Linear(
-            model_args.hidden_size,
-            model_args.num_key_value_heads * model_args.head_dim,
+            model_args.dim,
+            model_args.n_kv_heads * model_args.head_dim,
             bias=True,
         )
         self.wv = nn.Linear(
-            model_args.hidden_size,
-            model_args.num_key_value_heads * model_args.head_dim,
+            model_args.dim,
+            model_args.n_kv_heads * model_args.head_dim,
             bias=True,
         )
         self.wo = nn.Linear(
-            model_args.num_attention_heads * model_args.head_dim,
-            model_args.hidden_size,
+            model_args.n_heads * model_args.head_dim,
+            model_args.dim,
             bias=True,
         )
-        self.sinks = nn.Parameter(torch.empty(model_args.num_attention_heads))
+        self.sinks = nn.Parameter(torch.empty(model_args.n_heads))
 
         self.use_flex_attn = model_args.use_flex_attn
 
@@ -192,7 +192,7 @@ class Attention(nn.Module):
         v = values.transpose(1, 2).contiguous()
 
         # FlexAttention
-        output, lse = self.attn(
+        output, aux_output = self.attn(
             q,
             k,
             v,
@@ -202,6 +202,7 @@ class Attention(nn.Module):
 
         # Apply attention sink rescaling: rescale by σ(lse - w[h])
         # This is mathematically equivalent to concatenating learnable sink weights
+        lse = aux_output.lse
         sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
         output = output * sink_scale.to(output.dtype)
 
@@ -253,13 +254,11 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(
             model_args, use_sliding_attention=use_sliding_attention
         )
-        self.attention_norm = nn.RMSNorm(
-            model_args.hidden_size, eps=model_args.norm_eps
-        )
-        self.ffn_norm = nn.RMSNorm(model_args.hidden_size, eps=model_args.norm_eps)
+        self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
         self.moe = GptOssMoE(
-            model_args, dim=model_args.hidden_size, hidden_dim=model_args.moe_inter_dim
+            model_args, dim=model_args.dim, hidden_dim=model_args.moe_inter_dim
         )
         self.moe_enabled = True  # for composability with load balancing
 
@@ -297,22 +296,20 @@ class GptOssModel(nn.Module, ModelProtocol):
         super().__init__()
         self.model_args = model_args
         self.max_seq_len = model_args.max_seq_len
-        self.tok_embeddings = nn.Embedding(
-            model_args.vocab_size, model_args.hidden_size
-        )
+        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
         self.register_buffer(
             "rope_cache", self._precompute_rope_cache(), persistent=False
         )
 
         self.layers = torch.nn.ModuleDict()
-        for layer_id in range(model_args.num_hidden_layers):
+        for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args).to(
                 torch.bfloat16
             )
 
-        self.norm = nn.RMSNorm(model_args.hidden_size, eps=model_args.norm_eps)
+        self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(
-            model_args.hidden_size,
+            model_args.dim,
             model_args.vocab_size,
             dtype=torch.get_default_dtype(),
             bias=False,
@@ -331,7 +328,7 @@ class GptOssModel(nn.Module, ModelProtocol):
                 layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_std = self.model_args.hidden_size**-0.5
+        final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
             nn.init.trunc_normal_(
