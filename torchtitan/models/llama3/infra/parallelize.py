@@ -199,6 +199,8 @@ def apply_tp(
             "attention.wk": colwise_parallel(),
             "attention.wv": colwise_parallel(),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
+            "attention.q_norm": SequenceParallel(use_local_output=True),
+            "attention.k_norm": SequenceParallel(use_local_output=True),
             "ffn_norm": SequenceParallel(),
             "feed_forward": prepare_module_input(
                 input_layouts=(Shard(1),),
