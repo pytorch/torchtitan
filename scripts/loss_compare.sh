@@ -19,7 +19,7 @@
 #    loss_compare.sh main my_branch --baseline-train-options="--parallelism.tensor_parallel_degree=2" --no-seed-checkpoint
 #
 # 3. Compare the same commit with different training options:
-#    loss_compare.sh . . --baseline-train-options="--parallelism.tensor_parallel_degree=1" --benchmark-train-options="--parallelism.tensor_parallel_degree=2"
+#    loss_compare.sh . . --baseline-train-options="--parallelism.tensor_parallel_degree=1" --test-train-options="--parallelism.tensor_parallel_degree=2"
 
 # Exit immediately if any command exits with a non-zero status
 set -e
@@ -37,7 +37,7 @@ LOG_PREFIX="[LOSS_COMPARE]"
 CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml"
 STEPS=100
 BASELINE_TRAIN_OPTIONS=""
-BENCHMARK_TRAIN_OPTIONS=""
+TEST_TRAIN_OPTIONS=""
 ENABLE_SEED_CHECKPOINT=true
 OUTPUT_FOLDER="loss_compare"
 
@@ -49,7 +49,7 @@ TRAIN_CMD_WITHOUT_CHECKPOINT="./run_train.sh ${FIXED_OPTIONS}"
 
 # Global variables set by argument parsing
 BASELINE_COMMIT=""
-BENCHMARK_COMMIT=""
+TEST_COMMIT=""
 STATS_FILE=""
 
 #=============================================================================
@@ -99,17 +99,17 @@ log_and_save() {
 
 # Function to show usage
 show_usage() {
-    echo "$LOG_PREFIX Usage: $0 <baseline_commit> <benchmark_commit> [OPTIONS]"
+    echo "$LOG_PREFIX Usage: $0 <baseline_commit> <test_commit> [OPTIONS]"
     echo "$LOG_PREFIX"
     echo "$LOG_PREFIX Required arguments:"
     echo "$LOG_PREFIX   baseline_commit              Git commit hash for baseline"
-    echo "$LOG_PREFIX   benchmark_commit             Git commit hash for benchmark"
+    echo "$LOG_PREFIX   test_commit                  Git commit hash for test"
     echo "$LOG_PREFIX"
     echo "$LOG_PREFIX Optional arguments:"
     echo "$LOG_PREFIX   --config=PATH                Path to config file (default: ./torchtitan/models/llama3/train_configs/llama3_8b.toml)"
     echo "$LOG_PREFIX   --steps=N                    Number of training steps (default: 100)"
     echo "$LOG_PREFIX   --baseline-train-options=\"\"   Additional training options for baseline run"
-    echo "$LOG_PREFIX   --benchmark-train-options=\"\"  Additional training options for benchmark run"
+    echo "$LOG_PREFIX   --test-train-options=\"\"        Additional training options for test run"
     echo "$LOG_PREFIX   --no-seed-checkpoint         Disable seed checkpoint creation and checkpoint functionality"
     echo "$LOG_PREFIX"
     echo "$LOG_PREFIX Note: If only --baseline-train-options is provided, both runs will use the same options"
@@ -120,7 +120,7 @@ show_usage() {
     echo "$LOG_PREFIX   $0 abc123 def456 --steps=200"
     echo "$LOG_PREFIX   $0 abc123 def456 --config=./custom.toml --steps=50"
     echo "$LOG_PREFIX   $0 abc123 def456 --no-seed-checkpoint"
-    echo "$LOG_PREFIX   $0 . . --baseline-train-options=\"--parallelism.data_parallel_replicate_degree=1\" --benchmark-train-options=\"--parallelism.data_parallel_replicate_degree=2\" --steps=30"
+    echo "$LOG_PREFIX   $0 . . --baseline-train-options=\"--parallelism.data_parallel_replicate_degree=1\" --test-train-options=\"--parallelism.data_parallel_replicate_degree=2\" --steps=30"
     echo "$LOG_PREFIX"
 }
 
@@ -133,9 +133,9 @@ validate_arguments() {
     fi
 
     # Validate commit arguments - if one is ".", both must be "."
-    if [[ "$BASELINE_COMMIT" == "." && "$BENCHMARK_COMMIT" != "." ]] || [[ "$BASELINE_COMMIT" != "." && "$BENCHMARK_COMMIT" == "." ]]; then
+    if [[ "$BASELINE_COMMIT" == "." && "$TEST_COMMIT" != "." ]] || [[ "$BASELINE_COMMIT" != "." && "$TEST_COMMIT" == "." ]]; then
         echo "$LOG_PREFIX Error: If one commit is '.', both commits must be '.'"
-        echo "$LOG_PREFIX       Got baseline: '$BASELINE_COMMIT', benchmark: '$BENCHMARK_COMMIT'"
+        echo "$LOG_PREFIX       Got baseline: '$BASELINE_COMMIT', test: '$TEST_COMMIT'"
         echo "$LOG_PREFIX       Use '.' for both commits to compare different configurations on current working directory"
         exit 1
     fi
@@ -161,7 +161,7 @@ parse_arguments() {
 
     # Parse required arguments
     BASELINE_COMMIT=$1
-    BENCHMARK_COMMIT=$2
+    TEST_COMMIT=$2
     shift 2
 
     # Parse optional named arguments
@@ -176,8 +176,8 @@ parse_arguments() {
             --baseline-train-options=*)
                 BASELINE_TRAIN_OPTIONS="${1#*=}"
                 ;;
-            --benchmark-train-options=*)
-                BENCHMARK_TRAIN_OPTIONS="${1#*=}"
+            --test-train-options=*)
+                TEST_TRAIN_OPTIONS="${1#*=}"
                 ;;
             --no-seed-checkpoint)
                 ENABLE_SEED_CHECKPOINT=false
@@ -196,9 +196,9 @@ parse_arguments() {
     done
 
     # If only baseline train options are provided, use them for both
-    if [ -n "$BASELINE_TRAIN_OPTIONS" ] && [ -z "$BENCHMARK_TRAIN_OPTIONS" ]; then
-        BENCHMARK_TRAIN_OPTIONS="$BASELINE_TRAIN_OPTIONS"
-        echo "$LOG_PREFIX Note: Using baseline train options for both baseline and benchmark runs"
+    if [ -n "$BASELINE_TRAIN_OPTIONS" ] && [ -z "$TEST_TRAIN_OPTIONS" ]; then
+        TEST_TRAIN_OPTIONS="$BASELINE_TRAIN_OPTIONS"
+        echo "$LOG_PREFIX Note: Using baseline train options for both baseline and test runs"
     fi
 }
 
@@ -225,12 +225,12 @@ setup_output_directory() {
 
 # Function to print configuration summary
 print_configuration() {
-    echo "$LOG_PREFIX Starting loss comparison between baseline commit: $BASELINE_COMMIT and benchmark commit: $BENCHMARK_COMMIT"
+    echo "$LOG_PREFIX Starting loss comparison between baseline commit: $BASELINE_COMMIT and test commit: $TEST_COMMIT"
     echo "$LOG_PREFIX Config file: $CONFIG_FILE"
     echo "$LOG_PREFIX Training steps: $STEPS"
     echo "$LOG_PREFIX Seed checkpoint enabled: $ENABLE_SEED_CHECKPOINT"
     echo "$LOG_PREFIX Baseline train options: $BASELINE_TRAIN_OPTIONS"
-    echo "$LOG_PREFIX Benchmark train options: $BENCHMARK_TRAIN_OPTIONS"
+    echo "$LOG_PREFIX Test train options: $TEST_TRAIN_OPTIONS"
     echo "$LOG_PREFIX "
 }
 
@@ -305,25 +305,25 @@ extract_loss_data() {
 
     # Strip ANSI escape codes from log files before processing
     strip_ansi_codes "$OUTPUT_FOLDER/baseline_training.log" "$OUTPUT_FOLDER/baseline_training_clean.log"
-    strip_ansi_codes "$OUTPUT_FOLDER/benchmark_training.log" "$OUTPUT_FOLDER/benchmark_training_clean.log"
+    strip_ansi_codes "$OUTPUT_FOLDER/test_training.log" "$OUTPUT_FOLDER/test_training_clean.log"
 
     # Extract step and loss from cleaned logs
     grep "step:" "$OUTPUT_FOLDER/baseline_training_clean.log" | sed -E 's/.*step:[[:space:]]*([0-9]+)[[:space:]]*loss:[[:space:]]*([0-9]+\.[0-9]+).*/\1 \2/' > "$OUTPUT_FOLDER/baseline_losses.txt"
-    grep "step:" "$OUTPUT_FOLDER/benchmark_training_clean.log" | sed -E 's/.*step:[[:space:]]*([0-9]+)[[:space:]]*loss:[[:space:]]*([0-9]+\.[0-9]+).*/\1 \2/' > "$OUTPUT_FOLDER/benchmark_losses.txt"
+    grep "step:" "$OUTPUT_FOLDER/test_training_clean.log" | sed -E 's/.*step:[[:space:]]*([0-9]+)[[:space:]]*loss:[[:space:]]*([0-9]+\.[0-9]+).*/\1 \2/' > "$OUTPUT_FOLDER/test_losses.txt"
 }
 
 # Function to generate step-by-step comparison
 generate_step_comparison() {
     log_and_save ""
     log_and_save "$LOG_PREFIX Step-by-step loss comparison:"
-    log_and_save "$LOG_PREFIX Step    Baseline Loss    Benchmark Loss   Difference"
-    log_and_save "$LOG_PREFIX ----    -------------    --------------   ----------"
+    log_and_save "$LOG_PREFIX Step    Baseline Loss    Test Loss   Difference"
+    log_and_save "$LOG_PREFIX ----    -------------    ---------   ----------"
 
     # Join the two files and calculate differences
-    join "$OUTPUT_FOLDER/baseline_losses.txt" "$OUTPUT_FOLDER/benchmark_losses.txt" | while read step baseline_loss benchmark_loss; do
+    join "$OUTPUT_FOLDER/baseline_losses.txt" "$OUTPUT_FOLDER/test_losses.txt" | while read step baseline_loss test_loss; do
         # Calculate difference using awk for floating point arithmetic
-        diff=$(awk "BEGIN {printf \"%.6f\", $benchmark_loss - $baseline_loss}")
-        local formatted_line=$(printf "$LOG_PREFIX %-6s  %-13s    %-14s   %s" "$step" "$baseline_loss" "$benchmark_loss" "$diff")
+        diff=$(awk "BEGIN {printf \"%.6f\", $test_loss - $baseline_loss}")
+        local formatted_line=$(printf "$LOG_PREFIX %-6s  %-13s    %-14s   %s" "$step" "$baseline_loss" "$test_loss" "$diff")
         log_and_save "$formatted_line"
     done
 }
@@ -335,23 +335,23 @@ generate_summary_statistics() {
 
     # Calculate average losses
     local baseline_avg=$(awk '{sum+=$2; count++} END {if(count>0) print sum/count; else print "N/A"}' "$OUTPUT_FOLDER/baseline_losses.txt")
-    local benchmark_avg=$(awk '{sum+=$2; count++} END {if(count>0) print sum/count; else print "N/A"}' "$OUTPUT_FOLDER/benchmark_losses.txt")
+    local test_avg=$(awk '{sum+=$2; count++} END {if(count>0) print sum/count; else print "N/A"}' "$OUTPUT_FOLDER/test_losses.txt")
 
     log_and_save "$LOG_PREFIX Average baseline loss:  $baseline_avg"
-    log_and_save "$LOG_PREFIX Average benchmark loss: $benchmark_avg"
+    log_and_save "$LOG_PREFIX Average test loss: $test_avg"
 
     # Calculate overall difference if both averages are available
-    if [[ "$baseline_avg" != "N/A" && "$benchmark_avg" != "N/A" ]]; then
-        local avg_diff=$(awk "BEGIN {printf \"%.6f\", $benchmark_avg - $baseline_avg}")
+    if [[ "$baseline_avg" != "N/A" && "$test_avg" != "N/A" ]]; then
+        local avg_diff=$(awk "BEGIN {printf \"%.6f\", $test_avg - $baseline_avg}")
         log_and_save "$LOG_PREFIX Average difference:     $avg_diff"
 
         # Determine performance comparison
         if (( $(awk "BEGIN {print ($avg_diff < 0)}") )); then
-            log_and_save "$LOG_PREFIX Benchmark performs BETTER (lower loss) than baseline"
+            log_and_save "$LOG_PREFIX Test performs BETTER (lower loss) than baseline"
         elif (( $(awk "BEGIN {print ($avg_diff > 0)}") )); then
-            log_and_save "$LOG_PREFIX Baseline performs BETTER (lower loss) than benchmark"
+            log_and_save "$LOG_PREFIX Baseline performs BETTER (lower loss) than test"
         else
-            log_and_save "$LOG_PREFIX Performance is EQUIVALENT between baseline and benchmark"
+            log_and_save "$LOG_PREFIX Performance is EQUIVALENT between baseline and test"
         fi
     fi
 }
@@ -367,7 +367,7 @@ perform_loss_analysis() {
     extract_loss_data
 
     # Check if loss files were created successfully
-    if [ ! -s "$OUTPUT_FOLDER/baseline_losses.txt" ] || [ ! -s "$OUTPUT_FOLDER/benchmark_losses.txt" ]; then
+    if [ ! -s "$OUTPUT_FOLDER/baseline_losses.txt" ] || [ ! -s "$OUTPUT_FOLDER/test_losses.txt" ]; then
         log_and_save "$LOG_PREFIX Warning: Could not extract loss data from training logs."
         log_and_save "$LOG_PREFIX Please check that the training completed successfully."
         return
@@ -393,7 +393,7 @@ print_completion_summary() {
     echo "$LOG_PREFIX"
     echo "$LOG_PREFIX Loss comparison complete. Results saved in $OUTPUT_FOLDER/:"
     echo "$LOG_PREFIX   - baseline_outputs/"
-    echo "$LOG_PREFIX   - benchmark_outputs/"
+    echo "$LOG_PREFIX   - test_outputs/"
     if [ "$ENABLE_SEED_CHECKPOINT" = true ]; then
         echo "$LOG_PREFIX   - seed_checkpoint_outputs/"
     fi
@@ -428,9 +428,9 @@ main() {
     run_training "baseline" "$BASELINE_TRAIN_OPTIONS"
     restore_seed_checkpoint
 
-    # Benchmark training
-    checkout_commit "$BENCHMARK_COMMIT" "benchmark"
-    run_training "benchmark" "$BENCHMARK_TRAIN_OPTIONS"
+    # Test training
+    checkout_commit "$TEST_COMMIT" "test"
+    run_training "test" "$TEST_TRAIN_OPTIONS"
     echo "$LOG_PREFIX "
 
     # Analysis and reporting
