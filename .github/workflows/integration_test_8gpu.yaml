@@ -12,10 +12,6 @@ on:
     # Runs every 6 hours
     - cron: '0 */6 * * *'
 
-permissions:
-      id-token: write
-      contents: read
-
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
   cancel-in-progress: true
@@ -24,27 +20,13 @@ defaults:
   run:
     shell: bash -l -eo pipefail {0}
 
+permissions:
+      id-token: write
+      contents: read
+
 jobs:
-  # aws setup
-  aws-setup:
-    runs-on: linux.rocm.gpu.gfx942.4
-    steps:
-      - name: configure aws credentials
-        id: aws_creds
-        uses: aws-actions/configure-aws-credentials@ececac1a45f3b08a01d2dd070d28d111c5fe6722 # v4.1.0
-        with:
-          role-to-assume: arn:aws:iam::308535385114:role/gha_workflow_s3_and_ecr_read_only
-          aws-region: us-east-1
-          role-duration-seconds: 18000
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        continue-on-error: true
-        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
-
   build-test:
-    needs: aws-setup
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@move_aws_steps_inside_setup_rocm
     strategy:
       matrix:
         include:
