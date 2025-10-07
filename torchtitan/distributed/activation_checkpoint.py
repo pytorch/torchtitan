@@ -17,13 +17,14 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
+from torchtitan.config.job_config import Debug as DebugConfig
 from torchtitan.tools.logging import logger, warn_once
 
 
 _layer_sac_count = 0
 
 
-def _apply_layer_sac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
+def _apply_layer_sac(module: nn.Module, ac_config: ACConfig, dbg_config:DebugConfig) -> nn.Module:
     """Apply layer selective activation checkpointing to the module.
 
     Args:
@@ -38,7 +39,11 @@ def _apply_layer_sac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     ac_freq = int(ac_config.selective_ac_option)
     if not ac_freq or _layer_sac_count % ac_freq == 0:
         return ptd_checkpoint_wrapper(
-            module, preserve_rng_state=False, early_stop=ac_config.early_stop
+            module,
+            preserve_rng_state=dbg_config.torch_preserve_rng_state,
+            determinism_check=dbg_config.ac_determinism_check,
+            early_stop=ac_config.early_stop,
+            debug=dbg_config.ac_debug
         )
     else:
         return module
@@ -123,11 +128,13 @@ def _apply_op_sac(
         return create_selective_checkpoint_contexts(_get_custom_policy(meta))
 
     return ptd_checkpoint_wrapper(
-        module,
-        context_fn=selective_checkpointing_context_fn,
-        preserve_rng_state=False,
-        early_stop=ac_config.early_stop,
-    )
+            module,
+            context_fn=selective_checkpointing_context_fn,
+            preserve_rng_state=dbg_config.torch_preserve_rng_state,
+            determinism_check=dbg_config.ac_determinism_check,
+            early_stop=ac_config.early_stop,
+            debug=dbg_config.ac_debug
+        )
 
 
 def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
@@ -143,6 +150,13 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     return ptd_checkpoint_wrapper(
         module, preserve_rng_state=False, early_stop=ac_config.early_stop
     )
+    return ptd_checkpoint_wrapper(
+            module,
+            preserve_rng_state=dbg_config.torch_preserve_rng_state,
+            determinism_check=dbg_config.ac_determinism_check,
+            early_stop=ac_config.early_stop,
+            debug=dbg_config.ac_debug
+        )
 
 
 def _apply_op_sac_to_transformer_block_with_flex(
