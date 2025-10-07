@@ -107,7 +107,7 @@ def set_determinism(
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
         # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
-        # reproducibility, since the autotune results may not not deterministic.
+        # reproducibility, since the autotune results may not be deterministic.
         from torch.nn.attention.flex_attention import flex_attention
 
         from torchtitan.models.attention import FlexAttention
