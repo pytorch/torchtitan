@@ -6,6 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import os
 from typing import Callable, ClassVar
 
 import torch
@@ -24,6 +25,13 @@ from torchtitan.tools.utils import has_cuda_capability
 # batch. To record what it is initialized, FLEX_ATTN_MASK_T is used as the key to
 # track the initialized mask.
 FLEX_ATTN_MASK_T = tuple[str, int | None]
+
+
+_flex_compile_mode: str | None = (
+    None
+    if int(os.getenv("DISABLE_TORCHTITAN_FLEX_MAX_AUTOTUNE", 0)) == 1
+    else "max-autotune-no-cudagraphs"
+)
 
 
 class FlexAttention(torch.nn.Module):
@@ -47,7 +55,7 @@ class FlexAttention(torch.nn.Module):
     # We registered flex_attention related attributes as class variables as we
     # need to amortize the cost of compilation.
     flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="max-autotune-no-cudagraphs"
+        flex_attention, mode=_flex_compile_mode
     )
     compiled_create_block_mask: ClassVar[Callable] = torch.compile(create_block_mask)
     used_attn_mask_types: ClassVar[set[FLEX_ATTN_MASK_T]] = set()
