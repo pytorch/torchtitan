@@ -134,7 +134,7 @@ deepseekv3_configs = {
         dim=7168,
         inter_dim=18432,
         moe_inter_dim=2048,
-        n_layers=61,
+        n_layers=4,
         n_dense_layers=3,
         n_heads=128,
         moe_args=MoEArgs(
@@ -155,7 +155,6 @@ deepseekv3_configs = {
         v_head_dim=128,
         use_flex_attn=True,
         attn_mask_type="block_causal",
-        hf_weight_quantized=True,
     ),
 }
 

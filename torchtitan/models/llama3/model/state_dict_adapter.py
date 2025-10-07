@@ -10,7 +10,6 @@ from typing import Any
 
 logger = logging.getLogger()
 
-from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import TransformerModelArgs
@@ -41,9 +40,6 @@ class Llama3StateDictAdapter(StateDictAdapter):
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }
-
-    def get_hf_storage_reader(self, path: str) -> HuggingFaceStorageReader:
-        return HuggingFaceStorageReader(path)
 
     # HuggingFace permutation function (exact copy from their conversion script)
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):

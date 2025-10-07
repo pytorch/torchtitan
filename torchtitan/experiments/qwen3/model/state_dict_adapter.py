@@ -15,8 +15,6 @@ aligned with the HF implementation.
 import re
 from typing import Any
 
-from torch.distributed.checkpoint import HuggingFaceStorageReader
-
 from torch.distributed.tensor import DTensor
 from torchtitan.models.utils import MoEStateDictAdapter
 
@@ -51,9 +49,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }
-
-    def get_hf_storage_reader(self, path: str) -> HuggingFaceStorageReader:
-        return HuggingFaceStorageReader(path)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """

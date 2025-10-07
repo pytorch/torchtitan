@@ -453,6 +453,14 @@ class Checkpoint:
     non-tensors. The default value is False.
     """
 
+    initial_load_in_hf_quantized: bool = False
+    """
+    Enable loading of HuggingFace's safetensors format with quantized state dict keys. The option
+    is only used when `initial_load_path` and `initial_load_path_in_hf` is specified. This will load
+    checkpoints in HF's model definition and dequantize on model weights if necessary. To support
+    this parameter, the model need to define proper HuggingFaceStorageReader to perform dequantize.
+    """
+
     last_save_model_only: bool = True
     """
     When last_save_model_only=True, only the model will be saved at the end of training,

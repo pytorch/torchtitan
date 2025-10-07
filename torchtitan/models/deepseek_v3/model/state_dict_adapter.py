@@ -71,8 +71,13 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 }
             )
 
-    def get_hf_storage_reader(self, path: str) -> HuggingFaceStorageReader:
-        if self.model_args.hf_weight_quantized:
+    def get_hf_storage_reader(
+        self, path: str, from_quantized: bool = False
+    ) -> HuggingFaceStorageReader:
+        """
+        Override default get_hf_storage_reader function to return QuantizedHFStorageReader.
+        """
+        if from_quantized:
             from torch.distributed.checkpoint.quantized_hf_storage import (
                 QuantizedHuggingFaceStorageReader,
             )
