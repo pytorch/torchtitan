@@ -68,3 +68,10 @@ filter_fqns = ["output", "router.gate"]
 
 [quantize.linear.mx]
 filter_fqns = ["output", "router.gate"]
+
+[debug]
+torch_deterministic = false
+torch_deterministic_warn_only = false
+torch_preserve_rng_state = false
+ac_determinism_check = "default"
+ac_debug = false
