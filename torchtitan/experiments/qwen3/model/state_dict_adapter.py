@@ -15,14 +15,10 @@ aligned with the HF implementation.
 import re
 from typing import Any
 
-<<<<<<< HEAD
-from torch.distributed.tensor import DTensor
-from torchtitan.models.utils import MoEStateDictAdapter
-=======
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
->>>>>>> 946b1ea9 (reformat)
+from torch.distributed.tensor import DTensor
+from torchtitan.models.utils import MoEStateDictAdapter
 
 from .args import Qwen3ModelArgs
 

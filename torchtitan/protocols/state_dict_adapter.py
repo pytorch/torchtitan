@@ -69,7 +69,7 @@ class BaseStateDictAdapter(ABC):
             path: the path to read HF checkpoint
 
         Returns:
-            THe HuggingFace storage reader to read rom HF checkpoint
+            The HuggingFace storage reader to read from HF checkpoint
 
         """
         pass

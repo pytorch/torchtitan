@@ -6,8 +6,10 @@
 
 
 import re
-import time
 from typing import Any
+
+import torch
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from torch.distributed.tensor import DTensor
 from torchtitan.models.utils import MoEStateDictAdapter
@@ -68,6 +70,24 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
                 }
             )
+
+    def get_hf_storage_reader(self, path: str) -> HuggingFaceStorageReader:
+        if self.model_args.hf_weight_quantized:
+            from torch.distributed.checkpoint.quantized_hf_storage import (
+                QuantizedHuggingFaceStorageReader,
+            )
+
+            # NOTE: Now we use Quantized HF storage reader to read DeepSeek-V3 671B model.
+            # If loading checkpoints without quantization, use HuggingFaceStorageReader instead
+            BLOCK_SIZE = 128
+            return QuantizedHuggingFaceStorageReader(
+                path=path,
+                target_dtype=torch.float32,
+                block_size=BLOCK_SIZE,
+                thread_count=4,
+            )
+        else:
+            return HuggingFaceStorageReader(path)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
