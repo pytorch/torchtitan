@@ -53,14 +53,12 @@ expert_parallel_degree = 1
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
-enable = true
+enable = false
 folder = "checkpoint"
 interval = 500
 last_save_model_only = true
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
-initial_load_in_hf = true
-initial_load_path = "/home/jianiw/tmp/mffuse/deepseek-v3/DeepSeek-V3.1-Base"
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
