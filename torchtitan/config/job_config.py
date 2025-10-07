@@ -888,6 +888,23 @@ class Validation:
 
 
 @dataclass
+class Debug:
+    torch_deterministic: bool = False
+     """Use deterministic algorithms wherever possible, may be slower"""
+
+    torch_deterministic_warn_only: bool = False
+    """Only warns about ops without deterministic implementations rather than erroring out  """
+
+    torch_preserve_rng_state: bool = False
+     """If deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower"""
+
+    ac_determinism_check: str = "default"
+    """A string specifying the determinism function. """
+
+    ac_debug: bool = False
+    """ Capture ac debug information. Will be slower. """
+
+@dataclass
 class JobConfig:
     """
     Default container for training configuration.
@@ -912,6 +929,7 @@ class JobConfig:
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
     experimental: Experimental = field(default_factory=Experimental)
     validation: Validation = field(default_factory=Validation)
+    debug: Debug = field(default_factory=Debug)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
