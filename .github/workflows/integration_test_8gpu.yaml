@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@move_aws_steps_inside_setup_rocm
+    uses: akashveramd/test-infra/.github/workflows/linux_job_v2.yml@linux_job_v2_main_rocm_aws
     strategy:
       matrix:
         include:
