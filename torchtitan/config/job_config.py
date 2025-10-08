@@ -527,6 +527,14 @@ class Checkpoint:
     Could be implemented as a separate script, but this way shares more code.
     """
 
+    load_only: bool = False
+    """
+    In certain scenarios, you may only need to load checkpoints for verification or debugging
+    purposes, without saving any new checkpoints. For example, you might use seed checkpoints
+    to validate model correctness. Enabling this option allows checkpoints to be loaded
+    without saving any during the training.
+    """
+
 
 @dataclass
 class ActivationCheckpoint:
