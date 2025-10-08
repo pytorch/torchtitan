@@ -5,13 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
-import logging
 import os
 import re
 from abc import ABC, abstractmethod
 from typing import Any
 
-logger = logging.getLogger()
+from torch.distributed.checkpoint import HuggingFaceStorageReader
+
+from torchtitan.tools.logging import logger
 
 from .model import BaseModelArgs
 
@@ -58,6 +59,21 @@ class BaseStateDictAdapter(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_hf_storage_reader(
+        self, path: str, from_quantized: bool = False
+    ) -> HuggingFaceStorageReader:
+        """Returns hf storage reader to read HF checkpoint
+
+        Args:
+            path: the path to read HF checkpoint
+
+        Returns:
+            The HuggingFace storage reader to read from HF checkpoint
+
+        """
+        pass
+
 
 class StateDictAdapter(BaseStateDictAdapter):
     """State dict adapter base class which provides convenient default behavior to build fqn_to_index_mapping"""
@@ -86,3 +102,12 @@ class StateDictAdapter(BaseStateDictAdapter):
                     self.fqn_to_index_mapping[hf_key] = int(indx)
             else:
                 self.fqn_to_index_mapping = None
+
+    def get_hf_storage_reader(
+        self, path: str, from_quantized: bool = False
+    ) -> HuggingFaceStorageReader:
+        if from_quantized:
+            logger.warning(
+                "Loading from quantized checkpoint format is not supported for this model."
+            )
+        return HuggingFaceStorageReader(path)

@@ -65,7 +65,7 @@ mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]
-enable=true
+enable = true
 components = ["loss"] # ["model", "loss"]
 
 [quantize.linear.float8]
