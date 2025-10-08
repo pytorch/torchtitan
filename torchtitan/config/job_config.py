@@ -422,6 +422,28 @@ class Checkpoint:
     enable: bool = False
     """Whether to enable checkpoint"""
 
+    enable_ft_dataloader_checkpoints: bool = True
+    """
+    Warning: Disabling this can have fault tolerant replicas training
+    over the same data multiple times. Use it with caution if training
+    over the same data is acceptable.
+
+    Used to enable checkpointing the dataloader index for fault tolerant training with torchft.
+
+    Fault tolerant training stores data loader index in the checkpoints, so that training can resume
+    without going over the same batch twice.
+
+    If enabled, data loader state is checkpointed. Otherwise, replicas
+    will train over the same data multiple times, which can result in
+    overfitting.
+
+    The failed replcia will still recover other state e.g. model
+    parameters from other replcias.
+
+    Note, if regular checkpointing is enabled, we also checkpoint the
+    data loader state. But when not using fault tolerance, the entire training starts from scratch.
+    """
+
     folder: str = "checkpoint"
     """
     The folder to store the checkpoints.
