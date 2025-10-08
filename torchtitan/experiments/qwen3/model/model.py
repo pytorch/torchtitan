@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.models.attention import build_attention
+from torchtitan.models.moe import MoE
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import Qwen3ModelArgs
@@ -131,6 +132,7 @@ class Attention(nn.Module):
         )
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.head_dim
+        self.scaling = self.head_dim**-0.5
 
         # RMSNorm added here to the here to include the q-k norm
         # This is one of the main differences between Llama3 and Qwen3
@@ -208,7 +210,7 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        output = self.sdpa(xq, xk, xv)
+        output = self.sdpa(xq, xk, xv, scale=self.scaling)
 
         output = output.transpose(
             1, 2
@@ -282,9 +284,18 @@ class TransformerBlock(nn.Module):
         self.dim = model_args.dim
 
         self.attention = Attention(model_args)
-        self.feed_forward = FeedForward(
-            dim=model_args.dim, hidden_dim=model_args.hidden_dim
-        )
+
+        self.moe_enabled = model_args.moe_enabled
+        if self.moe_enabled:
+            self.moe = MoE(
+                model_args.moe_args,
+                dim=model_args.dim,
+                hidden_dim=model_args.moe_inter_dim,
+            )
+        else:
+            self.feed_forward = FeedForward(
+                dim=model_args.dim, hidden_dim=model_args.hidden_dim
+            )
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
@@ -309,15 +320,22 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), rope_cache)
-        out = h + self.feed_forward(self.ffn_norm(h))
-        return out
+        x = x + self.attention(self.attention_norm(x), rope_cache)
 
-    def init_weights(self):
+        if self.moe_enabled:
+            x = x + self.moe(self.ffn_norm(x))
+        else:
+            x = x + self.feed_forward(self.ffn_norm(x))
+        return x
+
+    def init_weights(self, buffer_device: torch.device):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
+        if self.moe_enabled:
+            self.moe.init_weights(self.weight_init_std, buffer_device)
+        else:
+            self.feed_forward.init_weights(self.weight_init_std)
 
 
 class Qwen3Model(nn.Module, ModelProtocol):
@@ -360,8 +378,6 @@ class Qwen3Model(nn.Module, ModelProtocol):
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
 
-        self.init_weights()
-
     def init_weights(
         self,
         buffer_device: torch.device | None = None,
@@ -384,7 +400,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                layer.init_weights()
+                layer.init_weights(buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5

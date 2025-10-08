@@ -39,14 +39,16 @@ The folder should be organized as follows
   - Include other util files if necessary.
 - `__init__.py`
   - A dictionary of the actual model configurations, of the type `[str: ModelArgs]`.
-  - Call `register_train_spec` to specify a [`TrainSpec`](/torchtitan/protocols/train_spec.py), consisting a tuple of
+  - Define `get_train_spec` to return a [`TrainSpec`](/torchtitan/protocols/train_spec.py), consisting a tuple of
     - model name, model class, model args
+      - Model name should be the same as the folder name, which should be added to `torchtitan/models/__init__.py` or ``torchtitan/experiments/__init__.py``.
     - parallelizing function, pipelining function
     - builder functions for optimizer, lr scheduler, data loader, tokenizer, and loss function
       - More often than not, existing components can be reused.
       - Adding new datasets requires the `torchtitan` team’s review and legal approval.
       - Try to have minimal dependency on external libraries, if any.
     - state dict adapter
+  - If developing outside of torchtitan, one can call `register_train_spec` to register a `TrainSpec` so that `train.py` can be reused.
   - Read [more](/docs/extension.md#trainspec) on `TrainSpec`.
 - `README.md`
   - Include [instructions](/README.md#downloading-a-tokenizer) to download tokenizers / encoders.

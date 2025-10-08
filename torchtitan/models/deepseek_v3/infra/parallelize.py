@@ -17,16 +17,31 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.expert_parallel import NoParallel
+from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.llama4.infra.parallelize import (
     apply_compile,
     apply_fsdp,
     apply_moe_ep_tp,
 )
-from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
+from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.tools.logging import logger
+
+
+# for selective op activation checkpointing
+_op_sac_save_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    torch.ops._c10d_functional.all_to_all_single.default,
+    # for low precision training, it's useful to always save
+    # the result of max, since the absolute maximum is
+    # used to compute the scaling factor for quantization.
+    torch.ops.aten.max.default,
+    torch._higher_order_ops.flex_attention,
+}
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -46,15 +61,13 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if (
-        job_config.parallelism.context_parallel_degree > 1
-        and model.model_args.use_flex_attn
-    ):
+    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.float8.recipe_name in (
+        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
@@ -89,16 +102,21 @@ def parallelize_deepseekv3(
             etp_enabled=parallel_dims.etp_enabled,
         )
 
-    if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
-
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
+
+    if job_config.activation_checkpoint.mode != "none":
+        apply_ac(
+            model,
+            job_config.activation_checkpoint,
+            model_compile_enabled=model_compile_enabled,
+            use_flex_attn=use_flex_attn,
+            op_sac_save_list=_op_sac_save_list,
+        )
+
     if model_compile_enabled:
-        # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
-        torch._dynamo.config.capture_scalar_outputs = True
-        apply_compile(model)
+        apply_compile(model, job_config.compile)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -201,12 +219,12 @@ def apply_non_moe_tp(
             "attention": prepare_module_input(
                 input_layouts=(Shard(1), Replicate()),
                 desired_input_layouts=(Replicate(), Replicate()),
-                # input_kwarg_layouts={
-                #     "position_ids": Replicate(),
-                # },
-                # desired_input_kwarg_layouts={
-                #     "position_ids": Replicate(),
-                # },
+                input_kwarg_layouts={
+                    "position_ids": Replicate(),
+                },
+                desired_input_kwarg_layouts={
+                    "position_ids": Replicate(),
+                },
             ),
             # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
             # so that the intermedidate results k is generated as a DTensor and its gradient is

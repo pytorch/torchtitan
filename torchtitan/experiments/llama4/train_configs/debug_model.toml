@@ -2,7 +2,6 @@
 dump_folder = "./outputs"
 description = "Llama 4 debug training"
 print_args = false
-use_for_integration_test = true
 
 [profiling]
 enable_profiling = false
@@ -71,8 +70,16 @@ selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac bas
 enable=false
 components = ["model", "loss"]
 
-[float8]
+[quantize.linear.float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
-moe_fqns = ["experts"]
+
+[quantize.grouped_mm.float8]
+fqns = ["experts"]
+
+[quantize.linear.mx]
+filter_fqns = ["output", "router.gate"]
+
+[quantize.grouped_mm.mx]
+fqns = ["experts"]

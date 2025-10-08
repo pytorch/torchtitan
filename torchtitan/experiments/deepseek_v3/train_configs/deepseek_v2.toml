@@ -2,7 +2,6 @@
 dump_folder = "./outputs"
 description = "DeepSeek v2 debug training"
 print_args = false
-use_for_integration_test = true
 
 [profiling]
 enable_profiling = false
@@ -67,7 +66,7 @@ async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 mode = "none"  # ["none", "selective", "full"]
 selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
-[float8]
+[quantize.linear.float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]

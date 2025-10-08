@@ -5,12 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from importlib import import_module
+from typing import Mapping
 
-# Import torchtitan.models to ensure all train specs are registered
-import torchtitan.models  # noqa: F401
 from torchtitan.protocols import BaseModelArgs, BaseStateDictAdapter, ModelProtocol
 from torchtitan.protocols.train_spec import (
-    _train_specs,
     LossFunctionBuilder,
     LRSchedulersBuilder,
     OptimizersBuilder,
@@ -24,7 +23,7 @@ from torchtitan.protocols.train_spec import (
 class ForgeTrainSpec:
     name: str
     model_cls: type[ModelProtocol]
-    model_args: dict[str, BaseModelArgs]
+    model_args: Mapping[str, BaseModelArgs]
     parallelize_fn: ParallelizeFunction
     pipelining_fn: PipeliningFunction | None
     build_optimizers_fn: OptimizersBuilder
@@ -33,24 +32,7 @@ class ForgeTrainSpec:
     state_dict_adapter: type[BaseStateDictAdapter] | None = None
 
 
-# Copy and transform train specs from torchtitan.protocols.train_spec._train_specs
-# This happens during import after all models have been registered
-_forge_train_specs = {}
-
-
-def register_train_spec(train_spec: ForgeTrainSpec) -> None:
-    global _forge_train_specs
-    if train_spec.name in _forge_train_specs:
-        raise ValueError(f"Model {train_spec.name} is already registered.")
-
-    _forge_train_specs[train_spec.name] = train_spec
-
-
-def get_train_spec(name: str) -> ForgeTrainSpec:
-    global _forge_train_specs
-    if name not in _forge_train_specs:
-        raise ValueError(f"Model {name} is not registered.")
-    return _forge_train_specs[name]
+_extra_train_specs: dict[str, ForgeTrainSpec] = {}
 
 
 def _transform_train_spec(original_spec: TrainSpec):
@@ -69,6 +51,31 @@ def _transform_train_spec(original_spec: TrainSpec):
     )
 
 
-# Populate _forge_train_specs with transformed specs
-for name, spec in _train_specs.items():
-    register_train_spec(_transform_train_spec(spec))
+def register_train_spec(train_spec: ForgeTrainSpec) -> None:
+    global _extra_train_specs
+    if train_spec.name in _extra_train_specs:
+        raise ValueError(f"ForgeTrainSpec {train_spec.name} is already registered.")
+
+    # user can define a ForgeTrainSpec from outside of torchtitan
+    _extra_train_specs[train_spec.name] = train_spec
+
+
+def get_train_spec(name: str) -> ForgeTrainSpec:
+    # user-defined ForgeTrainSpec has higher priority
+    global _extra_train_specs
+    if name in _extra_train_specs:
+        return _extra_train_specs[name]
+
+    from torchtitan.experiments import _supported_experiments
+    from torchtitan.models import _supported_models
+
+    assert _supported_models.isdisjoint(_supported_experiments)
+
+    if name in _supported_models:
+        module = import_module(f"torchtitan.models.{name}")
+        return _transform_train_spec(module.get_train_spec())
+    elif name in _supported_experiments:
+        module = import_module(f"torchtitan.experiments.{name}")
+        return _transform_train_spec(module.get_train_spec())
+
+    raise ValueError(f"ForgeTrainSpec {name} is not registered.")

@@ -7,7 +7,6 @@ import copy
 
 import torch
 from torch.distributed._composable.fsdp import fully_shard
-
 from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.components.loss import cross_entropy_loss
@@ -30,7 +29,7 @@ class TestSimpleFSDP(FSDPTest):
             self.dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
             data_parallel_replicate_degree = self.world_size // 2
         else:
-            raise ValueError(f"Unsupported mode {mode}")
+            raise ValueError(f"Unsupported mode {self.mode}")
 
         self.parallel_dims = ParallelDims(
             dp_shard=data_parallel_shard_degree,
@@ -39,6 +38,7 @@ class TestSimpleFSDP(FSDPTest):
             tp=1,
             pp=1,
             ep=1,
+            etp=1,
             world_size=self.world_size,
         )
         self.device_mesh = self.parallel_dims.world_mesh
@@ -93,7 +93,7 @@ class TestSimpleFSDP(FSDPTest):
         for fsdp2_loss, simple_fsdp_replicate_loss in zip(
             fsdp2_losses, simple_fsdp_replicate_losses
         ):
-            assert torch.allclose(fsdp2_loss, simple_fsdp_replicate_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_replicate_loss)
 
     def test_fullyshard_convergence(self):
         # unit test for fully_shard mode
@@ -109,7 +109,7 @@ class TestSimpleFSDP(FSDPTest):
         for fsdp2_loss, simple_fsdp_fullyshard_loss in zip(
             fsdp2_losses, simple_fsdp_fullyshard_losses
         ):
-            assert torch.allclose(fsdp2_loss, simple_fsdp_fullyshard_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_fullyshard_loss)
 
     def test_hybridshard_convergence(self):
         # unit test for hybrid_shard mode
@@ -125,4 +125,4 @@ class TestSimpleFSDP(FSDPTest):
         for fsdp2_loss, simple_fsdp_hybridshard_loss in zip(
             fsdp2_losses, simple_fsdp_hybridshard_losses
         ):
-            assert torch.allclose(fsdp2_loss, simple_fsdp_hybridshard_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_hybridshard_loss)

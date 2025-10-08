@@ -10,7 +10,7 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.dataloader import build_dataloader
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_llama
 from .infra.pipeline import pipeline_llama
@@ -29,13 +29,13 @@ __all__ = [
 
 llama3_configs = {
     "debugmodel": TransformerModelArgs(
-        dim=256, n_layers=6, n_heads=16, vocab_size=2000, rope_theta=500000
+        dim=256, n_layers=6, n_heads=16, vocab_size=2048, rope_theta=500000
     ),
     "debugmodel_flex_attn": TransformerModelArgs(
         dim=256,
         n_layers=6,
         n_heads=16,
-        vocab_size=2000,
+        vocab_size=2048,
         rope_theta=500000,
         use_flex_attn=True,
         attn_mask_type="block_causal",
@@ -94,8 +94,8 @@ llama3_configs = {
 }
 
 
-register_train_spec(
-    TrainSpec(
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
         name="llama3",
         model_cls=Transformer,
         model_args=llama3_configs,
@@ -109,4 +109,3 @@ register_train_spec(
         build_validator_fn=build_validator,
         state_dict_adapter=Llama3StateDictAdapter,
     )
-)

@@ -25,12 +25,16 @@ try:
         HuggingFaceStorageReader,
         HuggingFaceStorageWriter,
     )
+    from torch.distributed.checkpoint._consolidate_hf_safetensors import (
+        consolidate_safetensors_files_on_every_rank,
+    )
     from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 except ImportError:
     HuggingFaceStorageWriter = None
     HuggingFaceStorageReader = None
     DefaultStager = None
     StagingOptions = None
+    consolidate_safetensors_files_on_every_rank = None
     print("Huggingface Checkpointing is not available, please install torch >= 2.9.0")
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -369,14 +373,23 @@ class CheckpointManager:
             state_dict = self.sd_adapter.to_hf(state_dict)
 
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
-
-            storage_writer = HuggingFaceStorageWriter(
-                path=checkpoint_id,
-                save_distributed=True,
-                fqn_to_index_mapping=fqn_to_index_mapping,
-                enable_consolidation=True,
-                thread_count_consolidation=5,
-            )
+            if fqn_to_index_mapping:
+                storage_writer = HuggingFaceStorageWriter(
+                    path=os.path.join(checkpoint_id, "sharded"),
+                    save_distributed=True,
+                    fqn_to_index_mapping=fqn_to_index_mapping,
+                    enable_consolidation=False,
+                )
+            else:
+                # the reason for only enabling consolidation if there is
+                # no mapping is because no mapping implies that we save all fqns
+                # to one file. This means we only need one rank to consolidate.
+                # Otherwise we should use consolidate_safetensors_files_on_every_rank
+                storage_writer = HuggingFaceStorageWriter(
+                    path=checkpoint_id,
+                    save_distributed=True,
+                    enable_consolidation=True,
+                )
 
         else:
             checkpoint_save_id = checkpoint_id
@@ -402,6 +415,14 @@ class CheckpointManager:
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
+            )
+
+        if to_hf and self.sd_adapter.fqn_to_index_mapping:
+            consolidate_safetensors_files_on_every_rank(
+                input_dir=os.path.join(checkpoint_id, "sharded"),
+                output_dir=checkpoint_id,
+                fqn_to_index_mapping=self.sd_adapter.fqn_to_index_mapping,
+                num_threads=5,
             )
 
         if enable_garbage_collection:
@@ -507,6 +528,7 @@ class CheckpointManager:
                 )
                 self.save_future = result.upload_completion
                 self.staging_future = result.staging_completion
+                self.staging = True
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 self.save_future = self.dcp_save(
@@ -629,6 +651,7 @@ class CheckpointManager:
         """
         if self.enable_staging and self.staging:
             self.staging_future.result()
+            self.staging = False
 
     def _find_load_step(self, folder: str = "") -> int:
         """Find the step to load the checkpoint for.

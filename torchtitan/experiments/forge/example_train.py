@@ -107,7 +107,7 @@ class Trainer(ForgeEngine):
                 dp_rank=self.dp_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=self.parallel_dims,
-                loss_fn=self.train_spec.build_loss_fn(job_config),
+                loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
             )
@@ -197,7 +197,10 @@ class Trainer(ForgeEngine):
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             loss = (
-                torch.mean(torch.stack(losses)).to(self.device)
+                # using sum instead of mean because we already rescale the
+                # loss_fn down by a factor of n_microbatches in
+                # torchtitan/distributed/pipeline_parallel.py
+                torch.sum(torch.stack(losses)).to(self.device)
                 if self.pp_has_last_stage
                 else torch.tensor([-1.0], device=self.device)
             )
@@ -297,8 +300,12 @@ class Trainer(ForgeEngine):
                     break
 
                 # Run validation if validator is available
-                if self.job_config.enable and self.validator.should_validate(self.step):
-                    self.validator.validate(self.model_parts)
+                if (
+                    self.job_config.validation.enable
+                    and self.validator.should_validate(self.step)
+                ):
+                    with self.loss_fn.no_rescale():
+                        self.validator.validate(self.model_parts, self.step)
 
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)

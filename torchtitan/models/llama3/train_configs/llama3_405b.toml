@@ -1,4 +1,3 @@
-# torchtitan Config.toml
 # NOTE: this toml config is a preset for 128 H100 GPUs.
 
 [job]
@@ -59,7 +58,7 @@ mode = "full" # ["none", "selective", "full"]
 enable=true
 components = ["model", "loss"]
 
-[float8]
+[quantize.linear.float8]
 enable_fsdp_float8_all_gather = true
 precompute_float8_dynamic_scale_for_fsdp = true
 filter_fqns = ["output"]
@@ -68,4 +67,4 @@ filter_fqns = ["output"]
 enable = false
 dataset = "c4_validation"
 freq = 500
-steps = -1
+steps = 1200  # Recommend value for c4_validation with world-size=8 and seq_len=8192
