@@ -28,6 +28,10 @@ class TransformerModelArgs(BaseModelArgs):
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
+    rope_scaling_factor: float = 8.0
+    rope_low_freq_factor: float = 1.0
+    rope_high_freq_factor: float = 4.0
+    rope_original_max_position_embeddings: int = 8192
 
     max_seq_len: int = 131072
     # If `True`, then each transformer block init uses its layer ID, and if
