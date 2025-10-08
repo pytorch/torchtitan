@@ -7,6 +7,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
@@ -471,21 +472,21 @@ class Transformer(nn.Module, ModelProtocol):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-        nope_mask_mod = get_causal_mask_mod()
+        mask_mods = [get_causal_mask_mod()]
         match self.model_args.attn_mask_type:
             case "causal":
                 B = 1
             case "block_causal":
+                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
                 B = input_batch.shape[0]
-                nope_mask_mod = get_document_mask_mod(
-                    nope_mask_mod, input_batch, tokenizer.eos_id
-                )
             case _:
                 raise ValueError(f"Unknown attention mask type: {self.attn_mask_type}")
 
-        rope_mask_mod = get_fixed_block_mask_mod(
-            nope_mask_mod, self.model_args.fixed_attn_block_size
+        rope_mask_mod = and_masks(
+            *mask_mods,
+            get_fixed_block_mask_mod(self.model_args.fixed_attn_block_size),
         )
+        nope_mask_mod = and_masks(*mask_mods)
 
         seqlen = input_batch.shape[1]
         return {
@@ -496,7 +497,7 @@ class Transformer(nn.Module, ModelProtocol):
     def forward(
         self,
         tokens: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: AttentionMasksType | None = None,
         input_batch: torch.Tensor | None = None,
     ):
         """

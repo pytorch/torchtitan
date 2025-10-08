@@ -10,7 +10,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.nn.attention.flex_attention import BlockMask
+from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
@@ -421,19 +421,17 @@ class Transformer(nn.Module, ModelProtocol):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-        mask_mod = get_causal_mask_mod()
+        mask_mods = [get_causal_mask_mod()]
         match self.model_args.attn_mask_type:
             case "causal":
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
-                mask_mod = get_document_mask_mod(
-                    mask_mod, input_batch, tokenizer.eos_id
-                )
+                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(f"Unknown attention mask type: {self.attn_mask_type}")
         return create_attention_mask(
-            mask_mod, B, None, input_batch.shape[1], input_batch.shape[1]
+            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
         )
 
     def get_order_sensitive_buffers(

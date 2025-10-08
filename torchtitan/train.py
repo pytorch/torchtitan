@@ -414,16 +414,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
 
-        # Create the attention mask(s) if use_flex_attn is True
-        attention_masks = (
-            model_parts[0].get_attention_masks(
+        if getattr(self.model_args, "use_flex_attn", False):
+            extra_inputs["attention_masks"] = model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
-            if getattr(self.model_args, "use_flex_attn", False)
-            else None
-        )
 
         # Get the order sensitive buffers
         order_sensitive_buffers = model_parts[0].get_order_sensitive_buffers(
@@ -456,7 +452,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         inputs,
                         *order_sensitive_buffers[0],
                         **extra_inputs,
-                        attention_masks=attention_masks,
                         target=targets,
                         losses=losses,
                         input_batch=inputs,
@@ -464,7 +459,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 else:
                     self.pp_schedule.step(
                         *order_sensitive_buffers[0],
-                        attention_masks=attention_masks,
                         target=targets,
                         losses=losses,
                         input_batch=inputs,
@@ -489,7 +483,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         inputs,
                         *order_sensitive_buffers[0],
                         **extra_inputs,
-                        attention_masks=attention_masks,
                     )
                     loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
