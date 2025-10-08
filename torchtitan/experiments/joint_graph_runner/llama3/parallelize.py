@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Shard, Replicate
@@ -20,7 +19,7 @@ from torchtitan.tools.logging import logger
 
 from torchtitan.experiments.simple_fsdp.simple_fsdp import data_parallel, MixedPrecisionPolicy
 
-from torch._functorch.aot_autograd import aot_export_joint_with_descriptors
+from torch._functorch.aot_autograd import aot_export_joint_with_descriptors, aot_compile_joint_with_descriptors
 from torch._functorch.partitioners import min_cut_rematerialization_partition
 
 from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
@@ -402,8 +401,12 @@ def joint_graph_builder(model, *inputs, **kwargs):
 
     # get fw/bw graphs
     joint_with_descriptors = graph_capture_and_aot_export_joint_with_descriptors(model, inputs)
+    
+    def compiler(gm: torch.fx.GraphModule, example_inputs):
+        print_if_rank0(gm.print_readable(print_output=False))
+        return gm
 
-    fn = aot_compile_joint_with_descriptors(joint_with_descriptors)
+    fn = aot_compile_joint_with_descriptors(joint_with_descriptors, fw_compiler=compiler, bw_compiler=compiler)
 
     def wrapper_fn(args):
         input = [
