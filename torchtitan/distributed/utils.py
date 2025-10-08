@@ -238,7 +238,10 @@ def maybe_enable_amp(
 
 
 def init_distributed(
-    comm_config: CommConfig, enable_cpu_backend: bool = False, base_folder: str = ""
+    comm_config: CommConfig,
+    enable_cpu_backend: bool = False,
+    base_folder: str = "",
+    replica_id: int | None = None,
 ):
     def _warn_overwrite_env(env, val):
         if env in os.environ:
@@ -279,9 +282,17 @@ def init_distributed(
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
+    local_rank = os.environ.get("RANK")
+    world_size = os.environ.get("WORLD_SIZE")
+
+    global_rank = None
+    if local_rank is not None and replica_id is not None and world_size is not None:
+        global_rank = int(local_rank) + int(replica_id) * int(world_size)
+
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),
         timeout=timedelta(seconds=comm_config.init_timeout_seconds),
+        rank=global_rank,
     )
 
 
@@ -432,9 +443,7 @@ def _clip_grad_norm_with_ep(
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
+        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:

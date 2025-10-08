@@ -98,6 +98,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config.comm,
             enable_cpu_backend=job_config.training.enable_cpu_offload,
             base_folder=job_config.job.dump_folder,
+            replica_id=(
+                job_config.fault_tolerance.replica_id
+                if job_config.fault_tolerance.enable
+                else None
+            ),
         )
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
