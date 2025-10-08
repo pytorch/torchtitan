@@ -3,7 +3,6 @@
 dump_folder = "./outputs"
 description = "Flux debug model"
 print_args = false
-use_for_integration_test = true
 
 [profiling]
 enable_profiling = false
@@ -69,7 +68,7 @@ enable = false
 dataset = "coco-validation"
 freq = 5
 local_batch_size = 8
-steps = 1
+steps = 48  # Recommended value with the current settings and world_size=8
 # args for sampling images
 enable_classifier_free_guidance = true
 classifier_free_guidance_scale = 5.0

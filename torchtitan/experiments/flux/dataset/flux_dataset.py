@@ -6,7 +6,6 @@
 
 import itertools
 import math
-from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -23,6 +22,7 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
+from torchtitan.datasets import DatasetConfig
 from torchtitan.experiments.flux.dataset.tokenizer import (
     build_flux_tokenizer,
     FluxTokenizer,
@@ -139,30 +139,23 @@ def _coco_data_processor(
     }
 
 
-@dataclass
-class TextToImageDatasetConfig:
-    path: str
-    loader: Callable
-    data_processor: Callable
-
-
 DATASETS = {
-    "cc12m-wds": TextToImageDatasetConfig(
+    "cc12m-wds": DatasetConfig(
         path="pixparse/cc12m-wds",
         loader=lambda path: load_dataset(path, split="train", streaming=True),
-        data_processor=_cc12m_wds_data_processor,
+        sample_processor=_cc12m_wds_data_processor,
     ),
-    "cc12m-test": TextToImageDatasetConfig(
+    "cc12m-test": DatasetConfig(
         path="torchtitan/experiments/flux/tests/assets/cc12m_test",
         loader=lambda path: load_dataset(
             path, split="train", data_files={"train": "*.tar"}, streaming=True
         ),
-        data_processor=_cc12m_wds_data_processor,
+        sample_processor=_cc12m_wds_data_processor,
     ),
-    "coco-validation": TextToImageDatasetConfig(
+    "coco-validation": DatasetConfig(
         path="howard-hou/COCO-Text",
         loader=lambda path: load_dataset(path, split="validation", streaming=True),
-        data_processor=_coco_data_processor,
+        sample_processor=_coco_data_processor,
     ),
 }
 
@@ -180,7 +173,7 @@ def _validate_dataset(
     config = DATASETS[dataset_name]
     path = dataset_path or config.path
     logger.info(f"Preparing {dataset_name} dataset from {path}")
-    return path, config.loader, config.data_processor
+    return path, config.loader, config.sample_processor
 
 
 class FluxDataset(IterableDataset, Stateful):
@@ -367,6 +360,7 @@ class FluxValidationDataset(FluxDataset):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         generate_timesteps: bool = True,
+        infinite: bool = False,
     ) -> None:
         # Call parent constructor correctly
         super().__init__(
@@ -377,7 +371,7 @@ class FluxValidationDataset(FluxDataset):
             job_config=job_config,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
-            infinite=False,
+            infinite=infinite,
         )
 
         # Initialize timestep generation for validation
@@ -406,6 +400,7 @@ def build_flux_validation_dataloader(
     # This parameter is not used, keep it for compatibility
     tokenizer: BaseTokenizer | None,
     generate_timestamps: bool = True,
+    infinite: bool = False,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
     dataset_name = job_config.validation.dataset
@@ -423,6 +418,7 @@ def build_flux_validation_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         generate_timesteps=generate_timestamps,
+        infinite=infinite,
     )
 
     return ParallelAwareDataloader(

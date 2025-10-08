@@ -32,19 +32,33 @@ except ImportError:
 
     PrepareModuleInputOutput = None
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
-
+from torchtitan.config.job_config import Compile as CompileConfig
+from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
-    NoParallel,
     ReordererSequenceParallel,
     TensorParallel,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-
-from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
+from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.tools.logging import logger
+
+
+# for selective op activation checkpointing
+_op_sac_save_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    torch.ops._c10d_functional.all_to_all_single.default,
+    # for low precision training, it's useful to always save
+    # the result of max, since the absolute maximum is
+    # used to compute the scaling factor for quantization.
+    torch.ops.aten.max.default,
+    torch._higher_order_ops.flex_attention,
+}
 
 
 def parallelize_llama(
@@ -70,15 +84,13 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if (
-        job_config.parallelism.context_parallel_degree > 1
-        and model.model_args.use_flex_attn
-    ):
+    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.float8.recipe_name in (
+        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
@@ -111,17 +123,21 @@ def parallelize_llama(
             etp_enabled=parallel_dims.etp_enabled,
         )
 
-    if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
-
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
+    if job_config.activation_checkpoint.mode != "none":
+        apply_ac(
+            model,
+            job_config.activation_checkpoint,
+            model_compile_enabled=model_compile_enabled,
+            use_flex_attn=use_flex_attn,
+            op_sac_save_list=_op_sac_save_list,
+        )
+
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
-        torch._dynamo.config.capture_scalar_outputs = True
-        apply_compile(model)
+        apply_compile(model, job_config.compile)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -387,7 +403,7 @@ def apply_fsdp(
     transformer_blocks = list(model.layers.values())
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
-    if model.tok_embeddings is not None and model.layers is not None:
+    if model.tok_embeddings is not None and len(model.layers) > 0:
         model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
 
     for transformer_block, next_transformer_block in zip(
@@ -411,7 +427,7 @@ def apply_fsdp(
     reversed_transformer_blocks = list(reversed(model.layers.values()))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
-    if model.norm is not None and model.output is not None and model.layers is not None:
+    if model.norm is not None and model.output is not None and len(model.layers) > 0:
         model.output.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(
@@ -505,17 +521,24 @@ def apply_moe_ep_tp(
         )
 
 
-def apply_compile(model: nn.Module):
+def apply_compile(model: nn.Module, compile_config: CompileConfig):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
+    # but it is experimental.
+    # torch._dynamo.config.capture_scalar_outputs = True
     for layer_id, transformer_block in model.layers.named_children():
         # TODO: remove when torch.compile supports fullgraph=True for MoE
         fullgraph = True
         if transformer_block.moe_enabled:
             fullgraph = False
-        transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
+        transformer_block = torch.compile(
+            transformer_block,
+            backend=compile_config.backend,
+            fullgraph=fullgraph,
+        )
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")

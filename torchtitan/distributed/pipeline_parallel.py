@@ -36,6 +36,7 @@ except ImportError:
     ScheduleDualPipeV = None
 
 
+from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 
@@ -96,7 +97,8 @@ def build_pipeline_schedule(
     schedule = schedule_class(
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
-        loss_fn=loss_fn,
+        loss_fn=rescale_accumulated_loss(loss_fn, n_microbatches),
+        scale_grads=False,
     )
     logger.info(
         f"Using pipeline schedule {job_config.parallelism.pipeline_parallel_schedule} "
@@ -298,7 +300,7 @@ def pipeline_module_split(
 
         # Create a set of modules to keep for faster lookup
         modules_to_keep = set(module_names)
-        print(f"Stage {stage_idx}: Modules to keep: {modules_to_keep}")
+        logger.info(f"Stage {stage_idx}: Modules to keep: {modules_to_keep}")
         for module_name, module_value in model.named_children():
             # Handle layer-like structures (e.g., "layers.0", "layers.1")
             if isinstance(module_value, (nn.ModuleDict, nn.ModuleList)):

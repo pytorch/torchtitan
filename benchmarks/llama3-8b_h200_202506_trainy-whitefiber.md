@@ -14,7 +14,10 @@ Each host has
 
 ### Configuration
 
-Runs were invoked with the following, where `NUM_NODES` was `4` and `8`
+Runs were invoked with the following, where `NUM_NODES` was `4` and `8`.
+
+**Warning**: the command here has been updated to use the latest version of torchtitan, which has had API changes since this benchmark was ran.
+To reproduce the results using the original torchtitan commit, change all instances of `quantize.linear.float8` to `float8` in the command below.
 ```
   torchrun \
     --nnodes $NUM_NODES  \
@@ -27,10 +30,10 @@ Runs were invoked with the following, where `NUM_NODES` was `4` and `8`
     --metrics.enable_wandb \
     --training.local_batch_size=2 \
     --training.compile \
-    --model.converters="float8" \
-    --float8.enable_fsdp_float8_all_gather \
-    --float8.precompute_float8_dynamic_scale_for_fsdp \
-    --float8.force_recompute_fp8_weight_in_bwd \
+    --model.converters="quantize.linear.float8" \
+    --quantize.linear.float8.enable_fsdp_float8_all_gather \
+    --quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp \
+    --quantize.linear.float8.force_recompute_fp8_weight_in_bwd \
     --profiling.profile_freq 1000000
     --training.steps 2000
 ```

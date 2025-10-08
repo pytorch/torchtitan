@@ -30,6 +30,9 @@ class MoEArgs:
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
     load_balance_coeff: float | None = 1e-3
 
+    _debug_force_load_balance: bool = False
+    # if True, we force each experts get same amount of token via round-robin
+
 
 # can be used as dense FFN layer or shared experts in MoE layers
 class FeedForward(nn.Module):
@@ -180,6 +183,7 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid"],
         route_norm: bool,
         route_scale: float,
+        _debug_force_load_balance: bool = False,
     ):
         super().__init__()
         self.gate = nn.Linear(dim, num_experts, bias=False)
@@ -188,6 +192,24 @@ class TokenChoiceTopKRouter(nn.Module):
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
+        self._debug_force_load_balance = _debug_force_load_balance
+
+    def _debug_force_load_balance_routing(
+        self, scores: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Balanced round-robin expert assignment.
+        Returns (selected_experts_indices [N, K] LongTensor, top_scores [N, K] FloatTensor).
+        """
+        n_tokens = scores.size(0)
+        # Round-robin indices with exact balance
+        selected_experts_indices = (
+            torch.arange(
+                n_tokens * self.top_k, device=scores.device, dtype=torch.int64
+            ).reshape(n_tokens, self.top_k)
+            % self.num_experts
+        )
+        top_scores = scores.gather(dim=1, index=selected_experts_indices)  # [N,K]
+        return selected_experts_indices, top_scores
 
     def forward(
         self, x: torch.Tensor, expert_bias: torch.Tensor | None = None
@@ -231,7 +253,14 @@ class TokenChoiceTopKRouter(nn.Module):
                 scores, k=self.top_k, dim=1
             )
 
-        if self.score_func == "sigmoid" and self.route_norm:
+        # debug override: balanced round-robin routing
+        if self._debug_force_load_balance:
+            (
+                selected_experts_indices,
+                top_scores,
+            ) = self._debug_force_load_balance_routing(scores)
+
+        if self.route_norm:
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
@@ -329,6 +358,7 @@ class MoE(nn.Module):
             score_func=moe_args.score_func,
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
+            _debug_force_load_balance=moe_args._debug_force_load_balance,
         )
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
         self.shared_experts = (
@@ -417,17 +447,19 @@ class MoE(nn.Module):
         # shape (bs*slen*top_k, dim)
         routed_output = self.experts(routed_input, num_tokens_per_expert)
 
+        # shared expert
+        # Note: we execute the shared expert before scoring the output of the routed expert
+        # to "implicitly" overlap the shared expert compute with token combine communication
+        if self.shared_experts is not None:
+            out = self.shared_experts(x)
+        else:
+            out = torch.zeros_like(x)
+
         if not self.score_before_experts:
             routed_output = (
                 routed_output.to(torch.float32)
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
-
-        # shared expert
-        if self.shared_experts is not None:
-            out = self.shared_experts(x)
-        else:
-            out = torch.zeros_like(x)
 
         out = out.scatter_add(
             dim=0, index=token_indices_experts_sorted, src=routed_output

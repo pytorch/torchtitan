@@ -13,8 +13,7 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.dataloader import build_dataloader
 from torchtitan.models.llama3.infra.pipeline import pipeline_llama
 from torchtitan.models.moe import MoEArgs
-
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_deepseekv3
 from .model.args import DeepSeekV3ModelArgs
@@ -31,11 +30,11 @@ __all__ = [
 
 deepseekv3_configs = {
     "debugmodel": DeepSeekV3ModelArgs(
-        vocab_size=2000,
+        vocab_size=2048,
         dim=256,
         inter_dim=1024,
         moe_inter_dim=256,
-        n_layers=3,
+        n_layers=6,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
@@ -43,7 +42,7 @@ deepseekv3_configs = {
             num_shared_experts=2,
             top_k=3,
             score_func="softmax",
-            route_norm=True,
+            route_norm=False,
             score_before_experts=False,
         ),
         q_lora_rank=0,
@@ -54,11 +53,11 @@ deepseekv3_configs = {
         mscale=0.70,
     ),
     "debugmodel_flex_attn": DeepSeekV3ModelArgs(
-        vocab_size=2000,
+        vocab_size=2048,
         dim=256,
         inter_dim=1024,
         moe_inter_dim=256,
-        n_layers=3,
+        n_layers=6,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
@@ -66,7 +65,7 @@ deepseekv3_configs = {
             num_shared_experts=2,
             top_k=3,
             score_func="softmax",
-            route_norm=True,
+            route_norm=False,
             score_before_experts=False,
         ),
         q_lora_rank=0,
@@ -91,7 +90,7 @@ deepseekv3_configs = {
             num_shared_experts=2,
             top_k=6,
             score_func="softmax",
-            route_norm=True,
+            route_norm=False,
             score_before_experts=False,
         ),
         q_lora_rank=0,
@@ -116,7 +115,7 @@ deepseekv3_configs = {
             num_shared_experts=2,
             top_k=6,
             score_func="softmax",
-            route_norm=True,
+            route_norm=False,
             route_scale=16.0,
             score_before_experts=False,
         ),
@@ -160,8 +159,8 @@ deepseekv3_configs = {
 }
 
 
-register_train_spec(
-    TrainSpec(
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
         name="deepseek_v3",
         model_cls=DeepSeekV3Model,
         model_args=deepseekv3_configs,
@@ -174,4 +173,3 @@ register_train_spec(
         build_loss_fn=build_cross_entropy_loss,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )
-)

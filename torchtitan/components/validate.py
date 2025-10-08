@@ -17,6 +17,7 @@ from torchtitan.config import JobConfig
 from torchtitan.datasets.hf_datasets import build_hf_validation_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools import utils
+from torchtitan.tools.logging import logger
 
 
 class BaseValidator:
@@ -66,6 +67,7 @@ class Validator(BaseValidator):
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
             tokenizer=tokenizer,
+            infinite=self.job_config.validation.steps != -1,
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
@@ -73,6 +75,12 @@ class Validator(BaseValidator):
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
+
+        if self.job_config.validation.steps == -1:
+            logger.warning(
+                "Setting validation steps to -1 might cause hangs because of "
+                "unequal sample counts across ranks when dataset is exhausted."
+            )
 
     @torch.no_grad()
     def validate(
@@ -139,7 +147,10 @@ class Validator(BaseValidator):
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
                 loss = (
-                    torch.mean(torch.stack(losses)).to(device_type)
+                    # using sum instead of mean because we already rescale the
+                    # loss_fn down by a factor of n_microbatches in
+                    # torchtitan/distributed/pipeline_parallel.py
+                    torch.sum(torch.stack(losses)).to(device_type)
                     if self.pp_has_last_stage
                     else torch.tensor([-1.0], device=device_type)
                 )
