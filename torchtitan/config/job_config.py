@@ -239,6 +239,9 @@ class Training:
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
 
+    debug_moe_force_load_balance: bool = False
+    """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
+
 
 @dataclass
 class Parallelism:
@@ -522,6 +525,14 @@ class Checkpoint:
     Initializes the full model without applying parallelisms, and then saves it as a seed checkpoint.
     Note: requires user to call train.py without specifying any parallelisms, e.g. NGPU=1.
     Could be implemented as a separate script, but this way shares more code.
+    """
+
+    load_only: bool = False
+    """
+    In certain scenarios, you may only need to load checkpoints for verification or debugging
+    purposes, without saving any new checkpoints. For example, you might use seed checkpoints
+    to validate model correctness. Enabling this option allows checkpoints to be loaded
+    without saving any during the training.
     """
 
 
