@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor, Shard, Replicate
@@ -24,12 +25,12 @@ from torch._functorch.partitioners import min_cut_rematerialization_partition
 
 from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
 
-from torch._functorch._aot_autograd.aot_eager_runner import (
-    get_num_mutate_inputs,
-    get_num_user_outputs,
-    JointGraphModule,
-    RunMode,
-)
+# from torch._functorch._aot_autograd.aot_eager_runner import (
+#     get_num_mutate_inputs,
+#     get_num_user_outputs,
+#     JointGraphModule,
+#     RunMode,
+# )
 import contextlib
 from torchtitan.experiments.simple_fsdp.llama3.model import SimpleFSDPTransformer
 from torch._functorch.aot_autograd import (
@@ -60,6 +61,13 @@ def graph_capture_and_aot_export_joint_with_descriptors(model, inputs):
     with torch._dynamo.config.patch(install_free_tensors=True):
         # TODO: switch to use the official graph_capture API once it is ready
         gm = _dynamo_graph_capture_for_export(model)(*inputs)
+
+        # Restore the state dict to match the original module
+        _restore_state_dict(model, gm)
+
+        # Validate that state dict and ordering match
+        _validate_state_dict_match(model, gm)
+
     return aot_export_joint_with_descriptors_alone(gm, inputs)
 
 
@@ -72,6 +80,158 @@ def aot_export_joint_with_descriptors_alone(model, inputs):
             inputs,
         )
         return joint_with_descriptors
+
+
+
+def _assign_attr(
+    from_obj: torch.Tensor | torch.nn.Parameter,
+    to_module: torch.nn.Module,
+    target: str,
+    is_buffer: bool = False,
+) -> None:
+    """
+    Assign attribute 'from_obj' to the qualified name 'target' on 'to_module'.
+    This installs empty Modules where none exist yet if they are subpaths of target.
+    Based on _assign_attr from torch.export.unflatten.
+    """
+    *prefix, field = target.split(".")
+
+    # Generate all submodules along the path
+    for item in prefix:
+        if not hasattr(to_module, item):
+            setattr(to_module, item, torch.nn.Module())
+        to_module = getattr(to_module, item)
+
+    # Assign the actual parameter or buffer
+    if is_buffer:
+        to_module.register_buffer(field, from_obj)
+    else:
+        to_module.register_parameter(field, from_obj)
+
+
+def _clear_traced_params_buffers(traced_module: torch.fx.GraphModule) -> None:
+    """Remove all parameters and buffers from traced module before restoring."""
+    # Remove all parameters
+    for name in list(traced_module._parameters.keys()):
+        delattr(traced_module, name)
+
+    # Remove all buffers
+    for name in list(traced_module._buffers.keys()):
+        delattr(traced_module, name)
+
+
+def _restore_state_dict(
+    original_module: torch.nn.Module, traced_module: torch.fx.GraphModule
+) -> None:
+    """
+    Restores the state dict of the traced module to match the original module exactly.
+    Preserves the original FQNs with dots, creating intermediate empty modules as needed.
+    Ensures that the ordering of parameters/buffers matches the original module.
+    """
+    # Build ID-based lookups for traced module params/buffers
+    traced_params: dict[int, tuple[str, torch.nn.Parameter]] = {}
+    for name, param in traced_module.named_parameters(remove_duplicate=False):
+        traced_params[id(param)] = (name, param)
+
+    traced_buffers: dict[int, tuple[str, torch.Tensor]] = {}
+    for name, buffer in traced_module.named_buffers(remove_duplicate=False):
+        traced_buffers[id(buffer)] = (name, buffer)
+
+    # Build mapping from old names to new names for graph node updates
+    name_mapping: dict[str, str] = {}
+
+    # Clear existing parameters and buffers from traced module
+    _clear_traced_params_buffers(traced_module)
+
+    # Restore parameters in the order they appear in original module
+    for orig_name, orig_param in original_module.named_parameters(
+        remove_duplicate=False
+    ):
+        if id(orig_param) in traced_params:
+            # This param exists in traced module - restore it with original FQN
+            traced_name, traced_param = traced_params[id(orig_param)]
+            _assign_attr(traced_param, traced_module, orig_name, is_buffer=False)
+            name_mapping[traced_name] = orig_name
+        else:
+            # This param doesn't exist in traced module - add it
+            _assign_attr(orig_param, traced_module, orig_name, is_buffer=False)
+
+    # Restore buffers in the order they appear in original module
+    for orig_name, orig_buffer in original_module.named_buffers(remove_duplicate=False):
+        if id(orig_buffer) in traced_buffers:
+            # This buffer exists in traced module - restore it with original FQN
+            traced_name, traced_buffer = traced_buffers[id(orig_buffer)]
+            _assign_attr(traced_buffer, traced_module, orig_name, is_buffer=True)
+            name_mapping[traced_name] = orig_name
+        else:
+            # This buffer doesn't exist in traced module - add it
+            _assign_attr(orig_buffer, traced_module, orig_name, is_buffer=True)
+
+    # Update get_attr nodes in the graph to use the correct FQNs
+    for node in traced_module.graph.nodes:
+        if node.op == "get_attr" and node.target in name_mapping:
+            node.target = name_mapping[node.target]
+
+    traced_module.recompile()
+
+
+def _validate_state_dict_match(
+    original_module: torch.nn.Module, traced_module: torch.fx.GraphModule
+) -> None:
+    """
+    Validates that the traced module's state dict matches the original module.
+    Checks that parameter/buffer names, ordering, and tensor values match.
+
+    Raises:
+        AssertionError: If any validation check fails.
+    """
+    # Check 1: Verify parameter names and ordering match
+    orig_param_names = list(
+        dict(original_module.named_parameters(remove_duplicate=False)).keys()
+    )
+    gm_param_names = list(
+        dict(traced_module.named_parameters(remove_duplicate=False)).keys()
+    )
+    assert orig_param_names == gm_param_names, (
+        f"Parameter names or ordering mismatch!\n"
+        f"Original: {orig_param_names}\n"
+        f"Traced:   {gm_param_names}"
+    )
+
+    # Check 2: Verify buffer names and ordering match
+    orig_buffer_names = list(
+        dict(original_module.named_buffers(remove_duplicate=False)).keys()
+    )
+    gm_buffer_names = list(
+        dict(traced_module.named_buffers(remove_duplicate=False)).keys()
+    )
+    assert orig_buffer_names == gm_buffer_names, (
+        f"Buffer names or ordering mismatch!\n"
+        f"Original: {orig_buffer_names}\n"
+        f"Traced:   {gm_buffer_names}"
+    )
+
+    # Check 3: Verify parameter tensors match by identity or value
+    for (orig_name, orig_param), (gm_name, gm_param) in zip(
+        original_module.named_parameters(remove_duplicate=False),
+        traced_module.named_parameters(remove_duplicate=False),
+    ):
+        assert (
+            orig_name == gm_name
+        ), f"Parameter name mismatch: {orig_name} != {gm_name}"
+        assert id(orig_param) == id(gm_param) or torch.equal(
+            orig_param, gm_param
+        ), f"Parameter tensor mismatch for {orig_name}"
+
+    # Check 4: Verify buffer tensors match by identity or value
+    for (orig_name, orig_buffer), (gm_name, gm_buffer) in zip(
+        original_module.named_buffers(remove_duplicate=False),
+        traced_module.named_buffers(remove_duplicate=False),
+    ):
+        assert orig_name == gm_name, f"Buffer name mismatch: {orig_name} != {gm_name}"
+        assert id(orig_buffer) == id(gm_buffer) or torch.equal(
+            orig_buffer, gm_buffer
+        ), f"Buffer tensor mismatch for {orig_name}"
 
 
 
@@ -243,72 +403,74 @@ def joint_graph_builder(model, *inputs, **kwargs):
     # get fw/bw graphs
     joint_with_descriptors = graph_capture_and_aot_export_joint_with_descriptors(model, inputs)
 
-    # Now partition the joint grapg 
-    joint_gm = joint_with_descriptors.graph_module
-    aot_state = joint_with_descriptors._aot_state
-    aot_graph_capture = joint_with_descriptors._aot_graph_capture
+    fn = aot_compile_joint_with_descriptors(joint_with_descriptors)
 
-    # Get the joint graph module
-    joint_inputs = aot_graph_capture.updated_flat_args
-    fw_metadata = aot_state.fw_metadata
+    def wrapper_fn(args):
+        input = [
+            *model.parameters(),
+            *model.buffers(),
+            *args,
+        ]
+        return fn(*input)
 
-    num_user_outputs = get_num_user_outputs(fw_metadata)
-    num_mutate_inputs = get_num_mutate_inputs(fw_metadata)
-    num_inner_fwd_outputs = num_mutate_inputs + num_user_outputs
-
-    fw_gm, bw_gm = min_cut_rematerialization_partition(
-        joint_gm,
-        joint_inputs,
-        num_fwd_outputs=num_inner_fwd_outputs,
-        static_lifetime_input_indices=fw_metadata.static_input_indices or [],
-    )
-
-    # print_if_rank0(f"fw_gm:")
-    # print_if_rank0(fw_gm.print_readable(print_output=False))
-
-    # print_if_rank0(f"bw_gm:")
-    # print_if_rank0(bw_gm.print_readable(print_output=False))
-
-    # Run graph passes here
-
-    ## Apply bucketing
-    # schedule_overlap_bucketing(fw_gm)
-    # schedule_overlap_bucketing(bw_gm)
-
-    ## TODO: Apply Flex Attention compilation here
-
-    # Codgen Autograd.Function Wrappers
-
-    # Get the model parameters and buffers - the partitioned graphs expect these as arguments
-    local_params = []
-    for p in model.parameters():
-        if isinstance(p, DTensor):
-            local_params.append(p.to_local())
-        else:
-            local_params.append(p)
-
-    local_buffers = []
-    for b in model.buffers():
-        if isinstance(b, DTensor):
-            local_buffers.append(b.to_local())
-        else:
-            local_buffers.append(b)
+    return wrapper_fn
 
 
-    joint_graph_module = JointGraphModule(
-        local_params, local_buffers, fw_metadata, fw_gm, bw_gm, RunMode.CODEGEN_AUTOGRAD, f"rank{torch.distributed.get_rank()}"
-    )
 
-    return joint_graph_module
+    # # Now partition the joint grapg 
+    # joint_gm = joint_with_descriptors.graph_module
+    # aot_state = joint_with_descriptors._aot_state
+    # aot_graph_capture = joint_with_descriptors._aot_graph_capture
 
+    # # Get the joint graph module
+    # joint_inputs = aot_graph_capture.updated_flat_args
+    # fw_metadata = aot_state.fw_metadata
 
-    # trace_structured(
-    #     "artifact",
-    #     metadata_fn=lambda: {
-    #         "name": "aot_export_joint_with_descriptors",
-    #         "encoding": "string",
-    #     },
-    #     payload_fn=lambda: gm.print_readable(
-    #         print_output=False, include_stride=True, include_device=True
-    #     ),
+    # num_user_outputs = get_num_user_outputs(fw_metadata)
+    # num_mutate_inputs = get_num_mutate_inputs(fw_metadata)
+    # num_inner_fwd_outputs = num_mutate_inputs + num_user_outputs
+
+    # fw_gm, bw_gm = min_cut_rematerialization_partition(
+    #     joint_gm,
+    #     joint_inputs,
+    #     num_fwd_outputs=num_inner_fwd_outputs,
+    #     static_lifetime_input_indices=fw_metadata.static_input_indices or [],
     # )
+
+    # # print_if_rank0(f"fw_gm:")
+    # # print_if_rank0(fw_gm.print_readable(print_output=False))
+
+    # # print_if_rank0(f"bw_gm:")
+    # # print_if_rank0(bw_gm.print_readable(print_output=False))
+
+    # # Run graph passes here
+
+    # ## Apply bucketing
+    # # schedule_overlap_bucketing(fw_gm)
+    # # schedule_overlap_bucketing(bw_gm)
+
+    # ## TODO: Apply Flex Attention compilation here
+
+    # # Codgen Autograd.Function Wrappers
+
+    # # Get the model parameters and buffers - the partitioned graphs expect these as arguments
+    # local_params = []
+    # for p in model.parameters():
+    #     if isinstance(p, DTensor):
+    #         local_params.append(p.to_local())
+    #     else:
+    #         local_params.append(p)
+
+    # local_buffers = []
+    # for b in model.buffers():
+    #     if isinstance(b, DTensor):
+    #         local_buffers.append(b.to_local())
+    #     else:
+    #         local_buffers.append(b)
+
+
+    # joint_graph_module = JointGraphModule(
+    #     local_params, local_buffers, fw_metadata, fw_gm, bw_gm, RunMode.CODEGEN_AUTOGRAD, f"rank{torch.distributed.get_rank()}"
+    # )
+
+    # return joint_graph_module
