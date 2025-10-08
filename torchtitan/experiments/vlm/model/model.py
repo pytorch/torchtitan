@@ -10,16 +10,14 @@ from torch import nn
 
 from torchtitan.models.llama3 import Transformer as Llama3
 
-from ..datasets.mm_datasets import SpecialTokens
-
 from .args import Llama3Siglip2ModelArgs
 from .siglip2 import VisionTransformer
 
 
-def _scatter_img_tokens(h_BSD, tokens_BS, i_NLD, i_mask_NL, img_id):
+def _scatter_img_tokens(h_BSD, tokens_BS, i_NLD, i_mask_NL, img_token_id):
     B, S, D = h_BSD.shape
     # Where are the image tokens in LLM input, make broadcastable with h_BSD
-    img_mask_h_BSD = E.repeat(tokens_BS == img_id, "b s -> b s 1")
+    img_mask_h_BSD = E.repeat(tokens_BS == img_token_id, "b s -> b s 1")
     # Only get valid (non-padded) tokens, result are flatten
     i_flatten = torch.masked_select(i_NLD, mask=i_mask_NL.unsqueeze(-1))
 
@@ -76,7 +74,7 @@ class Llama3Siglip2Transformer(Llama3):
         tokens: torch.Tensor,
         pixel_values: torch.Tensor,
         grid_thw: torch.Tensor,
-        special_tokens: SpecialTokens,
+        img_token_id: int,
         input_batch: torch.Tensor | None = None,
     ):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
@@ -87,9 +85,7 @@ class Llama3Siglip2Transformer(Llama3):
             pixel_masks = E.reduce(grid_hw != -1, "n l hw -> n l", reduction="all")
             i_NLD = self.encoder(pixel_values, pixel_masks, grid_hw)
             i_NLD = self.projector(i_NLD)
-            h_BSD = _scatter_img_tokens(
-                h_BSD, tokens, i_NLD, pixel_masks, special_tokens.img_id
-            )
+            h_BSD = _scatter_img_tokens(h_BSD, tokens, i_NLD, pixel_masks, img_token_id)
 
         for layer in self.layers.values():
             h_BSD = layer(h_BSD, self.freqs_cis)

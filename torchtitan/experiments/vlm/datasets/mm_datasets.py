@@ -20,26 +20,27 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
-from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.config import JobConfig
 from torchtitan.datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
-from ..model.args import SpecialTokens
+from ..tokenizer import VLMTokenizer
 from .mm_collator_nld import MultiModalCollatorNLD
 from .utils.image import calculate_image_tokens, process_image
 from .utils.packing import SamplePacker
 from .utils.text import process_text_with_images
 
 
+IGNORE_INDEX = -100  # Pytorch's default for F.cross_entropy
+
+
 def _process_mm_sample(
     texts: list[str] | str,
     images: list[bytes] | bytes,
-    tokenizer: BaseTokenizer,
+    tokenizer: VLMTokenizer,
     patch_size: int,
     max_patch_per_image: int,
     spatial_merge_size: int,
-    special_tokens: SpecialTokens,
 ) -> dict[str, Any] | None:
     """Common processing logic for multimodal samples.
 
@@ -98,7 +99,7 @@ def _process_mm_sample(
                     processed_images.append(processed_img)
                     image_dimensions.append((num_tokens, width, height))
                     # Replace None with image token
-                    texts_list[idx] = special_tokens.img_token
+                    texts_list[idx] = tokenizer.img_token
                 else:
                     # Replace None with empty string if processing failed
                     texts_list[idx] = ""
@@ -109,7 +110,7 @@ def _process_mm_sample(
 
         # Process all image tokens at once
         processed_text = process_text_with_images(
-            texts_list, image_dimensions, tokenizer, special_tokens, add_eos=True
+            texts_list, image_dimensions, tokenizer, add_eos=True
         )
 
         tokens = tokenizer.encode(processed_text)
@@ -120,10 +121,10 @@ def _process_mm_sample(
 
         # Mask special tokens in labels
         special_token_ids = torch.tensor(
-            [special_tokens.boi_id, special_tokens.eoi_id, special_tokens.img_id]
+            [tokenizer.boi_id, tokenizer.eoi_id, tokenizer.img_id]
         )
         labels = torch.where(
-            torch.isin(labels, special_token_ids), special_tokens.ignore_id, labels
+            torch.isin(labels, special_token_ids), IGNORE_INDEX, labels
         )
 
         return {
@@ -139,11 +140,10 @@ def _process_mm_sample(
 
 def _process_obelics_sample(
     sample: dict[str, Any],
-    tokenizer: HuggingFaceTokenizer,
+    tokenizer: VLMTokenizer,
     patch_size: int,
     spatial_merge_size: int,
     max_patch_per_image: int,
-    special_tokens: SpecialTokens,
 ) -> dict[str, Any] | None:
     """Process a sample from the OBELICS dataset."""
     return _process_mm_sample(
@@ -153,17 +153,15 @@ def _process_obelics_sample(
         patch_size=patch_size,
         spatial_merge_size=spatial_merge_size,
         max_patch_per_image=max_patch_per_image,
-        special_tokens=special_tokens,
     )
 
 
 def _process_cc12_wd_sample(
     sample: dict[str, Any],
-    tokenizer: BaseTokenizer,
+    tokenizer: VLMTokenizer,
     patch_size: int,
     spatial_merge_size: int,
     max_patch_per_image: int,
-    special_tokens: SpecialTokens,
 ) -> dict[str, Any] | None:
     """Process a sample from the CC12-WD dataset.
     Transforms CC12-WD format to match Interleaved format:
@@ -184,7 +182,6 @@ def _process_cc12_wd_sample(
         patch_size=patch_size,
         spatial_merge_size=spatial_merge_size,
         max_patch_per_image=max_patch_per_image,
-        special_tokens=special_tokens,
     )
 
 
@@ -225,7 +222,7 @@ class MultiModalDataset(IterableDataset, Stateful):
         self,
         dataset_name: str,
         dataset_path: str | None,
-        tokenizer: BaseTokenizer,
+        tokenizer: VLMTokenizer,
         batch_size: int,
         seq_len: int,
         patch_size: int,
@@ -233,7 +230,6 @@ class MultiModalDataset(IterableDataset, Stateful):
         max_patches_per_image: int,
         max_images_per_batch: int,
         packing_buffer_size: int,
-        special_tokens: SpecialTokens,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
@@ -254,7 +250,6 @@ class MultiModalDataset(IterableDataset, Stateful):
         self.spatial_merge_size = spatial_merge_size
         self.max_patches_per_image = max_patches_per_image
         self.max_images_per_batch = max_images_per_batch
-        self.special_tokens = special_tokens
         self.enable_packing = packing_buffer_size > 0
         if self.enable_packing:
             self.packer = SamplePacker(
@@ -277,7 +272,6 @@ class MultiModalDataset(IterableDataset, Stateful):
                         patch_size=self.patch_size,
                         spatial_merge_size=self.spatial_merge_size,
                         max_patch_per_image=self.max_patches_per_image,
-                        special_tokens=self.special_tokens,
                     )
                     if processed is None:
                         continue
@@ -366,7 +360,7 @@ class MultiModalDataset(IterableDataset, Stateful):
 def build_mm_dataloader(
     dp_world_size: int,
     dp_rank: int,
-    tokenizer: HuggingFaceTokenizer,
+    tokenizer: VLMTokenizer,
     job_config: JobConfig,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
@@ -393,7 +387,6 @@ def build_mm_dataloader(
     patch_size = job_config.data.patch_size
     spatial_merge_size = job_config.data.spatial_merge_size
     packing_buffer_size = job_config.data.packing_buffer_size
-    special_tokens = SpecialTokens.from_tokenizer(tokenizer)
 
     dataset = MultiModalDataset(
         dataset_name=job_config.training.dataset,
@@ -406,7 +399,6 @@ def build_mm_dataloader(
         max_patches_per_image=max_patches_per_image,
         max_images_per_batch=max_images_per_batch,
         packing_buffer_size=packing_buffer_size,
-        special_tokens=special_tokens,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         infinite=infinite,
@@ -418,7 +410,7 @@ def build_mm_dataloader(
         patch_size=patch_size,
         max_images_per_batch=max_images_per_batch,
         max_patches_per_image=max_patches_per_image,
-        special_tokens=special_tokens,
+        tokenizer=tokenizer,
     )
 
     base_dataloader = ParallelAwareDataloader(

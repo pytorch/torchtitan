@@ -190,7 +190,10 @@ class HuggingFaceTokenizer(BaseTokenizer):
         return token
 
     def _process_special_token(
-        self, token_str: str, token_config: dict, token_id: Optional[int] = None
+        self,
+        token_str: str,
+        token_config: dict | None = None,
+        token_id: int | None = None,
     ) -> AddedToken:
         """
         Process a special token and update BOS/EOS attributes if applicable.
