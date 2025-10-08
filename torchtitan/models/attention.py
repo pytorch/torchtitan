@@ -70,6 +70,7 @@ class FlexAttention(torch.nn.Module):
         self.attn_mask_type = attn_mask_type
         self.fixed_block_size = fixed_block_size
 
+        self.mask_cache = {}
         FlexAttention.used_attn_mask_types.add(self.mask_key)
 
     @property
@@ -82,9 +83,61 @@ class FlexAttention(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         scale: float | None = None,
+        sink_weights: torch.Tensor | None = None,
+        sliding_window: int = 0,
+        enable_gqa: bool = False,
     ) -> torch.Tensor:
-        block_mask = FlexAttention.block_masks[self.mask_key]
-        return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, scale=scale)
+        if sink_weights is None:
+            block_mask = FlexAttention.block_masks[self.mask_key]
+            return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, scale=scale)
+
+        B, H_q, S_q, D = q.shape
+        _, H_kv, S_kv, _ = k.shape
+
+        # regular (no-sink) mask + no extra KV col
+        mask_key = (sliding_window, S_q, S_kv)
+        if mask_key not in self.mask_cache:
+            if sliding_window is not None and sliding_window > 0:
+                mask_mod = FlexAttention._get_sliding_window_mask_mod(sliding_window)
+            else:
+                mask_mod = FlexAttention._get_causal_mask_mod()
+            block_mask = create_block_mask(
+                mask_mod, B, H_q, S_q, S_kv,
+                _compile=True, device=q.device # NOTE: set _compile=False if sampling for debugging
+            )
+            self.mask_cache[mask_key] = block_mask
+
+        block_mask = self.mask_cache[mask_key]
+
+        # run fast flex_attn and return LSE
+        out, lse = FlexAttention.flex_attn(
+            q, k, v,
+            block_mask=block_mask,
+            enable_gqa=enable_gqa,
+            return_lse=True
+        )
+
+        # rescale by sigma(lse - w[h]) and broadcast over D
+        if sink_weights is not None:
+            w = sink_weights  # [H]
+            scale = torch.sigmoid(lse - w.view(1, -1, 1)).unsqueeze(-1)  # [B,H,S,1]
+            out = out * scale
+
+        out = out.to(q.dtype)
+        return out
+
+    @staticmethod
+    def _get_sliding_window_mask_mod(window: int):
+        """
+        Returns a mask_mod function that
+        - only allows kv_idx ≤ q_idx (causal)
+        - and only if (q_idx - kv_idx) ≤ window
+        """
+        def sliding_mod(b, h, q_idx, kv_idx):
+            # causal within window
+            keep = (kv_idx <= q_idx) & (q_idx - kv_idx <= window)
+            return keep
+        return sliding_mod
 
     @staticmethod
     def _get_causal_mask_mod() -> _mask_mod_signature:
