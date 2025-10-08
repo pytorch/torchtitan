@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import ctypes
 import importlib
 import os
+import signal
 import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
@@ -33,8 +35,12 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
+c_globals = ctypes.CDLL(None)  # POSIX
+
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+    torch_profiler: torch.profiler.profile | None = None
+
     # core configs
     job_config: JobConfig
     parallel_dims: ParallelDims
@@ -555,13 +561,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if not self.ft_manager.enabled
             else f"replica_{self.ft_manager.replica_id}"
         )
+        self.torch_profiler = maybe_enable_profiling(
+            job_config.profiling,
+            global_step=self.step,
+            base_folder=job_config.job.dump_folder,
+            leaf_folder=leaf_folder,
+        )
+
         with (
-            maybe_enable_profiling(
-                job_config.profiling,
-                global_step=self.step,
-                base_folder=job_config.job.dump_folder,
-                leaf_folder=leaf_folder,
-            ) as torch_profiler,
             maybe_enable_memory_snapshot(
                 job_config.profiling,
                 global_step=self.step,
@@ -585,6 +592,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 ),
             ),
         ):
+            if self.torch_profiler:
+
+                @ctypes.CFUNCTYPE(None, ctypes.c_int)
+                def sigabrt_handler(signal):
+                    logger.info("SIGABRT received. Stopping profiler")
+                    self.torch_profiler.profiler.enabled = False
+                    self.torch_profiler.export_chrome_trace("trace.json")
+
+                c_globals.signal(signal.SIGABRT, sigabrt_handler)
+
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():
                 self.step += 1
@@ -608,8 +625,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
-                if torch_profiler:
-                    torch_profiler.step()
+                if self.torch_profiler:
+                    self.torch_profiler.step()
                 if memory_profiler:
                     memory_profiler.step()
 
@@ -667,10 +684,12 @@ if __name__ == "__main__":
         else:
             trainer.train()
     except Exception:
+        logger.info("Torchtitan training threw an exception")
         if trainer:
             trainer.close()
         raise
     else:
+        logger.info("Torchtitan training completed")
         trainer.close()
         torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
