@@ -40,7 +40,7 @@ jobs:
             index-url: https://download.pytorch.org/whl/nightly/cu126
             is-rocm: 0
           - name: rocm
-            runner: linux.rocm.gpu.gfx942.8
+            runner: linux.rocm.gpu.gfx942.4
             gpu-arch-type: rocm
             gpu-arch-version: "6.4"
             docker-image: torchtitan-rocm-ubuntu-22.04-clang12
