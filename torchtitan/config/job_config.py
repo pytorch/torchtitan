@@ -458,7 +458,7 @@ class Checkpoint:
     `--checkpoint.no_initial_load_model_only` to override the default setting.
     """
 
-    initial_load_legacy: bool = True
+    initial_load_legacy: bool = False
     """
     From model checkpoint paths converted in our old branch
     """
