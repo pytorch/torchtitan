@@ -125,6 +125,13 @@ def parallelize_deepseekv3(
                 ):
                     experts_shard_dim = 1
 
+                # when EP is enable, the routed experts' gradient reduction is done over
+                # dp_mod_ep_mesh instead of whole dp_mesh.
+                # we add a `fsdp_gradient_divide_factor` to scale gradient over dp_mesh
+                # to be consistent with data.
+                # TODO (ruisizhang123): update the logic following the link below instead
+                # of using a reduction_divide_factor
+                # https://github.com/pytorch/torchtitan/pull/1803#discussion_r2415190883
                 transformer_block.moe.experts = data_parallel(
                     transformer_block.moe.experts,
                     dp_mod_ep_mesh,
@@ -132,11 +139,8 @@ def parallelize_deepseekv3(
                     ac_mode=job_config.activation_checkpoint.mode,
                     mp_policy=mp_policy,
                     shard_dim=experts_shard_dim,
+                    reduction_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
                 )
-                # TODO(ruisizhang123): support set_gradient_divide_factor in simplefsdp
-                # transformer_block.moe.experts.set_gradient_divide_factor(
-                #     parallel_dims.fsdp_gradient_divide_factor,
-                # )
 
         model = data_parallel(
             model,
