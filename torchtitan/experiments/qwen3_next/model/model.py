@@ -177,9 +177,11 @@ class GatedDeltaNet(nn.Module):
             model_args.linear_value_head_dim * model_args.linear_num_value_heads
         )
         self.conv_dim = self.key_dim * 2 + self.value_dim
+        self.activation = model_args.hidden_act
         self.conv1d = nn.Conv1d(
             self.conv_dim,
             self.conv_dim,
+            bias=False,
             kernel_size=model_args.linear_conv_kernel_dim,
             groups=self.conv_dim,
             padding=model_args.linear_conv_kernel_dim - 1,
@@ -193,7 +195,9 @@ class GatedDeltaNet(nn.Module):
             torch.log(torch.empty(model_args.linear_num_value_heads).uniform_(0, 16))
         )
         self.norm = FusedRMSNormGated(
-            model_args.linear_value_head_dim, eps=model_args.norm_eps
+            model_args.linear_value_head_dim,
+            eps=model_args.norm_eps,
+            activation=model_args.hidden_act,
         )
         self.out_proj = nn.Linear(self.value_dim, model_args.dim, bias=False)
 
@@ -245,7 +249,7 @@ class GatedDeltaNet(nn.Module):
             mixed_qkv,
             self.conv1d.weight.squeeze(1),
             self.conv1d.bias,
-            activation="silu",
+            activation=self.activation,
         ).transpose(1, 2)
         query, key, value = torch.split(
             mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1

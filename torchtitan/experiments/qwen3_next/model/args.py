@@ -43,12 +43,13 @@ from torchtitan.tools.logging import logger
 class Qwen3NextModelArgs(BaseModelArgs):
 
     dim: int = 2048
-    n_layers: int = 28
+    n_layers: int = 48
     n_heads: int = 16
     n_kv_heads: int = 2
     vocab_size: int = 151936
     head_dim: int = 256
     hidden_dim: int = 5120
+    hidden_act: str = "silu"
 
     norm_eps: float = 1e-6
     rope_theta: float = 1000000
