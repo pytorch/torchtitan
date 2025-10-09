@@ -34,6 +34,20 @@ class Profiling:
     profile_freq: int = 10
     """How often to collect profile traces, in iterations"""
 
+    profiler_active: int = 1
+    """
+    The steps profiler is active for.
+
+    This is used to configure torch.profile.schedule.
+    """
+
+    profiler_warmup: int = 3
+    """
+    The number of warmup steps before the active step in each profiling cycle.
+
+    This is used to configure torch.profile.schedule.
+    """
+
     enable_memory_snapshot: bool = False
     """Whether to dump memory snapshot"""
 
@@ -451,6 +465,14 @@ class Checkpoint:
     model definition and DCP format, after necessary model state dict transformation.
     `initial_load_model_only` must be true because safetensors doesn't support saving
     non-tensors. The default value is False.
+    """
+
+    initial_load_in_hf_quantized: bool = False
+    """
+    Enable loading of HuggingFace's safetensors format with quantized state dict keys. The option
+    is only used when `initial_load_path` and `initial_load_path_in_hf` is specified. This will load
+    checkpoints in HF's model definition and dequantize on model weights if necessary. To support
+    this parameter, the model need to define proper HuggingFaceStorageReader to perform dequantize.
     """
 
     last_save_model_only: bool = True

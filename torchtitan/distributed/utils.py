@@ -106,6 +106,14 @@ def set_determinism(
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
+        # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
+        # reproducibility, since the autotune results may not be deterministic.
+        from torch.nn.attention.flex_attention import flex_attention
+
+        from torchtitan.models.attention import FlexAttention
+
+        FlexAttention.flex_attn = torch.compile(flex_attention)
+
     if not world_mesh:
         if seed is not None:
             torch.manual_seed(seed)
