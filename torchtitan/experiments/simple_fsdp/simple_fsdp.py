@@ -49,6 +49,37 @@ class MixedPrecisionPolicy:
     reduce_dtype: Optional[torch.dtype] = None
 
 
+class _ScaledPartial(Partial):
+    # A subclass of Partial placement that allows user to perform reduction with a custom
+    # factor (reduction_divide_factor) other than the default world size.
+    def __init__(
+        self,
+        reduction_divide_factor: float,
+    ):
+        self.reduction_divide_factor = reduction_divide_factor
+        super().__init__(reduce_op="sum")
+
+    def _reduce_value(
+        self, tensor: torch.Tensor, mesh: DeviceMesh, mesh_dim: int
+    ) -> torch.Tensor:
+        # for all_reduce in DDP
+        tensor.div_(self.reduction_divide_factor)
+        reduced = super()._reduce_value(tensor, mesh, mesh_dim)
+        return reduced
+
+    def _reduce_shard_value(
+        self,
+        tensor: torch.Tensor,
+        mesh: DeviceMesh,
+        mesh_dim: int,
+        shard_spec: Placement,
+    ) -> torch.Tensor:
+        # for reduce_scatter in FSDP
+        tensor.div_(self.reduction_divide_factor)
+        reduced = super()._reduce_shard_value(tensor, mesh, mesh_dim, shard_spec)
+        return reduced
+
+
 def _distribute_dtensor(
     tensor: DTensor,
     device_mesh: DeviceMesh,
@@ -192,18 +223,24 @@ class ReplicateComputation(torch.nn.Module):
         mode,
         regional_ac,
         mp_policy,
+        reduction_divide_factor,
     ):
         super().__init__()
         self.device_mesh = device_mesh
         self.param_sharding = param_sharding
         self.mode = mode
         self.compute_placements = [Replicate()] * self.device_mesh.ndim
-        self.grad_placements = [Partial(reduce_op="avg")] * self.device_mesh.ndim
+        self.grad_placements = [
+            _ScaledPartial(
+                reduction_divide_factor=reduction_divide_factor,
+            )
+            if reduction_divide_factor is not None
+            else Partial(reduce_op="avg")
+        ] * self.device_mesh.ndim
         self.regional_ac = regional_ac
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype = mp_policy.param_dtype
         self.reduce_dtype = mp_policy.reduce_dtype
-        self.ep_mesh_name, self.tp_mesh_name = "ep", "tp"
 
     def replicate_compute(self, x):
         # data parallel runtime replicate parameters and do local compute
@@ -286,6 +323,7 @@ def data_parallel(
     ac_mode: str = "none",
     mp_policy: Optional[MixedPrecisionPolicy] = None,
     shard_dim: int = 0,
+    reduction_divide_factor: Optional[float] = None,
 ):
     if mode == "replicate":
         param_sharding = (Replicate(),)
@@ -348,6 +386,7 @@ def data_parallel(
                 mode,
                 regional_ac,
                 mp_policy=mp_policy,
+                reduction_divide_factor=reduction_divide_factor,
             ),
         )
     return model
