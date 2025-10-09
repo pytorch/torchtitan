@@ -1,15 +1,10 @@
-name: 8 GPU Model Tests
+name: 8 GPU Experimental Model Tests
 
 on:
   push:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-    paths-ignore:
-      - 'torchtitan/experiments/**'
-  schedule:
-    # Runs every 6 hours
-    - cron: '0 */6 * * *'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -49,4 +44,4 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
-        python -m tests.integration_tests.run_tests --test_suite models artifacts-to-be-uploaded --ngpu 8
+        python -m tests.integration_tests.run_tests --test_suite experimental_models artifacts-to-be-uploaded --ngpu 8
