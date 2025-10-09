@@ -166,11 +166,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             pp_mesh = world_mesh["pp"]  # type: DeviceMesh
 
         if parallel_dims.tp_enabled:
-            tp_mesh = world_mesh["tp"]  # type: DeviceMesh
-            self.tp_degree = tp_mesh.size()
-            self.tp_rank = tp_mesh.get_local_rank()
+            self.tp_mesh = world_mesh["tp"]  # type: DeviceMesh
+            self.tp_degree = self.tp_mesh.size()
+            self.tp_rank = self.tp_mesh.get_local_rank()
             self.tp_src_rank = torch.distributed.get_rank() - self.tp_rank
-            self.tp_group = tp_mesh.get_group()
+            self.tp_group = self.tp_mesh.get_group()
         else:
             self.tp_degree = 1
             self.tp_rank = 0

@@ -4,7 +4,7 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.dataloader import build_dataloader
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from ..llama3 import (
     Llama3StateDictAdapter,
@@ -107,8 +107,9 @@ qwen3_configs = {
     ),
 }
 
-register_train_spec(
-    TrainSpec(
+
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
         name="qwen3",
         model_cls=Transformer,
         model_args=qwen3_configs,
@@ -122,4 +123,3 @@ register_train_spec(
         build_validator_fn=build_validator,
         state_dict_adapter=Llama3StateDictAdapter,
     )
-)

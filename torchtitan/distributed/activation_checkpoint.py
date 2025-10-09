@@ -18,6 +18,14 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.tools.logging import logger, warn_once
 
+try:
+    from torch.distributed.tensor.experimental._attention import create_cp_block_mask
+except ImportError:
+    print(
+        "create_cp_block_mask not found, skipping, please use the nightly version of torch."
+    )
+    create_cp_block_mask = None
+
 
 _layer_sac_count = 0
 
@@ -121,12 +129,19 @@ def _apply_op_sac(
         meta = defaultdict(int)
         return create_selective_checkpoint_contexts(_get_custom_policy(meta))
 
-    return ptd_checkpoint_wrapper(
-        module,
-        context_fn=selective_checkpointing_context_fn,
-        preserve_rng_state=False,
-        early_stop=ac_config.early_stop,
-    )
+    if create_cp_block_mask is not None:
+        return ptd_checkpoint_wrapper(
+            module,
+            context_fn=selective_checkpointing_context_fn,
+            preserve_rng_state=False,
+            early_stop=ac_config.early_stop,
+        )
+    else:
+        return ptd_checkpoint_wrapper(
+            module,
+            context_fn=selective_checkpointing_context_fn,
+            preserve_rng_state=False,
+        )
 
 
 def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
