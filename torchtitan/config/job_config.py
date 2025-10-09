@@ -291,9 +291,11 @@ class Parallelism:
     within an FSDP setup. `reshard_after_forward` controls parameter behavior after forward,
     trading off memory and communication. See torch's `fully_shard` API for more documentation
     on `reshard_after_forward`.
+
     The supported policies include "default", "always" and "never":
+
     - "default" applies default resharding behavior, implementing "smart defaults" for known optimal
-        scenarios.
+      scenarios.
     - "always" will enable `reshard_after_forward` for all forward passes.
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
@@ -393,15 +395,21 @@ class Parallelism:
     expert_parallel_degree: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+
     Currently, it is supported with the following constraints:
+
     - when etp = tp:
+
       - cp <= ep <= dp_shard * cp
       - ep % cp == 0
       - dp_shard * cp % ep == 0
+
     - when etp = 1:
+
       - cp * tp <= ep <= dp_shard * cp * tp
       - ep % (cp * tp) == 0
       - dp_shard * cp * tp % ep == 0
+
     Note that this is still an experimental feature. Some constraints will be
     relaxed soon when we have more flexible DeviceMesh support.
     """
@@ -503,6 +511,7 @@ class Checkpoint:
     async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
     """
     Which async checkpoint mode to use. Currently there are 3 different modes.
+
     - "disabled": synchronized checkpointing will be used.
     - "async": torch.distributed.checkpoint.async_save will be used.
     - "async_with_pinned_mem": this option utilizes a dedicated pinned memory space and creates a
