@@ -346,7 +346,9 @@ class CheckpointManager:
             Future: The future object if the checkpoint is async, otherwise None.
         """
 
+
         ret: Future | None = None
+
 
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
@@ -356,18 +358,30 @@ class CheckpointManager:
             ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
             state_dict = self.sd_adapter.to_hf(state_dict)
 
-            fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
 
-            storage_writer = HuggingFaceStorageWriter(
-                path=checkpoint_id,
-                save_distributed=True,
-                fqn_to_index_mapping=fqn_to_index_mapping,
-                enable_consolidation=True,
-                thread_count_consolidation=5,
-            )
+            fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
+            if fqn_to_index_mapping:
+                storage_writer = HuggingFaceStorageWriter(
+                    path=os.path.join(checkpoint_id, "sharded"),
+                    save_distributed=True,
+                    fqn_to_index_mapping=fqn_to_index_mapping,
+                    enable_consolidation=False,
+                )
+            else:
+                # the reason for only enabling consolidation if there is
+                # no mapping is because no mapping implies that we save all fqns
+                # to one file. This means we only need one rank to consolidate.
+                # Otherwise we should use consolidate_safetensors_files_on_every_rank
+                storage_writer = HuggingFaceStorageWriter(
+                    path=checkpoint_id,
+                    save_distributed=True,
+                    enable_consolidation=True,
+                )
+
 
         else:
             checkpoint_save_id = checkpoint_id
+
 
         if async_mode == AsyncMode.ASYNC:
             ret = dcp.async_save(
@@ -392,8 +406,26 @@ class CheckpointManager:
                 checkpoint_id=checkpoint_save_id,
             )
 
+
+        if to_hf and self.sd_adapter.fqn_to_index_mapping:
+            try:
+                from torch.distributed.checkpoint._consolidate_hf_safetensors import (
+                    consolidate_safetensors_files_on_every_rank,
+                )
+            except Exception as e:
+                raise e
+
+            consolidate_safetensors_files_on_every_rank(
+                input_dir=os.path.join(checkpoint_id, "sharded"),
+                output_dir=checkpoint_id,
+                fqn_to_index_mapping=self.sd_adapter.fqn_to_index_mapping,
+                num_threads=5,
+            )
+
+
         if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
+
 
         return ret
 
