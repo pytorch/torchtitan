@@ -31,6 +31,7 @@ __all__ = [
 
 qwen3next_configs = {
     "80B_A3B": Qwen3NextModelArgs(
+        full_attention_interval=4,
         moe_enabled=True,
         moe_inter_dim=512,
         moe_args=MoEArgs(
@@ -40,7 +41,8 @@ qwen3next_configs = {
             score_func="softmax",
             route_norm=True,
             route_scale=1.0,
-            score_before_experts=False
+            score_before_experts=False,
+            shared_gate=True
         )
     ),
 }
