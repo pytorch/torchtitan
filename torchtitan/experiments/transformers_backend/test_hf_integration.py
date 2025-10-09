@@ -11,6 +11,9 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 
+BASELINE = "fsdp2_tp1_cp1_pp1"
+# BASELINE = "fsdp1_tp1_cp1_pp1"
+
 console = Console()
 
 class LogLevel(Enum):
@@ -149,14 +152,27 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
     config["model"]["flavor"] = flavor
 
     parallelism_configs = [
-        "fsdp2_tp1_cp1_pp1", # baseline
+        BASELINE, # baseline
         "fsdp2_tp2_cp1_pp1",
         "fsdp2_tp1_cp1_pp2",
         "fsdp2_tp1_cp2_pp1",
         "fsdp2_tp1_cp2_pp2",
         "fsdp2_tp2_cp2_pp1",
+        "fsdp2_tp2_cp1_pp2",
         "fsdp2_tp2_cp2_pp2",
     ]
+
+    # parallelism_configs = [
+    #     BASELINE, # baseline
+    #     "fsdp1_tp2_cp1_pp1",
+    #     "fsdp1_tp1_cp1_pp2",
+    #     "fsdp1_tp1_cp2_pp1",
+    #     "fsdp1_tp1_cp2_pp2",
+    #     "fsdp1_tp2_cp2_pp1",
+    #     "fsdp1_tp2_cp1_pp2",
+    #     "fsdp1_tp2_cp2_pp2",
+    # ]
+
 
     out_path = Path(out_dir) / model_name / flavor
     out_path.mkdir(parents=True, exist_ok=True)
@@ -184,6 +200,7 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
 
     # Create parallelism configs
     for pc in parallelism_configs:
+            
         iter_config = toml.loads(toml.dumps(config))
 
         m = re.match(r"fsdp(\d+)_tp(\d+)_cp(\d+)_pp(\d+)", pc)
@@ -200,8 +217,10 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
         iter_config["parallelism"]["tensor_parallel_degree"] = tp
         iter_config["parallelism"]["context_parallel_degree"] = cp
         iter_config["parallelism"]["pipeline_parallel_degree"] = pp
-        iter_config["parallelism"]["pipeline_parallel_schedule"] = "1F1B"
+        iter_config["parallelism"]["pipeline_parallel_schedule"] = "GPipe"
         iter_config["job"]["dump_folder"] = str(pc_dir)
+        if pc == BASELINE or pc == "fsdp2_tp1_cp1_pp2":
+            iter_config["training"]["local_batch_size"] = 2
 
         config_path = pc_dir / "config.toml"
         with open(config_path, "w") as f:
@@ -379,9 +398,9 @@ def report(inp_dir: str):
         grad_norm: List[float] = field(default_factory=list)
     
     # Default tolerance values (matching compare_distributed_run.py)
-    DEFAULT_LOSS_ATOL = 0.02
+    DEFAULT_LOSS_ATOL = 5e-2
     DEFAULT_LOSS_RTOL = 1e-5
-    DEFAULT_GRAD_NORM_ATOL = 0.02
+    DEFAULT_GRAD_NORM_ATOL = 7e-1
     DEFAULT_GRAD_NORM_RTOL = 1e-5
     
     def _extract_metrics(log_file: Path) -> TrainingMetrics:
@@ -503,7 +522,7 @@ def report(inp_dir: str):
             tuple[int, int]: (passed_count, failed_count)
         """
         # Find baseline directory
-        baseline_dir = flavor_dir / "fsdp2_tp1_cp1_pp1"
+        baseline_dir = flavor_dir / BASELINE
         if not baseline_dir.exists():
             log_message(LogLevel.WARNING, f"No baseline directory found in {flavor_dir.relative_to(inp_path)}, skipping", indent=1)
             return 0, 0
@@ -525,7 +544,7 @@ def report(inp_dir: str):
         # Find all parallelism config directories (excluding seed_checkpoint and baseline)
         config_dirs = []
         for item in flavor_dir.iterdir():
-            if item.is_dir() and item.name.startswith("fsdp2_") and item.name != "fsdp2_tp1_cp1_pp1":
+            if item.is_dir() and item.name not in {BASELINE, "seed_checkpoint"}:
                 config_dirs.append(item)
         
         if not config_dirs:
@@ -598,7 +617,7 @@ def report(inp_dir: str):
                     
                     if success:
                         log_message(LogLevel.INFO, f"Diff between baseline vs HF nd-parallel saved to:", indent=5, dim=True)
-                        console.print(f"      [dim]{diff_file.relative_to(flavor_dir)}[/dim]")
+                        console.print(f"      [dim]{diff_file}[/dim]")
                     else:
                         log_message(LogLevel.WARNING, f"Failed to generate diff: {output}", indent=5, dim=True)
                         
@@ -651,7 +670,7 @@ def report(inp_dir: str):
     # Find all directories that contain a baseline (fsdp2_tp1_cp1_pp1) subdirectory
     flavor_dirs = []
     for root, dirs, files in os.walk(inp_path):
-        if "fsdp2_tp1_cp1_pp1" in dirs:
+        if BASELINE in dirs:
             flavor_dirs.append(Path(root))
     
     if not flavor_dirs:

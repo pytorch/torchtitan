@@ -273,12 +273,26 @@ class HFTransformerModel(nn.Module):
             patch_hf_llama()
 
         self.model = model_cls(config=model_args)
-
+        self.max_seq_len = model_args.max_seq_len
+        
         for layer in self.model.model.layers:
             if hasattr(model_args, "first_k_dense_replace") and layer.layer_idx >= model_args.first_k_dense_replace:
                 layer.moe_enabled = True
             else:
                 layer.moe_enabled = False
+
+        self.cp_mesh = None
+        self.tp_mesh = None
+        self.pp_mesh = None
+
+    def set_cp_mesh(self, mesh):
+        self.cp_mesh = mesh
+    
+    def set_tp_mesh(self, mesh):
+        self.tp_mesh = mesh
+    
+    def set_pp_mesh(self, mesh):
+        self.pp_mesh = mesh
 
     @property
     def tok_embeddings(self):
@@ -358,8 +372,9 @@ class HFTransformerModel(nn.Module):
             raise AttributeError("Could not find rotary_emb in the model. Please check the model structure.")
 
     def forward(self, *args, **kwargs):
-        position_ids = torch.arange(args[0].shape[1], device=args[0].device).unsqueeze(0)
-        kwargs["position_ids"] = position_ids
+        local_seq_len = self.max_seq_len
+        local_seq_len //= self.cp_mesh.size() if self.cp_mesh is not None and self.cp_mesh.size() > 1 else 1
+        kwargs["position_ids"] = torch.arange(local_seq_len, device=args[0].device).unsqueeze(0)
         output = self.model.model(*args, **kwargs)
         output = self.model.lm_head(output.last_hidden_state)
         return output

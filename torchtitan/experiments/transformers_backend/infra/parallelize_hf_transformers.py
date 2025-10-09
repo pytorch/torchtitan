@@ -196,6 +196,7 @@ def parallelize_hf_transformers(
         logger.warning("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
+        model.set_tp_mesh(world_mesh["tp"])
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.float8.recipe_name in (
             "rowwise",
@@ -281,6 +282,7 @@ def parallelize_hf_transformers(
             logger.info("Applied FSDP to the model")
 
         if parallel_dims.cp_enabled:
+            model.set_cp_mesh(world_mesh["cp"])
             logger.info("Applied Context Parallel to the model")
 
         if job_config.training.enable_cpu_offload:
@@ -296,6 +298,9 @@ def parallelize_hf_transformers(
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
+    if parallel_dims.pp_enabled:
+        model.set_pp_mesh(world_mesh["pp"])
+
     return model
 
 
@@ -310,22 +315,36 @@ def apply_non_moe_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": RowwiseParallel(
+    
+    # skipping nn.Identity modules (which are added by pipeline parallelism for unused modules)
+    root_plan = {}
+    
+    if hasattr(model, 'tok_embeddings'):
+        if isinstance(model.tok_embeddings, nn.Identity):
+            root_plan["tok_embeddings"] = NoParallel()
+        else:
+            root_plan["tok_embeddings"] = RowwiseParallel(
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
-            "output": ColwiseParallel(
+            )
+    
+    if hasattr(model, 'norm'):
+        if isinstance(model.norm, nn.Identity):
+            root_plan["norm"] = NoParallel()
+        else:
+            root_plan["norm"] = SequenceParallel()
+    
+    if hasattr(model, 'output'):
+        if isinstance(model.output, nn.Identity):
+            root_plan["output"] = NoParallel()
+        else:
+            root_plan["output"] = ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
-            ),
-        },
-    )
+            )
+    if root_plan:  # Only call if there's something to parallelize
+        parallelize_module(model, tp_mesh, root_plan)
 
     # Parallel styles used for transformer block linear weights and their
     # inputs may be different for float8 linears with tensorwise scaling.
