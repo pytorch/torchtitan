@@ -4,32 +4,35 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
+
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DTensor, Shard, Replicate
+
+from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
+
+from torch._functorch.aot_autograd import (
+    aot_compile_joint_with_descriptors,
+    aot_export_joint_with_descriptors,
+    boxed_nop_preserve_node_meta,
+)
+from torch._functorch.partitioners import min_cut_rematerialization_partition
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.experiments.simple_fsdp.llama3.model import SimpleFSDPTransformer
+
+from torchtitan.experiments.simple_fsdp.simple_fsdp import (
+    data_parallel,
+    MixedPrecisionPolicy,
+)
 from torchtitan.models.llama3.infra.parallelize import apply_tp
 from torchtitan.tools.logging import logger
 
-from torchtitan.experiments.simple_fsdp.simple_fsdp import data_parallel, MixedPrecisionPolicy
-
-from torch._functorch.aot_autograd import aot_export_joint_with_descriptors, aot_compile_joint_with_descriptors
-from torch._functorch.partitioners import min_cut_rematerialization_partition
-
-from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
-
-import contextlib
-from torchtitan.experiments.simple_fsdp.llama3.model import SimpleFSDPTransformer
-from torch._functorch.aot_autograd import (
-    aot_export_joint_with_descriptors,
-    boxed_nop_preserve_node_meta,
-)
-    
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
@@ -43,9 +46,11 @@ _op_sac_save_list = {
     torch._higher_order_ops.flex_attention,
 }
 
+
 def print_if_rank0(msg):
     if torch.distributed.get_rank() == 0:
         print(msg)
+
 
 def graph_capture_and_aot_export_joint_with_descriptors(model, inputs):
     assert isinstance(inputs, tuple)
@@ -71,7 +76,6 @@ def aot_export_joint_with_descriptors_alone(model, inputs):
             inputs,
         )
         return joint_with_descriptors
-
 
 
 def _assign_attr(
@@ -225,7 +229,6 @@ def _validate_state_dict_match(
         ), f"Buffer tensor mismatch for {orig_name}"
 
 
-
 def parallelize_llama(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -320,11 +323,12 @@ def parallelize_llama(
 
     return model
 
+
 # Just to bootstrap our experiment. NOT the final API.
 class HijackWrapper(torch.nn.Module):
     def __init__(self, inner: torch.nn.Module, parallel_dims, **overrides):
         super().__init__()
-        self.inner = inner           # register as submodule
+        self.inner = inner  # register as submodule
         self.parallel_dims = parallel_dims
 
         self.joint_graph_module = None
@@ -359,15 +363,18 @@ class HijackWrapper(torch.nn.Module):
         # print_if_rank0(self.parallel_dims.world_mesh)
         # 2-D device mesh with ['dp_shard', 'tp'], [2, 4]
 
-        # Hack: convert args and kwargs to DTensor. This should be fixed at data loader. 
+        # Hack: convert args and kwargs to DTensor. This should be fixed at data loader.
         # This works, but kinda cheating?
-        dt_args = tuple(DTensor.from_local(arg, self.parallel_dims.world_mesh["tp"], [Replicate()]) for arg in args)
+        dt_args = tuple(
+            DTensor.from_local(arg, self.parallel_dims.world_mesh["tp"], [Replicate()])
+            for arg in args
+        )
 
         # RuntimeError('Sharding propagation failed for Op(op=aten.embedding.default, args_schema=Spec(S(0) on (2048, 256)), Spec((Shard(dim=0), Replicate()) on (16, 2048)) @ mesh: (2, 4))')
         # dt_args = tuple(DTensor.from_local(arg, self.parallel_dims.world_mesh, [Shard(0), Replicate()]) for arg in args)
 
         # RuntimeError('Sharding propagation failed for Op(op=aten.embedding.default, args_schema=Spec(S(0) on (2048, 256)), Spec(S(0) on (16, 2048)) @ mesh: (2,))')
-        # dt_args = tuple(DTensor.from_local(arg, self.parallel_dims.world_mesh["dp_shard"], [Shard(0)]) for arg in args) 
+        # dt_args = tuple(DTensor.from_local(arg, self.parallel_dims.world_mesh["dp_shard"], [Shard(0)]) for arg in args)
 
         # HACK: doing graph capture on the fly, we should do it AOT
         if self.joint_graph_module is None:
@@ -376,7 +383,9 @@ class HijackWrapper(torch.nn.Module):
             # torch._functorch.config.graphsafe_rng_functionalization = False
 
             # first time, we need to initialize the runner
-            self.joint_graph_module = joint_graph_builder(self.inner, *dt_args, **kwargs)
+            self.joint_graph_module = joint_graph_builder(
+                self.inner, *dt_args, **kwargs
+            )
 
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
@@ -392,8 +401,10 @@ def joint_graph_builder(model, *inputs, **kwargs):
     assert not kwargs
 
     # get fw/bw graphs
-    joint_with_descriptors = graph_capture_and_aot_export_joint_with_descriptors(model, inputs)
-    
+    joint_with_descriptors = graph_capture_and_aot_export_joint_with_descriptors(
+        model, inputs
+    )
+
     def compiler(gm: torch.fx.GraphModule, example_inputs):
         print_if_rank0("Before compiler:")
         print_if_rank0(gm.print_readable(print_output=False))
@@ -404,7 +415,9 @@ def joint_graph_builder(model, *inputs, **kwargs):
         print_if_rank0(gm.print_readable(print_output=False))
         return gm
 
-    fn = aot_compile_joint_with_descriptors(joint_with_descriptors, fw_compiler=compiler, bw_compiler=compiler)
+    fn = aot_compile_joint_with_descriptors(
+        joint_with_descriptors, fw_compiler=compiler, bw_compiler=compiler
+    )
 
     def wrapper_fn(args):
         input = [
