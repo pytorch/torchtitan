@@ -29,6 +29,10 @@ class TransformerModelArgs(BaseModelArgs):
     norm_eps: float = 1e-5
     rope_theta: float = 10000
     rope_scaling: bool = False
+    head_dim: int | None = None
+    hidden_dim: int | None = None
+    use_qkv_bias: bool = False
+    use_qk_norm: bool = False
 
     max_seq_len: int = 131072
     # If `True`, then each transformer block init uses its layer ID, and if
@@ -38,6 +42,8 @@ class TransformerModelArgs(BaseModelArgs):
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 0
+
+    enable_weight_tying: bool = False
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len

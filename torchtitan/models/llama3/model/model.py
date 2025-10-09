@@ -174,16 +174,36 @@ class Attention(nn.Module):
             else model_args.n_kv_heads
         )
         self.n_rep = self.n_heads // self.n_kv_heads
-        self.head_dim = model_args.dim // model_args.n_heads
+        self.head_dim = (
+            model_args.dim // model_args.n_heads
+            if model_args.head_dim is None
+            else model_args.head_dim
+        )
 
         self.wq = nn.Linear(
-            model_args.dim, model_args.n_heads * self.head_dim, bias=False
+            model_args.dim,
+            model_args.n_heads * self.head_dim,
+            bias=model_args.use_qkv_bias,
         )
-        self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(
+            model_args.dim,
+            self.n_kv_heads * self.head_dim,
+            bias=model_args.use_qkv_bias,
+        )
+        self.wv = nn.Linear(
+            model_args.dim,
+            self.n_kv_heads * self.head_dim,
+            bias=model_args.use_qkv_bias,
+        )
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
+        if model_args.use_qk_norm:
+            self.q_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps)
+            self.k_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps)
+        else:
+            self.q_norm = nn.Identity()
+            self.k_norm = nn.Identity()
         self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
 
     def init_weights(self, init_std: float):
@@ -220,7 +240,10 @@ class Attention(nn.Module):
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         xq, xk = apply_rotary_emb(
-            xq, xk, freqs_cis=freqs_cis, position_ids=position_ids
+            self.q_norm(xq),
+            self.k_norm(xk),
+            freqs_cis=freqs_cis,
+            position_ids=position_ids,
         )
 
         # repeat k/v heads if n_kv_heads < n_heads
@@ -263,13 +286,15 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: float | None,
+        use_hidden_dim: bool = False,
     ):
         super().__init__()
-        hidden_dim = int(2 * hidden_dim / 3)
-        # custom dim factor multiplier
-        if ffn_dim_multiplier is not None:
-            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        if not use_hidden_dim:
+            hidden_dim = int(2 * hidden_dim / 3)
+            # custom dim factor multiplier
+            if ffn_dim_multiplier is not None:
+                hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+            hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
@@ -311,9 +336,12 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(model_args)
         self.feed_forward = FeedForward(
             dim=model_args.dim,
-            hidden_dim=4 * model_args.dim,
+            hidden_dim=4 * model_args.dim
+            if model_args.hidden_dim is None
+            else model_args.hidden_dim,
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+            use_hidden_dim=model_args.hidden_dim is not None,
         )
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
@@ -442,6 +470,7 @@ class Transformer(nn.Module, ModelProtocol):
         tokens: torch.Tensor,
         input_batch: torch.Tensor | None = None,
         position_ids: torch.Tensor | None = None,
+        sequence_lengths: list[torch.Tensor] | None = None,
     ):
         """
         Perform a forward pass through the Transformer model.

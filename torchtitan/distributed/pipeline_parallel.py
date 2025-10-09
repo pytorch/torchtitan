@@ -12,15 +12,29 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
 
-from torch.distributed.pipelining.schedules import (
-    _PipelineSchedule,
-    _PipelineScheduleRuntime,
-    get_schedule_class,
-    PipelineScheduleMulti,
-    PipelineScheduleSingle,
-    ScheduleDualPipeV,
-    ScheduleZBVZeroBubble,
-)
+try:
+    from torch.distributed.pipelining.schedules import (
+        _PipelineSchedule,
+        _PipelineScheduleRuntime,
+        get_schedule_class,
+        PipelineScheduleMulti,
+        PipelineScheduleSingle,
+        ScheduleDualPipeV,
+        ScheduleZBVZeroBubble,
+    )
+except ImportError:
+    print("Not using 2.9 or nightly, ScheduleDualPipeV not available.")
+    from torch.distributed.pipelining.schedules import (
+        _PipelineSchedule,
+        _PipelineScheduleRuntime,
+        get_schedule_class,
+        PipelineScheduleMulti,
+        PipelineScheduleSingle,
+        ScheduleZBVZeroBubble,
+    )
+
+    ScheduleDualPipeV = None
+
 
 from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.config import JobConfig
@@ -338,9 +352,14 @@ def pipeline_module_split(
     models = []
 
     schedule_class = get_schedule_class(pp_schedule)
-    style = (
-        "v" if schedule_class in (ScheduleZBVZeroBubble, ScheduleDualPipeV) else "loop"
-    )
+    if ScheduleDualPipeV is not None:
+        style = (
+            "v"
+            if schedule_class in (ScheduleZBVZeroBubble, ScheduleDualPipeV)
+            else "loop"
+        )
+    else:
+        style = "v" if schedule_class is ScheduleZBVZeroBubble else "loop"
 
     for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style=style):
         module_names = module_names_per_stage[stage_idx]
