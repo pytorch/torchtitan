@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import asdict, replace
+from dataclasses import replace
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
@@ -29,7 +29,12 @@ __all__ = [
 
 llama3_siglip2_configs = {
     "debugmodel": Llama3Siglip2ModelArgs(
-        **asdict(replace(llama3_configs["debugmodel"], vocab_size=2048)),
+        **{
+            k: v
+            for k, v in vars(
+                replace(llama3_configs["debugmodel"], vocab_size=2048)
+            ).items()
+        },
         encoder=Siglip2ModelArgs(
             dim=128,
             ffn_dim=256,
