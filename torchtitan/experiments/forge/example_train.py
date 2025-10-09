@@ -157,15 +157,14 @@ class Trainer(ForgeEngine):
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        # apply context parallelism if cp is enabled
-        # ensure CP handles the separate freqs_cis buffer for each pp stage
         inputs = input_dict["input"]
-        # Create the FlexAttention mask according to the input
+        extra_args = {}
+
         if getattr(self.model_args, "use_flex_attn", False):
-            cp_mesh = (
-                parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
+            extra_args["attention_masks"] = model_parts[0].get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
             )
-            init_attention_mask(inputs, self.tokenizer.eos_id, cp_mesh)
 
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
@@ -187,11 +186,18 @@ class Trainer(ForgeEngine):
                 )
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
-                        inputs, target=targets, losses=losses, input_batch=inputs
+                        inputs,
+                        **extra_args,
+                        target=targets,
+                        losses=losses,
+                        input_batch=inputs,
                     )
                 else:
                     self.pp_schedule.step(
-                        target=targets, losses=losses, input_batch=inputs
+                        **extra_args,
+                        target=targets,
+                        losses=losses,
+                        input_batch=inputs,
                     )
 
             # accumulate losses across pipeline microbatches
@@ -209,7 +215,7 @@ class Trainer(ForgeEngine):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs)
+                    pred = model_parts[0](inputs, **extra_args)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred

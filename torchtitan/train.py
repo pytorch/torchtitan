@@ -413,9 +413,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+        extra_args = {}
 
         if getattr(self.model_args, "use_flex_attn", False):
-            extra_inputs["attention_masks"] = model_parts[0].get_attention_masks(
+            extra_args["attention_masks"] = model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
@@ -446,12 +447,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     self.pp_schedule.step(
                         inputs,
                         **extra_inputs,
+                        **extra_args,
                         target=targets,
                         losses=losses,
                         input_batch=inputs,
                     )
                 else:
                     self.pp_schedule.step(
+                        **extra_args,
                         target=targets,
                         losses=losses,
                         input_batch=inputs,
@@ -472,7 +475,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_inputs)
+                    pred = model_parts[0](inputs, **extra_inputs, **extra_args)
                     loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
                 del pred
