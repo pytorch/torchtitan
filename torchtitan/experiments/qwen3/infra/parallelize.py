@@ -114,6 +114,7 @@ def parallelize_qwen3(
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
+            base_folder=job_config.job.dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP

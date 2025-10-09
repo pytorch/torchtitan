@@ -569,7 +569,7 @@ class Checkpoint:
 
 @dataclass
 class ActivationCheckpoint:
-    mode: Literal["selective", "full", "none"] = "selective"
+    mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
 
     selective_ac_option: str = "2"
@@ -596,6 +596,24 @@ class ActivationCheckpoint:
     """
     Whether to stop recomputing early when all activations have already been
     rematerialized.
+    """
+
+    memory_budget: float = 0.5
+    """
+    When mode is set to "memory_budget", this value determines how much
+    partitioner in the compiler should trade off compute for memory.
+    0.0 corresponds to the activation memory from applying
+    activation checkpointing to the full compiled region, and 1.0 corresponds to
+    the activation memory from the default runtime-optimized strategy. Read here:
+    https://pytorch.org/blog/activation-checkpointing-techniques/
+    """
+
+    visualize_memory_budget_pareto: bool = False
+    """
+    This dumps out a SVG visualization of the expected runtime vs. activation
+    memory tradeoffs for all memory budget values from 0 to 1 in increments of
+    0.05 in {--job.dump_folder}/memory_budget_pareto folder. See an example here:
+    https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
     """
 
 
