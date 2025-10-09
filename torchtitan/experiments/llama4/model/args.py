@@ -19,6 +19,14 @@ from torchtitan.tools.utils import has_cuda_capability
 
 
 @dataclass
+class RoPEScalingArgs:
+    scaling_factor: float = 16.0
+    low_freq_factor: float = 1.0
+    high_freq_factor: float = 1.0
+    original_max_position_embeddings: int = 8192
+
+
+@dataclass
 class TransformerModelArgs(BaseModelArgs):
     dim: int = 4096
     n_layers: int = 32
@@ -29,6 +37,7 @@ class TransformerModelArgs(BaseModelArgs):
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
+    rope_scaling_args: RoPEScalingArgs | None = None
 
     max_seq_len: int = 1048576
     # If `True`, then each transformer block init uses its layer ID, and if
