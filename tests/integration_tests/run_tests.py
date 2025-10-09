@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from tests.integration_tests.experimental_models import build_experimental_model_tests_list
 import argparse
 import os
 import subprocess
@@ -12,11 +11,13 @@ import subprocess
 from torchtitan.tools.logging import logger
 
 from tests.integration_tests import OverrideDefinitions
+from tests.integration_tests.experimental_models import (
+    build_experimental_model_tests_list,
+)
 
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
-from tests.integration_tests.experimental_models import build_experimental_model_tests_list
 
 
 _TEST_SUITES_FUNCTION = {

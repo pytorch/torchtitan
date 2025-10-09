@@ -3,6 +3,8 @@ name: 8 GPU Model Tests
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
   pull_request:
     branches: [ main ]
     paths-ignore:

@@ -11,7 +11,7 @@ from tests.integration_tests import OverrideDefinitions
 def build_experimental_model_tests_list() -> list[OverrideDefinitions]:
     """
     Build a dictionary of model parallelism test configurations.
-    This test suite is aimed at testing the model under experiments folder of torchtitan, 
+    This test suite is aimed at testing the model under experiments folder of torchtitan,
     and will be used to monitor the side effect of core changes to experimental models.
 
     Returns:
@@ -54,7 +54,7 @@ def build_experimental_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name qwen3",
-                    "--model.flavor debugmodel_moe", 
+                    "--model.flavor debugmodel_moe",
                     "--parallelism.data_parallel_shard_degree 4",
                 ],
             ],
@@ -67,7 +67,7 @@ def build_experimental_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--experimental.custom_args_module torchtitan.experiments.vlm.assets.job_config", 
+                    "--experimental.custom_args_module torchtitan.experiments.vlm.assets.job_config",
                     "--model.name vlm",
                     "--training.dataset cc12m-test",
                     "--parallelism.data_parallel_shard_degree 4",
