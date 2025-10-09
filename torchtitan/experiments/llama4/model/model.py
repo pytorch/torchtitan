@@ -519,7 +519,9 @@ class Transformer(nn.Module, ModelProtocol):
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
                 B = input_batch.shape[0]
             case _:
-                raise ValueError(f"Unknown attention mask type: {self.attn_mask_type}")
+                raise ValueError(
+                    f"Unknown attention mask type: {self.model_args.attn_mask_type}"
+                )
 
         rope_mask_mod = and_masks(
             *mask_mods,
