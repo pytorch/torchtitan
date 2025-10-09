@@ -14,10 +14,15 @@ from torch import nn
 from torchtitan.distributed.expert_parallel import expert_parallel
 
 
+def moe_init_std(dim_in: int, n_layers: int) -> float:
+    return (2 / (dim_in * n_layers)) ** 0.5
+
+
 @dataclass
 class MoEArgs:
     num_experts: int = 8
     num_shared_experts: int = 1
+    shared_gate: bool = False
 
     # router
     score_func: Literal["softmax", "sigmoid"] = "sigmoid"
@@ -156,10 +161,12 @@ class GroupedExperts(nn.Module):
                 self.w1, self.w2, self.w3, x, num_tokens_per_expert
             )
 
-    def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
+    def init_weights(self, init_std: float, n_layers: int):
+        std_in = moe_init_std(self.w1.shape[-1], n_layers)
+        std_out = moe_init_std(self.w2.shape[0], n_layers)
+        nn.init.trunc_normal_(self.w1, mean=0.0, std=std_in)
+        nn.init.trunc_normal_(self.w2, mean=0.0, std=std_in)
+        nn.init.trunc_normal_(self.w3, mean=0.0, std=std_out)
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -275,8 +282,15 @@ class TokenChoiceTopKRouter(nn.Module):
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
-    def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+    def init_weights(self, init_std: float, n_layers: int):
+        temp_weight = torch.empty_like(self.gate.weight)
+        nn.init.normal_(temp_weight, mean=0.0, std=1.0)
+
+        row_norms = torch.norm(temp_weight, dim=1, keepdim=True)
+        temp_weight = temp_weight / row_norms.clamp(min=1e-6)  # avoid divide by 0
+
+        std = moe_init_std(self.gate.weight.shape[1], n_layers)
+        self.gate.weight.data = temp_weight * std
 
 
 # NOTE: the reason we make this a stateless module is to support
@@ -366,6 +380,9 @@ class MoE(nn.Module):
             if moe_args.num_shared_experts > 0
             else None
         )
+        self.shared_gate = (
+            nn.Linear(dim, 1, bias=False) if moe_args.shared_gate else None
+        )
         self.score_before_experts = moe_args.score_before_experts
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
@@ -450,10 +467,16 @@ class MoE(nn.Module):
         # shared expert
         # Note: we execute the shared expert before scoring the output of the routed expert
         # to "implicitly" overlap the shared expert compute with token combine communication
+        flat_x = x.view(-1, x.shape[-1])
         if self.shared_experts is not None:
-            out = self.shared_experts(x)
+            shared_out = self.shared_experts(flat_x)
+            if self.shared_gate is not None:
+                shared_gate_val = F.sigmoid(self.shared_gate(flat_x))
+                out = shared_out * shared_gate_val
+            else:
+                out = shared_out
         else:
-            out = torch.zeros_like(x)
+            out = torch.zeros_like(flat_x)
 
         if not self.score_before_experts:
             routed_output = (
@@ -467,15 +490,17 @@ class MoE(nn.Module):
         out = out.reshape(bs, slen, dim)
         return out
 
-    def init_weights(
-        self,
-        init_std: float,
-        buffer_device: torch.device,
-    ):
-        self.experts.init_weights(init_std)
-        self.router.init_weights(init_std)
+    def init_weights(self, init_std: float, buffer_device: torch.device, n_layers: int):
+        self.experts.init_weights(init_std, n_layers)
+        self.router.init_weights(init_std, n_layers)
         if self.shared_experts is not None:
             self.shared_experts.init_weights(init_std)
+            if self.shared_gate is not None:
+                nn.init.trunc_normal_(
+                    self.shared_gate.weight,
+                    mean=0.0,
+                    std=moe_init_std(self.shared_gate.weight.shape[1], n_layers),
+                )
 
         with torch.device(buffer_device):
             self.tokens_per_expert = torch.zeros(
