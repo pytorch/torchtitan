@@ -9,7 +9,6 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor, Shard, Replicate
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 
-
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -24,19 +23,12 @@ from torch._functorch.partitioners import min_cut_rematerialization_partition
 
 from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
 
-# from torch._functorch._aot_autograd.aot_eager_runner import (
-#     get_num_mutate_inputs,
-#     get_num_user_outputs,
-#     JointGraphModule,
-#     RunMode,
-# )
 import contextlib
 from torchtitan.experiments.simple_fsdp.llama3.model import SimpleFSDPTransformer
 from torch._functorch.aot_autograd import (
     aot_export_joint_with_descriptors,
     boxed_nop_preserve_node_meta,
 )
-from torch._logging import trace_structured
     
 # for selective op activation checkpointing
 _op_sac_save_list = {
@@ -423,63 +415,3 @@ def joint_graph_builder(model, *inputs, **kwargs):
         return fn(*input)
 
     return wrapper_fn
-
-
-
-    # # Now partition the joint grapg 
-    # joint_gm = joint_with_descriptors.graph_module
-    # aot_state = joint_with_descriptors._aot_state
-    # aot_graph_capture = joint_with_descriptors._aot_graph_capture
-
-    # # Get the joint graph module
-    # joint_inputs = aot_graph_capture.updated_flat_args
-    # fw_metadata = aot_state.fw_metadata
-
-    # num_user_outputs = get_num_user_outputs(fw_metadata)
-    # num_mutate_inputs = get_num_mutate_inputs(fw_metadata)
-    # num_inner_fwd_outputs = num_mutate_inputs + num_user_outputs
-
-    # fw_gm, bw_gm = min_cut_rematerialization_partition(
-    #     joint_gm,
-    #     joint_inputs,
-    #     num_fwd_outputs=num_inner_fwd_outputs,
-    #     static_lifetime_input_indices=fw_metadata.static_input_indices or [],
-    # )
-
-    # # print_if_rank0(f"fw_gm:")
-    # # print_if_rank0(fw_gm.print_readable(print_output=False))
-
-    # # print_if_rank0(f"bw_gm:")
-    # # print_if_rank0(bw_gm.print_readable(print_output=False))
-
-    # # Run graph passes here
-
-    # ## Apply bucketing
-    # # schedule_overlap_bucketing(fw_gm)
-    # # schedule_overlap_bucketing(bw_gm)
-
-    # ## TODO: Apply Flex Attention compilation here
-
-    # # Codgen Autograd.Function Wrappers
-
-    # # Get the model parameters and buffers - the partitioned graphs expect these as arguments
-    # local_params = []
-    # for p in model.parameters():
-    #     if isinstance(p, DTensor):
-    #         local_params.append(p.to_local())
-    #     else:
-    #         local_params.append(p)
-
-    # local_buffers = []
-    # for b in model.buffers():
-    #     if isinstance(b, DTensor):
-    #         local_buffers.append(b.to_local())
-    #     else:
-    #         local_buffers.append(b)
-
-
-    # joint_graph_module = JointGraphModule(
-    #     local_params, local_buffers, fw_metadata, fw_gm, bw_gm, RunMode.CODEGEN_AUTOGRAD, f"rank{torch.distributed.get_rank()}"
-    # )
-
-    # return joint_graph_module
