@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@7311
     strategy:
       matrix:
         include:
