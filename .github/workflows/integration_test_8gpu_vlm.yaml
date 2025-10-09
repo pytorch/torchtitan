@@ -1,10 +1,13 @@
-name: 8 GPU Experimental Model Tests
+name: 8 GPU Vision Language Model Tests
 
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'torchtitan/experiments/vlm/**'
   pull_request:
-    branches: [ main ]
+    paths:
+      - 'torchtitan/experiments/vlm/**'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
