@@ -75,6 +75,5 @@ class ModelProtocol(Protocol):
         self,
         batch_size: int,
         seq_len: int,
-    ) -> tuple[tuple[torch.Tensor, ...], tuple[int, ...]]:
-        raise NotImplementedError()
-        return ((), ())
+    ) -> tuple[dict[str, torch.Tensor], dict[str, int]]:
+        return ({}, {})
