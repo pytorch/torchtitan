@@ -403,6 +403,12 @@ def joint_graph_builder(model, *inputs, **kwargs):
     joint_with_descriptors = graph_capture_and_aot_export_joint_with_descriptors(model, inputs)
     
     def compiler(gm: torch.fx.GraphModule, example_inputs):
+        print_if_rank0("Before compiler:")
+        print_if_rank0(gm.print_readable(print_output=False))
+
+        gm = schedule_overlap_bucketing(gm)
+
+        print_if_rank0("After compiler:")
         print_if_rank0(gm.print_readable(print_output=False))
         return gm
 
