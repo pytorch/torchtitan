@@ -231,7 +231,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 steps_per_epoch * job_config.training.epochs
             )
             logger.info(
-                f"Set total training steps to {self.job_config.training.steps} ({job_config.training.epochs} epochs at {steps_per_epoch} steps/epcoh)"
+                f"Set total training steps to {self.job_config.training.steps} ({job_config.training.epochs} "
+                f"epochs at {steps_per_epoch} steps/epoch)"
             )
         if job_config.checkpoint.interval == "epoch":
             steps_per_epoch = len(self.dataloader) // max(

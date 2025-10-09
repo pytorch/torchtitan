@@ -1,0 +1,93 @@
+# torchtitan Config.toml
+# NOTE: this toml config is a preset for 64 A100 GPUs.
+
+[job]
+dump_folder = "/home/dakota/7b_qwen_base_debug3"
+description = "qwen_7b_grpo"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+
+[metrics]
+log_freq = 1
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = true
+
+[model]
+name = "qwen2"
+flavor = "7B"
+tokenizer_path = "Qwen/Qwen2.5-7B"
+# converters = "float8"
+
+[optimizer]
+name = "AdamW"
+lr = 3e-7
+beta1 = 0.9
+beta2 = 0.999
+weight_decay = 0.1
+# reset_state_every_n_steps = 100
+
+[lr_scheduler]
+warmup_steps = 10
+decay_type="linear"
+decay_ratio=0.1
+
+[training]
+local_batch_size = 1
+seq_len = 32768
+global_batch_size = 256
+
+max_norm = 0.25  # grad norm clipping
+steps = 1000
+dataset = "c4"
+seed = 42
+
+[compile]
+enable=false
+components = ["model", "loss"]
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+tensor_parallel_degree = 1
+context_parallel_degree = 1
+pipeline_parallel_degree = 1
+
+[grpo]
+sglang_tp = 1
+sglang_urls = ["localhost:9004", "localhost:9005", "localhost:9006", "localhost:9007"]
+sglang_slurm_num_nodes = 1
+sglang_port = 26756
+logit_loss_weight = 0.0
+entropy_loss_weight = 0.0000
+kl_beta = 0.000
+kl_estimator_type = "k3"
+ref_model_ema = 0.999
+clip_ratio_lower_bound = 0.2
+clip_ratio_upper_bound = 0.25
+pos_scaler = 1.00
+neg_scaler = 1.00
+grpo_by_token = true
+scale_adv_by_len = false
+num_microbatches = 2
+onpolicy_logp_threshold=-6.0
+
+[checkpoint]
+enable = true
+folder = "checkpoints"
+initial_load_path = "/home/shared/torchtitan-conversions/qwen_2-5_7b"
+initial_load_legacy = true
+interval = 1000
+export_dtype = "float32"
+async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+
+[activation_checkpoint]
+mode = 'selective'  # ['none', 'selective', 'full']
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false

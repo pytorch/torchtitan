@@ -11,7 +11,14 @@ from typing import Callable, ClassVar
 
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor.experimental._attention import create_cp_block_mask
+
+try:
+    from torch.distributed.tensor.experimental._attention import create_cp_block_mask
+except ImportError:
+    print(
+        "create_cp_block_mask not found, skipping, please use the nightly version of torch."
+    )
+    create_cp_block_mask = None
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
@@ -48,9 +55,7 @@ class FlexAttention(torch.nn.Module):
 
     # We registered flex_attention related attributes as class variables as we
     # need to amortize the cost of compilation.
-    flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="default"
-    )
+    flex_attn: ClassVar[Callable] = torch.compile(flex_attention, mode="default")
     compiled_create_block_mask: ClassVar[Callable] = torch.compile(create_block_mask)
     used_attn_mask_types: ClassVar[set[FLEX_ATTN_MASK_T]] = set()
     # Attention mask type to the created BlockMask.
@@ -67,7 +72,11 @@ class FlexAttention(torch.nn.Module):
         self, attn_mask_type: str, fixed_block_size: int | None = None
     ) -> None:
         super().__init__()
-        if attn_mask_type not in ["causal", "block_causal", "block_causal_by_sequence_lengths"]:
+        if attn_mask_type not in [
+            "causal",
+            "block_causal",
+            "block_causal_by_sequence_lengths",
+        ]:
             raise ValueError(f"Unrecognized attn_mask_type {attn_mask_type}.")
         self.attn_mask_type = attn_mask_type
         self.fixed_block_size = fixed_block_size
@@ -114,7 +123,7 @@ class FlexAttention(torch.nn.Module):
             return (seq_idx[b, q_idx] == seq_idx[b, kv_idx]) & (q_idx >= kv_idx)
 
         return block_causal_mask
-    
+
     @staticmethod
     def _get_document_ids_from_seq_lens(
         seq_lens: list[torch.Tensor],
@@ -143,7 +152,6 @@ class FlexAttention(torch.nn.Module):
             batch_document_ids.append(document_ids)
         batch_document_ids = torch.stack(batch_document_ids)
         return batch_document_ids
-
 
     @staticmethod
     def _get_block_causal_mask_mod_by_seq_lens(
@@ -201,7 +209,11 @@ class FlexAttention(torch.nn.Module):
 
     @staticmethod
     @torch.no_grad()
-    def init_attention_mask(batch: torch.Tensor, eos_id: int | None, sequence_lengths: list[torch.Tensor] | None = None) -> None:
+    def init_attention_mask(
+        batch: torch.Tensor,
+        eos_id: int | None,
+        sequence_lengths: list[torch.Tensor] | None = None,
+    ) -> None:
         # batch is [b, s, h, d] shape
         for mask_key in FlexAttention.used_attn_mask_types:
             attn_mask_type, fixed_block_size = mask_key
@@ -226,7 +238,9 @@ class FlexAttention(torch.nn.Module):
                             "`sequence_lengths` must be provided for block_causal_by_sequence_lengths"
                         )
                     batch_dimension = batch.shape[0]
-                    mask_mod = FlexAttention._get_block_causal_mask_mod_by_seq_lens(sequence_lengths)
+                    mask_mod = FlexAttention._get_block_causal_mask_mod_by_seq_lens(
+                        sequence_lengths
+                    )
                 case _:
                     raise RuntimeError(f"Shouldn't reach here. {attn_mask_type}")
 
@@ -301,15 +315,21 @@ def init_attention_mask(
     batch: torch.Tensor,
     eos_id: int | None,
     cp_mesh: torch.distributed.device_mesh.DeviceMesh | None = None,
-    sequence_lengths: list[torch.Tensor] | None = None
+    sequence_lengths: list[torch.Tensor] | None = None,
 ) -> None:
 
     # This is not functional yet because we currently gate the use of Flex + CP
     # while we continue debugging accuracy issues. However, we want to evaluate
     # the user experience with CP enabled.
-    if cp_mesh is not None:
+    if (cp_mesh is not None) and (create_cp_block_mask is not None):
         FlexAttention.compiled_create_block_mask = functools.partial(
             create_cp_block_mask, device_mesh=cp_mesh
         )
+    elif (cp_mesh is not None) and (create_cp_block_mask is None):
+        raise RuntimeError(
+            "create_cp_block_mask not found, please install torch>=2.9.0"
+        )
 
-    FlexAttention.init_attention_mask(batch, eos_id=eos_id, sequence_lengths=sequence_lengths)
+    FlexAttention.init_attention_mask(
+        batch, eos_id=eos_id, sequence_lengths=sequence_lengths
+    )
