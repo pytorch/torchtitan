@@ -14,7 +14,7 @@ from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_llama
-from .model.args import TransformerModelArgs
+from .model.args import RoPEScalingArgs, TransformerModelArgs
 from .model.model import Transformer
 from .model.state_dict_adapter import Llama4StateDictAdapter
 
@@ -32,10 +32,7 @@ llama4_configs = {
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
-        rope_scaling_factor=16.0,
-        rope_low_freq_factor=1.0,
-        rope_high_freq_factor=1.0,
-        rope_original_max_position_embeddings=8192,
+        rope_scaling_args=RoPEScalingArgs(),
     ),
     "17bx16e": TransformerModelArgs(
         dim=5120,
@@ -45,10 +42,7 @@ llama4_configs = {
         ffn_dim_multiplier=1.2,
         multiple_of=2048,
         rope_theta=500000,
-        rope_scaling_factor=16.0,
-        rope_low_freq_factor=1.0,
-        rope_high_freq_factor=1.0,
-        rope_original_max_position_embeddings=8192,
+        rope_scaling_args=RoPEScalingArgs(),
         max_seq_len=10485760,
         moe_args=MoEArgs(num_experts=16),
         interleave_moe_layer_step=1,
@@ -69,10 +63,7 @@ llama4_configs = {
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
-        rope_scaling_factor=16.0,
-        rope_low_freq_factor=1.0,
-        rope_high_freq_factor=1.0,
-        rope_original_max_position_embeddings=8192,
+        rope_scaling_args=RoPEScalingArgs(),
         every_n_layers_nope=4,
         fixed_attn_block_size=256,
         use_flex_attn=True,
@@ -86,10 +77,7 @@ llama4_configs = {
         ffn_dim_multiplier=1.2,
         multiple_of=2048,
         rope_theta=500000,
-        rope_scaling_factor=16.0,
-        rope_low_freq_factor=1.0,
-        rope_high_freq_factor=1.0,
-        rope_original_max_position_embeddings=8192,
+        rope_scaling_args=RoPEScalingArgs(),
         max_seq_len=10485760,
         moe_args=MoEArgs(num_experts=16),
         interleave_moe_layer_step=1,

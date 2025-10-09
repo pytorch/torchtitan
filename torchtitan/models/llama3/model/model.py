@@ -15,17 +15,14 @@ from torch import nn
 from torchtitan.models.attention import build_attention
 from torchtitan.protocols.train_spec import ModelProtocol
 
-from .args import TransformerModelArgs
+from .args import RoPEScalingArgs, TransformerModelArgs
 
 
 def precompute_freqs_cis(
     dim: int,
     end: int,
     theta: float = 10000.0,
-    scaling_factor: float = 8.0,
-    low_freq_factor: float = 1.0,
-    high_freq_factor: float = 4.0,
-    original_max_position_embeddings: int = 8192,
+    scaling_args: RoPEScalingArgs = RoPEScalingArgs(),
 ) -> torch.Tensor:
     """
     Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
@@ -38,20 +35,25 @@ def precompute_freqs_cis(
         dim (int): Dimension of the frequency tensor.
         end (int): End index for precomputing frequencies.
         theta (float | None): Scaling factor for frequency computation. Defaults to 10000.0.
-        scaling_factor (float | None): RoPE scaling multiplier; larger values
-            stretch positions to support longer contexts. Defaults to 8.0.
-        low_freq_factor (float | None): Extra scaling applied to the low-frequency
-            (long-wavelength) RoPE bands. Defaults to 1.0.
-        high_freq_factor (float | None): Extra scaling applied to the high-frequency
-            (short-wavelength) RoPE bands. Defaults to 4.0.
-        original_max_position_embeddings (int | None): Maximum position embeddings
-            for original model. Defaults to 8192.
+        scaling_args (RoPEScalingArgs | None): RoPE scaling arguments. Defaults to None.
+            scaling_factor (float): RoPE scaling multiplier; larger values
+                stretch positions to support longer contexts. Defaults to 8.0.
+            low_freq_factor (float): Extra scaling applied to the low-frequency
+                (long-wavelength) RoPE bands. Defaults to 1.0.
+            high_freq_factor (float): Extra scaling applied to the high-frequency
+                (short-wavelength) RoPE bands. Defaults to 4.0.
+            original_max_position_embeddings (int): Maximum position embeddings
+                for original model. Defaults to 8192.
     Returns:
         torch.Tensor: Precomputed frequency tensor with complex exponentials.
     """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
     # apply rope scaling
+    scaling_factor = scaling_args.scaling_factor
+    low_freq_factor = scaling_args.low_freq_factor
+    high_freq_factor = scaling_args.high_freq_factor
+    original_max_position_embeddings = scaling_args.original_max_position_embeddings
     wavelen = 2 * math.pi / freqs
     high_freq_wavelen = original_max_position_embeddings / high_freq_factor
     low_freq_wavelen = original_max_position_embeddings / low_freq_factor
@@ -423,10 +425,7 @@ class Transformer(nn.Module, ModelProtocol):
             # relaxing in our CP enablement PR
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
-            self.model_args.rope_scaling_factor,
-            self.model_args.rope_low_freq_factor,
-            self.model_args.rope_high_freq_factor,
-            self.model_args.rope_original_max_position_embeddings,
+            self.model_args.rope_scaling_args,
         )
 
     def forward(
