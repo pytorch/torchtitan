@@ -34,6 +34,20 @@ class Profiling:
     profile_freq: int = 10
     """How often to collect profile traces, in iterations"""
 
+    profiler_active: int = 1
+    """
+    The steps profiler is active for.
+
+    This is used to configure torch.profile.schedule.
+    """
+
+    profiler_warmup: int = 3
+    """
+    The number of warmup steps before the active step in each profiling cycle.
+
+    This is used to configure torch.profile.schedule.
+    """
+
     enable_memory_snapshot: bool = False
     """Whether to dump memory snapshot"""
 
@@ -277,9 +291,11 @@ class Parallelism:
     within an FSDP setup. `reshard_after_forward` controls parameter behavior after forward,
     trading off memory and communication. See torch's `fully_shard` API for more documentation
     on `reshard_after_forward`.
+
     The supported policies include "default", "always" and "never":
+
     - "default" applies default resharding behavior, implementing "smart defaults" for known optimal
-        scenarios.
+      scenarios.
     - "always" will enable `reshard_after_forward` for all forward passes.
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
@@ -379,15 +395,21 @@ class Parallelism:
     expert_parallel_degree: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+
     Currently, it is supported with the following constraints:
+
     - when etp = tp:
+
       - cp <= ep <= dp_shard * cp
       - ep % cp == 0
       - dp_shard * cp % ep == 0
+
     - when etp = 1:
+
       - cp * tp <= ep <= dp_shard * cp * tp
       - ep % (cp * tp) == 0
       - dp_shard * cp * tp % ep == 0
+
     Note that this is still an experimental feature. Some constraints will be
     relaxed soon when we have more flexible DeviceMesh support.
     """
@@ -453,6 +475,14 @@ class Checkpoint:
     non-tensors. The default value is False.
     """
 
+    initial_load_in_hf_quantized: bool = False
+    """
+    Enable loading of HuggingFace's safetensors format with quantized state dict keys. The option
+    is only used when `initial_load_path` and `initial_load_path_in_hf` is specified. This will load
+    checkpoints in HF's model definition and dequantize on model weights if necessary. To support
+    this parameter, the model need to define proper HuggingFaceStorageReader to perform dequantize.
+    """
+
     last_save_model_only: bool = True
     """
     When last_save_model_only=True, only the model will be saved at the end of training,
@@ -481,6 +511,7 @@ class Checkpoint:
     async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
     """
     Which async checkpoint mode to use. Currently there are 3 different modes.
+
     - "disabled": synchronized checkpointing will be used.
     - "async": torch.distributed.checkpoint.async_save will be used.
     - "async_with_pinned_mem": this option utilizes a dedicated pinned memory space and creates a
@@ -538,7 +569,7 @@ class Checkpoint:
 
 @dataclass
 class ActivationCheckpoint:
-    mode: Literal["selective", "full", "none"] = "selective"
+    mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
 
     selective_ac_option: str = "2"
@@ -565,6 +596,24 @@ class ActivationCheckpoint:
     """
     Whether to stop recomputing early when all activations have already been
     rematerialized.
+    """
+
+    memory_budget: float = 0.5
+    """
+    When mode is set to "memory_budget", this value determines how much
+    partitioner in the compiler should trade off compute for memory.
+    0.0 corresponds to the activation memory from applying
+    activation checkpointing to the full compiled region, and 1.0 corresponds to
+    the activation memory from the default runtime-optimized strategy. Read here:
+    https://pytorch.org/blog/activation-checkpointing-techniques/
+    """
+
+    visualize_memory_budget_pareto: bool = False
+    """
+    This dumps out a SVG visualization of the expected runtime vs. activation
+    memory tradeoffs for all memory budget values from 0 to 1 in increments of
+    0.05 in {--job.dump_folder}/memory_budget_pareto folder. See an example here:
+    https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
     """
 
 

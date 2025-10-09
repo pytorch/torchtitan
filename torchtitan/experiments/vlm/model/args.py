@@ -59,4 +59,4 @@ class Siglip2ModelArgs:
 
 @dataclass
 class Llama3Siglip2ModelArgs(Llama3Args):
-    encoder: Siglip2ModelArgs = field(default_factory=lambda: Siglip2ModelArgs())
+    encoder: Siglip2ModelArgs = field(default_factory=Siglip2ModelArgs)

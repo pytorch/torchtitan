@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import replace
+from dataclasses import fields
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
@@ -30,10 +30,9 @@ __all__ = [
 llama3_siglip2_configs = {
     "debugmodel": Llama3Siglip2ModelArgs(
         **{
-            k: v
-            for k, v in vars(
-                replace(llama3_configs["debugmodel"], vocab_size=2048)
-            ).items()
+            f.name: getattr(o, f.name)
+            for o in [llama3_configs["debugmodel"]]
+            for f in fields(o)
         },
         encoder=Siglip2ModelArgs(
             dim=128,
