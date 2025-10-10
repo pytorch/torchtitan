@@ -124,6 +124,7 @@ def set_determinism(
 
         FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
 
+    seed = debug_config.seed
     if not world_mesh:
         if seed is not None:
             torch.manual_seed(seed)
