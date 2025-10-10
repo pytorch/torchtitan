@@ -40,7 +40,7 @@ def _apply_layer_sac(module: nn.Module, ac_config: ACConfig, debug_config:DebugC
     if not ac_freq or _layer_sac_count % ac_freq == 0:
         return ptd_checkpoint_wrapper(
             module,
-            preserve_rng_state=debug_config.torch_preserve_rng_state,
+            preserve_rng_state=debug_config.ac_preserve_rng_state,
             determinism_check=debug_config.ac_determinism_check,
             early_stop=ac_config.early_stop,
             debug=debug_config.ac_debug
@@ -130,7 +130,7 @@ def _apply_op_sac(
     return ptd_checkpoint_wrapper(
             module,
             context_fn=selective_checkpointing_context_fn,
-            preserve_rng_state=dbg_config.torch_preserve_rng_state,
+            preserve_rng_state=dbg_config.ac_preserve_rng_state,
             determinism_check=dbg_config.ac_determinism_check,
             early_stop=ac_config.early_stop,
             debug=dbg_config.ac_debug
@@ -152,7 +152,7 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     )
     return ptd_checkpoint_wrapper(
             module,
-            preserve_rng_state=dbg_config.torch_preserve_rng_state,
+            preserve_rng_state=dbg_config.ac_preserve_rng_state,
             determinism_check=dbg_config.ac_determinism_check,
             early_stop=ac_config.early_stop,
             debug=dbg_config.ac_debug
