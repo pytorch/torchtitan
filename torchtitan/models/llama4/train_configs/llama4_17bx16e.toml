@@ -70,8 +70,10 @@ filter_fqns = ["output", "router.gate"]
 filter_fqns = ["output", "router.gate"]
 
 [debug]
-torch_deterministic = false
-torch_deterministic_warn_only = false
-torch_preserve_rng_state = false
+#seed = <integer>
+deterministic = false
+deterministic_warn_only = false
+ac_preserve_rng_state = false
 ac_determinism_check = "default"
 ac_debug = false
+moe_force_load_balance = false
