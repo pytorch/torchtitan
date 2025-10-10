@@ -1,8 +1,13 @@
 [job]
 dump_folder = "./outputs"
+<<<<<<< HEAD
 description = "Llama 3 fault-tolerant debug training"
 print_config = false
 custom_config_module = "torchtitan.components.ft.config"
+=======
+description = "Llama 3 debug training"
+print_args = false
+>>>>>>> f63037ff (add script to train with ft (#1812))
 
 [profiling]
 enable_profiling = true
