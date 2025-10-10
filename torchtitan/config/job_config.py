@@ -263,15 +263,6 @@ class Training:
     many temporary files.
     """
 
-    seed: int | None = None
-    """Choose the base RNG seed used for training"""
-
-    deterministic: bool = False
-    """Use deterministic algorithms wherever possible, may be slower"""
-
-    debug_moe_force_load_balance: bool = False
-    """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
-
 
 @dataclass
 class Parallelism:
@@ -889,20 +880,26 @@ class Validation:
 
 @dataclass
 class Debug:
-    torch_deterministic: bool = False
-     """Use deterministic algorithms wherever possible, may be slower"""
+    deterministic: bool = False
+    """Use deterministic algorithms wherever possible, may be slower"""
 
-    torch_deterministic_warn_only: bool = False
+    deterministic_warn_only: bool = False
     """Only warns about ops without deterministic implementations rather than erroring out  """
 
-    torch_preserve_rng_state: bool = False
-     """If deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower"""
+    seed: int | None = None
+    """Choose the base RNG seed used for training"""
+
+    ac_preserve_rng_state: bool = False
+    """If deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower. See https://docs.pytorch.org/docs/stable/checkpoint.html for details."""
 
     ac_determinism_check: str = "default"
-    """A string specifying the determinism function. """
+    """A string specifying the determinism function. See https://docs.pytorch.org/docs/stable/checkpoint.html for details."""
 
     ac_debug: bool = False
-    """ Capture ac debug information. Will be slower. """
+    """ Capture ac debug information. Will be slower. See https://docs.pytorch.org/docs/stable/checkpoint.html for details."""
+
+    moe_force_load_balance: bool = False
+    """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
 
 @dataclass
 class JobConfig:

@@ -18,6 +18,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Comm as CommConfig, TORCH_DTYPE_MAP
+from torchtitan.config import Debug as DebugConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -83,9 +84,7 @@ def dist_mean(
 def set_determinism(
     world_mesh: DeviceMesh | None,
     device: torch.device,
-    seed: int | None = None,
-    deterministic: bool = False,
-    deterministic_warn_only: bool = False,
+    debug_config: DebugConfig,
     distinct_seed_mesh_dim: str = "pp",
 ) -> None:
     """
@@ -98,10 +97,10 @@ def set_determinism(
 
     Set Determinism flags for increased reproducibility with loss of performance.
     """
-    if deterministic:
+    if debug_config.deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
         torch.use_deterministic_algorithms(True)
-        torch.use_deterministic_algorithms(True, warn_only=deterministic_warn_only)
+        torch.use_deterministic_algorithms(True, warn_only=debug_config.deterministic_warn_only)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         # env var for deterministic CuBLAS
@@ -116,6 +115,7 @@ def set_determinism(
 
         FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
 
+    seed = debug_config.seed
     if not world_mesh:
         if seed is not None:
             torch.manual_seed(seed)
