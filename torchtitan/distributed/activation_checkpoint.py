@@ -24,7 +24,7 @@ from torchtitan.tools.logging import logger, warn_once
 _layer_sac_count = 0
 
 
-def _apply_layer_sac(module: nn.Module, ac_config: ACConfig, dbg_config:DebugConfig) -> nn.Module:
+def _apply_layer_sac(module: nn.Module, ac_config: ACConfig, debug_config:DebugConfig) -> nn.Module:
     """Apply layer selective activation checkpointing to the module.
 
     Args:
@@ -40,10 +40,10 @@ def _apply_layer_sac(module: nn.Module, ac_config: ACConfig, dbg_config:DebugCon
     if not ac_freq or _layer_sac_count % ac_freq == 0:
         return ptd_checkpoint_wrapper(
             module,
-            preserve_rng_state=dbg_config.torch_preserve_rng_state,
-            determinism_check=dbg_config.ac_determinism_check,
+            preserve_rng_state=debug_config.torch_preserve_rng_state,
+            determinism_check=debug_config.ac_determinism_check,
             early_stop=ac_config.early_stop,
-            debug=dbg_config.ac_debug
+            debug=debug_config.ac_debug
         )
     else:
         return module
