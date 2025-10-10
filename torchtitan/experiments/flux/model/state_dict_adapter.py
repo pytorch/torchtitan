@@ -13,7 +13,6 @@ from collections import defaultdict
 from typing import Any
 
 import torch
-
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import FluxModelArgs
