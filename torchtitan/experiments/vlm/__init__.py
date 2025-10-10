@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import fields
+from typing import Any
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
@@ -27,13 +28,14 @@ __all__ = [
 ]
 
 
+def _get_dict(obj) -> dict[str, Any]:
+    """Convert dataclass to dict, preserving nested dataclasses (unlike asdict)."""
+    return {field.name: getattr(obj, field.name) for field in fields(obj)}
+
+
 llama3_siglip2_configs = {
     "debugmodel": Llama3Siglip2ModelArgs(
-        **{
-            f.name: getattr(o, f.name)
-            for o in [llama3_configs["debugmodel"]]
-            for f in fields(o)
-        },
+        **_get_dict(llama3_configs["debugmodel"]),
         encoder=Siglip2ModelArgs(
             dim=128,
             ffn_dim=256,
