@@ -102,6 +102,9 @@ class Llama3Siglip2Transformer(Llama3):
         h_BSD = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         if self.encoder is not None:
+            assert (
+                attention_masks is not None
+            ), "encoder only allows FlexAttention, so the llama3 must use FlexAttention as well."
             grid_hw = grid_thw[:, :, 1:]  # Siglip2 only support image hw
             pixel_masks = E.reduce(grid_hw != -1, "n l hw -> n l", reduction="all")
             i_NLD = self.encoder(
