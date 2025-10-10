@@ -10,12 +10,22 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.models.attention import build_attention
+from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.models.attention import (
+    create_attention_mask,
+    FlexAttentionWrapper,
+    get_causal_mask_mod,
+    get_document_mask_mod,
+    ScaledDotProductAttentionWrapper,
+)
 from torchtitan.models.moe import MoE
+from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import Qwen3ModelArgs
+
 
 # Adapted from https://github.com/pytorch/torchtune/blob/main/torchtune/models/qwen2/_positional_embeddings.py
 def precompute_rope_cache(
@@ -133,6 +143,7 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.head_dim
         self.scaling = self.head_dim**-0.5
+        self.use_flex_attn = getattr(model_args, "use_flex_attn", False)
 
         # RMSNorm added here to the here to include the q-k norm
         # This is one of the main differences between Llama3 and Qwen3
@@ -155,7 +166,11 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
-        self.sdpa = build_attention(model_args.use_flex_attn, model_args.attn_mask_type)
+
+        if self.use_flex_attn:
+            self.inner_attention = FlexAttentionWrapper()
+        else:
+            self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -170,6 +185,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         rope_cache: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
     ):
         """
         Forward pass of the attention module.
@@ -210,7 +226,12 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        output = self.sdpa(xq, xk, xv, scale=self.scaling)
+        if self.use_flex_attn:
+            assert isinstance(attention_masks, BlockMask), attention_masks
+            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+        else:
+            assert attention_masks is None
+            output = self.inner_attention(xq, xk, xv)
 
         output = output.transpose(
             1, 2
@@ -308,6 +329,7 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         rope_cache: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -320,7 +342,7 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        x = x + self.attention(self.attention_norm(x), rope_cache)
+        x = x + self.attention(self.attention_norm(x), rope_cache, attention_masks)
 
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
@@ -423,9 +445,31 @@ class Qwen3Model(nn.Module, ModelProtocol):
             self.model_args.rope_theta,
         )
 
+    def get_attention_masks(
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
+    ) -> AttentionMasksType:
+        mask_mods = [get_causal_mask_mod()]
+        match self.model_args.attn_mask_type:
+            case "causal":
+                B = 1
+            case "block_causal":
+                B = input_batch.shape[0]
+                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+            case _:
+                raise ValueError(
+                    f"Unknown attention mask type: {self.model_args.attn_mask_type}"
+                )
+        return create_attention_mask(
+            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
+        )
+
     def forward(
         self,
         tokens: torch.Tensor,
+        attention_masks: AttentionMasksType | None = None,
         input_batch: torch.Tensor | None = None,
     ):
         """
@@ -449,7 +493,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.rope_cache)
+            h = layer(h, self.rope_cache, attention_masks)
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
