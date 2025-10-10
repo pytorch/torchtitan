@@ -67,14 +67,15 @@ class FlexAttentionWrapper(torch.nn.Module):
         # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
         #    to convert `lse` to be DTensor.
 
-        return FlexAttentionWrapper._compiled_flex_attn(
-            q,
-            k,
-            v,
-            block_mask=block_mask,
-            scale=scale,
-            return_lse=return_lse,
-        )
+        with torch.fx.traceback.annotate({"compile_with_inductor": "flex_attention"}):
+            return FlexAttentionWrapper._compiled_flex_attn(
+                q,
+                k,
+                v,
+                block_mask=block_mask,
+                scale=scale,
+                return_lse=return_lse,
+            )
 
 
 class ScaledDotProductAttentionWrapper(torch.nn.Module):
