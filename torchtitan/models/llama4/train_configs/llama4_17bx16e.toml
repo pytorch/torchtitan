@@ -68,12 +68,3 @@ filter_fqns = ["output", "router.gate"]
 
 [quantize.linear.mx]
 filter_fqns = ["output", "router.gate"]
-
-[debug]
-#seed = <integer>
-deterministic = false
-deterministic_warn_only = false
-ac_preserve_rng_state = false
-ac_determinism_check = "default"
-ac_debug = false
-moe_force_load_balance = false
