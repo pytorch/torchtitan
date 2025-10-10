@@ -49,3 +49,9 @@ repos:
   hooks:
     - id: pydoclint
       args: [--config=pyproject.toml]
+
+- repo: https://github.com/rstcheck/rstcheck
+  rev: v6.2.4
+  hooks:
+    - id: rstcheck
+      args: [--recursive, --report-level=warning, --docstrings]
