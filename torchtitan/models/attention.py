@@ -83,8 +83,9 @@ class FlexAttention(torch.nn.Module):
         v: torch.Tensor,
         scale: float | None = None,
     ) -> torch.Tensor:
-        block_mask = FlexAttention.block_masks[self.mask_key]
-        return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, scale=scale)
+        with torch.fx.traceback.annotate({"compile_with_inductor": "flex_attention"}):
+            block_mask = FlexAttention.block_masks[self.mask_key]
+            return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, scale=scale)
 
     @staticmethod
     def _get_causal_mask_mod() -> _mask_mod_signature:
