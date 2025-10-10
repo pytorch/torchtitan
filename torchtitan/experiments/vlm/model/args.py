@@ -6,38 +6,7 @@
 
 from dataclasses import dataclass, field
 
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
-
 from torchtitan.models.llama3 import TransformerModelArgs as Llama3Args
-
-
-@dataclass
-class SpecialTokens:
-    img_token: str
-    img_id: int
-    boi_token: str
-    boi_id: int
-    eoi_token: str
-    eoi_id: int
-    pad_token: str
-    pad_id: int
-    ignore_id: int = -100  # Pytorch F.cross_entropy default
-
-    @classmethod
-    def from_tokenizer(cls, tokenizer: HuggingFaceTokenizer):
-        SPECIAL_TOKENS_MAP = {
-            "img": "<|image|>",
-            "boi": "<|begin_of_image|>",
-            "eoi": "<|end_of_image|>",
-            "pad": "<|pad|>",
-        }
-        added_tokens = tokenizer.tokenizer.get_added_tokens_decoder()
-        token_to_id = {tok.content: tok_id for tok_id, tok in added_tokens.items()}
-        special_tokens_dict = {}
-        for prefix, tok in SPECIAL_TOKENS_MAP.items():
-            special_tokens_dict[f"{prefix}_token"] = tok
-            special_tokens_dict[f"{prefix}_id"] = token_to_id[tok]
-        return cls(**special_tokens_dict)
 
 
 @dataclass

@@ -6,6 +6,8 @@
 
 import torch
 
+from ...tokenizer import VLMTokenizer
+
 
 def pad_text_batch(
     input_ids: torch.Tensor,
@@ -97,8 +99,7 @@ def pad_input_ids_and_labels_to_target_batch_size(
 def process_text_with_images(
     text: list[str],
     image_tokens: list[tuple[int, int, int]],  # [(total, width, height), ...]
-    tokenizer,
-    special_tokens,
+    tokenizer: VLMTokenizer,
     add_eos: bool = True,
 ) -> str:
     """Process text by interleaving image tokens efficiently.
@@ -122,14 +123,14 @@ def process_text_with_images(
     image_idx = 0
 
     for part in text:
-        if part == special_tokens.img_token and image_idx < len(image_tokens):
+        if part == tokenizer.img_token and image_idx < len(image_tokens):
             num_image_tokens, _, _ = image_tokens[image_idx]
 
             parts.extend(
                 [
-                    special_tokens.boi_token,
-                    *([special_tokens.img_token] * num_image_tokens),
-                    special_tokens.eoi_token,
+                    tokenizer.boi_token,
+                    *([tokenizer.img_token] * num_image_tokens),
+                    tokenizer.eoi_token,
                 ]
             )
             image_idx += 1

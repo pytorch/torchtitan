@@ -4,13 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import asdict, replace
+from dataclasses import asdict
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
-from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
+from torchtitan.experiments.vlm.tokenizer import build_vlm_tokenizer
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.protocols.train_spec import TrainSpec
 
@@ -29,7 +29,7 @@ __all__ = [
 
 llama3_siglip2_configs = {
     "debugmodel": Llama3Siglip2ModelArgs(
-        **asdict(replace(llama3_configs["debugmodel"], vocab_size=2048)),
+        **asdict(llama3_configs["debugmodel"]),
         encoder=Siglip2ModelArgs(
             dim=128,
             ffn_dim=256,
@@ -49,7 +49,7 @@ def get_train_spec() -> TrainSpec:
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_mm_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
+        build_tokenizer_fn=build_vlm_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
     )
