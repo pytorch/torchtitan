@@ -27,11 +27,11 @@ def parallelize_flux(
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
-    if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP
+    if parallel_dims.fsdp_enabled:
         if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard")
+            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
-            dp_mesh_dim_names = ("dp_shard",)
+            dp_mesh_dim_names = ("dp_shard_cp",)
 
         apply_fsdp(
             model,
@@ -46,6 +46,9 @@ def parallelize_flux(
         else:
             logger.info("Applied FSDP to the model")
 
+        if parallel_dims.cp_enabled:
+            logger.info("Applied Context Parallel to the model")
+            
     return model
 
 

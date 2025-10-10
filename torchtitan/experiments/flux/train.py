@@ -90,6 +90,10 @@ class FluxTrainer(Trainer):
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
+        
+        cp_group = self.parallel_dims.world_mesh["cp"].get_group() \
+            if self.parallel_dims.cp_enabled else None
+
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = preprocess_data(
@@ -132,24 +136,36 @@ class FluxTrainer(Trainer):
             # Patchify: Convert latent into a sequence of patches
             latents = pack_latents(latents)
 
-        with self.maybe_enable_amp:
-            latent_noise_pred = model(
-                img=latents,
-                img_ids=latent_pos_enc,
-                txt=t5_encodings,
-                txt_ids=text_pos_enc,
-                y=clip_encodings,
-                timesteps=timesteps,
-            )
-
-            # Convert sequence of patches to latent shape
-            pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
+        # limou
+        with torch.no_grad(), torch.device(self.device):
             target = noise - labels
-            loss = self.loss_fn(pred, target)
-        # pred.shape=(bs, seq_len, vocab_size)
-        # need to free to before bwd to avoid peaking memory
-        del (pred, noise, target)
-        loss.backward()
+            target = pack_latents(target)
+
+        optional_context_parallel_ctx = (
+            dist_utils.create_context_parallel_ctx(
+                cp_mesh = self.parallel_dims.world_mesh["cp"],
+                cp_buffers = [latents, latent_pos_enc, t5_encodings, text_pos_enc, target],
+                cp_seq_dims = [1, 1, 1, 1, 1],
+                cp_no_restore_buffers = {latents, latent_pos_enc, t5_encodings, text_pos_enc, target},
+                cp_rotate_method = self.job_config.parallelism.context_parallel_rotate_method,
+            ) if cp_group else None
+        )
+        with self.train_context(optional_context_parallel_ctx):
+            with self.maybe_enable_amp:
+                latent_noise_pred = model(
+                    img=latents,
+                    img_ids=latent_pos_enc,
+                    txt=t5_encodings,
+                    txt_ids=text_pos_enc,
+                    y=clip_encodings,
+                    timesteps=timesteps,
+                )
+
+                loss = self.loss_fn(latent_noise_pred, target)
+            # pred.shape=(bs, seq_len, vocab_size)
+            # need to free to before bwd to avoid peaking memory
+            del (latent_noise_pred, noise, target)
+            loss.backward()
 
         return loss
 
