@@ -120,9 +120,9 @@ def set_determinism(
         # reproducibility, since the autotune results may not be deterministic.
         from torch.nn.attention.flex_attention import flex_attention
 
-        from torchtitan.models.attention import FlexAttention
+        from torchtitan.models.attention import FlexAttentionWrapper
 
-        FlexAttention.flex_attn = torch.compile(flex_attention)
+        FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
 
     if not world_mesh:
         if seed is not None:
