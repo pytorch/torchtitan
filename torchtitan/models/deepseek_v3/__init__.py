@@ -134,7 +134,7 @@ deepseekv3_configs = {
         dim=7168,
         inter_dim=18432,
         moe_inter_dim=2048,
-        n_layers=4,
+        n_layers=61,
         n_dense_layers=3,
         n_heads=128,
         moe_args=MoEArgs(
@@ -161,7 +161,6 @@ deepseekv3_configs = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="deepseek_v3",
         model_cls=DeepSeekV3Model,
         model_args=deepseekv3_configs,
         parallelize_fn=parallelize_deepseekv3,
