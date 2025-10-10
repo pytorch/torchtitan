@@ -11,6 +11,13 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+
+try:
+    import intel_extension_for_pytorch as ipex
+    print ( f"IPEX found - hence using IPEX")
+except:
+    print ( f"IPEX not found, hence not using")
+
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module

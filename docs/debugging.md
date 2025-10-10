@@ -93,17 +93,17 @@ CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_tr
 - Sets deterministic workspace configuration for CuBLAS operations
 - **Note:** This will significantly reduce training performance but ensures exact reproducibility
 
-Use --debug.deterministic.warn_only to only warn about (not stop running) kernel without deterministic implementation.
+Use `--debug.deterministic_warn_only` to only warn about (not stop running) kernel without deterministic implementation.
 
 ### Activation Checkipointing Debugging ###
 
 The following debug configs are available for AC.
 
-ac_preserve_rng_state - if deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower.
+`ac_preserve_rng_state` - if deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower.
 
-ac_determinism_check - A string specifying the determinism function
+`ac_determinism_check` - A string specifying the determinism function
 
-ac_debug - capture ac debug information. Will be slower.
+`ac_debug` - capture ac debug information. Will be slower.
 
 See https://docs.pytorch.org/docs/stable/checkpoint.html for details.
 
