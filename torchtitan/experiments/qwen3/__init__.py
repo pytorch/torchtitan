@@ -180,7 +180,6 @@ qwen3_configs = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="qwen3",
         model_cls=Qwen3Model,
         model_args=qwen3_configs,  # Change from dict to Mapping
         parallelize_fn=parallelize_qwen3,
