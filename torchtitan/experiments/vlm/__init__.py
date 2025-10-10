@@ -7,6 +7,7 @@
 from dataclasses import fields
 from typing import Any
 
+from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
