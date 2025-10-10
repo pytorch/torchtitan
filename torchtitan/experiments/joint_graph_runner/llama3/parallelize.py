@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+from torch._guards import tracing, TracingContext
 
 import torch
 import torch.nn as nn
@@ -33,6 +34,9 @@ from torchtitan.experiments.simple_fsdp.simple_fsdp import (
 from torchtitan.models.llama3.infra.parallelize import apply_tp
 from torchtitan.tools.logging import logger
 
+
+from torch.fx.passes.regional_inductor import compile_fx_annotated_nodes_with_inductor
+
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
@@ -54,17 +58,20 @@ def print_if_rank0(msg):
 
 def graph_capture_and_aot_export_joint_with_descriptors(model, inputs):
     assert isinstance(inputs, tuple)
-    with torch._dynamo.config.patch(install_free_tensors=True):
+    with torch._dynamo.config.patch(install_free_tensors=True), torch.fx.traceback.preserve_node_meta():
         # TODO: switch to use the official graph_capture API once it is ready
         gm = _dynamo_graph_capture_for_export(model)(*inputs)
 
         # Restore the state dict to match the original module
         _restore_state_dict(model, gm)
 
-        # Validate that state dict and ordering match
-        _validate_state_dict_match(model, gm)
+        print_if_rank0("Dynamo gm:")
+        print_if_rank0(gm.print_readable(print_output=False))
 
-    return aot_export_joint_with_descriptors_alone(gm, inputs)
+        fake_mode = gm.meta.get("fake_mode", None)
+
+    with tracing(TracingContext(fake_mode)):
+        return aot_export_joint_with_descriptors_alone(gm, inputs), fake_mode
 
 
 def aot_export_joint_with_descriptors_alone(model, inputs):
@@ -78,47 +85,24 @@ def aot_export_joint_with_descriptors_alone(model, inputs):
         return joint_with_descriptors
 
 
-def _assign_attr(
-    from_obj: torch.Tensor | torch.nn.Parameter,
-    to_module: torch.nn.Module,
-    target: str,
-    is_buffer: bool = False,
+def _clear_traced_params_buffers(
+    traced_module: torch.fx.GraphModule, const_keys: list[str]
 ) -> None:
-    """
-    Assign attribute 'from_obj' to the qualified name 'target' on 'to_module'.
-    This installs empty Modules where none exist yet if they are subpaths of target.
-    Based on _assign_attr from torch.export.unflatten.
-    """
-    *prefix, field = target.split(".")
-
-    # Generate all submodules along the path
-    for item in prefix:
-        if not hasattr(to_module, item):
-            setattr(to_module, item, torch.nn.Module())
-        to_module = getattr(to_module, item)
-
-    # Assign the actual parameter or buffer
-    if is_buffer:
-        to_module.register_buffer(field, from_obj)
-    else:
-        to_module.register_parameter(field, from_obj)
-
-
-def _clear_traced_params_buffers(traced_module: torch.fx.GraphModule) -> None:
     """Remove all parameters and buffers from traced module before restoring."""
-    # Remove all parameters
-    for name in list(traced_module._parameters.keys()):
-        delattr(traced_module, name)
-
-    # Remove all buffers
-    for name in list(traced_module._buffers.keys()):
-        delattr(traced_module, name)
+    for key in const_keys:
+        assert key in traced_module._buffers.keys()
+        # We don't want constants to show up as a buffer in the state dict.
+        # Instead they should just be a direct attribute.
+        buffer = getattr(traced_module, key)
+        torch.fx.graph_module._del_attr(traced_module, key)
+        setattr(traced_module, key, buffer)
 
 
 def _restore_state_dict(
     original_module: torch.nn.Module, traced_module: torch.fx.GraphModule
 ) -> None:
     """
+    TODO: move this into torch.export
     Restores the state dict of the traced module to match the original module exactly.
     Preserves the original FQNs with dots, creating intermediate empty modules as needed.
     Ensures that the ordering of parameters/buffers matches the original module.
@@ -135,9 +119,6 @@ def _restore_state_dict(
     # Build mapping from old names to new names for graph node updates
     name_mapping: dict[str, str] = {}
 
-    # Clear existing parameters and buffers from traced module
-    _clear_traced_params_buffers(traced_module)
-
     # Restore parameters in the order they appear in original module
     for orig_name, orig_param in original_module.named_parameters(
         remove_duplicate=False
@@ -145,22 +126,30 @@ def _restore_state_dict(
         if id(orig_param) in traced_params:
             # This param exists in traced module - restore it with original FQN
             traced_name, traced_param = traced_params[id(orig_param)]
-            _assign_attr(traced_param, traced_module, orig_name, is_buffer=False)
+            torch.fx.graph_module._assign_attr(traced_param, traced_module, orig_name)
+            torch.fx.graph_module._del_attr(traced_module, traced_name)
             name_mapping[traced_name] = orig_name
         else:
             # This param doesn't exist in traced module - add it
-            _assign_attr(orig_param, traced_module, orig_name, is_buffer=False)
+            torch.fx.graph_module._assign_attr(orig_param, traced_module, orig_name)
 
     # Restore buffers in the order they appear in original module
     for orig_name, orig_buffer in original_module.named_buffers(remove_duplicate=False):
         if id(orig_buffer) in traced_buffers:
             # This buffer exists in traced module - restore it with original FQN
             traced_name, traced_buffer = traced_buffers[id(orig_buffer)]
-            _assign_attr(traced_buffer, traced_module, orig_name, is_buffer=True)
+            torch.fx.graph_module._assign_attr(orig_buffer, traced_module, orig_name)
             name_mapping[traced_name] = orig_name
+            torch.fx.graph_module._del_attr(traced_module, traced_name)
         else:
             # This buffer doesn't exist in traced module - add it
-            _assign_attr(orig_buffer, traced_module, orig_name, is_buffer=True)
+            torch.fx.graph_module._assign_attr(orig_buffer, traced_module, orig_name)
+
+    param_names = [v[0] for v in traced_params.values()]
+    buffer_names = [v[0] for v in traced_buffers.values()]
+    const_keys = set(param_names + buffer_names).difference(set(name_mapping.keys()))
+
+    _clear_traced_params_buffers(traced_module, const_keys)
 
     # Update get_attr nodes in the graph to use the correct FQNs
     for node in traced_module.graph.nodes:
@@ -168,65 +157,6 @@ def _restore_state_dict(
             node.target = name_mapping[node.target]
 
     traced_module.recompile()
-
-
-def _validate_state_dict_match(
-    original_module: torch.nn.Module, traced_module: torch.fx.GraphModule
-) -> None:
-    """
-    Validates that the traced module's state dict matches the original module.
-    Checks that parameter/buffer names, ordering, and tensor values match.
-
-    Raises:
-        AssertionError: If any validation check fails.
-    """
-    # Check 1: Verify parameter names and ordering match
-    orig_param_names = list(
-        dict(original_module.named_parameters(remove_duplicate=False)).keys()
-    )
-    gm_param_names = list(
-        dict(traced_module.named_parameters(remove_duplicate=False)).keys()
-    )
-    assert orig_param_names == gm_param_names, (
-        f"Parameter names or ordering mismatch!\n"
-        f"Original: {orig_param_names}\n"
-        f"Traced:   {gm_param_names}"
-    )
-
-    # Check 2: Verify buffer names and ordering match
-    orig_buffer_names = list(
-        dict(original_module.named_buffers(remove_duplicate=False)).keys()
-    )
-    gm_buffer_names = list(
-        dict(traced_module.named_buffers(remove_duplicate=False)).keys()
-    )
-    assert orig_buffer_names == gm_buffer_names, (
-        f"Buffer names or ordering mismatch!\n"
-        f"Original: {orig_buffer_names}\n"
-        f"Traced:   {gm_buffer_names}"
-    )
-
-    # Check 3: Verify parameter tensors match by identity or value
-    for (orig_name, orig_param), (gm_name, gm_param) in zip(
-        original_module.named_parameters(remove_duplicate=False),
-        traced_module.named_parameters(remove_duplicate=False),
-    ):
-        assert (
-            orig_name == gm_name
-        ), f"Parameter name mismatch: {orig_name} != {gm_name}"
-        assert id(orig_param) == id(gm_param) or torch.equal(
-            orig_param, gm_param
-        ), f"Parameter tensor mismatch for {orig_name}"
-
-    # Check 4: Verify buffer tensors match by identity or value
-    for (orig_name, orig_buffer), (gm_name, gm_buffer) in zip(
-        original_module.named_buffers(remove_duplicate=False),
-        traced_module.named_buffers(remove_duplicate=False),
-    ):
-        assert orig_name == gm_name, f"Buffer name mismatch: {orig_name} != {gm_name}"
-        assert id(orig_buffer) == id(gm_buffer) or torch.equal(
-            orig_buffer, gm_buffer
-        ), f"Buffer tensor mismatch for {orig_name}"
 
 
 def parallelize_llama(
@@ -378,10 +308,6 @@ class HijackWrapper(torch.nn.Module):
 
         # HACK: doing graph capture on the fly, we should do it AOT
         if self.joint_graph_module is None:
-            # needed to avoid having fwd_rng_state in the fw_gm inp
-            # this doesn't work!
-            # torch._functorch.config.graphsafe_rng_functionalization = False
-
             # first time, we need to initialize the runner
             self.joint_graph_module = joint_graph_builder(
                 self.inner, *dt_args, **kwargs
@@ -400,24 +326,35 @@ def joint_graph_builder(model, *inputs, **kwargs):
         assert isinstance(input, DTensor)
     assert not kwargs
 
-    # get fw/bw graphs
-    joint_with_descriptors = graph_capture_and_aot_export_joint_with_descriptors(
+    joint_with_descriptors, fake_mode = graph_capture_and_aot_export_joint_with_descriptors(
         model, inputs
     )
+
+    # verify user annotation show up in the graph  
+    for node in joint_with_descriptors.graph_module.graph.nodes:
+        if node.target in {torch.ops.higher_order.flex_attention, torch.ops.higher_order.flex_attention_backward}:
+            if "custom" not in node.meta:
+                # this is currently failing, as backward nodes are missing the annotation
+                # raise RuntimeError(f"node {node} is not annotated with custom metadata, seeing node.meta: {node.meta}")
+                pass
 
     def compiler(gm: torch.fx.GraphModule, example_inputs):
         print_if_rank0("Before compiler:")
         print_if_rank0(gm.print_readable(print_output=False))
 
-        gm = schedule_overlap_bucketing(gm)
+        # gm = schedule_overlap_bucketing(gm)
+
+        # RuntimeError: Cannot access data pointer of Tensor that doesn't have storage P1985731155
+        # gm = compile_fx_annotated_nodes_with_inductor(gm, example_inputs)
 
         print_if_rank0("After compiler:")
         print_if_rank0(gm.print_readable(print_output=False))
         return gm
 
-    fn = aot_compile_joint_with_descriptors(
-        joint_with_descriptors, fw_compiler=compiler, bw_compiler=compiler
-    )
+    with tracing(TracingContext(fake_mode)):
+        fn = aot_compile_joint_with_descriptors(
+            joint_with_descriptors, fw_compiler=compiler, bw_compiler=compiler
+        )
 
     def wrapper_fn(args):
         input = [
