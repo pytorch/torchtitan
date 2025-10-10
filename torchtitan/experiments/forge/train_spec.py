@@ -21,7 +21,6 @@ from torchtitan.protocols.train_spec import (
 
 @dataclass
 class ForgeTrainSpec:
-    name: str
     model_cls: type[ModelProtocol]
     model_args: Mapping[str, BaseModelArgs]
     parallelize_fn: ParallelizeFunction
@@ -39,7 +38,6 @@ def _transform_train_spec(original_spec: TrainSpec):
     """Transform the original train spec to ForgeTrainSpec format."""
     # Create a new TrainSpec with only the fields we need in forge
     return ForgeTrainSpec(
-        name=original_spec.name,
         model_cls=original_spec.model_cls,
         model_args=original_spec.model_args,
         parallelize_fn=original_spec.parallelize_fn,
@@ -51,13 +49,13 @@ def _transform_train_spec(original_spec: TrainSpec):
     )
 
 
-def register_train_spec(train_spec: ForgeTrainSpec) -> None:
+def register_train_spec(name: str, train_spec: ForgeTrainSpec) -> None:
     global _extra_train_specs
-    if train_spec.name in _extra_train_specs:
-        raise ValueError(f"ForgeTrainSpec {train_spec.name} is already registered.")
+    if name in _extra_train_specs:
+        raise ValueError(f"ForgeTrainSpec {name} is already registered.")
 
     # user can define a ForgeTrainSpec from outside of torchtitan
-    _extra_train_specs[train_spec.name] = train_spec
+    _extra_train_specs[name] = train_spec
 
 
 def get_train_spec(name: str) -> ForgeTrainSpec:

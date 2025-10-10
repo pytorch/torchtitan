@@ -6,6 +6,7 @@
 
 from dataclasses import asdict, replace
 
+from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
@@ -41,7 +42,6 @@ llama3_siglip2_configs = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="llama3-siglip2",
         model_cls=Llama3Siglip2Transformer,
         model_args=llama3_siglip2_configs,
         parallelize_fn=parallelize_vlm,

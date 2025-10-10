@@ -66,7 +66,7 @@ class Trainer(ForgeEngine):
 
         model_args = self.model_args
         logger.info(
-            f"Built {self.train_spec.name} {job_config.model.flavor} with {model_args}"
+            f"Built {job_config.model.name} {job_config.model.flavor} with {model_args}"
         )
 
         # metrics logging
@@ -78,7 +78,7 @@ class Trainer(ForgeEngine):
         self.metrics_processor.num_flops_per_token = self.num_flops_per_token
 
         logger.info(
-            f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
+            f"{color.blue}Model {job_config.model.name} {job_config.model.flavor} "
             f"{color.red}size: {self.model_param_count:,} total parameters{color.reset}"
         )
 

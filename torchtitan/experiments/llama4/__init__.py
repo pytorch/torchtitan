@@ -8,6 +8,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
 from torchtitan.components.tokenizer import build_hf_tokenizer
+from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.models.llama3 import pipeline_llama
 from torchtitan.models.moe import MoEArgs
@@ -103,7 +104,6 @@ llama4_configs = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="llama4",
         model_cls=Transformer,
         model_args=llama4_configs,
         parallelize_fn=parallelize_llama,
@@ -113,5 +113,6 @@ def get_train_spec() -> TrainSpec:
         build_dataloader_fn=build_hf_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        build_validator_fn=build_validator,
         state_dict_adapter=Llama4StateDictAdapter,
     )

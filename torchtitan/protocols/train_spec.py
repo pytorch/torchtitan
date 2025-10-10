@@ -42,7 +42,6 @@ ValidatorBuilder: TypeAlias = Callable[..., BaseValidator]
 
 @dataclass
 class TrainSpec:
-    name: str
     model_cls: type[ModelProtocol]
     model_args: Mapping[str, BaseModelArgs]
     parallelize_fn: ParallelizeFunction
@@ -60,13 +59,13 @@ class TrainSpec:
 _extra_train_specs: dict[str, TrainSpec] = {}
 
 
-def register_train_spec(train_spec: TrainSpec) -> None:
+def register_train_spec(name: str, train_spec: TrainSpec) -> None:
     global _extra_train_specs
-    if train_spec.name in _extra_train_specs:
-        raise ValueError(f"TrainSpec {train_spec.name} is already registered.")
+    if name in _extra_train_specs:
+        raise ValueError(f"TrainSpec {name} is already registered.")
 
     # user can define a TrainSpec from outside of torchtitan
-    _extra_train_specs[train_spec.name] = train_spec
+    _extra_train_specs[name] = train_spec
 
 
 def get_train_spec(name: str) -> TrainSpec:

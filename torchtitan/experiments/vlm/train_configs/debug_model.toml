@@ -23,7 +23,7 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
-name = "llama3-siglip2"
+name = "vlm"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
 hf_assets_path = "tests/assets/tokenizer"
