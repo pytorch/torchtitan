@@ -151,7 +151,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.model_args = model_args
 
         logger.info(
-            f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
+            f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
         )
         with (
             torch.device("meta"),
@@ -181,7 +181,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
-            f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
+            f"{color.blue}Model {job_config.model.name} {job_config.model.flavor} "
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
         )
 
@@ -196,7 +196,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = self.train_spec.build_loss_fn(job_config)
+        self.loss_fn = self.train_spec.build_loss_fn(
+            job_config, parallel_dims=parallel_dims, ft_manager=self.ft_manager
+        )
 
         # verify batch sizes
         global_batch_size = job_config.training.global_batch_size
@@ -226,7 +228,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
                 raise RuntimeError(
-                    f"Pipeline Parallel is enabled but {self.train_spec.name} "
+                    f"Pipeline Parallel is enabled but {job_config.model.name} "
                     f"does not support pipelining"
                 )
 
@@ -413,6 +415,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+        # For arguments, like attention_masks, we have to put them in a separate
+        # dict as extra_inputs are not forwarded to other stages in PP, but
+        # extra_args are.
         extra_args = {}
 
         if getattr(self.model_args, "use_flex_attn", False):

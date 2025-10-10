@@ -33,12 +33,10 @@ __all__ = [
 
 def get_train_spec() -> TrainSpec:
     return FaultTolerantTrainSpec(
-        name="llama3_ft",
         model_cls=Transformer,
         model_args=llama3_configs,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llama,
-        fragment_fn=fragment_llm,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
@@ -46,4 +44,5 @@ def get_train_spec() -> TrainSpec:
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
         state_dict_adapter=Llama3StateDictAdapter,
+        fragment_fn=fragment_llm,
     )

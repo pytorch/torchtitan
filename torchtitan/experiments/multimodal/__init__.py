@@ -22,8 +22,8 @@ llama4_mm_configs = {
 }
 
 register_train_spec(
+    "llama4_multimodal",
     TrainSpec(
-        name="llama4_multimodal",
         model_cls=MultimodalDecoder,
         model_args=llama4_mm_configs,
         parallelize_fn=parallelize_llama,
@@ -33,5 +33,5 @@ register_train_spec(
         build_dataloader_fn=build_mm_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
-    )
+    ),
 )

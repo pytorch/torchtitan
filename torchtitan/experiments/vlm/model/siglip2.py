@@ -146,7 +146,7 @@ class Attention(nn.Module):
         xv = E.rearrange(xv, "b l (h d) -> b h l d", d=self.head_dim)
 
         assert isinstance(attention_masks, BlockMask)
-        output = self.inner_attention(xq, xk, xv, attention_masks)
+        output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
         output = E.rearrange(output, "b h l d -> b l (h d)").contiguous()
 
         return self.out_proj(output)
@@ -213,19 +213,27 @@ class VisionTransformer(nn.Module):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
+
+        # TODO: this is duplicated in the main model forward.
+        # TODO: is this really required? Can we call this `get_attention_masks`
+        # inside the main model forward? At that time PP should already split the
+        # grid_thw correctly.
+        grid_hw = extra_inputs["grid_thw"][:, :, 1:]  # Siglip2 only support image hw
+        pixel_masks = E.reduce(grid_hw != -1, "n l hw -> n l", reduction="all")
+
         mask_mods = [get_causal_mask_mod()]
         match self.args.attn_mask_type:
             case "causal":
                 B = 1
             case "block_causal":
-                B = input_batch.shape[0]
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+                B = pixel_masks.shape[0]
+                mask_mods.append(get_document_mask_mod(pixel_masks, tokenizer.eos_id))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.args.attn_mask_type}"
                 )
         return create_attention_mask(
-            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
+            and_masks(*mask_mods), B, None, pixel_masks.shape[1], pixel_masks.shape[1]
         )
 
     def forward(
