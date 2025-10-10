@@ -90,13 +90,6 @@ class FluxTrainer(Trainer):
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
-
-        cp_group = (
-            self.parallel_dims.world_mesh["cp"].get_group()
-            if self.parallel_dims.cp_enabled
-            else None
-        )
-
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = preprocess_data(
@@ -139,7 +132,6 @@ class FluxTrainer(Trainer):
             # Patchify: Convert latent into a sequence of patches
             latents = pack_latents(latents)
 
-        # limou
         with torch.no_grad(), torch.device(self.device):
             target = noise - labels
             target = pack_latents(target)
@@ -164,7 +156,7 @@ class FluxTrainer(Trainer):
                 },
                 cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
             )
-            if cp_group
+            if self.parallel_dims.cp_enabled
             else None
         )
         with self.train_context(optional_context_parallel_ctx):
