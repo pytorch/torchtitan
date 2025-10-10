@@ -18,10 +18,10 @@ pip install -r requirements-flux.txt
 ## Usage
 First, download the autoencoder model from HuggingFace with your own access token:
 ```bash
-python torchtitan/experiments/flux/scripts/download_autoencoder.py --repo_id black-forest-labs/FLUX.1-dev --ae_path ae.safetensors --hf_token <your_access_token>
+python scripts/download_hf_assets.py --repo_id black-forest-labs/FLUX.1-dev --additional_patterns ae.safetensors --hf_token <your_access_token>
 ```
 
-This step will download the autoencoder model from HuggingFace and save it to the `torchtitan/experiments/flux/assets/autoencoder/ae.safetensors` file.
+This step will download the autoencoder model from HuggingFace and save it to the `assets/hf/FLUX.1-dev/ae.safetensors` file.
 
 Run the following command to train the model on a single GPU:
 ```bash
