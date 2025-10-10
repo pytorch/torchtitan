@@ -93,7 +93,11 @@ CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_tr
 - Sets deterministic workspace configuration for CuBLAS operations
 - **Note:** This will significantly reduce training performance but ensures exact reproducibility
 
+<<<<<<< HEAD
 Use `--debug.deterministic_warn_only` to only warn about (not stop running) kernel without deterministic implementation.
+=======
+Use --debug.deterministic.warn_only to only warn about (not stop running) kernel without deterministic implementation.
+>>>>>>> 0b9a2b71 (Review relaeted updates.)
 
 ### Activation Checkipointing Debugging ###
 
