@@ -95,7 +95,7 @@ def estimate_memory(job_config: JobConfig):
         else contextlib.nullcontext()
     ):
         logger.info(
-            f"Building {train_spec.name} {job_config.model.flavor} with {model_args}"
+            f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
             model = train_spec.model_cls(model_args)
