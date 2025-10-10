@@ -48,7 +48,7 @@ def parallelize_flux(
 
         if parallel_dims.cp_enabled:
             logger.info("Applied Context Parallel to the model")
-            
+
     return model
 
 

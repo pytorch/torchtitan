@@ -90,9 +90,12 @@ class FluxTrainer(Trainer):
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
-        
-        cp_group = self.parallel_dims.world_mesh["cp"].get_group() \
-            if self.parallel_dims.cp_enabled else None
+
+        cp_group = (
+            self.parallel_dims.world_mesh["cp"].get_group()
+            if self.parallel_dims.cp_enabled
+            else None
+        )
 
         # generate t5 and clip embeddings
         input_dict["image"] = labels
@@ -143,12 +146,26 @@ class FluxTrainer(Trainer):
 
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
-                cp_mesh = self.parallel_dims.world_mesh["cp"],
-                cp_buffers = [latents, latent_pos_enc, t5_encodings, text_pos_enc, target],
-                cp_seq_dims = [1, 1, 1, 1, 1],
-                cp_no_restore_buffers = {latents, latent_pos_enc, t5_encodings, text_pos_enc, target},
-                cp_rotate_method = self.job_config.parallelism.context_parallel_rotate_method,
-            ) if cp_group else None
+                cp_mesh=self.parallel_dims.world_mesh["cp"],
+                cp_buffers=[
+                    latents,
+                    latent_pos_enc,
+                    t5_encodings,
+                    text_pos_enc,
+                    target,
+                ],
+                cp_seq_dims=[1, 1, 1, 1, 1],
+                cp_no_restore_buffers={
+                    latents,
+                    latent_pos_enc,
+                    t5_encodings,
+                    text_pos_enc,
+                    target,
+                },
+                cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+            )
+            if cp_group
+            else None
         )
         with self.train_context(optional_context_parallel_ctx):
             with self.maybe_enable_amp:
