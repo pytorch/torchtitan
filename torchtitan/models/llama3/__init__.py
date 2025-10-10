@@ -72,7 +72,6 @@ llama3_configs = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="llama3",
         model_cls=Transformer,
         model_args=llama3_configs,
         parallelize_fn=parallelize_llama,
