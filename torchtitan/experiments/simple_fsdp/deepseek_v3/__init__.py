@@ -21,7 +21,6 @@ from .parallelize import parallelize_deepseekv3
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="simple_fsdp.deepseek_v3",
         model_cls=SimpleFSDPDeepSeekV3Model,
         model_args=deepseekv3_configs,
         parallelize_fn=parallelize_deepseekv3,
