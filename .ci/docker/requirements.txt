@@ -8,3 +8,7 @@ fsspec
 tyro
 tokenizers >= 0.15.0
 safetensors
+transformers
+einops
+sentencepiece
+pillow
