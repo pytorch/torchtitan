@@ -1,4 +1,0 @@
-transformers>=4.51.1
-einops
-sentencepiece
-pillow

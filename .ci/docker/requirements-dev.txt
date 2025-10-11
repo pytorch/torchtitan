@@ -3,4 +3,3 @@ pytest==7.3.2
 pytest-cov
 pre-commit
 tomli-w >= 1.1.0
-transformers
