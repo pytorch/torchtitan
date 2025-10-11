@@ -7,7 +7,7 @@
 import torch
 from torch import nn, Tensor
 
-from torchtitan.experiments.flux.model.layers import (
+from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
