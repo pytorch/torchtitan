@@ -14,10 +14,15 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 
-from .infra.parallelize import parallelize_encoders
-from .model.autoencoder import load_ae
-from .model.hf_embedder import FluxEmbedder
-from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
+from torchtitan.models.flux.infra.parallelize import parallelize_encoders
+from torchtitan.models.flux.model.autoencoder import load_ae
+from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
+from torchtitan.models.flux.utils import (
+    create_position_encoding_for_latents,
+    pack_latents,
+    preprocess_data,
+    unpack_latents,
+)
 
 
 class FluxTrainer(Trainer):

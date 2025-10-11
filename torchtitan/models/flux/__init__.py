@@ -8,9 +8,9 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.protocols.train_spec import TrainSpec
 
-from .dataset.flux_dataset import build_flux_dataloader
+from torchtitan.datasets.flux_dataset import build_flux_dataloader
+from torchtitan.components.loss import build_mse_loss
 from .infra.parallelize import parallelize_flux
-from .loss import build_mse_loss
 from .model.args import FluxModelArgs
 from .model.autoencoder import AutoEncoderParams
 from .model.model import FluxModel
