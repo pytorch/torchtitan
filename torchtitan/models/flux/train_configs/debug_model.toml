@@ -2,7 +2,7 @@
 dump_folder = "./outputs"
 description = "Flux debug model"
 print_config = false
-custom_config_module = "torchtitan.experiments.flux.job_config"
+custom_config_module = "torchtitan.models.flux.job_config"
 
 [profiling]
 enable_profiling = false
@@ -43,7 +43,7 @@ img_size = 256
 t5_encoder = "google/t5-v1_1-xxl"
 clip_encoder = "openai/clip-vit-large-patch14"
 max_t5_encoding_len = 256
-autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
+autoencoder_path = "assets/hf/FLUX.1-dev/ae.safetensors"  # Autoencoder to use for image
 
 [parallelism]
 data_parallel_replicate_degree = 1

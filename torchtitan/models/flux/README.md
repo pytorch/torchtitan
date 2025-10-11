@@ -31,21 +31,7 @@ Run the following command to train the model on a single GPU:
 
 If you want to train with other model args, run the following command:
 ```bash
-CONFIG_FILE="./torchtitan/experiments/flux/train_configs/flux_schnell_model.toml" ./torchtitan/experiments/flux/run_train.sh
-```
-
-## Running Tests
-
-### Unit Tests
-To run the unit tests for the FLUX model, use the following command:
-```bash
-pytest -s torchtitan/experiments/flux/tests/
-```
-
-### Integration Tests
-To run the integration tests for the FLUX model, use the following command:
-```bash
-python -m torchtitan.experiments.flux.tests.integration_tests <output_dir>
+CONFIG_FILE="./torchtitan/models/flux/train_configs/flux_schnell_model.toml" ./torchtitan/models/flux/run_train.sh
 ```
 
 
@@ -55,7 +41,6 @@ python -m torchtitan.experiments.flux.tests.integration_tests <output_dir>
 - Distributed checkpointing and loading.
     - Notes on the current checkpointing implementation: To keep the model weights are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of evaluation, and sharding the weights of the module if it is a FSDPModule.
 - CI for FLUX model. Supported periodically running integration tests on 8 GPUs, and unittests.
-
 
 
 ## TODO
