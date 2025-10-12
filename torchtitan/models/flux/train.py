@@ -11,8 +11,6 @@ import torch
 
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.tools.logging import init_logger, logger
-from torchtitan.train import Trainer
 
 from torchtitan.models.flux.infra.parallelize import parallelize_encoders
 from torchtitan.models.flux.model.autoencoder import load_ae
@@ -23,6 +21,8 @@ from torchtitan.models.flux.utils import (
     preprocess_data,
     unpack_latents,
 )
+from torchtitan.tools.logging import init_logger, logger
+from torchtitan.train import Trainer
 
 
 class FluxTrainer(Trainer):
