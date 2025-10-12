@@ -76,6 +76,38 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "pp+fsdp+tp+ep+etp",
             ngpu=8,
         ),
+        # Integration Test Cases for Qwen3 dense and MoE model
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name deepseek_v3",
+                    "--model.flavor 0.6B",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                ],
+            ],
+            "PP+FSDP+TP+EP",
+            "pp+fsdp+tp+ep",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name qwen_moe_debugmodel",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--parallelism.expert_tensor_parallel_degree 2",
+                ],
+            ],
+            "PP+FSDP+TP+EP+ETP",
+            "pp+fsdp+tp+ep+etp",
+            ngpu=8,
+        ),
     ]
 
     return model_tests
