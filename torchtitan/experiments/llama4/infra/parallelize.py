@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -22,6 +21,7 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
@@ -120,6 +120,7 @@ def parallelize_llama(
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
+            base_folder=job_config.job.dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
@@ -238,8 +239,8 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None),
-                desired_input_layouts=(Replicate(), None),
+                input_layouts=(Shard(1), None, None),
+                desired_input_layouts=(Replicate(), None, None),
             ),
             "attention.wq": colwise_parallel(),
             "attention.wk": colwise_parallel(),
@@ -440,6 +441,8 @@ def apply_moe_ep_tp(
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
 ):
+    assert ep_mesh is not None or tp_mesh is not None
+
     for transformer_block in model.layers.values():
         if not transformer_block.moe_enabled:
             continue
@@ -485,16 +488,13 @@ def apply_moe_ep_tp(
             experts_mesh = tp_mesh
             # input Replicate, output Partial
             experts_plan = TensorParallel()
-        elif tp_mesh is None:
+        elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
-        elif etp_enabled:
-            experts_mesh = ep_tp_mesh
-            experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
         else:
-            experts_mesh = ep_mesh
-            experts_plan = ExpertParallel()
+            experts_mesh = ep_tp_mesh
+            experts_plan = ExpertTensorParallel()
 
         parallelize_module(
             module=transformer_block.moe.experts,

@@ -109,7 +109,6 @@ flux_configs = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="flux",
         model_cls=FluxModel,
         model_args=flux_configs,
         parallelize_fn=parallelize_flux,

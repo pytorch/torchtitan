@@ -102,6 +102,7 @@ def parallelize_llama(
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
+            base_folder=job_config.job.dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
@@ -206,8 +207,8 @@ def apply_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None),
-                desired_input_layouts=(Replicate(), None),
+                input_layouts=(Shard(1), None, None),
+                desired_input_layouts=(Replicate(), None, None),
             ),
             "attention.wq": colwise_parallel(),
             "attention.wk": colwise_parallel(),

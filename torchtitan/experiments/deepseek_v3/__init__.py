@@ -40,8 +40,8 @@ deepseek_configs = {
 
 
 register_train_spec(
+    "deepseek3",
     TrainSpec(
-        name="deepseek3",
         model_cls=DeepseekForCausalLM,
         model_args=deepseek_configs,
         parallelize_fn=parallelize_deepseek,
@@ -51,5 +51,5 @@ register_train_spec(
         build_dataloader_fn=build_hf_dataloader,
         build_tokenizer_fn=get_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
-    )
+    ),
 )
