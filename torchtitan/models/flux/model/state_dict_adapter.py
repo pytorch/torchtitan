@@ -14,14 +14,14 @@ from typing import Any
 
 import torch
 
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import FluxModelArgs
 
 logger = logging.getLogger()
 
 
-class FluxStateDictAdapter(BaseStateDictAdapter):
+class FluxStateDictAdapter(StateDictAdapter):
     """
     State dict adapter for Flux model to convert between HuggingFace safetensors format
     and torchtitan DCP format.
@@ -30,7 +30,7 @@ class FluxStateDictAdapter(BaseStateDictAdapter):
     """
 
     def __init__(self, model_args: FluxModelArgs, hf_assets_path: str | None):
-
+        super().__init__(model_args, hf_assets_path)
         # Build fqn to index mapping if hf_assets_path
         if hf_assets_path:
             # If directory is multimodal ensure that hf_assets_path is to the folder containing transformer's safetensors

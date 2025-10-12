@@ -12,9 +12,9 @@ set -ex
 # LOG_RANK=0,1 NGPU=4 ./torchtitan/experiments/flux/run_train.sh
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
-CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/experiments/flux/train_configs/debug_model.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/flux/train_configs/debug_model.toml"}
 
 PYTORCH_ALLOC_CONF="expandable_segments:True" \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
--m torchtitan.experiments.flux.train --job.config_file ${CONFIG_FILE} "$@"
+-m torchtitan.models.flux.train --job.config_file ${CONFIG_FILE} "$@"

@@ -12,7 +12,7 @@ from datasets import load_dataset
 
 from torchtitan.config import ConfigManager
 from torchtitan.datasets import DatasetConfig
-from torchtitan.experiments.flux.dataset.flux_dataset import (
+from torchtitan.datasets.flux_dataset import (
     _cc12m_wds_data_processor,
     build_flux_dataloader,
     DATASETS,
