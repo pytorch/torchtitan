@@ -80,7 +80,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name deepseek_v3",
+                    "--model.name qwen3",
                     "--model.flavor 0.6B",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
@@ -88,14 +88,15 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "PP+FSDP+TP+EP",
-            "pp+fsdp+tp+ep",
+            "Qwen3 PP+FSDP+TP",
+            "qwen3_pp+fsdp+tp",
             ngpu=8,
         ),
         OverrideDefinitions(
             [
                 [
-                    "--model.name qwen_moe_debugmodel",
+                    "--model.name qwen3",
+                    "--model.flavor debugmodel_moe",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -104,8 +105,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                     "--parallelism.expert_tensor_parallel_degree 2",
                 ],
             ],
-            "PP+FSDP+TP+EP+ETP",
-            "pp+fsdp+tp+ep+etp",
+            "Qwen3 PP+FSDP+TP+EP+ETP",
+            "qwen3_pp+fsdp+tp+ep+etp",
             ngpu=8,
         ),
     ]
