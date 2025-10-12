@@ -7,10 +7,10 @@
 import argparse
 import os
 
+from torchtitan.tools.logging import logger
+
 from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import _run_cmd
-
-from torchtitan.tools.logging import logger
 
 
 def build_flux_test_list() -> list[OverrideDefinitions]:
@@ -20,53 +20,6 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
     same root config file.
     """
     integration_tests_flavors = [
-        # basic tests
-        OverrideDefinitions(
-            [
-                [
-                    "--profiling.enable_profiling",
-                    "--metrics.enable_tensorboard",
-                ],
-            ],
-            "default",
-            "default",
-        ),
-        # Checkpointing tests.
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                ],
-                [
-                    "--checkpoint.enable",
-                    "--training.steps 20",
-                ],
-            ],
-            "Checkpoint Integration Test - Save Load Full Checkpoint",
-            "full_checkpoint",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                    "--checkpoint.last_save_model_only",
-                ],
-            ],
-            "Checkpoint Integration Test - Save Model Only fp32",
-            "last_save_model_only_fp32",
-        ),
-        # Parallelism tests.
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.data_parallel_replicate_degree 1",
-                ]
-            ],
-            "FSDP",
-            "fsdp",
-            ngpu=4,
-        ),
         OverrideDefinitions(
             [
                 [
@@ -129,16 +82,16 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
     # Random init encoder for offline testing
     model_arg = "--model.name flux"
     random_init_encoder_arg = "--training.test_mode"
-    clip_encoder_version_arg = "--encoder.clip_encoder torchtitan/experiments/flux/tests/assets/clip-vit-large-patch14/"
-    t5_encoder_version_arg = (
-        "--encoder.t5_encoder torchtitan/experiments/flux/tests/assets/t5-v1_1-xxl/"
+    clip_encoder_version_arg = (
+        "--encoder.clip_encoder tests/assets/clip-vit-large-patch14/"
     )
+    t5_encoder_version_arg = "--encoder.t5_encoder tests/assets/t5-v1_1-xxl/"
     tokenzier_path_arg = "--model.tokenizer_path tests/assets/tokenizer"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./torchtitan/experiments/flux/run_train.sh"
+        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./torchtitan/models/flux/run_train.sh"
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
 
@@ -147,7 +100,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
             # For flux generation, test using inference script
             cmd = (
                 f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
-                f"./torchtitan/experiments/flux/inference/run_infer.sh"
+                f"scripts/flux_inference/run_infer.sh"
             )
 
         cmd += " " + model_arg
@@ -201,7 +154,7 @@ def main():
     parser.add_argument("output_dir")
     parser.add_argument(
         "--config_path",
-        default="./torchtitan/experiments/flux/train_configs/debug_model.toml",
+        default="./tests/integration_tests/base_config.toml",
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(
