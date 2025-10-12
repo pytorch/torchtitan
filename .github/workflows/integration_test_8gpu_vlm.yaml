@@ -1,13 +1,13 @@
-name: Flux 8 GPU Integration Test
+name: 8 GPU Vision Language Model Tests
 
 on:
   push:
     branches: [ main ]
     paths:
-      - 'torchtitan/experiments/flux/**'
+      - 'torchtitan/experiments/vlm/**'
   pull_request:
     paths:
-      - 'torchtitan/experiments/flux/**'
+      - 'torchtitan/experiments/vlm/**'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -19,7 +19,7 @@ defaults:
 
 jobs:
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
       runner: linux.g5.48xlarge.nvidia.gpu
       gpu-arch-type: cuda
@@ -29,7 +29,6 @@ jobs:
       docker-image: torchtitan-ubuntu-20.04-clang12
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      # delete the checkpoints in the artifacts to save CI uploading time
       script: |
         set -eux
 
@@ -37,14 +36,15 @@ jobs:
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
 
-        pip config --user set global.progress_bar off
-
         # Log CUDA driver version for debugging.
         DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
         echo "CUDA driver version: ${DRIVER_VERSION}"
 
+        pip config --user set global.progress_bar off
+
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
 
+        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
+
         mkdir artifacts-to-be-uploaded
-        python -m torchtitan.experiments.flux.tests.integration_tests artifacts-to-be-uploaded --ngpu 8
-        rm -rf artifacts-to-be-uploaded/*/checkpoint
+        python -m torchtitan.experiments.vlm.tests.integration_tests artifacts-to-be-uploaded --ngpu 4
