@@ -190,8 +190,19 @@ class CheckpointManager:
         self.load_only = checkpoint_config.load_only
 
         self.ft_manager = (
-            ft_manager.manager if ft_manager and ft_manager.enabled else None
+            ft_manager.manager
+            if ft_manager
+            and ft_manager.enabled
+            and checkpoint_config.enable_ft_dataloader_checkpoints
+            else None
         )
+
+        if ft_manager and ft_manager.enabled and not self.ft_manager:
+            logger.warn(
+                "Fault tolerance is enabled but enable_ft_dataloader_checkpoints is False. "
+                "This means replicas can retrain over the same data multiple times, which can result in overfitting."
+            )
+
         if self.ft_manager:
             optimizers.init_cache_state_dict()
 
