@@ -55,11 +55,13 @@ def parallelize_deepseekv3(
                 "Currently, float8 tensorwise TP is not tested for deepseekv3"
             )
 
+        use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
         apply_non_moe_tp(
             model,
             world_mesh["tp"],
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
+            use_flex_attn=use_flex_attn,
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
