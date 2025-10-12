@@ -426,50 +426,48 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
+        else:
+            extra_args["attention_masks"] = None
 
         # Get the order sensitive buffers
         order_sensitive_buffers = model_parts[0].get_order_sensitive_buffers(
             inputs.size(0), inputs.size(1)
         )
-        extra_args.update(order_sensitive_buffers[0])
-
-        # apply context parallelism if cp is enabled
-        # ensure CP handles the separate freqs_cis buffer for each pp stage
         cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
-        optional_context_parallel_ctx = (
-            dist_utils.create_context_parallel_ctx(
-                cp_mesh=parallel_dims.world_mesh["cp"],
-                cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
-                cp_seq_dims=[1, 1] + [0 for _ in model_parts],
-                cp_no_restore_buffers={inputs, labels},
-                cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+        if cp_mesh:
+            (
+                inputs,
+                labels,
+                extra_args["attention_masks"],
+                *order_sensitive_buffers,
+            ) = dist_utils.cp_shard(
+                cp_mesh,
+                inputs,
+                labels,
+                extra_args["attention_masks"],
+                *order_sensitive_buffers,
             )
-            if parallel_dims.cp_enabled
-            else None
-        )
+        extra_args.update(order_sensitive_buffers[0])
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
-            with self.train_context(optional_context_parallel_ctx):
-                targets, losses = (
-                    (labels, []) if self.pp_has_last_stage else (None, None)
+            targets, losses = (labels, []) if self.pp_has_last_stage else (None, None)
+            if self.pp_has_first_stage:
+                self.pp_schedule.step(
+                    inputs,
+                    **extra_inputs,
+                    **extra_args,
+                    target=targets,
+                    losses=losses,
+                    input_batch=inputs,
                 )
-                if self.pp_has_first_stage:
-                    self.pp_schedule.step(
-                        inputs,
-                        **extra_inputs,
-                        **extra_args,
-                        target=targets,
-                        losses=losses,
-                        input_batch=inputs,
-                    )
-                else:
-                    self.pp_schedule.step(
-                        **extra_args,
-                        target=targets,
-                        losses=losses,
-                        input_batch=inputs,
-                    )
+            else:
+                self.pp_schedule.step(
+                    **extra_args,
+                    target=targets,
+                    losses=losses,
+                    input_batch=inputs,
+                )
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
@@ -483,18 +481,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # Non-PP forward / backward
-            with self.train_context(optional_context_parallel_ctx):
-                assert len(model_parts) == 1
-                with self.maybe_enable_amp:
-                    pred = model_parts[0](
-                        inputs,
-                        **extra_inputs,
-                        **extra_args,
-                    )
-                    loss = self.loss_fn(pred, labels)
-                # need to free pred before bwd to avoid peaking memory
-                del pred
-                loss.backward()
+            assert len(model_parts) == 1
+            with self.maybe_enable_amp:
+                pred = model_parts[0](
+                    inputs,
+                    **extra_inputs,
+                    **extra_args,
+                )
+                loss = self.loss_fn(pred, labels)
+            # need to free pred before bwd to avoid peaking memory
+            del pred
+            loss.backward()
 
         return loss
 
