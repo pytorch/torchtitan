@@ -32,10 +32,11 @@ ENV PATH /opt/conda/envs/py_$PYTHON_VERSION/bin:/opt/conda/bin:$PATH
 COPY requirements-dev.txt /opt/conda/
 COPY requirements.txt /opt/conda/
 COPY requirements-flux.txt /opt/conda/
+COPY requirements-vlm.txt /opt/conda/
 COPY conda-env-ci.txt /opt/conda/
 COPY ./common/install_conda.sh install_conda.sh
 COPY ./common/utils.sh utils.sh
-RUN bash ./install_conda.sh && rm install_conda.sh utils.sh /opt/conda/requirements-dev.txt /opt/conda/requirements.txt /opt/conda/requirements-flux.txt /opt/conda/conda-env-ci.txt
+RUN bash ./install_conda.sh && rm install_conda.sh utils.sh /opt/conda/requirements-dev.txt /opt/conda/requirements.txt /opt/conda/requirements-flux.txt /opt/conda/requirements-vlm.txt /opt/conda/conda-env-ci.txt
 
 USER ci-user
 CMD ["bash"]

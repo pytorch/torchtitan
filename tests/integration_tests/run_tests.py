@@ -106,7 +106,7 @@ def main():
         "--test_suite",
         default="features",
         choices=["features", "models", "h100"],
-        help="Which test suite to run. If not specified, torchtitan composibility tests will be run",
+        help="Which test suite to run. If not specified, torchtitan composability tests will be run",
     )
     parser.add_argument(
         "--config_path",
