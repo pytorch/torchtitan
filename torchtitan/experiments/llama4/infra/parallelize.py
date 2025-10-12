@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -22,6 +21,7 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
@@ -441,6 +441,8 @@ def apply_moe_ep_tp(
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
 ):
+    assert ep_mesh is not None or tp_mesh is not None
+
     for transformer_block in model.layers.values():
         if not transformer_block.moe_enabled:
             continue
@@ -486,16 +488,13 @@ def apply_moe_ep_tp(
             experts_mesh = tp_mesh
             # input Replicate, output Partial
             experts_plan = TensorParallel()
-        elif tp_mesh is None:
+        elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
-        elif etp_enabled:
-            experts_mesh = ep_tp_mesh
-            experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
         else:
-            experts_mesh = ep_mesh
-            experts_plan = ExpertParallel()
+            experts_mesh = ep_tp_mesh
+            experts_plan = ExpertTensorParallel()
 
         parallelize_module(
             module=transformer_block.moe.experts,
