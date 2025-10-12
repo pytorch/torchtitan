@@ -4,12 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.components.loss import build_mse_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
-from torchtitan.protocols.train_spec import TrainSpec
 
 from torchtitan.datasets.flux_dataset import build_flux_dataloader
-from torchtitan.components.loss import build_mse_loss
+from torchtitan.protocols.train_spec import TrainSpec
 from .infra.parallelize import parallelize_flux
 from .model.args import FluxModelArgs
 from .model.autoencoder import AutoEncoderParams
