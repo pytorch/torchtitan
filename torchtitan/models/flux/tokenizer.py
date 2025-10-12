@@ -11,9 +11,10 @@
 from typing import List
 
 import torch
+from transformers import CLIPTokenizer, T5Tokenizer
+
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.config import JobConfig
-from transformers import CLIPTokenizer, T5Tokenizer
 
 
 class FluxTestTokenizer(BaseTokenizer):
