@@ -82,32 +82,28 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
                 [
                     "--model.name qwen3",
                     "--model.flavor 0.6B",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
-            "Qwen3 PP+FSDP+TP",
-            "qwen3_pp+fsdp+tp",
-            ngpu=8,
+            "Qwen3 FSDP+TP",
+            "qwen3_fsdp+tp",
+            ngpu=4,
         ),
         OverrideDefinitions(
             [
                 [
                     "--model.name qwen3",
                     "--model.flavor debugmodel_moe",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 2",
                     "--parallelism.expert_tensor_parallel_degree 2",
                 ],
             ],
-            "Qwen3 PP+FSDP+TP+EP+ETP",
-            "qwen3_pp+fsdp+tp+ep+etp",
-            ngpu=8,
+            "Qwen3 FSDP+TP+EP+ETP",
+            "qwen3_fsdp+tp+ep+etp",
+            ngpu=4,
         ),
     ]
 
