@@ -510,16 +510,17 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     """
     # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
     # but it is experimental.
-    # torch._dynamo.config.capture_scalar_outputs = True
+    torch._dynamo.config.capture_scalar_outputs = True
     for layer_id, transformer_block in model.layers.named_children():
         # TODO: remove when torch.compile supports fullgraph=True for MoE
-        fullgraph = True
         if transformer_block.moe_enabled:
-            fullgraph = False
+            transformer_block.moe.experts._forward = torch.compile(transformer_block.moe.experts._forward, backend=compile_config.backend, fullgraph=True)
+            transformer_block.moe.experts.forward = torch.compiler.disable(transformer_block.moe.experts.forward)
+
         transformer_block = torch.compile(
             transformer_block,
             backend=compile_config.backend,
-            fullgraph=fullgraph,
+            fullgraph=not transformer_block.moe_enabled,
         )
         model.layers.register_module(layer_id, transformer_block)
 
