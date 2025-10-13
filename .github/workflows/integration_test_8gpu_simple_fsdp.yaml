@@ -1,4 +1,4 @@
-name: SimpleFSDP 8 GPU Integration Test
+name: SimpleFSDP 8 GPU Integration Tests
 
 on:
   push:
@@ -9,8 +9,9 @@ on:
     paths:
       - 'torchtitan/experiments/simple_fsdp/**'
   schedule:
-    # Runs every 6 hours
-    - cron: '0 */6 * * *'
+    # Runs every 12 hours
+    - cron: '0 */12 * * *'
+
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
   cancel-in-progress: true
