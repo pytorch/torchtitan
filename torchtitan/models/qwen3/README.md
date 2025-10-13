@@ -23,7 +23,6 @@ eg, for Qwen3 0.6B model, the HF repo name is `Qwen/Qwen3-0.6B`. For 1.7B model,
 ## To be added
 - Modeling
     - CP is not supported currently because of RoPE embedding implementation details.
-    - `StateDictAdapter` support for MoE model
 
 - Testing
     - Learning rate verifying: verify learning rate and schedule with real training jobs (eg, 3k stps), or find official references.

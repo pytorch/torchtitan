@@ -30,6 +30,19 @@ __all__ = [
 # Adding different variants of the model
 
 qwen3_configs = {
+    "debugmodel": Qwen3ModelArgs(
+        vocab_size=2048,
+        max_seq_len=4096,
+        head_dim=128,
+        dim=256,
+        n_layers=8,
+        n_heads=16,
+        n_kv_heads=8,
+        qk_norm=True,
+        hidden_dim=3072,
+        rope_theta=1000000,
+        enable_weight_tying=True,
+    ),
     "0.6B": Qwen3ModelArgs(
         vocab_size=151936,
         max_seq_len=4096,
@@ -107,11 +120,11 @@ qwen3_configs = {
     ),
     # Qwen3-MoE models
     "debugmodel_moe": Qwen3ModelArgs(
-        vocab_size=151936,
+        vocab_size=2048,
         max_seq_len=4096,
         head_dim=128,
-        dim=1024,
-        n_layers=28,
+        dim=256,
+        n_layers=8,
         n_heads=16,
         n_kv_heads=8,
         qk_norm=True,
