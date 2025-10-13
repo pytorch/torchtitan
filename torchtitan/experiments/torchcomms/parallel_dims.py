@@ -55,4 +55,4 @@ class ParallelDimsForComms(ParallelDims):
             self.comms.append(comm)
             return mesh
         else:
-            raise NotImplementedError("Only support DP shard parallelism for now.")
+            raise NotImplementedError("Only support FSDP 1D parallelism for now.")
