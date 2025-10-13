@@ -1,8 +1,4 @@
-<<<<<<< HEAD
 name: VLM 8 GPU Integration Tests
-=======
-name: 8 GPU Vision Language Model Tests
->>>>>>> f7f225eb ([vlm] Add light-weight CI for experimental models (#1848))
 
 on:
   push:
