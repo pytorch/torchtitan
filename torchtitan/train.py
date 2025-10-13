@@ -94,7 +94,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
-        self.parallel_dims = parallel_dims = self.create_parallel_dims(parallelism_config, world_size)
+        self.parallel_dims = parallel_dims = self.create_parallel_dims(
+            parallelism_config, world_size
+        )
 
         world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
@@ -366,7 +368,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"total steps {job_config.training.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
-    
+
     def create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
         return ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
