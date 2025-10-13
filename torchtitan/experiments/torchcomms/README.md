@@ -15,6 +15,6 @@ TEST_BACKEND={backend} TRAIN_FILE=torchtitan.experiments.torchcomms.train ./run_
   - Integration and testing with `fully_shard` (FSDP)
 ---
 ## To Be Added
-- Composability testing with additional parallelism strategies (e.g., tensor, pipeline, model parallelism)
+- Integration and testing with additional parallelism strategies (e.g., tensor, pipeline, model parallelism) other than fully_shard
 - Integration and testing with torch.compile
 ---
