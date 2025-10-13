@@ -258,12 +258,12 @@ def pipeline_module_split(
         pp_schedule: Name of pipeline parallelism schedule
         device: Device
         module_names_per_stage: List of lists, where each inner list contains the module names
-                               that should be included in that stage. Module names should be
-                               dot-separated paths. Examples:
-                               - "tok_embeddings" for token embeddings
-                               - "layers.0", "layers.1" for specific transformer layers
-                               - "norm" for the final normalization layer
-                               - "output" for the output projection layer
+        that should be included in that stage. Module names should be
+        dot-separated paths. Examples:
+        - "tok_embeddings" for token embeddings
+        - "layers.0", "layers.1" for specific transformer layers
+        - "norm" for the final normalization layer
+        - "output" for the output projection layer
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the

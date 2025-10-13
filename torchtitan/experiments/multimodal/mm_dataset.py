@@ -34,10 +34,13 @@ def _process_obelics_sample(
 ) -> Dict[str, List[Union[str, "PIL.Image.Image"]]]:
     """
     This function formats samples from the OBELICS dataset
+
     Returns:
         Dict[str, Any]: The transformed sample with the following fields:
+
             - images: List[PIL.Image.Image] with the loaded images
             - text: str with the text of the sample ready to be tokenized including the image tokens
+
     Example:
         >>> formatted_sample = format_obelics(sample, image_token="<|image|>")
         >>> print(formatted_sample["text"])
@@ -85,18 +88,19 @@ class MultiModalDataset(IterableDataset, Stateful):
     Args:
         dataset_name (str): name of the dataset to load
         tokenizer (Tokenizer):
-            Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
+        Tokenizer used to encode data. Tokenize must implement an `encode` and `decode` method.
         world_size (int): number of data parallel processes participating in training
         rank (int): rank of the current data parallel process
         infinite (bool): whether to loop infinitely over the dataset
 
     We currently ONLY support the OBELICS dataset
 
-    Example use:
-    >>> ds = MultiModalDataset(dataset_name="OBELICS", tokenizer=tokenizer)
-    >>> for batch in Dataloader(ds, batch_size=8):
-            print(f"Batch size: {len(batch)}")
-        Batch size: 8
+    Example use::
+
+        >>> ds = MultiModalDataset(dataset_name="OBELICS", tokenizer=tokenizer)
+        >>> for batch in Dataloader(ds, batch_size=8):
+                print(f"Batch size: {len(batch)}")
+            Batch size: 8
     """
 
     def __init__(

@@ -138,10 +138,11 @@ class AllToAllVDev2dOffset(torch.autograd.Function):
 class TokenCombiner(torch.nn.Module):
     """
     Combine tokens from different experts, with backward pass to shuffle gradients back to the input.
+
     Args:
         `group_name`: name of the group to use for communication.
         `align`: alignment of the token offsets from each expert. If using
-                 Grouped Gemm next, this should be the same as Grouped Gemm's alignment.
+        Grouped Gemm next, this should be the same as Grouped Gemm's alignment.
         `in_len`: length of the input.
         `out_len`: length of the output.
         `token_shape`: shape of the tokens.

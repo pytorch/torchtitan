@@ -87,9 +87,11 @@ def _distribute_dtensor(
 ) -> DTensor:
     """
     Below are experimental enhancements to distribute a DTensor.
-    This helps enable Simple FSDP + TP/EP, in which
-        inner spec/mesh is TP/EP spec/mesh
-        outer spec/mesh is FSDP/DDP/HSDP spec/mesh
+    This helps enable Simple FSDP + TP/EP, in which:
+
+        - inner spec/mesh is TP/EP spec/mesh
+        - outer spec/mesh is FSDP/DDP/HSDP spec/mesh
+
     The logic follows
     https://github.com/pytorch/pytorch/blob/main/torch/distributed/_composable/fsdp/_fsdp_param.py#L261
     """
@@ -231,11 +233,13 @@ class ReplicateComputation(torch.nn.Module):
         self.mode = mode
         self.compute_placements = [Replicate()] * self.device_mesh.ndim
         self.grad_placements = [
-            _ScaledPartial(
-                reduction_divide_factor=reduction_divide_factor,
+            (
+                _ScaledPartial(
+                    reduction_divide_factor=reduction_divide_factor,
+                )
+                if reduction_divide_factor is not None
+                else Partial(reduce_op="avg")
             )
-            if reduction_divide_factor is not None
-            else Partial(reduce_op="avg")
         ] * self.device_mesh.ndim
         self.regional_ac = regional_ac
         mp_policy = mp_policy or MixedPrecisionPolicy()
@@ -296,7 +300,6 @@ class ReplicateComputation(torch.nn.Module):
         return output
 
     def forward(self, x):
-        global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
         # model initialization can be done now through

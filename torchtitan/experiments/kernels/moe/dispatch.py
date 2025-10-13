@@ -127,11 +127,12 @@ class AllToAllVDev2d(torch.autograd.Function):
 class TokenDispatcher(torch.nn.Module):
     """
     Dispatch tokens to different experts, with backward pass to shuffle gradients back to the input.
+
     Args:
         `group_name`: name of the group to use for communication.
         `align`: alignment of the token offsets for each receiving expert. If
-                 using Grouped Gemm next, this should be the same as Grouped Gemm's
-                 alignment.
+        using Grouped Gemm next, this should be the same as Grouped Gemm's
+        alignment.
         `in_len`: length of the input.
         `out_len`: length of the output.
         `token_shape`: shape of the tokens.

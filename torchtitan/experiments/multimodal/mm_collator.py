@@ -116,9 +116,9 @@ class MultiModalCollator:
             padding_idx (int): Padding index for input token ids. Defaults to 0.
             ignore_idx (int): Padding index for labels. Defaults to -100.
             pad_max_tiles (Optional[int]): Maximum number of tiles to pad to. If None, will pad to the largest number of tiles
-                in the batch. Defaults to None.
+            in the batch. Defaults to None.
             pad_max_images (Optional[int]): Maximum number of images to pad to. If None, will pad to the largest number of images
-                in the batch. Defaults to None.
+            in the batch. Defaults to None.
 
         Returns:
             Dict[str, Tensor]: Collated tokens, labels, images, aspect_ratio tensors.

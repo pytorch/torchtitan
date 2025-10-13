@@ -45,14 +45,15 @@ def precompute_freqs_cis(
         end (int): End index for precomputing frequencies.
         theta (float | None): Scaling factor for frequency computation. Defaults to 10000.0.
         scaling_args (RoPEScalingArgs | None): RoPE scaling arguments. Defaults to None.
-            scaling_factor (float): RoPE scaling multiplier; larger values
-                stretch positions to support longer contexts. Defaults to 8.0.
-            low_freq_factor (float): Extra scaling applied to the low-frequency
-                (long-wavelength) RoPE bands. Defaults to 1.0.
-            high_freq_factor (float): Extra scaling applied to the high-frequency
-                (short-wavelength) RoPE bands. Defaults to 4.0.
-            original_max_position_embeddings (int): Maximum position embeddings
-                for original model. Defaults to 8192.
+
+            - scaling_factor (float): RoPE scaling multiplier; larger values
+              stretch positions to support longer contexts. Defaults to 8.0.
+            - low_freq_factor (float): Extra scaling applied to the low-frequency
+              (long-wavelength) RoPE bands. Defaults to 1.0.
+            - high_freq_factor (float): Extra scaling applied to the high-frequency
+              (short-wavelength) RoPE bands. Defaults to 4.0.
+            - original_max_position_embeddings (int): Maximum position embeddings
+              for original model. Defaults to 8192.
     Returns:
         torch.Tensor: Precomputed frequency tensor with complex exponentials.
     """

@@ -56,18 +56,18 @@ class CLIPTransform:
             If None, this will be calculated using max_num_tiles and tile_size. Default None.
         tile_size (int): Size of the tiles to divide the image into. Default 224.
         max_num_tiles (Optional[int]): Only used if possible_resolutions is NOT given.
-            Maximum number of tiles to break an image into.
-            This will be used to generate possible_resolutions,
-            e.g. [(224, 224), (224, 448), (448, 224)] if max_num_tiles = 2 and tile_size = 224.
-            Default 4.
+        Maximum number of tiles to break an image into.
+        This will be used to generate possible_resolutions,
+        e.g. [(224, 224), (224, 448), (448, 224)] if max_num_tiles = 2 and tile_size = 224.
+        Default 4.
         dtype (torch.dtype): Data type of the output image. Default torch.bfloat16.
         resample (str): Resampling method used when resizing images. Supports any enum of
-            ``torchvision.transforms.InterpolationMode``, e.g. "nearest", "nearest_exact", "bilinear", "bicubic".
-            Default 'bilinear'.
-        resize_to_max_canvas (bool): "If True, the image will be upscaled without distortion to fit the largest possible
-            resolution from possible_resolutions.
-            If False, it will pick the resolution that minimizes downscaling, including no downscaling at all.
-            In this case, the image will only be upscaled if it's size < tile_size. Default False.
+        ``torchvision.transforms.InterpolationMode``, e.g. "nearest", "nearest_exact", "bilinear", "bicubic".
+        Default 'bilinear'.
+        resize_to_max_canvas (bool): If True, the image will be upscaled without distortion to fit the largest possible
+        resolution from possible_resolutions.
+        If False, it will pick the resolution that minimizes downscaling, including no downscaling at all.
+        In this case, the image will only be upscaled if it's size < tile_size. Default False.
 
     Examples:
         >>> image_transform = CLIPImageTransform(

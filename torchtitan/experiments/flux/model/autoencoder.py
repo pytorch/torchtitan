@@ -361,9 +361,11 @@ def load_ae(
 ) -> AutoEncoder:
     """
     Load the autoencoder from the given model name.
+
     Args:
         name (str): The name of the autoencoder.
         device (str or torch.device): The device to load the autoencoder to.
+
     Returns:
         AutoEncoder: The loaded autoencoder.
     """

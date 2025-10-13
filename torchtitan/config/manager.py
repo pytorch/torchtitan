@@ -28,10 +28,13 @@ class ConfigManager:
     Parses, merges, and validates a JobConfig from TOML and CLI sources.
 
     Configuration precedence:
+
         CLI args > TOML file > JobConfig defaults
 
     CLI arguments use the format <section>.<key> to map to TOML entries.
-    Example:
+
+    Example::
+
         model.name →
 
         [model]
@@ -121,9 +124,12 @@ class ConfigManager:
         allowing users to extend or override JobConfig configuration structure.
 
         Merge behavior:
+
         - If a field exists in both `base` and `custom`:
+
             - If both field types are dataclasses, they are merged recursively.
             - Otherwise, the field from `custom` overrides the one in `base` (type, default, etc.).
+
         - Fields only present in `base` or `custom` are preserved as-is.
         """
         result = []

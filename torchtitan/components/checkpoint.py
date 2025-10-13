@@ -164,14 +164,13 @@ class CheckpointManager:
         optimizers (OptimizersContainer): The optimizers used to optimize the model.
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize the model.
         states (Dict[str, Any]): The states that need to be saved, other than the
-            previous 4 components.
+        previous 4 components.
         checkpoint_config (Checkpoint): The config used to configure the checkpointing.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
-            with checkpoint_config.folder
+        with checkpoint_config.folder
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert model state
-            dicts between native format and other formats.
+        dicts between native format and other formats.
         ft_manager (Optional[ft.Manager]): The FTManager from TorchFT.
-
     """
 
     def __init__(
@@ -345,6 +344,7 @@ class CheckpointManager:
         to_hf: bool = False,
     ) -> Future | None:
         """Save the checkpoint with dcp.
+
         Args:
             state_dict (dict): The state dict to save.
             checkpoint_id (str): The checkpoint id to save.
@@ -432,11 +432,13 @@ class CheckpointManager:
         from_quantized: bool,
     ) -> None:
         """Load the checkpoint with dcp.
+
         Args:
             state_dict (dict): The state dict to load.
             checkpoint_id (str): The checkpoint id to load.
             from_hf (bool): Whether to load from HuggingFace checkpoint with
-                its own model definition and safetensors format.
+            its own model definition and safetensors format.
+            from_quantized (bool): Whether to load from quantized checkpoint.
         """
 
         if from_hf:

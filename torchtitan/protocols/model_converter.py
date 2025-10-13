@@ -17,6 +17,7 @@ class ModelConverter(Protocol):
 
     A model converter is applying a modification to PyTorch model.
     Typical use cases are:
+
         - Quantization: using QAT, FP8, ... specialized linear layers;
         - Fused optimized layers (e.g. flash-attention, norms, ...)
     """

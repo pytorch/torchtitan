@@ -232,14 +232,15 @@ class TokenChoiceTopKRouter(nn.Module):
         Args:
             x (torch.Tensor): Input tensor with shape ``(bs*slen, dim)``.
             expert_bias (torch.Tensor | None, optional): Optional bias tensor for experts with shape ``(num_experts,)``.
-                Used for load balancing. Defaults to None.
+            Used for load balancing. Defaults to None.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
                 - top_scores (torch.Tensor):
-                    Routing scores for selected experts with shape ``(bs*slen, top_k)``.
+                  Routing scores for selected experts with shape ``(bs*slen, top_k)``.
                 - selected_experts_indices (torch.Tensor):
-                    Expert indices selected for each token with shape ``(bs*slen, top_k)``.
+                  Expert indices selected for each token with shape ``(bs*slen, top_k)``.
                 - num_tokens_per_expert (torch.Tensor):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """

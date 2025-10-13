@@ -163,10 +163,11 @@ def generate_permute_indices(
         m_offsets: Cumulative sum of m_sizes. The exclusive ending position for each expert's tokens.
 
     Explanatory details:
-        `tokens_per_expert_group` is of shape (num_ranks * experts_per_rank,), for example:
-        From: |       rank 0      |       rank 1      |
-        To:   | E0 | E1 | E2 | E3 | E0 | E1 | E2 | E3 |
-              |  4 |  2 |  1 |  3 |  1 |  2 |  3 |  4 |
+        `tokens_per_expert_group` is of shape (num_ranks * experts_per_rank,), for example::
+
+            From: |       rank 0      |       rank 1      |
+            To:   | E0 | E1 | E2 | E3 | E0 | E1 | E2 | E3 |
+                  |  4 |  2 |  1 |  3 |  1 |  2 |  3 |  4 |
     """
 
     # prefix sum to get start index of each expert (parallel scan kernel in future?)

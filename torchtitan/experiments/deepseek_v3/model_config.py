@@ -15,6 +15,7 @@ class ModelArgs:
     defaults will yield a similar configuration to that of the DeepSeek-V3.
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
+
     Args:
         vocab_size (`int`, *optional*, defaults to 129280):
             Vocabulary size of the Deep model. Defines the number of different tokens that can be represented by the

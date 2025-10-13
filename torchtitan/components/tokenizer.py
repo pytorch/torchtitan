@@ -373,7 +373,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         Args:
             token_ids (list[int]): List of token IDs to decode
             **kwargs: Additional arguments passed to the underlying tokenizer's decode method
-                     (e.g., skip_special_tokens)
+            (e.g., skip_special_tokens)
 
         Returns:
             str: Decoded text

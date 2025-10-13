@@ -50,6 +50,7 @@ def _process_mm_sample(
         patch_size: Size of image patches
         max_patch_per_image: Maximum patches per image
         spatial_merge_size: merge 2D image patches to reduce LLM's sequence length.
+
             - if 1 (default): no merge, effectively NoOp
             - if 2: 2x2=4 image patches will be reduced to 1 LLM sequence
 

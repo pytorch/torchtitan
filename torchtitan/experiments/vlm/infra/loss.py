@@ -41,9 +41,10 @@ def token_imbalance_ce_loss(
     across all ranks, the resulting update is equivalent to a **global sample
     average** *only if every rank contains the same number of tokens*.
     In practice that assumption is violated for many workloads:
+
     - Sequences are padded to a fixed length -> some ranks see fewer real tokens.
     - SFT finetuning where user's queries tokens are masked out.
-    - Vision encoders often injects a large number of “ignored”
+    - Vision encoders often injects a large number of "ignored"
       tokens as context that are not trained with text tokens' loss.
 
     This function fixes the issue by **scaling the sum-of-loss** with the *average*
@@ -58,10 +59,12 @@ def token_imbalance_ce_loss(
     pred : torch.Tensor
     labels : torch.Tensor
     token_mesh : DeviceMesh
+
         A device mesh that contains all ranks participating in this training step's
         loss computation.  The function performs an ``all_reduce`` (mean) over the
         `num_tokens` tensor of a rank across this mesh.
-    ft_pg: dist.ProcessGroup | None
+
+    ft_pg : dist.ProcessGroup | None
         Optional pg for Fault Tolerance training.
 
     Returns

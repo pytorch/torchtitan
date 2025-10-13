@@ -216,6 +216,7 @@ class OnDeviceAllToAllV(torch.autograd.Function):
     def backward(ctx, grad_output, grad_splits):
         """
         Backward is implemented as a shuffle of the output's gradients to the input.
+
         Args:
             `grad_output`: output's gradients passed from the downstream.
             `grad_splits`: unused.

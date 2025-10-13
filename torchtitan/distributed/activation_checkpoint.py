@@ -58,7 +58,7 @@ def _apply_op_sac(
         ac_config (ACConfig): The activation checkpointing config.
         base_fqn (str, optional): The base fqn of the module. Defaults to None.
         op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
-            of recomputing.
+        of recomputing.
 
     Returns:
         nn.Module: The module with selective activation checkpointing applied.
@@ -160,9 +160,9 @@ def _apply_op_sac_to_transformer_block_with_flex(
         ac_config (ACConfig): The activation checkpointing config.
         base_fqn (str, optional): The base fqn of the module. Defaults to None.
         model_compile_enabled (bool): Whether model compilation is enabled.
-            Defaults to False.
+        Defaults to False.
         op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
-            of recomputing.
+        of recomputing.
 
     Returns:
         nn.Module: The transformer block with SAC applied.
@@ -294,7 +294,7 @@ def apply_ac(
         model_compile_enabled (bool): Whether torch.compile is enabled for the model.
         use_flex_attn (bool): Whether flex attention is enabled for the model.
         op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
-            of recomputing.
+        of recomputing.
     Returns:
         None
     """

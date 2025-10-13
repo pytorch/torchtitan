@@ -50,7 +50,6 @@ def _transform_train_spec(original_spec: TrainSpec):
 
 
 def register_train_spec(name: str, train_spec: ForgeTrainSpec) -> None:
-    global _extra_train_specs
     if name in _extra_train_specs:
         raise ValueError(f"ForgeTrainSpec {name} is already registered.")
 
@@ -60,7 +59,6 @@ def register_train_spec(name: str, train_spec: ForgeTrainSpec) -> None:
 
 def get_train_spec(name: str) -> ForgeTrainSpec:
     # user-defined ForgeTrainSpec has higher priority
-    global _extra_train_specs
     if name in _extra_train_specs:
         return _extra_train_specs[name]
 

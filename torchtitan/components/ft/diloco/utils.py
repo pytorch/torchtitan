@@ -21,12 +21,13 @@ def module_split(
     Args:
         model: The complete model to be split
         module_fqns_per_model_fragment: List of lists, where each inner list contains the module names
-                               that should be included in that fragment. Module names should be
-                               dot-separated paths. Examples:
-                               - "tok_embeddings" for token embeddings
-                               - "layers.0", "layers.1" for specific transformer layers
-                               - "norm" for the final normalization layer
-                               - "output" for the output projection layer
+        that should be included in that fragment. Module names should be
+        dot-separated paths. Examples:
+
+                - "tok_embeddings" for token embeddings
+                - "layers.0", "layers.1" for specific transformer layers
+                - "norm" for the final normalization layer
+                - "output" for the output projection layer
 
     Returns:
         List of model fragments

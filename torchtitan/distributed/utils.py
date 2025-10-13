@@ -36,8 +36,8 @@ def _dist_reduce(
         reduceOp (str): Reduce operation to perform.
         mesh (DeviceMesh): Device mesh to use for reduction.
         extra_pg (dist.ProcessGroup, optional): Extra process group to use for reduction.
-            Defaults to None. If provided, this all_reduce will be called for the extra
-            process group, and then the result will be all_reduced for the mesh.
+        Defaults to None. If provided, this all_reduce will be called for the extra
+        process group, and then the result will be all_reduced for the mesh.
     """
     if isinstance(x, DTensor):
         # functional collectives do not support DTensor inputs
@@ -334,17 +334,17 @@ def clip_grad_norm_(
         parameters: an iterable of Tensors or a single Tensor that will have gradients normalized
         max_norm (float): max norm of the gradients
         norm_type (float): type of the used p-norm. Can be ``'inf'`` for
-            infinity norm.
+        infinity norm.
         error_if_nonfinite (bool): if True, an error is thrown if the total
-            norm of the gradients from :attr:`parameters` is ``nan``,
-            ``inf``, or ``-inf``. Default: False (will switch to True in the future)
+        norm of the gradients from :attr:`parameters` is ``nan``,
+        ``inf``, or ``-inf``. Default: False (will switch to True in the future)
         foreach (bool): use the faster foreach-based implementation.
-            If ``None``, use the foreach implementation for CUDA and CPU native tensors and silently
-            fall back to the slow implementation for other device types.
-            Default: ``None``
+        If ``None``, use the foreach implementation for CUDA and CPU native tensors and silently
+        fall back to the slow implementation for other device types.
+        Default: ``None``
         pp_mesh: Pipeline Parallel device mesh. If not None, will reduce gradient norm across PP stages.
         ep_dense_params_mesh_ndim: Mesh ndim of the dense params when EP is used. If EP is not used,
-            set it to ``None``.
+        set it to ``None``.
 
     Returns:
         Total norm of the parameter gradients (viewed as a single vector).

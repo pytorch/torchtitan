@@ -36,6 +36,7 @@ class FlexAttentionWrapper(torch.nn.Module):
     """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
     This wrapper serves two purposes:
+
     1) Invoke `torch.compile` with a valid mode "max-autotune-no-cudagraphs" to
        achieve good performance.
     2) Being a wrapper allows us to apply _ContextParallel to it.

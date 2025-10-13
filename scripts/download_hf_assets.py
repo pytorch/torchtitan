@@ -26,7 +26,9 @@ def download_hf_assets(
     and downloads all related files
 
     Asset types:
+
     - tokenizer:
+
         - tokenizer.json - Modern HuggingFace tokenizers (complete definition)
         - tokenizer_config.json - Tokenizer configuration and metadata
         - tokenizer.model - SentencePiece model files (Llama, T5, etc.)
@@ -34,24 +36,30 @@ def download_hf_assets(
         - vocab.json - JSON vocabulary files
         - merges.txt - BPE merge rules (GPT-2, RoBERTa style)
         - special_tokens_map.json - Special token mappings
+
     - safetensors
+
         - *.safetensors - Modern Huggingface model weights format for fast loading
         - model.safetensors.index.json - Contains mapping from hf fqn to file name
+
     - index
+
         - model.safetensors.index.json - Contains mapping from hf fqn to file name
+
     - config
+
         - config.json - Defines the model architecture
         - generation_config.json - Defines the model architecture params needed for generation
 
     Args:
         repo_id (str): HuggingFace repository ID (e.g., meta-llama/Llama-3.1-8B")
         local_dir (str): Local directory to save tokenizer files. A subdirectory
-                        named after the model will be created automatically.
+        named after the model will be created automatically.
         asset_types (list[str]): List of the asset types to download
         hf_token (Optional[str]): HuggingFace API token for accessing private repositories.
-                                 Required for gated models like Llama.
+        Required for gated models like Llama.
         additional_patterns (Optional[list]): Additional file patterns to search for and download
-                                          from the HuggingFace Hub repository.
+        from the HuggingFace Hub repository.
         download_all (bool): If True, download all files from the repository
     """
     import os

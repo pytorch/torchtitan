@@ -22,6 +22,7 @@ class BaseStateDictAdapter(ABC):
 
     This class defines the interface for converting between native model
     state dict format and other model state dict formats.
+
     Args:
         model_args: for initializing the model's memory space
         hf_assets_path: path to HF assets folder containing tokenizer, model weights, etc.

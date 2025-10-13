@@ -16,6 +16,7 @@ import torch
 import torchvision
 from torchvision.transforms.v2 import functional as F
 
+
 # NOTE Copied from torchtune.modules.transforms.vision_utils.tile_crop.py
 def tile_crop(image: torch.Tensor, tile_size: int) -> torch.Tensor:
     """
@@ -80,10 +81,10 @@ def resize_with_pad(
         image (torch.Tensor): The input image tensor in the format [..., H, W].
         target_size (Tuple[int, int]): The desired resolution to fit the image into in the format [height, width].
         resample (torchvision.transforms.InterpolationMode): Resampling method used when resizing images.
-            Supports torchvision.transforms.InterpolationMode.NEAREST, InterpolationMode.NEAREST_EXACT,
-            InterpolationMode.BILINEAR and InterpolationMode.BICUBIC.
+        Supports torchvision.transforms.InterpolationMode.NEAREST, InterpolationMode.NEAREST_EXACT,
+        InterpolationMode.BILINEAR and InterpolationMode.BICUBIC.
         max_size (Optional[int]): The maximum size to upscale the image to.
-            If None, will upscale up to target_size.
+        If None, will upscale up to target_size.
 
     Returns:
         torch.Tensor: The resized and padded image tensor in the format [..., H, W].
@@ -263,9 +264,9 @@ def get_canvas_best_fit(
     Args:
         image (torch.Tensor): The image we want to fit into a canvas.
         possible_resolutions (torch.Tensor): A tensor of shape (N, 2) where each
-            row represents a possible canvas.
+        row represents a possible canvas.
         resize_to_max_canvas (bool): If True, pick the canvas that allows maximum scaling.
-            If False, pick the canvas that minimizes downscaling, including no downscaling at all.
+        If False, pick the canvas that minimizes downscaling, including no downscaling at all.
 
     Returns:
         Tuple[int, int]: The best resolution to fit the image into.

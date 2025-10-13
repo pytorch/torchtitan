@@ -365,7 +365,7 @@ class TilePositionalEmbedding(nn.Module):
         args:
             x (torch.Tensor): torch.Tensor with shape (bsz * num_imgs, num_tiles, num_tokens, emb_dim).
             aspect_ratio (torch.Tensor): torch.Tensor with shape (bsz * num_imgs, 2),
-                representing the aspect ratio of the image before tile-cropping, e.g. (2,1).
+            representing the aspect ratio of the image before tile-cropping, e.g. (2,1).
         returns:
             torch.Tensor: The input tensor with added positional embeddings.
         """
@@ -395,10 +395,10 @@ class TokenPositionalEmbedding(nn.Module):
     Args:
         emb_dim (int): The dimensionality of each token embedding.
         tile_size (int): The size of your image tiles, if the image was tile-cropped in advance. Otherwise,
-            the size of the input image. In this case, the function will consider your image as a single tile.
+        the size of the input image. In this case, the function will consider your image as a single tile.
         patch_size (int): The size of each patch. Used to divide the tiles into patches.
-            E.g. for ``patch_size=40``, a tile of shape (400, 400) will have 10x10 grid of patches
-            with shape (40, 40) each.
+        E.g. for ``patch_size=40``, a tile of shape (400, 400) will have 10x10 grid of patches
+        with shape (40, 40) each.
     """
 
     def __init__(self, emb_dim: int, tile_size: int, patch_size: int) -> None:
@@ -437,10 +437,10 @@ class TiledTokenPositionalEmbedding(nn.Module):
         max_num_tiles (int): The maximum number of tiles an image can be divided into.
         emb_dim (int): The dimensionality of each token embedding.
         tile_size (int): The size of your image tiles, if the image was tile-cropped in advance. Otherwise,
-            the size of the input image. In this case, the function will consider your image as a single tile.
+        the size of the input image. In this case, the function will consider your image as a single tile.
         patch_size (int): The size of each patch. Used to divide the tiles into patches.
-            E.g. for ``patch_size=40``, a tile of shape (400, 400) will have 10x10 grid of patches
-            with shape (40, 40) each.
+        E.g. for ``patch_size=40``, a tile of shape (400, 400) will have 10x10 grid of patches
+        with shape (40, 40) each.
     """
 
     def __init__(
@@ -474,8 +474,8 @@ class TiledTokenPositionalEmbedding(nn.Module):
         Args:
             x (torch.Tensor): torch.Tensor with shape (bsz * num_imgs, num_tiles, num_tokens, emb_dim).
             aspect_ratio (torch.Tensor): torch.Tensor with shape (bsz * num_imgs, 2),
-                where aspect_ratio[k] represents the aspect ratio of the k^th image
-                of the batch before tile-cropping,  e.g. aspect_ratio[k] = (2,1).
+            where aspect_ratio[k] represents the aspect ratio of the k^th image
+            of the batch before tile-cropping,  e.g. aspect_ratio[k] = (2,1).
         Returns:
             torch.Tensor: The input tensor with added positional embeddings.
         """
@@ -852,8 +852,8 @@ class Vit(nn.Module):
         Args:
             images (torch.Tensor): torch.Tensor with shape (bsz, num_imgs, num_tiles, num_channels, tile_size_w, tile_size_h).
             aspect_ratio (Optional[torch.Tensor]): torch.Tensor with shape (bsz, n_imgs, 2). If all
-                images have a single tile, i.e. they were not tile-cropped, it should be None.
-                Used to calculate the positional embeddings for the tiles.
+            images have a single tile, i.e. they were not tile-cropped, it should be None.
+            Used to calculate the positional embeddings for the tiles.
 
         Returns:
             Tuple[torch.Tensor, List[torch.Tensor]]: A tuple: (x, hidden_states),
@@ -1436,10 +1436,10 @@ class MultimodalDecoder(nn.Module):
             tokens (torch.Tensor): input tensor with shape ``[b x s]``
             encoder_input (Optional[torch.Tensor]): Optional input embeds from the encoder. Shape ``[b x s_e x d_e]``
             encoder_mask (Optional[torch.Tensor]):  Boolean tensor defining a relational matrix between
-                tokens and encoder embeddings. A True value at position ``i,j`` means token ``i`` can attend
-                to embedding ``j`` in the decoder. Mask has shape ``[b x s x s_e]``. Default is None,
-                but this is required during inference if the model has been setup with any layers
-                which use encoder embeddings and caches have been setup.
+            tokens and encoder embeddings. A True value at position ``i,j`` means token ``i`` can attend
+            to embedding ``j`` in the decoder. Mask has shape ``[b x s x s_e]``. Default is None,
+            but this is required during inference if the model has been setup with any layers
+            which use encoder embeddings and caches have been setup.
         """
         # input tensor of shape [b, s]
         bsz, seq_len = tokens.shape

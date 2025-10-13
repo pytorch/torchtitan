@@ -271,7 +271,7 @@ def get_m_alignment_for_contiguous_layout():
     """
     When we do a grouped GEMM in contiguous format, LHS are grouped into several batches along the M axis.
     Since we deal with exactly one sub-matrix of RHS for each GEMM block, batch sizes above should align well
-        with GEMM block shape.
+    with GEMM block shape.
 
     Returns:
         Group-level alignment requirement for grouped contiguous layout, which is always 128.
@@ -283,7 +283,7 @@ def get_tma_aligned_size(x: int, element_size: int) -> int:
     """
     Global memory address of TMA must be 16-byte aligned.
     Since we use column-major layout for the LHS scaling tensor,
-        the M-axis of the LHS scaling tensor needs to be padded to a multiple of 16 bytes.
+    the M-axis of the LHS scaling tensor needs to be padded to a multiple of 16 bytes.
 
     Arguments:
         x: original M-axis shape of the LHS scaling tensor.
@@ -302,7 +302,7 @@ def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
     """
     Returns TMA-aligned transposed format of the input tensor. `torch.transpose` will be called if necessary.
     If the input tensor is already column-major layout and 16-byte aligned along the M axis
-        (thus meets the requirement of LHS scaling tensor in DeepGEMM), this function will do nothing.
+    (thus meets the requirement of LHS scaling tensor in DeepGEMM), this function will do nothing.
 
     Arguments:
         x: usually the LHS scaling tensor in GEMM.

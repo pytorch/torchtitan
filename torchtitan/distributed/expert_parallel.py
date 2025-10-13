@@ -226,7 +226,6 @@ def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
     # TODO: move to core
     from torchtitan.experiments.kernels.moe.indices import generate_permute_indices
 
-    global TOKEN_GROUP_ALIGN_SIZE_M
     x_padded_per_expert = x.shape[0] + num_local_experts * TOKEN_GROUP_ALIGN_SIZE_M
     padded_max_len = _round_up(x_padded_per_expert, TOKEN_GROUP_ALIGN_SIZE_M)
     with torch.no_grad():

@@ -255,11 +255,12 @@ def pad_patches(
     max_patches: int,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """Pad or truncate patches and grids to max_patches length for single image.
+
     Args:
         patches: Image patches of shape SeqLen x Dim [L,D]
         grids: corresponding patch coordinates in 3D grid from top-left
-            with shape [L, 3] for temporal and spatial dimension t,h,w.
-            Grid of all -1 indicates padding position.
+        with shape [L, 3] for temporal and spatial dimension t,h,w.
+        Grid of all -1 indicates padding position.
     """
     L, D = patches.shape
 

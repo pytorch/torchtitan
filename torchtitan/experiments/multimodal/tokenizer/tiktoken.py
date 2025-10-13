@@ -123,6 +123,7 @@ class TikTokenizer(BaseTokenizer):
 
         By default, setting disallowed_special=() encodes a string by ignoring
         special tokens. Specifically:
+
         - Setting `disallowed_special` to () will cause all text corresponding
           to special tokens to be encoded as natural text (insteading of raising
           an error).

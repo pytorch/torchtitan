@@ -781,7 +781,6 @@ def grouped_gemm_forward(
 
     def grid(META):
         if USE_TMA_LOAD:
-            nonlocal desc_helper
             desc_helper.fill_2d_tma_descriptor(
                 "x",
                 x.data_ptr(),
