@@ -29,18 +29,19 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             "1D",
             "1d",
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
-                    "--compile.model_backend_override aot_eager_autobucketing",
-                ],
-            ],
-            "1D+aot_eager_autobucketing",
-            "1d_aot_eager_autobucketing",
-        ),
+        # TODO(ruisizhang123): add back after autobucketing pass is mature
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--model.name simple_fsdp.llama3",
+        #             "--compile.enable",
+        #             "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
+        #             "--compile.model_backend_override aot_eager_autobucketing",
+        #         ],
+        #     ],
+        #     "1D+aot_eager_autobucketing",
+        #     "1d_aot_eager_autobucketing",
+        # ),
         OverrideDefinitions(
             [
                 [
