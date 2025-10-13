@@ -72,7 +72,6 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
             continue
 
         # Check if we have enough GPUs
-        print("run single test")
         run_single_test(test_flavor, args.config_path, args.output_dir)
 
 
