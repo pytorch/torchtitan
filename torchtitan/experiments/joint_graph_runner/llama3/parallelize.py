@@ -344,8 +344,7 @@ def joint_graph_builder(model, *inputs, **kwargs):
 
         # gm = schedule_overlap_bucketing(gm)
 
-        # RuntimeError: Cannot access data pointer of Tensor that doesn't have storage P1985731155
-        # gm = compile_fx_annotated_nodes_with_inductor(gm, example_inputs)
+        gm = compile_fx_annotated_nodes_with_inductor(gm, example_inputs)
 
         print_if_rank0("After compiler:")
         print_if_rank0(gm.print_readable(print_output=False))
