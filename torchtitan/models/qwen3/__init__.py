@@ -120,7 +120,7 @@ qwen3_configs = {
     ),
     # Qwen3-MoE models
     "debugmodel_moe": Qwen3ModelArgs(
-        vocab_size=2048,
+        vocab_size=151936,
         max_seq_len=4096,
         head_dim=128,
         dim=256,
