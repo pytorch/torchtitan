@@ -19,11 +19,16 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torch.distributed.checkpoint import HuggingFaceStorageWriter
-from torch.distributed.checkpoint._consolidate_hf_safetensors import (
-    consolidate_safetensors_files_on_every_rank,
+from torch.distributed.checkpoint import (
+    HuggingFaceStorageReader,
+    HuggingFaceStorageWriter,
 )
-from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
+try:
+    from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
+except:
+    from torch.distributed.checkpoint.staging import BlockingAsyncStager as DefaultStager
+    def StagingOptions(a, b, c, d):
+        return True
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
@@ -187,7 +192,6 @@ class CheckpointManager:
         ft_manager: FTManager | None = None,
     ) -> None:
         self.enable = checkpoint_config.enable
-        self.load_only = checkpoint_config.load_only
 
         self.ft_manager = (
             ft_manager.manager
@@ -356,7 +360,9 @@ class CheckpointManager:
             Future: The future object if the checkpoint is async, otherwise None.
         """
 
+
         ret: Future | None = None
+
 
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
@@ -365,6 +371,7 @@ class CheckpointManager:
                 self.sd_adapter is not None
             ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
             state_dict = self.sd_adapter.to_hf(state_dict)
+
 
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
             if fqn_to_index_mapping:
@@ -385,8 +392,10 @@ class CheckpointManager:
                     enable_consolidation=True,
                 )
 
+
         else:
             checkpoint_save_id = checkpoint_id
+
 
         if async_mode == AsyncMode.ASYNC:
             ret = dcp.async_save(
@@ -411,7 +420,15 @@ class CheckpointManager:
                 checkpoint_id=checkpoint_save_id,
             )
 
+
         if to_hf and self.sd_adapter.fqn_to_index_mapping:
+            try:
+                from torch.distributed.checkpoint._consolidate_hf_safetensors import (
+                    consolidate_safetensors_files_on_every_rank,
+                )
+            except Exception as e:
+                raise e
+
             consolidate_safetensors_files_on_every_rank(
                 input_dir=os.path.join(checkpoint_id, "sharded"),
                 output_dir=checkpoint_id,
@@ -419,8 +436,10 @@ class CheckpointManager:
                 num_threads=5,
             )
 
+
         if enable_garbage_collection:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
+
 
         return ret
 
@@ -510,7 +529,6 @@ class CheckpointManager:
                 )
                 self.save_future = result.upload_completion
                 self.staging_future = result.staging_completion
-                self.staging = True
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 self.save_future = self.dcp_save(
@@ -641,7 +659,6 @@ class CheckpointManager:
         """
         if self.enable_staging and self.staging:
             self.staging_future.result()
-            self.staging = False
 
     def _find_load_step(self, folder: str = "") -> int:
         """Find the step to load the checkpoint for.
@@ -787,7 +804,7 @@ class CheckpointManager:
         )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
-        if not self.enable or self.load_only:
+        if not self.enable:
             return False
 
         if curr_step == 1 and self.enable_first_step_checkpoint:
