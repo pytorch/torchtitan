@@ -51,13 +51,14 @@ SimpleFSDP relies on compiler backend to perform optimizations (i.e., bucketing 
 
 2. auto optimization: perform auto-bucketing & reordering without user inputs. **Note: it is not guaranteed that users will get the most optimized training performance**
     - "aot_eager_autobucketing": perform autobucketing at aten fx-level, and perform code execution with aot_eager backend.
-
-
-users can specify the pass (e.g., "aot_eager_autobucketing") via additional configs:
-
-```bash
---job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config  --compile.model_backend_override "aot_eager_autobucketing"
-```
+      ```bash
+      --compile.backend "aot_eager" --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config  --compile.model_backend_override "aot_eager_autobucketing"
+      ```
+3. manual optimization: perform manual bucketing & reordering with user FQN inputs.
+    - "aot_eager_manualbucketing": perform manual bucketing at aten fx-level, and perform code execution with aot_eager backend.
+      ```bash
+      --compile.backend "aot_eager" --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config  --compile.model_backend_override "aot_eager_manualbucketing" --compile.manual_bucketed_modules "tok_embeddings,layers.[0-5],norm+output"
+      ```
 
 ### Citation
 

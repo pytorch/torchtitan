@@ -10,7 +10,10 @@ from dataclasses import dataclass, field
 @dataclass
 class Compile:
     model_backend_override: str | None = None
-    """Override backend to compile in simplefsdp. Additional backend includes aot_eager_autobucketing"""
+    """Override backend to compile in simplefsdp. Additional backend includes aot_eager_autobucketing """
+
+    manual_bucketed_modules: list[str] = field(default_factory=list)
+    """Which modules should be bucketed together based on user specifications in manual optimization """
 
 
 @dataclass
