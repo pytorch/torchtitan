@@ -412,6 +412,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             yield input_dict, labels
 
+    def custom_hash_fn(self, tensor):
+        return tensor.norm(p=2, dtype=torch.float64)
+
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
@@ -488,6 +491,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     pred = model_parts[0](inputs, **extra_inputs, **extra_args)
                     loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
+                for res in model_parts[0].total_list:
+                    print("[FWD] pred results", self.custom_hash_fn(res))
+                print("[FWD] pred results", self.custom_hash_fn(pred))
                 del pred
                 loss.backward()
 
@@ -521,6 +527,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ),
             ep_enabled=parallel_dims.ep_enabled,
         )
+
+        for m in self.model_parts:
+            for p_name, p in m.named_parameters():
+                print("[BWD] grad", self.custom_hash_fn(p).to_local())
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()

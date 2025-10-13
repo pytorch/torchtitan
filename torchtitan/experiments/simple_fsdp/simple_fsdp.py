@@ -342,7 +342,6 @@ def data_parallel(
 
     # apply regional ac (with fsdp_policy) if no global ac is to be applied
     regional_ac = ac_mode == "none"
-
     for mod in modules:
         params_dict = dict(mod.named_parameters(recurse=False))
         # we shouldn't apply data parallel to the modules that are already
