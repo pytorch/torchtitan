@@ -81,7 +81,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name qwen3",
-                    "--model.flavor 0.6B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
