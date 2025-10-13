@@ -116,14 +116,6 @@ def set_determinism(
         FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
 
     seed = debug_config.seed
-        # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
-        # reproducibility, since the autotune results may not be deterministic.
-        from torch.nn.attention.flex_attention import flex_attention
-
-        from torchtitan.models.attention import FlexAttentionWrapper
-
-        FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
-
     if not world_mesh:
         if seed is not None:
             torch.manual_seed(seed)
