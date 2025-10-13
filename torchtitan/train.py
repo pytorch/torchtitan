@@ -11,9 +11,9 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
@@ -101,7 +101,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
             dp_mesh = world_mesh["dp"]
-            dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_rank()
+            dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
         else:
             dp_degree, dp_rank = 1, 0
 
