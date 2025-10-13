@@ -12,12 +12,11 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.models.llama3 import llama3_configs, pipeline_llama, Transformer
 from torchtitan.models.llama3.infra.parallelize import parallelize_llama
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
-
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        name="torchcomms",
+register_train_spec(
+    "torchcomms",
+    TrainSpec(
         model_cls=Transformer,
         model_args=llama3_configs,
         parallelize_fn=parallelize_llama,
@@ -27,4 +26,5 @@ def get_train_spec() -> TrainSpec:
         build_dataloader_fn=build_hf_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
-    )
+    ),
+)

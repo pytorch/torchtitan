@@ -37,48 +37,22 @@ class ParallelDimsForComms(ParallelDims):
         # TODO:
         # - Extend support for additional parallelism strategies (e.g., pipeline, context)
         # - Refactor and modularize initialization logic for communication objects and device mesh construction.
-        if self.dp_shard_enabled and not self.tp_enabled:
-            comms = (torchcomms.new_comm(backend, device, name="dp_shard_cp"),)
-            mesh = init_device_mesh(mesh_dim_comms=comms, mesh_dim_names=names)
-        elif self.dp_shard_enabled and self.tp_enabled:
+        if (
+            self.dp_shard > 1
+            and self.pp == 1
+            and self.dp_replicate == 1
+            and self.cp == 1
+            and self.tp == 1
+        ):
+            self.comms = []
             comm = torchcomms.new_comm(backend, device, name="main")
-            mesh_arrange = torch.arange(
-                self.world_size, dtype=torch.int, device="cpu"
-            ).view(self.dp_shard, self.dp)
-            tp_comm = comm.split(mesh_arrange.tolist(), "tp")
-            dp_comm = comm.split(mesh_arrange.transpose(0, 1).tolist(), "dp_shard")
+            # TODO: it's a hacky solution for now and we will update it in a week
             mesh = init_device_mesh(
-                mesh_dim_comms=(dp_comm, tp_comm),
-                mesh_dim_names=("dp_shard", "tp"),
+                mesh_dim_comms=(comm, comm, comm, comm),
+                mesh_dim_names=("dp_shard", "dp", "dp_cp", "dp_shard_cp"),
                 _global_comm=comm,
             )
-
-        # Create all the submesh here to ensure all required process groups are
-        # initialized:
-        # Mesh for data loading (no communication on this mesh)
-        dp_mesh_dim_names = []
-        # Mesh for param sharding
-        dp_shard_cp_mesh_dim_names = []
-        # Mesh for loss all-reduce
-        dp_cp_mesh_dim_names = []
-
-        if self.dp_replicate_enabled:
-            dp_mesh_dim_names.append("dp_replicate")
-            dp_cp_mesh_dim_names.append("dp_replicate")
-        if self.dp_shard_enabled:
-            dp_mesh_dim_names.append("dp_shard")
-            dp_shard_cp_mesh_dim_names.append("dp_shard")
-            dp_cp_mesh_dim_names.append("dp_shard")
-        if self.cp_enabled:
-            dp_shard_cp_mesh_dim_names.append("cp")
-            dp_cp_mesh_dim_names.append("cp")
-
-        if dp_mesh_dim_names != []:
-            mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
-        if dp_shard_cp_mesh_dim_names != []:
-            mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(
-                mesh_dim_name="dp_shard_cp"
-            )
-        if dp_cp_mesh_dim_names != []:
-            mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
-        return mesh
+            self.comms.append(comm)
+            return mesh
+        else:
+            raise NotImplementedError("Only support DP shard parallelism for now.")

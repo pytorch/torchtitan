@@ -37,7 +37,8 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = " ./run_train.sh --model.name torchcomms "
+        cmd = " TRAIN_FILE=torchtitan.experiments.torchcomms.train"
+        cmd = cmd + " ./run_train.sh --model.name torchcomms "
         cmd = (
             f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks}"
             + cmd
@@ -88,15 +89,6 @@ def build_integration_tests_list() -> list[OverrideDefinitions]:
             ],
             "FSDP",
             "FSDP",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "FSDP+TP",
-            "FSDP+TP",
         ),
     ]
     return integration_tests_flavors

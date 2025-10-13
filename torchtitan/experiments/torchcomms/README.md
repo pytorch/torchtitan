@@ -4,7 +4,7 @@ This repository provides a framework for composability testing with **TorchComms
 ---
 #### Example
 ```bash
-TEST_BACKEND=nccl ./run_train.sh --model.name torchcomms
+TEST_BACKEND={backend} TRAIN_FILE=torchtitan.experiments.torchcomms.train ./run_train.sh --model.name torchcomms
 ```
 ---
 ## Available Features
