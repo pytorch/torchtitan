@@ -198,12 +198,11 @@ class ExpertTensorParallel(ExpertParallel):
 class ReordererSequenceParallel(ParallelStyle):
     def __init__(self):
         super().__init__()
-        self.top_k = None
 
     def _prepare_inputput_fn(self, mod, inputs, device_mesh):
         # shape (batch_size*seq_len, top_k)
         top_scores, selected_experts_indices = inputs
-        num_tokens, self.top_k = top_scores.shape
+        num_tokens, _ = top_scores.shape
 
         # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
         # if top_scores.shape[0] % device_mesh.size() != 0:
@@ -241,7 +240,7 @@ class ReordererSequenceParallel(ParallelStyle):
         #       the MoE gather and scatter still require global token indices.
         local_rank = device_mesh.get_local_rank()
         # fact: top_scores.shape[0] // self.top_k = batch_size * seq_len // ep_degree
-        token_indices_experts_sorted += top_scores.shape[0] // self.top_k * local_rank
+        token_indices_experts_sorted += top_scores.shape[0] // mod.top_k * local_rank
 
         return top_scores, token_indices_experts_sorted, num_tokens_per_expert
 
