@@ -44,7 +44,7 @@ class Trainer(ForgeEngine):
     def __init__(self, job_config: JobConfig):
         logger.info(f"Starting job: {job_config.job.description}")
 
-        if job_config.job.print_args:
+        if job_config.job.print_config:
             logger.info(f"Running with args: {job_config.to_dict()}")
 
         if job_config.experimental.custom_import:

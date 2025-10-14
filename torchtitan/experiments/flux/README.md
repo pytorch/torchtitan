@@ -29,7 +29,7 @@ Run the following command to train the model on a single GPU:
 
 ```
 
-If you want to train with other model config, run the following command:
+If you want to train with other model args, run the following command:
 ```bash
 CONFIG_FILE="./torchtitan/experiments/flux/train_configs/flux_schnell_model.toml" ./torchtitan/experiments/flux/run_train.sh
 ```

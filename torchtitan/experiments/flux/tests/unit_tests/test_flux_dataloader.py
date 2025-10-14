@@ -50,7 +50,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 config_manager = ConfigManager()
                 config = config_manager.parse_args(
                     [
-                        f"--experimental.custom_args_module={path}",
+                        f"--job.custom_config_module={path}",
                         "--training.img_size",
                         str(256),
                         "--training.dataset",
