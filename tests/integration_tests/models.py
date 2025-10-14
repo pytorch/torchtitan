@@ -138,6 +138,24 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "qwen3_fsdp+tp+ep+etp",
             ngpu=4,
         ),
+        # Integration Test Cases for Llama 4
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name llama4",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                    "--compile.enable",
+                ],
+            ],
+            "Llama 4 PP+FSDP+TP+EP+compile",
+            "llama4_pp+fsdp+tp+ep+compile",
+            ngpu=8,
+        ),
     ]
 
     return model_tests
