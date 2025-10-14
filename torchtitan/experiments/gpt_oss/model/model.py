@@ -7,6 +7,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.protocols.model import AttentionMasksType
 import torch
 from torch import nn
 from torchtitan.models.attention import build_attention
@@ -111,8 +112,8 @@ class Attention(nn.Module):
     ):
         super().__init__()
 
-        self.sliding_window = (
-            model_args.sliding_window if use_sliding_attention else None
+        self.sliding_window_size = (
+            model_args.sliding_window_size if use_sliding_attention else None
         )
         self.head_dim = model_args.head_dim
         self.n_heads = model_args.n_heads
@@ -142,27 +143,33 @@ class Attention(nn.Module):
         )
         self.sinks = nn.Parameter(torch.empty(model_args.n_heads))
 
-        self.use_flex_attn = model_args.use_flex_attn
+        self.use_flex_attn = getattr(model_args, "use_flex_attn", False)
 
-        if not self.use_flex_attn:
-            raise ValueError("Only support FlexAttention in Gpt-oss model")
-
-        # Only apply sliding window to every other layer
-        if use_sliding_attention:
-            self.attn = build_attention(
-                use_flex_attn=True,
-                attn_mask_type="sliding_window",
-                sliding_window=self.sliding_window,
-            )
+        if self.use_flex_attn:
+            self.inner_attention = FlexAttentionWrapper()
         else:
-            self.attn = build_attention(
-                use_flex_attn=True, attn_mask_type=model_args.attn_mask_type
-            )
+            raise ValueError("Gpt-oss model only supports FlexAttention!")
+    
+    def init_weights(self, init_std: float):
+        linear_list = [
+            self.wq,
+            self.wk,
+            self.wv,
+        ]
 
+        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
+        for linear in linear_list:
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(linear.bias, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
+
+    
     def forward(
         self,
         x: torch.Tensor,
         rope_cache: torch.Tensor,
+        attention_mask: AttentionMasksType | None,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
@@ -191,14 +198,18 @@ class Attention(nn.Module):
         k = keys.transpose(1, 2).contiguous()
         v = values.transpose(1, 2).contiguous()
 
-        # FlexAttention
-        output, aux_output = self.attn(
-            q,
-            k,
-            v,
-            scale=None,
-            return_lse=True,
-        )
+        if self.use_flex_attn:
+            assert isinstance(attention_masks, BlockMask), attention_masks
+            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+        
+        # # FlexAttention
+        # output, aux_output = self.attn(
+        #     q,
+        #     k,
+        #     v,
+        #     scale=None,
+        #     return_lse=True,
+        # )
 
         # Apply attention sink rescaling: rescale by σ(lse - w[h])
         # This is mathematically equivalent to concatenating learnable sink weights
@@ -214,20 +225,6 @@ class Attention(nn.Module):
         ).contiguous()  # (bsz, seqlen, n_heads * v_head_dim)
         output = self.wo(output)  # (bsz, seqlen, dim)
         return output
-
-    def init_weights(self, init_std: float):
-        linear_list = [
-            self.wq,
-            self.wk,
-            self.wv,
-        ]
-
-        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
-        for linear in linear_list:
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
-            nn.init.trunc_normal_(linear.bias, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
 
     # TODO: statically init the mask using train.seq_len
     def sliding_window_causal(self, seqlen, device):
@@ -265,7 +262,7 @@ class TransformerBlock(nn.Module):
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
-    def forward(self, x: torch.Tensor, rope_cache: torch.Tensor):
+    def forward(self, x: torch.Tensor, rope_cache: torch.Tensor, attention_masks: AttentionMasksType | None):
         """
         Forward pass for the Transformer block.
 
@@ -276,7 +273,7 @@ class TransformerBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        x = x + self.attention(self.attention_norm(x), rope_cache)
+        x = x + self.attention(self.attention_norm(x), rope_cache, attention_masks)
         x = x + self.moe(self.ffn_norm(x))
         return x
 
@@ -345,6 +342,29 @@ class GptOssModel(nn.Module, ModelProtocol):
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
         )
+
+    def get_attention_masks(
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
+    ) -> AttentionMasksType:
+        # TODO: implement this function
+        mask_mods = [get_causal_mask_mod()]
+        match self.model_args.attn_mask_type:
+            case "causal":
+                B = 1
+            case "block_causal":
+                B = input_batch.shape[0]
+                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+            case _:
+                raise ValueError(
+                    f"Unknown attention mask type: {self.model_args.attn_mask_type}"
+                )
+        return create_attention_mask(
+            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
+        )
+
 
     def forward(self, tokens: torch.Tensor):
         """

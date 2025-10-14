@@ -73,7 +73,7 @@ class GptOssModelArgs(BaseModelArgs):
     head_dim: int = 64
     n_heads: int = 64
     n_kv_heads: int = 8
-    sliding_window: int = 128
+    sliding_window_size: int = 128
     use_flex_attn: bool = True
     attn_mask_type: str = "causal"
     # yarn
