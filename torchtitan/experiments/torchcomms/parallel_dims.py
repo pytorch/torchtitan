@@ -15,11 +15,11 @@ from torchcomms.device_mesh import init_device_mesh
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 
-__all__ = ["ParallelDimsForComms"]
+__all__ = ["TorchCommsParallelDims"]
 
 
 @dataclass
-class ParallelDimsForComms(ParallelDims):
+class TorchCommsParallelDims(ParallelDims):
     def _build_mesh_without_ep(self) -> DeviceMesh:
         dims = []
         names = []

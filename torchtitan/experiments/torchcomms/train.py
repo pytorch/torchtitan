@@ -14,14 +14,14 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
 
-from .parallel_dims import ParallelDimsForComms
+from .parallel_dims import TorchCommsParallelDims
 
 
-class CommsTrainer(Trainer):
-    parallel_dims: ParallelDimsForComms
+class TorchCommsTrainer(Trainer):
+    parallel_dims: TorchCommsParallelDims
 
-    def create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
-        return ParallelDimsForComms(
+    def _create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
+        return TorchCommsParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
             cp=parallelism_config.context_parallel_degree,
@@ -37,10 +37,10 @@ if __name__ == "__main__":
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
-    trainer: Optional[CommsTrainer] = None
+    trainer: Optional[TorchCommsTrainer] = None
 
     try:
-        trainer = CommsTrainer(config)
+        trainer = TorchCommsTrainer(config)
 
         if config.checkpoint.create_seed_checkpoint:
             assert (

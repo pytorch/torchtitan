@@ -1,10 +1,12 @@
 # TorchTitan & TorchComms Composability Testing
 
-This repository provides a framework for composability testing with **TorchComms** and distributed training in **TorchTitan**. The goal is to enable flexible experimentation with distributed communication primitives and parallelism strategies in PyTorch.
+This folder provides a framework for composability testing with TorchComms and distributed training in TorchTitan. The goal is to enable flexible experimentation with distributed communication primitives and parallelism strategies in PyTorch.
 ---
 #### Example
+
+The command below uses Llama 3 as an example, but should work on all models.
 ```bash
-TEST_BACKEND={backend} TRAIN_FILE=torchtitan.experiments.torchcomms.train ./run_train.sh --model.name torchcomms
+TEST_BACKEND=nccl TRAIN_FILE=torchtitan.experiments.torchcomms.train CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_train.sh
 ```
 ---
 ## Available Features

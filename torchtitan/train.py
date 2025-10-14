@@ -11,9 +11,9 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
@@ -94,7 +94,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
-        self.parallel_dims = parallel_dims = self.create_parallel_dims(
+        self.parallel_dims = parallel_dims = self._create_parallel_dims(
             parallelism_config, world_size
         )
 
@@ -369,7 +369,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
-    def create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
+    def _create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
         return ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
