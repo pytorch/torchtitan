@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.expert_parallel import indices_padding_wrapper
+from .utils import indices_padding_wrapper
 
 
 @dataclass
