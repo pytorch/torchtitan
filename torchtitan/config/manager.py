@@ -45,7 +45,7 @@ class ConfigManager:
 
     def parse_args(self, args: list[str] = sys.argv[1:]) -> JobConfig:
         toml_values = self._maybe_load_toml(args)
-        config_cls = self._maybe_add_custom_args(args, toml_values)
+        config_cls = self._maybe_add_custom_config(args, toml_values)
 
         base_config = (
             self._dict_to_dataclass(config_cls, toml_values)
@@ -83,16 +83,19 @@ class ConfigManager:
             logger.exception(f"Error while loading config file: {file_path}")
             raise e
 
-    def _maybe_add_custom_args(
+    def _maybe_add_custom_config(
         self, args: list[str], toml_values: dict[str, Any] | None
     ) -> Type[JobConfig]:  # noqa: B006
-        """Find and merge custom arguments module with current JobConfig class"""
+        """
+        Find and merge custom config module with current JobConfig class, if it is given.
+        The search order is first searching CLI args, then toml config file.
+        """
         module_path = None
 
         # 1. Check CLI
         valid_keys = {
-            "--experimental.custom_args_module",
-            "--experimental.custom-args-module",
+            "--job.custom_config_module",
+            "--job.custom-config-module",
         }
         for i, arg in enumerate(args):
             key = arg.split("=")[0]
@@ -102,9 +105,9 @@ class ConfigManager:
 
         # 2. If not found in CLI, check TOML
         if not module_path and toml_values:
-            experimental = toml_values.get("experimental", {})
-            if isinstance(experimental, dict):
-                module_path = experimental.get("custom_args_module")
+            job = toml_values.get("job", {})
+            if isinstance(job, dict):
+                module_path = job.get("custom_config_module")
 
         if not module_path:
             return self.config_cls
@@ -178,6 +181,15 @@ class ConfigManager:
         return cls(**result)
 
     def _validate_config(self) -> None:
+        if self.config.experimental.custom_args_module:
+            logger.warning(
+                "This field is being moved to --job.custom_config_module and "
+                "will be deprecated soon. Setting job.custom_config_module to "
+                "experimental.custom_args_module temporarily."
+            )
+            self.config.job.custom_config_module = (
+                self.config.experimental.custom_args_module
+            )
         # TODO: temporary mitigation of BC breaking change in hf_assets_path
         #       tokenizer default path, need to remove later
         if self.config.model.tokenizer_path:

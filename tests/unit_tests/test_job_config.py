@@ -208,7 +208,7 @@ class TestJobConfig(unittest.TestCase):
         parser = get_parser(ConfigManager)
         parser.print_help()
 
-    def test_extend_jobconfig_directly(self):
+    def test_extend_job_config_directly(self):
         @dataclass
         class CustomCheckpoint:
             convert_path: str = "/custom/path"
@@ -233,19 +233,19 @@ class TestJobConfig(unittest.TestCase):
         assert hasattr(config, "model")
 
     def test_custom_parser(self):
-        path = "tests.assets.extend_jobconfig_example"
+        path = "tests.assets.extended_job_config_example"
 
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
-                f"--experimental.custom_args_module={path}",
-                "--custom_args.how-is-your-day",
+                f"--job.custom_config_module={path}",
+                "--custom_config.how-is-your-day",
                 "bad",
                 "--model.converters",
                 "float8,mxfp",
             ]
         )
-        assert config.custom_args.how_is_your_day == "bad"
+        assert config.custom_config.how_is_your_day == "bad"
         assert config.model.converters == ["float8", "mxfp"]
         result = config.to_dict()
         assert isinstance(result, dict)
@@ -254,8 +254,8 @@ class TestJobConfig(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "2"):
             config = config_manager.parse_args(
                 [
-                    f"--experimental.custom_args_module={path}",
-                    "--custom_args.how-is-your-day",
+                    f"--job.custom_config_module={path}",
+                    "--custom_config.how-is-your-day",
                     "bad",
                     "--model.converters",
                     "float8,mxfp",
@@ -266,8 +266,8 @@ class TestJobConfig(unittest.TestCase):
         with tempfile.NamedTemporaryFile(mode="w+b", delete=True) as fp:
             tomli_w.dump(
                 {
-                    "experimental": {
-                        "custom_args_module": path,
+                    "job": {
+                        "custom_config_module": path,
                     }
                 },
                 fp,
@@ -278,14 +278,14 @@ class TestJobConfig(unittest.TestCase):
             config = config_manager.parse_args(
                 [
                     f"--job.config_file={fp.name}",
-                    f"--experimental.custom_args_module={path}",
-                    "--custom_args.how-is-your-day",
+                    f"--job.custom_config_module={path}",
+                    "--custom_config.how-is-your-day",
                     "bad",
                     "--model.converters",
                     "float8,mxfp",
                 ]
             )
-            assert config.custom_args.how_is_your_day == "bad"
+            assert config.custom_config.how_is_your_day == "bad"
             assert config.training.my_custom_steps == 32
             assert config.model.converters == ["float8", "mxfp"]
             result = config.to_dict()
@@ -294,10 +294,10 @@ class TestJobConfig(unittest.TestCase):
         with tempfile.NamedTemporaryFile(mode="w+b", delete=True) as fp:
             tomli_w.dump(
                 {
-                    "experimental": {
-                        "custom_args_module": path,
+                    "job": {
+                        "custom_config_module": path,
                     },
-                    "custom_args": {"how_is_your_day": "really good"},
+                    "custom_config": {"how_is_your_day": "really good"},
                     "model": {"converters": ["float8", "mxfp"]},
                 },
                 fp,
@@ -311,7 +311,7 @@ class TestJobConfig(unittest.TestCase):
                 ]
             )
 
-            assert config.custom_args.how_is_your_day == "really good"
+            assert config.custom_config.how_is_your_day == "really good"
             assert config.model.converters == ["float8", "mxfp"]
             result = config.to_dict()
             assert isinstance(result, dict)

@@ -19,8 +19,14 @@ class Job:
     description: str = "default job"
     """Description of the job"""
 
-    print_args: bool = False
-    """Print the args to terminal"""
+    print_config: bool = False
+    """Print the configs to terminal"""
+
+    custom_config_module: str = ""
+    """
+    This option allows users to extend the existing JobConfig with a customized
+    JobConfig dataclass. Users need to ensure that the path can be imported.
+    """
 
 
 @dataclass
@@ -834,6 +840,8 @@ class Experimental:
 
     custom_args_module: str = ""
     """
+    DEPRECATED (moved to Job.custom_config_module). Will be removed soon.
+
     This option allows users to extend TorchTitan's existing JobConfig by extending
     a user defined JobConfig dataclass. Similar to ``--experimental.custom_model_path``, the user
     needs to ensure that the path can be imported.

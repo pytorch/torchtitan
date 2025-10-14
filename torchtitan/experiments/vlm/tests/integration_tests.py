@@ -21,7 +21,7 @@ def build_vlm_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--experimental.custom_args_module torchtitan.experiments.vlm.assets.job_config",
+                    "--job.custom_config_module torchtitan.experiments.vlm.job_config",
                     "--model.name vlm",
                     "--training.dataset cc12m-test",
                     "--parallelism.data_parallel_shard_degree 4",

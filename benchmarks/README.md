@@ -9,7 +9,7 @@ A submission should be a file / files including the following information
 3. The hardware setup, including the types of GPUs, interconnections, etc.
 4. The actual performance report with training configs, e.g. via
    - `.toml` files / commandline arguments
-   - complete configs, which can be found in the log with [`--print_args`](https://github.com/pytorch/torchtitan/blob/e7c0cae934df78d6e9c2835f42ff1f757dc3fddc/torchtitan/config_manager.py#L47) turned on (preferred as the default value not shown in `.toml` or specified in commandline could change from time to time)
+   - complete configs, which can be found in the log with [`--print_config`](https://github.com/pytorch/torchtitan/blob/e7c0cae934df78d6e9c2835f42ff1f757dc3fddc/torchtitan/config_manager.py#L47) turned on (preferred as the default value not shown in `.toml` or specified in commandline could change from time to time)
 5. The versions and date/time of `torchtitan`, `torch`, `torchao`, or any relevant dependencies.
 6. Other notes which could help reproduce the results.
 

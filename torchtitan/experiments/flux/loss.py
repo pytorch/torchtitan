@@ -19,7 +19,7 @@ def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.mse_loss(pred.float(), labels.float().detach())
 
 
-def build_mse_loss(job_config: JobConfig):
+def build_mse_loss(job_config: JobConfig, **kwargs):
     loss_fn = mse_loss
     if job_config.compile.enable and "loss" in job_config.compile.components:
         logger.info("Compiling the loss function with torch.compile")

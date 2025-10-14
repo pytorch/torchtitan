@@ -1,7 +1,8 @@
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 debug training"
-print_args = false
+description = "Llama 3 fault-tolerant debug training"
+print_config = false
+custom_config_module = "torchtitan.components.ft.config"
 
 [profiling]
 enable_profiling = true
@@ -90,6 +91,3 @@ num_fragments = 2
 semi_sync_method = "diloco"
 process_group = "nccl"
 process_group_timeout_ms = 10000
-
-[experimental]
-custom_args_module = "torchtitan.components.ft.config"

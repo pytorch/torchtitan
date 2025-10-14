@@ -24,12 +24,12 @@ __all__ = [
     "parallelize_qwen3",
     "Qwen3ModelArgs",
     "Qwen3Model",
-    "qwen3_configs",
+    "qwen3_args",
 ]
 
 # Adding different variants of the model
 
-qwen3_configs = {
+qwen3_args = {
     "debugmodel": Qwen3ModelArgs(
         vocab_size=2048,
         max_seq_len=4096,
@@ -194,7 +194,7 @@ qwen3_configs = {
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
         model_cls=Qwen3Model,
-        model_args=qwen3_configs,  # Change from dict to Mapping
+        model_args=qwen3_args,  # Change from dict to Mapping
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,
