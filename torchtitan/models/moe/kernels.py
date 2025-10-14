@@ -213,9 +213,7 @@ def generate_permute_indices(
     return permuted_indices, m_sizes, m_offsets.to(torch.int32)
 
 
-# Below is for testing only
-
-
+# TODO: move the test below to torchtitan/tests/unit_tests
 def simple_test():
     device = torch.device("cuda", 0)
     experts_per_rank = 4
