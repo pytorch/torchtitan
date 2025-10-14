@@ -20,6 +20,6 @@ TEST_BACKEND=nccl TRAIN_FILE=torchtitan.experiments.torchcomms.train CONFIG_FILE
   - Integration and testing with `fully_shard` (FSDP)
 ---
 ### To Be Added
-- Integration and testing with additional parallelism strategies (e.g., tensor, pipeline, model parallelism) other than fully_shard
+- Integration and testing with additional parallelism strategies (e.g., tensor, pipeline, context parallelism) other than fully_shard
 - Integration and testing with torch.compile
 ---
