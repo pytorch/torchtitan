@@ -30,6 +30,7 @@ skip_for_rocm_test_list = [
     "2d_eager",
     "2d_compile",
     "pp_dp_1f1b",
+    "pp_dp_gpipe",
 ]
 TEST_WITH_ROCM = os.getenv("TEST_WITH_ROCM", "0") == "1"
 
