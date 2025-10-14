@@ -71,5 +71,5 @@ jobs:
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
-        sudo mkdir artifacts-to-be-uploaded
-        TEST_WITH_ROCM=${{ matrix.is-rocm }} python -m tests.integration_tests.run_tests --test_suite features artifacts-to-be-uploaded --ngpu 4
+        mkdir ~/artifacts-to-be-uploaded
+        TEST_WITH_ROCM=${{ matrix.is-rocm }} python -m tests.integration_tests.run_tests --test_suite features ~/artifacts-to-be-uploaded --ngpu 4
