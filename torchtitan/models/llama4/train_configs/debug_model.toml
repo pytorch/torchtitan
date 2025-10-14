@@ -1,6 +1,6 @@
 [job]
 dump_folder = "./outputs"
-description = "Llama 3 debug training"
+description = "Llama 4 debug training"
 print_args = false
 
 [profiling]
@@ -18,22 +18,22 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
-name = "llama3"
+name = "llama4"
 flavor = "debugmodel"
-# test folder with tokenizer.json, for debug purpose only
+# test tokenizer.model, for debug purpose only
 hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
-lr = 8e-4
-eps = 1e-8
+lr = 4e-3
+eps = 1e-15
 
 [lr_scheduler]
 warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "linear"
-min_lr_factor = 0.0
+min_lr_factor = 0.1
 
 [training]
 local_batch_size = 8
@@ -49,8 +49,10 @@ fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
-pipeline_parallel_schedule = "Interleaved1F1B"
+pipeline_parallel_schedule = "1F1B"
 context_parallel_degree = 1
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 1
 
 [checkpoint]
 enable = false
@@ -62,7 +64,7 @@ async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
 mode = "selective"  # ["none", "selective", "full"]
-selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]
 enable=false
@@ -71,10 +73,13 @@ components = ["model", "loss"]
 [quantize.linear.float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
-filter_fqns = ["output"]
+filter_fqns = ["output", "router.gate"]
 
-[validation]
-enable = false
-dataset = "c4_validation"
-freq = 5
-steps = 10
+[quantize.grouped_mm.float8]
+fqns = ["experts"]
+
+[quantize.linear.mx]
+filter_fqns = ["output", "router.gate"]
+
+[quantize.grouped_mm.mx]
+fqns = ["experts"]

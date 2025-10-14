@@ -14,7 +14,7 @@ from torchtitan.components.quantization import (
 
 from torchtitan.config.job_config import Float8Linear, JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
+from torchtitan.models.moe.utils import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
