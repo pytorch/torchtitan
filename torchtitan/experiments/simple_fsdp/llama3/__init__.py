@@ -11,7 +11,8 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.models.llama3 import llama3_configs, pipeline_llama
+from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.models.llama3 import llama3_configs
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .model import SimpleFSDPTransformer
@@ -23,7 +24,7 @@ def get_train_spec() -> TrainSpec:
         model_cls=SimpleFSDPTransformer,
         model_args=llama3_configs,
         parallelize_fn=parallelize_llama,
-        pipelining_fn=pipeline_llama,
+        pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
