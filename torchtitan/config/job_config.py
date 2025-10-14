@@ -316,18 +316,6 @@ class Parallelism:
     of stages. Stages per rank are inferred from split points degree, and schedule.
     """
 
-    pipeline_parallel_split_points: list[str] = field(default_factory=list)
-    """
-    DEPRECATED: Use module_fqns_per_model_part instead.
-    Specify comma-separated names of modules to use as the beginning of a split point.
-    e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
-    the first containing all the layers up to layers.0,
-    the second containing layers.0 and up to layers.2,
-    the third containing layers.2 and all the remaining layers.
-    Note: fully-automated splitting may be enabled in the future,
-    but currently the split points must be specified manually.
-    """
-
     module_fqns_per_model_part: list[list[str]] | None = None
     """
     Specify a list of lists containing the FQNs (Fully Qualified Names) of modules for each model chunk.
