@@ -20,6 +20,7 @@ from torchtitan.tools.logging import logger
 __all__ = ["TorchCommsParallelDims"]
 
 
+<<<<<<< HEAD
 def _calculate_ranks_per_dimension(
     meshes: List[torch.Tensor],
     dim_names: List[str],
@@ -53,6 +54,11 @@ def _calculate_ranks_per_dimension(
 class TorchCommsParallelDims(ParallelDims):
     def _build_mesh_without_ep(self) -> DeviceMesh:
         # TODO: support EP
+=======
+@dataclass
+class TorchCommsParallelDims(ParallelDims):
+    def _build_mesh_without_ep(self) -> DeviceMesh:
+>>>>>>> e8c73aed (TorchTitan e2e test on torchcomms device mesh (#1847))
         dims = []
         names = []
         for d, name in zip(
@@ -66,6 +72,7 @@ class TorchCommsParallelDims(ParallelDims):
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
         backend = os.environ["TEST_BACKEND"]
         device = torch.device("cuda")
+<<<<<<< HEAD
         mesh = torch.arange(self.world_size, dtype=torch.int, device="cpu").view(
             self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp
         )
@@ -156,3 +163,27 @@ class TorchCommsParallelDims(ParallelDims):
         self.comms = [*comm_per_dim.values(), comm]
 
         return device_mesh
+=======
+        # TODO:
+        # - Extend support for additional parallelism strategies (e.g., pipeline, context)
+        # - Refactor and modularize initialization logic for communication objects and device mesh construction.
+        if (
+            self.dp_shard > 1
+            and self.pp == 1
+            and self.dp_replicate == 1
+            and self.cp == 1
+            and self.tp == 1
+        ):
+            self.comms = []
+            comm = torchcomms.new_comm(backend, device, name="main")
+            # TODO: it's a hacky solution for now and we will update it in a week
+            mesh = init_device_mesh(
+                mesh_dim_comms=(comm, comm, comm, comm),
+                mesh_dim_names=("dp_shard", "dp", "dp_cp", "dp_shard_cp"),
+                _global_comm=comm,
+            )
+            self.comms.append(comm)
+            return mesh
+        else:
+            raise NotImplementedError("Only support FSDP 1D parallelism for now.")
+>>>>>>> e8c73aed (TorchTitan e2e test on torchcomms device mesh (#1847))
