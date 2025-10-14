@@ -1,5 +1,6 @@
 ## TorchTitan & TorchComms Composability Testing
 
+### Overview
 This folder provides a framework for composability testing with TorchComms and distributed training in TorchTitan. The goal is to enable flexible experimentation with distributed communication primitives and parallelism strategies in PyTorch.
 TODO: add more explanation once the torchcomm goes public.
 ---
