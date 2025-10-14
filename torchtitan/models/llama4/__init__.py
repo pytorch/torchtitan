@@ -22,11 +22,11 @@ from .model.state_dict_adapter import Llama4StateDictAdapter
 __all__ = [
     "TransformerModelArgs",
     "Transformer",
-    "llama4_configs",
+    "llama4_args",
 ]
 
 
-llama4_configs = {
+llama4_args = {
     "debugmodel": TransformerModelArgs(
         dim=256,
         n_layers=6,
@@ -105,7 +105,7 @@ llama4_configs = {
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
         model_cls=Transformer,
-        model_args=llama4_configs,
+        model_args=llama4_args,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
