@@ -16,8 +16,7 @@ from transformers.utils import is_torch_deterministic
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import AttentionInterface
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
-from torchtitan.experiments.transformers_backend.model.hf_llama_patch import patch_hf_llama
-from torchtitan.experiments.transformers_backend.model.hf_deepseek_v3_patch import patch_hf_deepseek_v3
+from torchtitan.experiments.transformers_backend.model.hf_llama_like_patch import patch_hf_llama_like
 
 @dataclass
 class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
@@ -55,6 +54,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         attn_implementation: str = "sdpa_torchtitan",
         **kwargs,
     ):
+        super().__init__(attn_implementation=attn_implementation, **kwargs)
         assert titan_args is not None, "titan_args is required"
 
         active_mappings = {}
@@ -67,6 +67,11 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         self._active_mappings = active_mappings
         
         self._create_dynamic_properties()
+
+        # Set HF attributes from titan_args based on mappings
+        for titan_name, hf_name in self._active_mappings.items():
+            if hasattr(titan_args, titan_name):
+                setattr(self, hf_name, getattr(titan_args, titan_name))
 
         # Fill all TorchTitan-specific args (no HF equivalent)
         self.multiple_of = titan_args.multiple_of
@@ -95,6 +100,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
             self._passed_args.update(**deepseek_v3_args.__dict__)
 
+            self.rope_interleave = deepseek_v3_args.rope_interleave
             self.partial_rotary_factor = deepseek_v3_args.partial_rotary_factor
 
             if deepseek_v3_args.moe_args is not None:
@@ -132,7 +138,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         # doesn't work well with how HFTransformerModelArgs is initialized.
         # This custom __repr__ provides a dataclass-like representation that correctly
         # displays the arguments passed during initialization.
-        args_lines = [f"{k}={v!r}" for k, v in sorted(self._passed_args.items())]
+        args_lines = [f"{k}={getattr(self, k)!r}" for k in sorted(self._passed_args.keys())]
         args_str = "\n".join(args_lines)
         return f"{self.__class__.__name__}(\n{args_str}\n)"
 
@@ -141,15 +147,24 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         hf_model_config = AutoConfig.from_pretrained(
             job_config.model.name,
             attn_implementation=self.attn_implementation,
+            trust_remote_code=True
         )
 
-        self.__dict__.update(hf_model_config.__dict__)
-        
+        # Explicitly update attributes based on mappings
+        for titan_name, hf_name in self._active_mappings.items():
+            if hasattr(hf_model_config, hf_name):
+                setattr(self, titan_name, getattr(hf_model_config, hf_name))
+
+        # Copy any other attributes that might not be in the mapping
+        # This is safer than a direct __dict__ update
+        for key, value in hf_model_config.to_dict().items():
+            setattr(self, key, value)
+
         # Update our attributes with the passed args from flavors
         for key, value in self._passed_args.items():
-            if hasattr(self, key):
+            if hasattr(self, key) and value is not None:
                 setattr(self, key, value)
-        
+
         # MoE
         if hasattr(self, "qk_nope_head_dim") and hasattr(self, "qk_rope_head_dim"):
             self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -265,12 +280,40 @@ class HFTransformerModel(nn.Module):
                     f"Make sure the class is available. Original error: {e}"
                 )
         
-        if model_args.architectures[0] == "DeepseekV3Model":
-            print("Patching deepseek")
-            patch_hf_deepseek_v3()
-        else:
-            print("Patching llama")
-            patch_hf_llama()
+        # agnostic weight initialization patching
+        try:
+            model_name_prefix = model_class_name.replace("ForCausalLM", "")
+            model_module = importlib.import_module(model_cls.__module__)
+
+            attention_cls = getattr(model_module, f"{model_name_prefix}Attention", None)
+            mlp_cls = getattr(model_module, f"{model_name_prefix}MLP", None)
+            decoder_layer_cls = getattr(model_module, f"{model_name_prefix}DecoderLayer", None)
+
+            if all([attention_cls, decoder_layer_cls]):
+                logger.info(f"Applying Llama-like patch for {model_name_prefix}")
+                patch_hf_llama_like(
+                    decoder_layer_cls=decoder_layer_cls,
+                    attention_cls=attention_cls,
+                    mlp_cls=mlp_cls,  # mlp_cls can be None
+                )
+            else:
+                missing = [
+                    cls_name
+                    for cls, cls_name in [
+                        (attention_cls, "Attention"),
+                        (decoder_layer_cls, "DecoderLayer"),
+                    ]
+                    if not cls
+                ]
+                logger.warning(
+                    f"Could not find required classes ({', '.join(missing)}) for {model_name_prefix}. "
+                    "Skipping Llama-like patch."
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to apply agnostic patch for {model_class_name} due to: {e}. "
+                "Weight initialization might not match TorchTitan."
+            )
 
         self.model = model_cls(config=model_args)
         self.max_seq_len = model_args.max_seq_len
@@ -330,6 +373,8 @@ class HFTransformerModel(nn.Module):
         """Returns the model's norm, handling different Hugging Face model structures."""
         if hasattr(self.model, "model") and hasattr(self.model.model, "norm"):  # Llama-like
             return self.model.model.norm
+        elif hasattr(self.model, "model") and hasattr(self.model.model, "final_layernorm"):  # Phi-like
+            return self.model.model.final_layernorm
         else:
             raise AttributeError("Could not find norm in the model. Please check the model structure.")
 
@@ -337,6 +382,8 @@ class HFTransformerModel(nn.Module):
     def norm(self, value):
         if hasattr(self.model, "model") and hasattr(self.model.model, "norm"):  # Llama-like
             setattr(self.model.model, "norm", value)
+        elif hasattr(self.model, "model") and hasattr(self.model.model, "final_layernorm"):  # Phi-like
+            setattr(self.model.model, "final_layernorm", value)
         else:
             raise AttributeError("Could not find norm in the model. Please check the model structure.")
 

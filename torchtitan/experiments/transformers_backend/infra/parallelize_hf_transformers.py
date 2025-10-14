@@ -43,12 +43,12 @@ _save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch._higher_order_ops.flex_attention,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
     # for low precision training, it's useful to always save
     # the result of max, since the absolute maximum is
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
 }
 
 def _apply_ac_to_transformer_block(
@@ -379,21 +379,34 @@ def apply_non_moe_tp(
             "self_attn.q_proj": colwise_parallel(),
             "self_attn.k_proj": colwise_parallel(),
             "self_attn.v_proj": colwise_parallel(),
-            "self_attn.o_proj": rowwise_parallel(output_layouts=Shard(1)),
             "post_attention_layernorm": SequenceParallel(),
         }
+
+        # Handle different names for the output projection layer, e.g. o_proj vs dense
+        o_proj_name = "o_proj" if hasattr(transformer_block.self_attn, "o_proj") else "dense"
+        layer_plan[f"self_attn.{o_proj_name}"] = rowwise_parallel(output_layouts=Shard(1))
+
         if not transformer_block.moe_enabled:
-            layer_plan.update(
-                {
-                    "mlp": prepare_module_input(
-                        input_layouts=(Shard(1),),
-                        desired_input_layouts=(Replicate(),),
-                    ),
-                    "mlp.gate_proj": colwise_parallel(),
-                    "mlp.up_proj": colwise_parallel(),
-                    "mlp.down_proj": rowwise_parallel(output_layouts=Shard(1)),
-                }
-            )
+            mlp_plan = {
+                "mlp": prepare_module_input(
+                    input_layouts=(Shard(1),),
+                    desired_input_layouts=(Replicate(),),
+                ),
+            }
+            # Handle different names for MLP layers, e.g. gate_proj vs fc1
+            gate_proj_name = "gate_proj" if hasattr(transformer_block.mlp, "gate_proj") else "fc1"
+            mlp_plan[f"mlp.{gate_proj_name}"] = colwise_parallel()
+
+            if hasattr(transformer_block.mlp, "up_proj"):
+                mlp_plan["mlp.up_proj"] = colwise_parallel()
+
+            down_proj_name = "down_proj" if hasattr(transformer_block.mlp, "down_proj") else "fc2"
+            mlp_plan[f"mlp.{down_proj_name}"] = rowwise_parallel(output_layouts=Shard(1))
+            layer_plan.update(mlp_plan)
+
+        # Some models like Phi-2 don't have post_attention_layernorm
+        if not hasattr(transformer_block, "post_attention_layernorm"):
+            layer_plan.pop("post_attention_layernorm")
 
         parallelize_module(
             module=transformer_block,

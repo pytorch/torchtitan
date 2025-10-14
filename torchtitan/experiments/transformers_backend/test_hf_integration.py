@@ -11,8 +11,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 
-BASELINE = "fsdp2_tp1_cp1_pp1"
-# BASELINE = "fsdp1_tp1_cp1_pp1"
+# BASELINE = "fsdp2_tp1_cp1_pp1"
+BASELINE = "fsdp1_tp1_cp1_pp1"
 
 console = Console()
 
@@ -151,28 +151,32 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
     config["model"]["name"] = model_name
     config["model"]["flavor"] = flavor
 
-    parallelism_configs = [
-        BASELINE, # baseline
-        "fsdp2_tp2_cp1_pp1",
-        "fsdp2_tp1_cp1_pp2",
-        "fsdp2_tp1_cp2_pp1",
-        "fsdp2_tp1_cp2_pp2",
-        "fsdp2_tp2_cp2_pp1",
-        "fsdp2_tp2_cp1_pp2",
-        "fsdp2_tp2_cp2_pp2",
-    ]
+    # parallelism_configs = [
+    #     BASELINE, # baseline
+    #     "fsdp2_tp2_cp1_pp1",
+    #     # "fsdp2_tp1_cp1_pp2",
+    #     # "fsdp2_tp1_cp2_pp1",
+    #     # "fsdp2_tp1_cp2_pp2",
+    #     # "fsdp2_tp2_cp2_pp1",
+    #     # "fsdp2_tp2_cp1_pp2",
+    #     # "fsdp2_tp2_cp2_pp2",
+    # ]
 
     # parallelism_configs = [
     #     BASELINE, # baseline
-    #     "fsdp1_tp2_cp1_pp1",
-    #     "fsdp1_tp1_cp1_pp2",
-    #     "fsdp1_tp1_cp2_pp1",
-    #     "fsdp1_tp1_cp2_pp2",
-    #     "fsdp1_tp2_cp2_pp1",
-    #     "fsdp1_tp2_cp1_pp2",
-    #     "fsdp1_tp2_cp2_pp2",
+    #     # "fsdp1_tp2_cp1_pp1",
+    #     # "fsdp1_tp1_cp1_pp2",
+    #     # "fsdp1_tp1_cp2_pp1",
+    #     # "fsdp1_tp1_cp2_pp2",
+    #     # "fsdp1_tp2_cp2_pp1",
+    #     # "fsdp1_tp2_cp1_pp2",
+    #     # "fsdp1_tp2_cp2_pp2",
     # ]
 
+    parallelism_configs = [
+        BASELINE, # baseline
+        "fsdp1_tp2_cp1_pp1",
+    ]
 
     out_path = Path(out_dir) / model_name / flavor
     out_path.mkdir(parents=True, exist_ok=True)
@@ -219,6 +223,11 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
         iter_config["parallelism"]["pipeline_parallel_degree"] = pp
         iter_config["parallelism"]["pipeline_parallel_schedule"] = "GPipe"
         iter_config["job"]["dump_folder"] = str(pc_dir)
+        
+        # if pc == "fsdp1_tp1_cp1_pp2" or pc == BASELINE:
+        #     iter_config["training"]["global_batch_size"] = 1
+        #     iter_config["training"]["local_batch_size"] = 1
+
         if pc == BASELINE or pc == "fsdp2_tp1_cp1_pp2":
             iter_config["training"]["local_batch_size"] = 2
 
@@ -379,7 +388,7 @@ def check_status(inp_dir: str):
     print("=" * 30)
 
 
-def report(inp_dir: str):
+def report(inp_dir: str, only: str = None):
     """
     Generate diff reports between baseline (fsdp2_tp1_cp1_pp1) and all other parallelism configs.
     Creates diff_baseline_vs_nd_parallelism.log in each non-baseline config directory.
@@ -673,9 +682,20 @@ def report(inp_dir: str):
         if BASELINE in dirs:
             flavor_dirs.append(Path(root))
     
+    # Filter by --only if provided
+    if only:
+        original_count = len(flavor_dirs)
+        flavor_dirs = [
+            d for d in flavor_dirs if only in str(d.relative_to(inp_path))
+        ]
+        log_message(
+            LogLevel.INFO,
+            f"Filtered from {original_count} to {len(flavor_dirs)} director{'ies' if len(flavor_dirs) != 1 else 'y'} matching '[bold]{only}[/bold]'",
+        )
+
     if not flavor_dirs:
         log_message(LogLevel.ERROR, f"No directories with baseline configuration found under {inp_path}")
-        console.print("[yellow]Expected to find directories containing 'fsdp2_tp1_cp1_pp1' subdirectory[/yellow]")
+        console.print("[yellow]Expected to find directories containing 'fsdp2_tp1_cp1' subdirectory[/yellow]")
         return
     
     log_message(LogLevel.INFO, f"Found {len(flavor_dirs)} model/flavor combination(s) to process:")
@@ -737,6 +757,7 @@ if __name__ == "__main__":
 
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--inp_dir", type=str, required=True)
+    report_parser.add_argument("--only", type=str, default=None)
 
     check_status_parser = subparsers.add_parser("check_status")
     check_status_parser.add_argument("--inp_dir", type=str, required=True)
@@ -748,6 +769,6 @@ if __name__ == "__main__":
     elif args.action == "submit_jobs":
         submit_jobs(args.inp_dir, args.qos, args.only)
     elif args.action == "report":
-        report(args.inp_dir)
+        report(args.inp_dir, args.only)
     elif args.action == "check_status":
         check_status(args.inp_dir)

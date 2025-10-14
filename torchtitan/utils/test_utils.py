@@ -42,8 +42,11 @@ def seeded_init_decorator_for_test(seed):
                 result = original_trunc_normal(*trunc_args, **trunc_kwargs)
                 return result
             
-            nn.init.trunc_normal_ = seeded_trunc_normal
-            return func(*args, **kwargs)
+            try:
+                nn.init.trunc_normal_ = seeded_trunc_normal
+                return func(*args, **kwargs)
+            finally:
+                nn.init.trunc_normal_ = original_trunc_normal
         
         return wrapper
     return decorator

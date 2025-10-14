@@ -35,7 +35,7 @@ class TitanModelArgs:
     n_layers: int = 32
     n_heads: int = 32
     n_kv_heads: Optional[int] = None
-    vocab_size: int = 128256
+    vocab_size: Optional[int] = None
     multiple_of: int = 256
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
@@ -69,17 +69,19 @@ class DeepSeekV3Args:
     beta_slow: Optional[int] = None
     mscale: Optional[float] = None
     partial_rotary_factor: Optional[float] = None
+    rope_interleave: bool = True
+
 
 flavors = {
     "debugmodel": HFTransformerModelArgs(
         titan_args=TitanModelArgs(
-            vocab_size=2000,
+            vocab_size=51200,
             dim=256,
-            n_layers=6,
+            n_layers=1,
             n_heads=16,
             n_kv_heads=16,
         ),
-        deepseek_v3_args=None
+        pad_token_id=None,
         # deepseek_v3_args=DeepSeekV3Args(
         #     partial_rotary_factor=4.0,
         #     inter_dim=1024,
