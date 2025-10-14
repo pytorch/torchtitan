@@ -27,7 +27,7 @@ _TEST_SUITES_FUNCTION = {
 # tests skipped for ROCm
 skip_for_rocm_test_list = [
     "model_only_hf_checkpoint",
-    "2D eager",
+    "2d_eager",
 ]
 TEST_WITH_ROCM = os.getenv("TEST_WITH_ROCM", "0") == "1"
 
