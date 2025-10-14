@@ -239,7 +239,7 @@ class ReordererSequenceParallel(ParallelStyle):
         # NOTE: As we shard routed tokens along bs*slen dim across the TP ranks,
         #       the MoE gather and scatter still require global token indices.
         local_rank = device_mesh.get_local_rank()
-        # fact: top_scores.shape[0] // self.top_k = batch_size * seq_len // ep_degree
+        # fact: top_scores.shape[0] // mod.top_k = batch_size * seq_len // ep_degree
         token_indices_experts_sorted += top_scores.shape[0] // mod.top_k * local_rank
 
         return top_scores, token_indices_experts_sorted, num_tokens_per_expert
