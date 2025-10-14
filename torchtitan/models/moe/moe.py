@@ -359,12 +359,12 @@ class MoE(nn.Module):
         super().__init__()
 
         num_experts = moe_args.num_experts
-        self.experts = GroupedExperts(
+        self.experts = torch.compile(GroupedExperts(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             use_grouped_mm=moe_args.use_grouped_mm,
-        )
+        ))
         self.router = TokenChoiceTopKRouter(
             dim=dim,
             num_experts=num_experts,
@@ -376,7 +376,7 @@ class MoE(nn.Module):
         )
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
         self.shared_experts = (
-            FeedForward(dim=dim, hidden_dim=hidden_dim * moe_args.num_shared_experts)
+            torch.compile(FeedForward(dim=dim, hidden_dim=hidden_dim * moe_args.num_shared_experts))
             if moe_args.num_shared_experts > 0
             else None
         )

@@ -37,7 +37,7 @@ llama4_configs = {
     ),
     "17bx16e": TransformerModelArgs(
         dim=5120,
-        n_layers=48,
+        n_layers=2,
         n_heads=40,
         n_kv_heads=8,
         ffn_dim_multiplier=1.2,

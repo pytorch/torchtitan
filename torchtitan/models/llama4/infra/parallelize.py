@@ -515,7 +515,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
         # TODO: remove when torch.compile supports fullgraph=True for MoE
         fullgraph = True
         if transformer_block.moe_enabled:
-            fullgraph = False
+            continue
         transformer_block = torch.compile(
             transformer_block,
             backend=compile_config.backend,
