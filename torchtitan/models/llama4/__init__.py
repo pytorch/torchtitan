@@ -10,7 +10,7 @@ from torchtitan.components.optimizer import build_optimizers_with_moe_load_balan
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.models.llama3 import pipeline_llama
+from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
@@ -107,7 +107,7 @@ def get_train_spec() -> TrainSpec:
         model_cls=Transformer,
         model_args=llama4_configs,
         parallelize_fn=parallelize_llama,
-        pipelining_fn=pipeline_llama,
+        pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
