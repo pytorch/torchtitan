@@ -22,7 +22,6 @@ __all__ = [
     "Transformer",
     "llama3_configs",
 ]
->>>>>>> cd16507b (move PP API to model agnostic file (#1868))
 
 
 def get_train_spec() -> TrainSpec:
