@@ -94,15 +94,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
-        self.parallel_dims = parallel_dims = ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
+        self.parallel_dims = parallel_dims = self._create_parallel_dims(
+            parallelism_config, world_size
         )
 
         world_mesh = parallel_dims.world_mesh
@@ -374,6 +367,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"sequence length {job_config.training.seq_len}, "
             f"total steps {job_config.training.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
+        )
+
+    def _create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
+        return ParallelDims(
+            dp_shard=parallelism_config.data_parallel_shard_degree,
+            dp_replicate=parallelism_config.data_parallel_replicate_degree,
+            cp=parallelism_config.context_parallel_degree,
+            tp=parallelism_config.tensor_parallel_degree,
+            pp=parallelism_config.pipeline_parallel_degree,
+            ep=parallelism_config.expert_parallel_degree,
+            etp=parallelism_config.expert_tensor_parallel_degree,
+            world_size=world_size,
         )
 
     def batch_generator(
