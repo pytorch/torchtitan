@@ -10,7 +10,11 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
+<<<<<<< HEAD
 from torchtitan.models.llama3 import llama3_args
+=======
+from torchtitan.models.llama3 import llama3_configs
+>>>>>>> cd16507b (move PP API to model agnostic file (#1868))
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .model import SimpleFSDPTransformer
