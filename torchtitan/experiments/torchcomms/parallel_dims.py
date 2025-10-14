@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import datetime
 import os
 from dataclasses import dataclass
 from typing import Dict, List
@@ -45,7 +44,6 @@ class TorchCommsParallelDims(ParallelDims):
             backend,
             device,
             name="comms_test_n_d_parallel",
-            timeout=datetime.timedelta(seconds=60),
         )
 
         # Get current rank to determine which groups this rank belongs to
