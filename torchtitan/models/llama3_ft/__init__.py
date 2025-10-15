@@ -16,13 +16,6 @@ from torchtitan.protocols.train_spec import TrainSpec
 
 from ..llama3 import llama3_args, Llama3StateDictAdapter, parallelize_llama, Transformer
 
-__all__ = [
-    "parallelize_llama",
-    "TransformerModelArgs",
-    "Transformer",
-    "llama3_configs",
-]
-
 
 def get_train_spec() -> TrainSpec:
     return FaultTolerantTrainSpec(

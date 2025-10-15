@@ -223,7 +223,6 @@ class ExpertTensorParallel(ExpertParallel):
 class ReordererSequenceParallel(ParallelStyle):
     def __init__(self):
         super().__init__()
-        self.top_k = None
 
     def _prepare_inputput_fn(self, mod, inputs, device_mesh):
         # shape (batch_size*seq_len, top_k)
