@@ -98,15 +98,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             parallelism_config, world_size
         )
 
-        world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
-            dp_mesh = world_mesh["dp"]
-            dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
+            batch_mesh = parallel_dims.get_mesh("batch")
+            batch_degree, batch_rank = batch_mesh.size(), batch_mesh.get_local_rank()
         else:
-            dp_degree, dp_rank = 1, 0
+            batch_degree, batch_rank = 1, 0
 
         self.ft_manager = FTManager(job_config.fault_tolerance)
-        dp_degree, dp_rank = self.ft_manager.get_dp_info(dp_degree, dp_rank)
+        batch_degree, batch_rank = self.ft_manager.get_dp_info(batch_degree, batch_rank)
 
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
@@ -115,14 +114,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
-        """
         dist_utils.set_determinism(
-            world_mesh,
+            parallel_dims,
             self.device,
             job_config.training.seed,
             job_config.training.deterministic,
         )
-        """
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
         # build tokenizer and dataloader
@@ -133,8 +130,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         self.dataloader = self.train_spec.build_dataloader_fn(
-            dp_world_size=dp_degree,
-            dp_rank=dp_rank,
+            dp_world_size=batch_degree,
+            dp_rank=batch_rank,
             tokenizer=self.tokenizer,
             job_config=job_config,
         )
@@ -200,19 +197,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if global_batch_size < 0:
             # This global batch size results in 1 gradient accumulation
             # step.
-            global_batch_size = job_config.training.local_batch_size * dp_degree
+            global_batch_size = job_config.training.local_batch_size * batch_degree
         assert global_batch_size > 0
         assert (
-            global_batch_size % (job_config.training.local_batch_size * dp_degree) == 0
+            global_batch_size % (job_config.training.local_batch_size * batch_degree)
+            == 0
         ), (
             f"global batch size must be multiple of local batch size times "
             f"data-parallel degree ({global_batch_size} "
-            f"% ({job_config.training.local_batch_size} * {dp_degree}) != 0)"
+            f"% ({job_config.training.local_batch_size} * {batch_degree}) != 0)"
         )
 
         # calculate gradient accumulation steps
         self.gradient_accumulation_steps = global_batch_size // (
-            job_config.training.local_batch_size * dp_degree
+            job_config.training.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
         self.loss_fn = rescale_accumulated_loss(
@@ -348,8 +346,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             self.validator = self.train_spec.build_validator_fn(
                 job_config=job_config,
-                dp_world_size=dp_degree,
-                dp_rank=dp_rank,
+                dp_world_size=batch_degree,
+                dp_rank=batch_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
                 loss_fn=self.loss_fn,
@@ -436,10 +434,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
-        cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
-                cp_mesh=parallel_dims.world_mesh["cp"],
+                cp_mesh=parallel_dims.get_mesh("cp"),
                 cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                 cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                 cp_no_restore_buffers={inputs, labels},
@@ -518,9 +515,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
-            pp_mesh=(
-                parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
-            ),
+            pp_mesh=parallel_dims.get_mesh("pp"),
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
@@ -534,17 +529,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if not self.metrics_processor.should_log(self.step):
             return
 
-        if parallel_dims.dp_cp_enabled:
+        if parallel_dims.batch_enabled:
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
+            batch_mesh = parallel_dims.get_mesh("batch")
             global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_mean(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
-                dist_utils.dist_max(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
+                dist_utils.dist_mean(loss, batch_mesh, ft_pg),
+                dist_utils.dist_max(loss, batch_mesh, ft_pg),
                 dist_utils.dist_sum(
                     torch.tensor(
                         self.ntokens_seen, dtype=torch.int64, device=self.device
                     ),
-                    parallel_dims.world_mesh["dp_cp"],
+                    batch_mesh,
                     ft_pg,
                 ),
             )
@@ -641,7 +637,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         timeout=timedelta(
                             seconds=job_config.comm.train_timeout_seconds
                         ),
-                        world_mesh=self.parallel_dims._world_mesh,
+                        parallel_dims=self.parallel_dims,
                     )
 
         if torch.distributed.get_rank() == 0:
