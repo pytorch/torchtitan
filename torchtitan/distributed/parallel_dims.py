@@ -73,27 +73,27 @@ class ParallelDims:
             pp: For PP.
             dp_replicate: For DDP or HSDP replicate dimension.
             dp_shard_cp: For FSDP or HSDP shard dimension. This includes
-                         ``cp`` even if ``cp`` is 1, so we just use the name
-                         ``dp_shard_cp``. As a result, we always use the name
-                         ``dp_shard_cp`` and ``dp_shard`` is not created as a
-                         dimension.
+                         ``cp`` even if ``cp`` is 1. As a result, we always
+                         use the name ``dp_shard_cp``, and ``dp_shard`` is not
+                         created as a dimension.
             dp_cp: This is used by loss all-reduce. It includes ``dp_replicate``,
                    ``dp_shard``, and ``cp`` as all of them are data parallelisms.
-            dp: This is used by data loading. It includes both ``dp_replicate``
-                and ``dp_shard``.
-                The naming can be confusing; ``batch`` could be a better name.
+            dp: This is used by data loading to decide the global batch size and
+                which part of data this raunk should read.  This dim includes both
+                ``dp_replicate`` and ``dp_shard``.
+                The name is confusing; ``batch`` could be a better name.
             cp: For CP.
             tp: For TP.
             ep: For EP.
-            dp_shard_in_ep: For FSDP or HSDP shard dimension in EP region.
+            dp_shard_in_ep: For FSDP or HSDP shard dimension in the EP region.
 
         Note: These dimensions won't exist at the same time. If we consider
-        unflatten() operator only, following are all the meshes required
+        the unflatten() operator only, the following are all the meshes required
         assuming all degrees are > 1 except for ``pp``:
 
-            ["dp", "cp", "tp"]: ``dp`` process group is wasted as dataloader
-                                doesn't need it.
-            ["dp_cp", "tp"]: loss computation
+            ["dp", "cp", "tp"]: The ``dp`` process group is wasted as the dataloader
+                                doesn't need it for communication.
+            ["dp_cp", "tp"]: Loss computation.
             ["dp_replicate", "dp_shard_cp", "tp"]: Non-EP region computation.
             ["dp_replicate", "dp_shard_in_ep", "ep", "tp"]: EP region computation if etp == tp.
             ["dp_replicate", "dp_shard_in_ep", "ep"]: EP region computation if etp == 1.
@@ -102,7 +102,7 @@ class ParallelDims:
         For example, ``dp_cp`` can be sliced and flattened from ["dp", "cp", "tp"].
         So we don't actually need to create ["dp_cp", "tp"].
 
-        But there are some meses we MUST create if that mesh will be used for a
+        But there are some meshes we MUST create if that mesh will be used for a
         parameter. So Non-EP-region-computation mesh and EP-region-computation mesh
         are required.
         """
