@@ -207,6 +207,7 @@ def get_train_context(
                     torch._dynamo.utils.maybe_enable_compiled_autograd(True)
                 )
 
+            if cp_context:
                 stack.enter_context(cp_context)
 
             yield
