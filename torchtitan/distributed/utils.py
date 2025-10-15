@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import itertools
 import math
 import os
 from collections.abc import Generator, Iterable
@@ -81,7 +82,7 @@ def dist_mean(
 
 
 def set_determinism(
-    world_mesh: DeviceMesh | None,
+    parallel_dims: ParallelDims,
     device: torch.device,
     seed: int | None = None,
     deterministic: bool = False,
@@ -114,7 +115,7 @@ def set_determinism(
 
         FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
 
-    if not world_mesh:
+    if parallel_dims.world_size == 1:
         if seed is not None:
             torch.manual_seed(seed)
             os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
@@ -134,28 +135,15 @@ def set_determinism(
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
     # and choose a unique seed for each rank on the PP mesh.
     # TODO(jianiw): We could further extend this to support multiple distinct dimensions instead of just one.
-    if (
-        c10d.get_world_size() > 1
-        and distinct_seed_mesh_dim in world_mesh.mesh_dim_names
-    ):
-        distinct_mesh = world_mesh[distinct_seed_mesh_dim]
+    duplicate_seed_mesh = parallel_dims.get_mesh("spmd")
+    logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
+    all_meshes = parallel_dims.get_all_meshes()
+    if distinct_seed_mesh_dim in all_meshes.keys():
+        distinct_mesh = all_meshes[distinct_seed_mesh_dim]
         seed += distinct_mesh.get_local_rank()
         seed %= 2**64
 
-        logger.debug(
-            f"{distinct_seed_mesh_dim} rank {distinct_mesh.get_local_rank()}, Global rank {c10d.get_rank()} using seed: {seed}"
-        )
-        duplicate_seed_mesh = list(
-            filter(
-                lambda name: name != distinct_seed_mesh_dim, world_mesh.mesh_dim_names
-            )
-        )
-        duplicate_seed_mesh = (
-            world_mesh[duplicate_seed_mesh] if len(duplicate_seed_mesh) else None
-        )
-    else:
-        duplicate_seed_mesh = world_mesh
-        logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
+        logger.debug(f"{distinct_seed_mesh_dim} rank {distinct_mesh.get_local_rank()}")
 
     # The native RNGs and python RNG may not be important, except for the 1-D PP case, but we seed them for consistency.
     torch.manual_seed(seed)
@@ -164,7 +152,7 @@ def set_determinism(
 
     # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
     # IF PP is also used, this seed is unique per PP rank.
-    if duplicate_seed_mesh and duplicate_seed_mesh.get_coordinate() is not None:
+    if duplicate_seed_mesh:
         torch.distributed.tensor._random.manual_seed(seed, duplicate_seed_mesh)
 
 
@@ -285,7 +273,10 @@ def init_distributed(
     )
 
 
-def set_pg_timeouts(timeout, world_mesh):
+def set_pg_timeouts(
+    timeout: timedelta,
+    parallel_dims: ParallelDims,
+):
     """
     Sets the timeout for all PGs in the provided mesh, and the default (world) group.
 
@@ -304,11 +295,10 @@ def set_pg_timeouts(timeout, world_mesh):
     torch.distributed.barrier(device_ids=[device_module.current_device()])
     device_module.synchronize()
 
-    groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
-
     # None represents the 'default' PG, not part of the mesh
-    groups.append(None)
-    for group in groups:
+    for group in itertools.chain(
+        [None], [mesh.get_group() for mesh in parallel_dims.get_all_meshes().values()]
+    ):
         torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
 
 
