@@ -115,12 +115,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
+        """
         dist_utils.set_determinism(
             world_mesh,
             self.device,
             job_config.training.seed,
             job_config.training.deterministic,
         )
+        """
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
         # build tokenizer and dataloader
@@ -639,7 +641,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         timeout=timedelta(
                             seconds=job_config.comm.train_timeout_seconds
                         ),
-                        world_mesh=self.parallel_dims.world_mesh,
+                        world_mesh=self.parallel_dims._world_mesh,
                     )
 
         if torch.distributed.get_rank() == 0:
