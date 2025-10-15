@@ -227,6 +227,7 @@ class ReordererSequenceParallel(ParallelStyle):
     def _prepare_inputput_fn(self, mod, inputs, device_mesh):
         # shape (batch_size*seq_len, top_k)
         top_scores, selected_experts_indices = inputs
+        num_tokens, _ = top_scores.shape
 
         # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
         # if top_scores.shape[0] % device_mesh.size() != 0:
