@@ -370,17 +370,43 @@ def apply_non_moe_tp(
 
     # Apply tensor + sequence parallelism to every transformer block
     for transformer_block in model.layers:
+        is_deepseek_v3 = "deepseek_v3" in transformer_block.self_attn.__class__.__module__
         layer_plan = {
             "input_layernorm": SequenceParallel(),
             "self_attn": prepare_module_input(
                 input_kwarg_layouts={"hidden_states": Shard(1)},
                 desired_input_kwarg_layouts={"hidden_states": Replicate()},
             ),
-            "self_attn.q_proj": colwise_parallel(),
-            "self_attn.k_proj": colwise_parallel(),
-            "self_attn.v_proj": colwise_parallel(),
             "post_attention_layernorm": SequenceParallel(),
         }
+
+        if is_deepseek_v3:
+            if getattr(transformer_block.self_attn, "q_lora_rank", None) is None:
+                layer_plan["self_attn.q_proj"] = colwise_parallel()
+            else:
+                layer_plan.update({
+                    "self_attn.q_a_proj": NoParallel(),
+                    "self_attn.q_a_layernorm": NoParallel(),
+                    "self_attn.q_b_proj": colwise_parallel(),
+                })
+
+            if getattr(transformer_block.self_attn, "kv_lora_rank", None) is None:
+                layer_plan.update({
+                    "self_attn.k_proj": colwise_parallel(),
+                    "self_attn.v_proj": colwise_parallel(),
+                })
+            else:
+                layer_plan.update({
+                    "self_attn.kv_a_proj_with_mqa": NoParallel(),
+                    "self_attn.kv_a_layernorm": NoParallel(),
+                    "self_attn.kv_b_proj": colwise_parallel(),
+                })
+        else:
+            layer_plan.update({
+                "self_attn.q_proj": colwise_parallel(),
+                "self_attn.k_proj": colwise_parallel(),
+                "self_attn.v_proj": colwise_parallel(),
+            })
 
         # Handle different names for the output projection layer, e.g. o_proj vs dense
         o_proj_name = "o_proj" if hasattr(transformer_block.self_attn, "o_proj") else "dense"

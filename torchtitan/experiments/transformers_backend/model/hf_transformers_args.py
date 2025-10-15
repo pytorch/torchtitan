@@ -17,6 +17,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import AttentionInterface
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from torchtitan.experiments.transformers_backend.model.hf_llama_like_patch import patch_hf_llama_like
+from torchtitan.experiments.transformers_backend.model.hf_moe_like_patch import patch_hf_moe_like
 
 @dataclass
 class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
@@ -138,7 +139,11 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         # doesn't work well with how HFTransformerModelArgs is initialized.
         # This custom __repr__ provides a dataclass-like representation that correctly
         # displays the arguments passed during initialization.
-        args_lines = [f"{k}={getattr(self, k)!r}" for k in sorted(self._passed_args.keys())]
+        args_lines = [
+            f"{k}={getattr(self, k)!r}"
+            for k in sorted(self._passed_args.keys())
+            if hasattr(self, k)
+        ]
         args_str = "\n".join(args_lines)
         return f"{self.__class__.__name__}(\n{args_str}\n)"
 
@@ -156,7 +161,6 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
                 setattr(self, titan_name, getattr(hf_model_config, hf_name))
 
         # Copy any other attributes that might not be in the mapping
-        # This is safer than a direct __dict__ update
         for key, value in hf_model_config.to_dict().items():
             setattr(self, key, value)
 
@@ -191,7 +195,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         # Check if this is a MoE model by looking for MoE attributes
-        is_moe = hasattr(self, 'n_routed_experts') and hasattr(self, 'num_experts_per_tok')
+        is_moe = hasattr(self, 'n_routed_experts')
         
         if is_moe:
             # MoE parameter counting (adapted from DeepSeek V3 implementation)
@@ -280,7 +284,7 @@ class HFTransformerModel(nn.Module):
                     f"Make sure the class is available. Original error: {e}"
                 )
         
-        # agnostic weight initialization patching
+        # Attempt to patch model weight initialization based on architecture type
         try:
             model_name_prefix = model_class_name.replace("ForCausalLM", "")
             model_module = importlib.import_module(model_cls.__module__)
@@ -289,26 +293,50 @@ class HFTransformerModel(nn.Module):
             mlp_cls = getattr(model_module, f"{model_name_prefix}MLP", None)
             decoder_layer_cls = getattr(model_module, f"{model_name_prefix}DecoderLayer", None)
 
-            if all([attention_cls, decoder_layer_cls]):
-                logger.info(f"Applying Llama-like patch for {model_name_prefix}")
-                patch_hf_llama_like(
-                    decoder_layer_cls=decoder_layer_cls,
-                    attention_cls=attention_cls,
-                    mlp_cls=mlp_cls,  # mlp_cls can be None
-                )
+            is_moe = hasattr(model_args, "n_routed_experts") #TODO(3outeille): check if this is the most reliable to detect a moe model
+            if is_moe:
+                moe_cls = getattr(model_module, f"{model_name_prefix}MoE", None)
+                required_classes = {
+                    "Attention": attention_cls,
+                    "MLP": mlp_cls, 
+                    "DecoderLayer": decoder_layer_cls,
+                    "MoE": moe_cls
+                }
+                
+                if all(required_classes.values()):
+                    logger.info(f"Applying MoE-like patch for {model_name_prefix}")
+                    patch_hf_moe_like(
+                        decoder_layer_cls=decoder_layer_cls,
+                        attention_cls=attention_cls,
+                        mlp_cls=mlp_cls,
+                        moe_cls=moe_cls
+                    )
+                else:
+                    missing = [name for name, cls in required_classes.items() if not cls]
+                    logger.warning(
+                        f"Could not find required classes ({', '.join(missing)}) for MoE patching of {model_name_prefix}. "
+                        "Skipping MoE-like patch."
+                    )
             else:
-                missing = [
-                    cls_name
-                    for cls, cls_name in [
-                        (attention_cls, "Attention"),
-                        (decoder_layer_cls, "DecoderLayer"),
-                    ]
-                    if not cls
-                ]
-                logger.warning(
-                    f"Could not find required classes ({', '.join(missing)}) for {model_name_prefix}. "
-                    "Skipping Llama-like patch."
-                )
+                required_classes = {
+                    "Attention": attention_cls,
+                    "DecoderLayer": decoder_layer_cls
+                }
+                
+                if all(required_classes.values()):
+                    logger.info(f"Applying Llama-like patch for {model_name_prefix}")
+                    patch_hf_llama_like(
+                        decoder_layer_cls=decoder_layer_cls,
+                        attention_cls=attention_cls,
+                        mlp_cls=mlp_cls  # mlp_cls can be None
+                    )
+                else:
+                    missing = [name for name, cls in required_classes.items() if not cls]
+                    logger.warning(
+                        f"Could not find required classes ({', '.join(missing)}) for {model_name_prefix}. "
+                        "Skipping Llama-like patch."
+                    )
+
         except Exception as e:
             logger.warning(
                 f"Failed to apply agnostic patch for {model_class_name} due to: {e}. "
