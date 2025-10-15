@@ -47,7 +47,7 @@ def pipeline_llm(
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    pp_mesh = parallel_dims.world_mesh["pp"]
+    pp_mesh = parallel_dims.get_mesh("pp")
 
     # Determine the number of virtual stages based on schedule type
     schedule_class = get_schedule_class(
