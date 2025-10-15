@@ -20,6 +20,35 @@ from torchtitan.tools.logging import logger
 __all__ = ["TorchCommsParallelDims"]
 
 
+def _calculate_ranks_per_dimension(
+    meshes: List[torch.Tensor],
+    dim_names: List[str],
+    dim_sizes: List[int],
+    cur_rank: int,
+) -> Dict[str, List[int]]:
+    """Calculate global ranks mapping for each mesh dimension.
+
+    Args:
+        meshes: List of mesh tensors to calculate ranks from
+        dim_names: List of dimension names corresponding to each mesh
+        dim_sizes: List of dimension sizes for reshaping
+        cur_rank: The current rank to find in the global ranks
+
+    Returns:
+        Dictionary mapping dimension names to the list of ranks that share the same dimension group as cur_rank
+    """
+    ranks_per_dim = {}
+    for idx, dim_name in enumerate(dim_names):
+        global_ranks = (
+            meshes[idx].transpose(idx, -1).reshape(-1, dim_sizes[idx]).tolist()
+        )
+        for row in global_ranks:
+            if cur_rank in row:
+                ranks_per_dim[dim_name] = row
+                break
+    return ranks_per_dim
+
+
 @dataclass
 class TorchCommsParallelDims(ParallelDims):
     def _build_mesh_without_ep(self) -> DeviceMesh:
@@ -50,15 +79,12 @@ class TorchCommsParallelDims(ParallelDims):
         cur_rank = comm.get_rank()
 
         mesh_dim_names = ["pp", "dp_replicate", "dp_shard", "cp", "tp"]
-        ranks_per_dim = {}
+        mesh_sizes = [mesh.size(idx) for idx in range(len(mesh_dim_names))]
+        meshes = [mesh] * len(mesh_dim_names)
+        ranks_per_dim = _calculate_ranks_per_dimension(
+            meshes, mesh_dim_names, mesh_sizes, cur_rank
+        )
         comm_per_dim = {}
-        for idx, dim_name in enumerate(mesh_dim_names):
-            # Calculate global ranks mapping for this mesh dimension
-            global_ranks = mesh.transpose(idx, -1).reshape(-1, mesh.size(idx)).tolist()
-            for row in global_ranks:
-                if cur_rank in row:
-                    ranks_per_dim[dim_name] = row
-                    break
 
         # Create communicators using the new single-list API
         for dim_name, ranks in ranks_per_dim.items():
@@ -85,13 +111,28 @@ class TorchCommsParallelDims(ParallelDims):
                 return
             raise
 
+        flatten_mesh = [
+            mesh.view(self.pp, self.dp_replicate * self.dp_shard, self.cp, self.tp),
+            mesh.view(self.pp, self.dp_replicate, self.dp_shard * self.cp, self.tp),
+            mesh.view(self.pp, self.dp_replicate * self.dp_shard * self.cp, self.tp),
+        ]
+
+        flattened_mesh_dim_names = ["dp", "dp_shard_cp", "dp_cp"]
         flatten_mesh_dim_names = {
             "dp": ["dp_replicate", "dp_shard"],
             "dp_shard_cp": ["dp_shard", "cp"],
             "dp_cp": ["dp_replicate", "dp_shard", "cp"],
         }
 
-        flatten_ranks_per_dim = self._get_flatten_ranks_per_dim(mesh, cur_rank)
+        reshape_size = [
+            self.dp_replicate * self.dp_shard,
+            self.dp_shard * self.cp,
+            self.dp_replicate * self.dp_shard * self.cp,
+        ]
+
+        flatten_ranks_per_dim = _calculate_ranks_per_dimension(
+            flatten_mesh, flattened_mesh_dim_names, reshape_size, cur_rank
+        )
 
         for flatten_dim_name, ranks in flatten_ranks_per_dim.items():
             comm_per_dim[flatten_dim_name] = comm.split(ranks, flatten_dim_name)
@@ -115,35 +156,3 @@ class TorchCommsParallelDims(ParallelDims):
         self.comms = [*comm_per_dim.values(), comm]
 
         return device_mesh
-
-    def _get_flatten_ranks_per_dim(
-        self, mesh: DeviceMesh, cur_rank: int
-    ) -> Dict[str, List[int]]:
-        # get flatten_ranks_per_dim for "dp", "dp_shard_cp", "dp_cp".
-        flatten_ranks_per_dim = {}
-        flatten_mesh = [
-            mesh.view(self.pp, self.dp_replicate * self.dp_shard, self.cp, self.tp),
-            mesh.view(self.pp, self.dp_replicate, self.dp_shard * self.cp, self.tp),
-            mesh.view(self.pp, self.dp_replicate * self.dp_shard * self.cp, self.tp),
-        ]
-        reshape_size = [
-            self.dp_replicate * self.dp_shard,
-            self.dp_shard * self.cp,
-            self.dp_replicate * self.dp_shard * self.cp,
-        ]
-        flattened_mesh_dim_names = ["dp", "dp_shard_cp", "dp_cp"]
-        for idx, dim_name in enumerate(flattened_mesh_dim_names):
-            # Calculate global ranks mapping for this mesh dimension
-            global_ranks = (
-                flatten_mesh[idx]
-                .transpose(idx, -1)
-                .reshape(-1, reshape_size[idx])
-                .tolist()
-            )
-
-            for row in global_ranks:
-                if cur_rank in row:
-                    flatten_ranks_per_dim[dim_name] = row
-                    break
-
-        return flatten_ranks_per_dim
