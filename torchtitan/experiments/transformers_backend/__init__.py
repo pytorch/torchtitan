@@ -75,35 +75,35 @@ class DeepSeekV3Args:
 flavors = {
     "debugmodel": HFTransformerModelArgs(
         titan_args=TitanModelArgs(
-            vocab_size=51200,
             dim=256,
-            n_layers=1,
+            n_layers=6,
             n_heads=16,
             n_kv_heads=16,
         ),
         pad_token_id=None,
-        # deepseek_v3_args=DeepSeekV3Args(
-        #     partial_rotary_factor=4.0,
-        #     inter_dim=1024,
-        #     moe_inter_dim=256,
-        #     n_dense_layers=1,
-        #     n_group=2,
-        #     topk_group=1,
-        #     kv_lora_rank=512,
-        #     q_lora_rank=0,
-        #     qk_nope_head_dim=128,
-        #     qk_rope_head_dim=64,
-        #     v_head_dim=128,
-        #     mscale=0.70,
-        #     moe_args=MoEArgs(
-        #         num_experts=8,
-        #         num_shared_experts=2,
-        #         top_k=3,
-        #         score_func="softmax",
-        #         route_norm=True,
-        #         score_before_experts=False,
-        #     ),
-        # )
+        #TODO(3outeille): use os.environ to switch between models
+        deepseek_v3_args=DeepSeekV3Args(
+            partial_rotary_factor=4.0,
+            inter_dim=1024,
+            moe_inter_dim=256,
+            n_dense_layers=1,
+            n_group=2,
+            topk_group=1,
+            kv_lora_rank=512,
+            q_lora_rank=0,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            mscale=0.70,
+            moe_args=MoEArgs(
+                num_experts=8,
+                num_shared_experts=2,
+                top_k=3,
+                score_func="softmax",
+                route_norm=True,
+                score_before_experts=False,
+            )
+        ) if os.environ.get("USE_MOE", "0") == "1" else None,
     ),
     "medium": HFTransformerModelArgs(
         titan_args=TitanModelArgs(

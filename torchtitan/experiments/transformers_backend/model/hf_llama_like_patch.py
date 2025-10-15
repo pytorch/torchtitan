@@ -20,10 +20,6 @@ def patch_hf_llama_like(decoder_layer_cls, attention_cls, mlp_cls=None):
       initialization for attention and MLP layers.
     - `DecoderLayer.__init__`: Adds `layer_idx` to attention and MLP modules within
       each decoder layer, which is required for the depth-dependent initialization.
-
-    By applying this patch, we can ensure that a model loaded in the transformers
-    backend will have the exact same weights as a model trained with the native
-    TorchTitan backend, which is essential for seamless conversion and debugging.
     """
 
     _original_decoder_layer_init = decoder_layer_cls.__init__

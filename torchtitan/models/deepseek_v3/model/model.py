@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-import os
 from typing import Tuple
 
 import torch
@@ -14,7 +13,7 @@ from torch import nn
 from torchtitan.models.attention import build_attention
 from torchtitan.models.moe import FeedForward, MoE
 from torchtitan.protocols.train_spec import ModelProtocol
-from torchtitan.utils.test_utils import seeded_init_decorator_for_test
+
 from .args import DeepSeekV3ModelArgs
 
 
@@ -241,7 +240,6 @@ class Attention(nn.Module):
         output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
         return self.wo(output)  # (bsz, seqlen, dim)
 
-    @seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
     def init_weights(self, init_std: float):
         linear_list = [
             self.wkv_a,
@@ -304,7 +302,6 @@ class TransformerBlock(nn.Module):
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
-    @seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
     def init_weights(self, buffer_device: torch.device):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
@@ -342,7 +339,6 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         self.model_args = model_args
         self.init_weights()
 
-    @seeded_init_decorator_for_test(seed=os.environ.get("SEED"))
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
         buffer_device = buffer_device or self.freqs_cis.device
         with torch.device(buffer_device):
