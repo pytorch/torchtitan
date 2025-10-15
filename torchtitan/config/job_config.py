@@ -375,6 +375,11 @@ class Parallelism:
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
 
+    pipeline_parallel_expert_parallel_overlap: bool = True
+    """Whether to turn on the optimization to overlap expert parallel and pipeline parallel
+    communication. This is only effective when the pipeline paralel schedule is DualPipeV and
+    pipeline_parallel_degree > 1 and expert_parallel_degree > 1."""
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 

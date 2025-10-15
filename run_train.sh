@@ -11,7 +11,7 @@ set -ex
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./run_train.sh
 NGPU=${NGPU:-"8"}
-export LOG_RANK=${LOG_RANK:-0}
+export LOG_RANK=${LOG_RANK:-0,2}
 CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/debug_model.toml"}
 TRAIN_FILE=${TRAIN_FILE:-"torchtitan.train"}
 
