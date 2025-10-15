@@ -87,19 +87,24 @@ class ParallelDims:
             ep: For EP.
             dp_shard_mod_ep: For FSDP or HSDP shard dimension in EP region.
 
-        Note: These dimensions won't exist at the same time. The meshes we need to
-        unflatten from world_mesh, assuming all degrees are > 1 except for ``pp``:
+        Note: These dimensions won't exist at the same time. If we consider
+        unflatten() operator only, following are all the meshes required
+        assuming all degrees are > 1 except for ``pp``:
 
             ["dp", "cp", "tp"]: ``dp`` process group is wasted as dataloader
                                 doesn't need it.
-
             ["dp_cp", "tp"]: loss computation
-
             ["dp_replicate", "dp_shard_cp", "tp"]: Non-EP region computation.
-
             ["dp_replicate", "dp_shard_mod_ep", "ep", "tp"]: EP region computation if etp == tp.
-
             ["dp_replicate", "dp_shard_mod_ep", "ep"]: EP region computation if etp == 1.
+
+        In reality, we don't actually need to create all of these meshes.
+        For example, ``dp_cp`` can be sliced and flattened from ["dp", "cp", "tp"].
+        So we don't actually need to create ["dp_cp", "tp"].
+
+        But there are some meses we MUST create if that mesh will be used for a
+        parameter. So Non-EP-region-computation mesh and EP-region-computation mesh
+        are required.
         """
 
         def add_dim(name, degree, config):
