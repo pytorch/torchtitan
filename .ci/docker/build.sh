@@ -14,7 +14,7 @@ echo "Building ${IMAGE_NAME} Docker image"
 
 OS=ubuntu
 CLANG_VERSION=""
-PYTHON_VERSION=3.11
+PYTHON_VERSION=3.12
 MINICONDA_VERSION=24.3.0-0
 
 case "${IMAGE_NAME}" in
