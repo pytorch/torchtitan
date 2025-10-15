@@ -26,12 +26,12 @@ def _calculate_ranks_per_dimension(
     dim_sizes: List[int],
     cur_rank: int,
 ) -> Dict[str, List[int]]:
-    """Calculate global ranks mapping for each mesh dimension.
+    """Util function to calculate global ranks mapping for each mesh dimension.
 
     Args:
         meshes: List of mesh tensors to calculate ranks from
         dim_names: List of dimension names corresponding to each mesh
-        dim_sizes: List of dimension sizes for reshaping
+        dim_sizes: List of dimension sizes corresponding to each mesh
         cur_rank: The current rank to find in the global ranks
 
     Returns:
@@ -99,7 +99,7 @@ class TorchCommsParallelDims(ParallelDims):
                     comm_per_dim["cp"],
                     comm_per_dim["tp"],
                 ),
-                mesh_dim_names=("pp", "dp_replicate", "dp_shard", "cp", "tp"),
+                mesh_dim_names=tuple(mesh_dim_names),
                 _global_comm=comm,
             )
         except TypeError as e:
