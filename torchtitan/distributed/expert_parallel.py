@@ -241,7 +241,9 @@ class ReordererSequenceParallel(ParallelStyle):
         local_rank = device_mesh.get_local_rank()
         # fact: top_scores.shape[0] // mod.top_k = batch_size * seq_len // ep_degree
         if not hasattr(mod, "top_k"):
-            raise ValueError("TokenReorderer class in MoE should always have top_k attribute.")
+            raise ValueError(
+                "TokenReorderer class in MoE should always have top_k attribute."
+            )
         token_indices_experts_sorted += top_scores.shape[0] // mod.top_k * local_rank
 
         return top_scores, token_indices_experts_sorted, num_tokens_per_expert
