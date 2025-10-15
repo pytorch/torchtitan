@@ -91,9 +91,3 @@ num_fragments = 2
 semi_sync_method = "diloco"
 process_group = "nccl"
 process_group_timeout_ms = 10000
-<<<<<<< HEAD
-=======
-
-[experimental]
-custom_args_module = "torchtitan.components.ft.config"
->>>>>>> f63037ff (add script to train with ft (#1812))
