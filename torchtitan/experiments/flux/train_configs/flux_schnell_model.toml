@@ -1,8 +1,7 @@
-
 [job]
 dump_folder = "./outputs"
 description = "Flux-schnell model"
-print_args = false
+custom_config_module = "torchtitan.experiments.flux.job_config"
 
 [profiling]
 enable_profiling = false
@@ -45,13 +44,9 @@ clip_encoder = "openai/clip-vit-large-patch14"
 max_t5_encoding_len = 256
 autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"  # Autoencoder to use for image
 
-
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
-
-[experimental]
-custom_args_module = "torchtitan.experiments.flux.job_config"
 
 [activation_checkpoint]
 mode = "full"

@@ -3,8 +3,6 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
@@ -24,11 +22,11 @@ __all__ = [
     "parallelize_deepseekv3",
     "DeepSeekV3ModelArgs",
     "DeepSeekV3Model",
-    "deepseekv3_configs",
+    "deepseekv3_args",
 ]
 
 
-deepseekv3_configs = {
+deepseekv3_args = {
     "debugmodel": DeepSeekV3ModelArgs(
         vocab_size=2048,
         dim=256,
@@ -162,7 +160,7 @@ deepseekv3_configs = {
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
         model_cls=DeepSeekV3Model,
-        model_args=deepseekv3_configs,
+        model_args=deepseekv3_args,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,

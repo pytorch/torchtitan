@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class CustomArgs:
+class CustomConfig:
     how_is_your_day: str = "good"
     """Just an example helptext"""
 
@@ -28,5 +28,5 @@ class JobConfig:
     This is an example of how to extend the tyro parser with custom config classes.
     """
 
-    custom_args: CustomArgs = field(default_factory=CustomArgs)
+    custom_config: CustomConfig = field(default_factory=CustomConfig)
     training: Training = field(default_factory=Training)
