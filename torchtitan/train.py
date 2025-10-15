@@ -13,7 +13,6 @@ from datetime import timedelta
 from typing import Any, Iterable
 
 import torch
-
 import torch.distributed.checkpoint.stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 
