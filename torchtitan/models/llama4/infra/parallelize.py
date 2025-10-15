@@ -64,7 +64,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
@@ -91,26 +90,21 @@ def parallelize_llama(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
             model,
-            world_mesh["tp"],
+            tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
         )
-        maybe_enable_async_tp(job_config, world_mesh["tp"])
+        maybe_enable_async_tp(job_config, tp_mesh)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
-                world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
+            tp_mesh=tp_mesh,
+            ep_mesh=parallel_dims.get_mesh("ep"),
+            etp_mesh=parallel_dims.get_mesh("etp"),
             etp_enabled=parallel_dims.etp_enabled,
         )
 
@@ -131,21 +125,27 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, job_config.compile)
 
-    dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
-        # apply FSDP or HSDP, potentially with Context Parallel
+        # dp_mesh is the mesh for FSDP/HSDP
         if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+            dp_mesh = DeviceMesh._concatenate(
+                [parallel_dims.get_mesh("dp_replicate"), parallel_dims.get_mesh("fsdp")]
+            )
         else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+            dp_mesh = parallel_dims.get_mesh("fsdp")
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh_dim_names = []
+        dp_mod_ep_mesh = None
         if parallel_dims.ep_enabled:
             if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
+                dp_mod_ep_mesh = DeviceMesh._concatenate(
+                    [
+                        parallel_dims.get_mesh("dp_replicate"),
+                        parallel_dims.get_mesh("efsdp"),
+                    ]
+                )
+            else:
+                dp_mod_ep_mesh = parallel_dims.get_mesh("efsdp")
 
         apply_fsdp(
             model,
@@ -156,11 +156,7 @@ def parallelize_llama(
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=(
-                world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
-                if parallel_dims.ep_enabled
-                else None
-            ),
+            dp_mod_ep_mesh=dp_mod_ep_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
@@ -175,9 +171,9 @@ def parallelize_llama(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
+        dp_mesh = parallel_dims.get_mesh("dp_replicate")
+        if parallel_dims.world_size != dp_mesh.size():
             raise RuntimeError("DDP has not supported > 1D parallelism")
-        dp_mesh = world_mesh
         apply_ddp(
             model,
             dp_mesh,
@@ -441,8 +437,7 @@ def apply_moe_ep_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
-    ep_tp_mesh: DeviceMesh | None,
-    etp_enabled: bool,
+    etp_mesh: DeviceMesh | None,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -464,7 +459,7 @@ def apply_moe_ep_tp(
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(),
             }
-            if ep_mesh is not None and not etp_enabled:
+            if ep_mesh is not None and etp_mesh is None:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
                 # the reorderer, the all-to-all comms, and routed experts computation
                 # are effectively running Sequence Parallel (split along the folded bs*slen dim)
@@ -491,12 +486,12 @@ def apply_moe_ep_tp(
             experts_mesh = tp_mesh
             # input Replicate, output Partial
             experts_plan = TensorParallel()
-        elif tp_mesh is None or not etp_enabled:
+        elif tp_mesh is None or etp_mesh is None:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
         else:
-            experts_mesh = ep_tp_mesh
+            experts_mesh = DeviceMesh._concatenate([ep_mesh, etp_mesh])
             experts_plan = ExpertTensorParallel()
 
         parallelize_module(
