@@ -370,7 +370,6 @@ def apply_non_moe_tp(
 
     # Apply tensor + sequence parallelism to every transformer block
     for transformer_block in model.layers:
-        is_deepseek_v3 = "deepseek_v3" in transformer_block.self_attn.__class__.__module__
         layer_plan = {
             "input_layernorm": SequenceParallel(),
             "self_attn": prepare_module_input(
@@ -380,37 +379,32 @@ def apply_non_moe_tp(
             "post_attention_layernorm": SequenceParallel(),
         }
 
-        if is_deepseek_v3:
-            if getattr(transformer_block.self_attn, "q_lora_rank", None) is None:
-                layer_plan["self_attn.q_proj"] = colwise_parallel()
-            else:
-                layer_plan.update({
-                    "self_attn.q_a_proj": NoParallel(),
-                    "self_attn.q_a_layernorm": NoParallel(),
-                    "self_attn.q_b_proj": colwise_parallel(),
-                })
-
-            if getattr(transformer_block.self_attn, "kv_lora_rank", None) is None:
-                layer_plan.update({
-                    "self_attn.k_proj": colwise_parallel(),
-                    "self_attn.v_proj": colwise_parallel(),
-                })
-            else:
-                layer_plan.update({
-                    "self_attn.kv_a_proj_with_mqa": NoParallel(),
-                    "self_attn.kv_a_layernorm": NoParallel(),
-                    "self_attn.kv_b_proj": colwise_parallel(),
-                })
-        else:
+        if getattr(transformer_block.self_attn, "q_lora_rank", None) is None:
             layer_plan.update({
                 "self_attn.q_proj": colwise_parallel(),
                 "self_attn.k_proj": colwise_parallel(),
                 "self_attn.v_proj": colwise_parallel(),
             })
+        else:
+            layer_plan.update({
+                "self_attn.q_a_proj": NoParallel(),
+                "self_attn.q_a_layernorm": NoParallel(),
+                "self_attn.q_b_proj": colwise_parallel(),
+                "self_attn.kv_a_proj_with_mqa": NoParallel(),
+                "self_attn.kv_a_layernorm": NoParallel(),
+                "self_attn.kv_b_proj": colwise_parallel(),
+            })
 
         # Handle different names for the output projection layer, e.g. o_proj vs dense
         o_proj_name = "o_proj" if hasattr(transformer_block.self_attn, "o_proj") else "dense"
         layer_plan[f"self_attn.{o_proj_name}"] = rowwise_parallel(output_layouts=Shard(1))
+        
+        # For Qwen3 RMSNorm on Q and K
+        # TODO(3outeille): we should probably shard(1) then replicate => then use SequenceParallel but for now I am fed up
+        if hasattr(transformer_block.self_attn, "q_norm"):
+            layer_plan["self_attn.q_norm"] = NoParallel()
+        if hasattr(transformer_block.self_attn, "k_norm"):
+            layer_plan["self_attn.k_norm"] = NoParallel()
 
         if not transformer_block.moe_enabled:
             mlp_plan = {
@@ -508,7 +502,7 @@ def apply_fsdp(
         if hasattr(transformer_block, "moe_enabled") and transformer_block.moe_enabled and ep_degree > 1:
             fsdp_mod_ep_config = fsdp_config.copy()
             fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
-
+            moe_block = transformer_block.mlp
             # NOTE: EP alreadys shards the routed experts on dim 0 (num_experts).
             #       When dp_mod_ep * ep > num_experts, FSDP default dim-0 sharding
             #       causes inefficiency, so we choose to do FSDP sharding on dim-1.
@@ -517,15 +511,14 @@ def apply_fsdp(
             #       shard_placement_fn on the outer TransformerBlock-level FSDP.
             _experts_shard_placement_fn = None
             assert dp_mod_ep_mesh is not None
-            assert hasattr(transformer_block, "moe")
             if (
                 dp_mod_ep_mesh.size() * ep_degree
-                > transformer_block.moe.experts.num_experts
+                > moe_block.experts.num_experts
             ):
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
             fully_shard(
-                transformer_block.moe.experts,
+                moe_block.experts,
                 **fsdp_mod_ep_config,
                 reshard_after_forward=reshard_after_forward,
                 shard_placement_fn=_experts_shard_placement_fn,
@@ -534,7 +527,7 @@ def apply_fsdp(
             # NOTE: # Although the FSDP sharding of experts is done on a mesh of
             #       a different size than other parameters, the gradient division
             #       factor should be consistent with data.
-            transformer_block.moe.experts.set_gradient_divide_factor(
+            moe_block.experts.set_gradient_divide_factor(
                 gradient_divide_factor,
             )
 
@@ -573,7 +566,7 @@ def apply_fsdp(
         if next_transformer_block is not None:
             if next_transformer_block.moe_enabled:
                 transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block, next_transformer_block.moe.experts]
+                    [next_transformer_block, next_transformer_block.mlp.experts]
                 )
             else:
                 transformer_block.set_modules_to_forward_prefetch(
@@ -597,7 +590,7 @@ def apply_fsdp(
         if prev_transformer_block is not None:
             if prev_transformer_block.moe_enabled:
                 transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block, prev_transformer_block.moe.experts]
+                    [prev_transformer_block, prev_transformer_block.mlp.experts]
                 )
             else:
                 transformer_block.set_modules_to_backward_prefetch(
@@ -618,11 +611,12 @@ def apply_moe_ep_tp(
         if not transformer_block.moe_enabled:
             continue
 
+        moe_block = transformer_block.mlp
         if tp_mesh is not None:
             moe_layer_plan = {
                 # input / output sharding on the seqlen dim
                 # all-gather for input, reduce-scatter for output
-                "moe": PrepareModuleInputOutput(
+                "mlp": PrepareModuleInputOutput(
                     input_layouts=(Shard(1),),
                     desired_input_layouts=(Replicate(),),
                     use_local_input=True,
@@ -630,22 +624,22 @@ def apply_moe_ep_tp(
                     desired_output_layouts=(Shard(1),),
                 ),
                 # replicate computation for the router
-                "moe.router.gate": NoParallel(),
+                "mlp.gate": NoParallel(),
             }
             if ep_mesh is not None and not etp_enabled:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
                 # the reorderer, the all-to-all comms, and routed experts computation
                 # are effectively running Sequence Parallel (split along the folded bs*slen dim)
-                moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
-            if transformer_block.moe.shared_experts is not None:
+                moe_layer_plan.update({"mlp.reorderer": ReordererSequenceParallel()})
+            if moe_block.shared_experts is not None:
                 # input Replicate, output Partial
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": ColwiseParallel(),
-                        "moe.shared_experts.w2": RowwiseParallel(
+                        "mlp.shared_experts.gate_proj": ColwiseParallel(),
+                        "mlp.shared_experts.up_proj": ColwiseParallel(),
+                        "mlp.shared_experts.down_proj": RowwiseParallel(
                             output_layouts=Partial()
                         ),
-                        "moe.shared_experts.w3": ColwiseParallel(),
                     }
                 )
             parallelize_module(
@@ -654,27 +648,40 @@ def apply_moe_ep_tp(
                 parallelize_plan=moe_layer_plan,
             )
 
-        experts_mesh, experts_plan = None, None
-        if ep_mesh is None:
+        if ep_mesh is None:  # This is the TP-only case for experts
             experts_mesh = tp_mesh
-            # input Replicate, output Partial
-            experts_plan = TensorParallel()
-        elif tp_mesh is None:
-            experts_mesh = ep_mesh
-            # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
-        elif etp_enabled:
-            experts_mesh = ep_tp_mesh
-            experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
-        else:
-            experts_mesh = ep_mesh
-            experts_plan = ExpertParallel()
+            expert_tp_plan = {}
+            for i in range(len(moe_block.experts)):
+                expert_tp_plan.update(
+                    {
+                        f"{i}.gate_proj": ColwiseParallel(),
+                        f"{i}.up_proj": ColwiseParallel(),
+                        f"{i}.down_proj": RowwiseParallel(output_layouts=Partial()),
+                    }
+                )
+            parallelize_module(
+                module=moe_block.experts,
+                device_mesh=experts_mesh,
+                parallelize_plan=expert_tp_plan,
+            )
+        else:  # EP or ETP enabled
+            experts_mesh, experts_plan = None, None
+            if tp_mesh is None:
+                experts_mesh = ep_mesh
+                # input / output sharding on the batch / tokens dim
+                experts_plan = ExpertParallel()
+            elif etp_enabled:
+                experts_mesh = ep_tp_mesh
+                experts_plan = ExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
+            else:
+                experts_mesh = ep_mesh
+                experts_plan = ExpertParallel()
 
-        parallelize_module(
-            module=transformer_block.moe.experts,
-            device_mesh=experts_mesh,
-            parallelize_plan=experts_plan,
-        )
+            parallelize_module(
+                module=moe_block.experts,
+                device_mesh=experts_mesh,
+                parallelize_plan=experts_plan,
+            )
 
 
 def apply_compile(model: nn.Module):
