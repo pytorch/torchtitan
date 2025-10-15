@@ -85,7 +85,7 @@ class ParallelDims:
             cp: For CP.
             tp: For TP.
             ep: For EP.
-            dp_shard_mod_ep: For FSDP or HSDP shard dimension in EP region.
+            dp_shard_in_ep: For FSDP or HSDP shard dimension in EP region.
 
         Note: These dimensions won't exist at the same time. If we consider
         unflatten() operator only, following are all the meshes required
@@ -95,8 +95,8 @@ class ParallelDims:
                                 doesn't need it.
             ["dp_cp", "tp"]: loss computation
             ["dp_replicate", "dp_shard_cp", "tp"]: Non-EP region computation.
-            ["dp_replicate", "dp_shard_mod_ep", "ep", "tp"]: EP region computation if etp == tp.
-            ["dp_replicate", "dp_shard_mod_ep", "ep"]: EP region computation if etp == 1.
+            ["dp_replicate", "dp_shard_in_ep", "ep", "tp"]: EP region computation if etp == tp.
+            ["dp_replicate", "dp_shard_in_ep", "ep"]: EP region computation if etp == 1.
 
         In reality, we don't actually need to create all of these meshes.
         For example, ``dp_cp`` can be sliced and flattened from ["dp", "cp", "tp"].
@@ -112,7 +112,7 @@ class ParallelDims:
             config["degree"].append(degree)
 
         world_mesh = init_device_mesh(device_type, [self.world_size])
-        dp_shard_mod_ep = (
+        dp_shard_in_ep = (
             self.dp_shard * self.cp // self.ep
             if self.etp == self.tp
             else self.dp_shard * self.cp * self.tp // self.ep
@@ -134,7 +134,7 @@ class ParallelDims:
                 add_dim("dp_replicate", self.dp_replicate, ep_computation_dims)
             if self.dp_shard_enabled:
                 add_dim("dp_shard_cp", self.dp_shard * self.cp, non_ep_computation_dims)
-                add_dim("dp_shard_mod_ep", dp_shard_mod_ep, ep_computation_dims)
+                add_dim("dp_shard_in_ep", dp_shard_in_ep, ep_computation_dims)
 
         if self.cp_enabled:
             add_dim("cp", self.cp, data_mesh_dims)
