@@ -31,6 +31,7 @@ skip_for_rocm_test_list = [
     "2d_compile",
     "pp_dp_1f1b",
     "pp_dp_gpipe",
+    "pp_tp",
     "pp_dp_tp",
     "3d_compile",
     "pp_looped_1f1b",
