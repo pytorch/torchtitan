@@ -115,7 +115,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # (mainly for debugging, expect perf loss).
         """
         dist_utils.set_determinism(
-            world_mesh._world_mesh,
+            world_mesh,
             self.device,
             job_config.debug,
             distinct_seed_mesh_dims=["pp"],
