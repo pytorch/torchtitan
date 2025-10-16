@@ -361,6 +361,12 @@ class Parallelism:
     PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
     """
 
+    pipeline_parallel_schedule_csv_format: str = "compute_comms"
+    """
+    Two different formats of csv schedules. One with compute actions only, and the other with both compute and communication actions.
+    """
+
+
     pipeline_parallel_microbatch_size: int = 1
     """
     The size of each pipeline parallel microbatch (default 1).

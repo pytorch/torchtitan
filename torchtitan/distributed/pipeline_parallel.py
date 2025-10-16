@@ -167,6 +167,7 @@ def build_pipeline_schedule(
         _PipelineSchedule: The pipeline schedule for the given stages.
     """
     pp_schedule_csv = job_config.parallelism.pipeline_parallel_schedule_csv
+    pp_schedule_csv_format = job_config.parallelism.pipeline_parallel_schedule_csv_format
 
     # Validate that pp_schedule_csv is a valid path
     if pp_schedule_csv:
@@ -218,7 +219,7 @@ def build_pipeline_schedule(
             "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
             "and _PipelineScheduleRuntime support csv schedules"
         )
-        schedule._load_csv(pp_schedule_csv)
+        schedule._load_csv(pp_schedule_csv, format=pp_schedule_csv_format)
 
     return schedule
 
