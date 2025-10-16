@@ -514,16 +514,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     for layer_id, transformer_block in model.layers.named_children():
         # TODO: remove when torch.compile supports fullgraph=True for MoE
         if transformer_block.moe_enabled:
-            transformer_block.moe.experts = torch.compile(
-                transformer_block.moe.experts,
-                backend=compile_config.backend,
-                fullgraph=True,
-            )
-            transformer_block.moe.shared_experts = torch.compile(
-                transformer_block.moe.shared_experts,
-                backend=compile_config.backend,
-                fullgraph=True,
-            )
+            continue
         else:
             transformer_block = torch.compile(
                 transformer_block,
