@@ -38,14 +38,12 @@ jobs:
             # (1m25s vs 2m37s).
             docker-image: torchtitan-ubuntu-20.04-clang12
             index-url: https://download.pytorch.org/whl/nightly/cu126
-            is-rocm: 0
           - name: rocm
             runner: linux.rocm.gpu.gfx942.4
             gpu-arch-type: rocm
             gpu-arch-version: "7.0"
             docker-image: torchtitan-rocm-ubuntu-22.04-clang12
             index-url: https://download.pytorch.org/whl/nightly/rocm7.0
-            is-rocm: 1
     with:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
@@ -70,11 +68,6 @@ jobs:
         python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
-
-        if [[ "${{ matrix.is-rocm }}" == "1" ]]; then
-          mkdir ~/artifacts-to-be-uploaded
-          TEST_WITH_ROCM=1 python -m tests.integration_tests.run_tests --test_suite features ~/artifacts-to-be-uploaded --ngpu 4
-        else
-          mkdir artifacts-to-be-uploaded
-          TEST_WITH_ROCM=0 python -m tests.integration_tests.run_tests --test_suite features artifacts-to-be-uploaded --ngpu 8
-        fi
+        
+        mkdir RUNNER_TEMP/artifacts-to-be-uploaded
+        TEST_WITH_ROCM=${{ matrix.gpu-arch-type == 'rocm' && "1" || "0" }} python -m tests.integration_tests.run_tests --test_suite features RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4

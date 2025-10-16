@@ -56,7 +56,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "2D eager",
             "2d_eager",
-            skip_rocm_test=False,
+            #skip_rocm_test=False,
         ),
         OverrideDefinitions(
             [
