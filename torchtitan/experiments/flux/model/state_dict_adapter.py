@@ -14,14 +14,14 @@ from typing import Any
 
 import torch
 
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import FluxModelArgs
 
 logger = logging.getLogger()
 
 
-class FluxStateDictAdapter(BaseStateDictAdapter):
+class FluxStateDictAdapter(StateDictAdapter):
     """
     State dict adapter for Flux model to convert between HuggingFace safetensors format
     and torchtitan DCP format.

@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-
 import torch
 import torch.nn as nn
 from torch.distributed._functional_collectives import (
@@ -15,6 +14,9 @@ from torch.distributed.tensor import (
     DeviceMesh,
     distribute_module,
     distribute_tensor,
+    DTensor,
+    Partial,
+    Replicate,
     Shard,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
@@ -24,6 +26,17 @@ from torchtitan.models.moe.utils import _permute, _unpermute
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
+    def _prepare_input_fn(self, mod, inputs, device_mesh):
+        routed_input, num_tokens_per_expert = inputs
+        # NOTE: Currently in MoE TP, experts multiplication runs in plain Tensors.
+        #       The grad_placements on inputs is set to Partial so that necessary
+        #       reductions are performed during backward.
+        routed_input = DTensor.from_local(
+            routed_input, device_mesh, (Replicate(),)
+        ).to_local(grad_placements=(Partial(),))
+
+        return routed_input, num_tokens_per_expert
+
     def _partition_fn(self, name, module, device_mesh):
         # w1 shape = (experts, out_dim, in_dim)
         module.register_parameter(
@@ -47,6 +60,7 @@ class TensorParallel(ParallelStyle):
             module,
             device_mesh,
             self._partition_fn,
+            self._prepare_input_fn,
         )
 
 
@@ -157,6 +171,17 @@ class ExpertParallel(ParallelStyle):
 # This class is for dp2ep with TP (without TP we can just use ExpertParallel)
 class ExpertTensorParallel(ExpertParallel):
     def _token_dispatch(self, mod, inputs, device_mesh):
+        routed_input, num_tokens_per_expert = inputs
+
+        # NOTE: Currently in MoE TP, experts multiplication runs in plain Tensors.
+        #       The grad_placements on inputs is set to Partial so that necessary
+        #       reductions are performed during backward.
+        routed_input = DTensor.from_local(
+            routed_input, device_mesh["tp"], (Replicate(),)
+        ).to_local(grad_placements=(Partial(),))
+
+        inputs = (routed_input, num_tokens_per_expert)
+
         # token dispatch happens on the EP mesh, whereas device_mesh is [ep, tp] mesh
         return super()._token_dispatch(mod, inputs, device_mesh["ep"])
 
@@ -198,12 +223,11 @@ class ExpertTensorParallel(ExpertParallel):
 class ReordererSequenceParallel(ParallelStyle):
     def __init__(self):
         super().__init__()
-        self.top_k = None
 
     def _prepare_inputput_fn(self, mod, inputs, device_mesh):
         # shape (batch_size*seq_len, top_k)
         top_scores, selected_experts_indices = inputs
-        num_tokens, self.top_k = top_scores.shape
+        num_tokens, _ = top_scores.shape
 
         # NOTE: If needed, we can pad tokens in case bs*slen is not divisible by TP degree
         # if top_scores.shape[0] % device_mesh.size() != 0:
@@ -240,8 +264,12 @@ class ReordererSequenceParallel(ParallelStyle):
         # NOTE: As we shard routed tokens along bs*slen dim across the TP ranks,
         #       the MoE gather and scatter still require global token indices.
         local_rank = device_mesh.get_local_rank()
-        # fact: top_scores.shape[0] // self.top_k = batch_size * seq_len // ep_degree
-        token_indices_experts_sorted += top_scores.shape[0] // self.top_k * local_rank
+        # fact: top_scores.shape[0] // mod.top_k = batch_size * seq_len // ep_degree
+        if not hasattr(mod, "top_k"):
+            raise ValueError(
+                "TokenReorderer class in MoE should always have top_k attribute."
+            )
+        token_indices_experts_sorted += top_scores.shape[0] // mod.top_k * local_rank
 
         return top_scores, token_indices_experts_sorted, num_tokens_per_expert
 

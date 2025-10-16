@@ -141,7 +141,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                         layer_num,
                         value.device_mesh,
                     )
-                else:  # keep this path to be compatibile with offline conversion
+                else:  # keep this path to be compatible with offline conversion
                     stacked_value = self._concatenate_expert_weights(
                         expert_weights_by_layer,
                         titan_abstract_key,
