@@ -92,7 +92,6 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
 
         # Skip the test for ROCm
         if TEST_WITH_ROCM and test_flavor.skip_rocm_test:
-            print(f"Skipping tests for ROCm!!! Test: {test_flavor.test_name}")
             continue
 
         # Check if we have enough GPUs
