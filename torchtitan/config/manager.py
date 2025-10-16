@@ -224,7 +224,7 @@ class ConfigManager:
     def register_tyro_rules(registry: tyro.constructors.ConstructorRegistry) -> None:
         @registry.primitive_rule
         def list_str_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
-            """Support for comma separate string parsing"""
+            """Support for comma separated string parsing"""
             if type_info.type != list[str]:
                 return None
             return tyro.constructors.PrimitiveConstructorSpec(

@@ -57,7 +57,7 @@ In a real-world scenario, `torchft_lighthouse` would likely be on a different ma
 ### Using semi-synchronous training (Example 2)
 
 TorchFT provides algorithms that do not require per-step synchronization and
-the replica groups can sychronize weights every N steps.
+the replica groups can synchronize weights every N steps.
 
 **Note on Batch Sizes**: For DiLoCo, there's an important distinction in batch size terminology:
 
