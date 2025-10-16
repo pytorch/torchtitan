@@ -43,6 +43,9 @@ dev = [
 [tool.setuptools.dynamic]
 version = {file = "assets/version.txt"}
 
+[tool.codespell]
+skip = ["*.json"]
+ignore-words-list = ["assertin", "datas" ,"indx", "inpt", "nd", "socio-economic"]
 
 # ---- Explicit project build information ---- #
 [build-system]
