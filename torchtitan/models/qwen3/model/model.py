@@ -470,7 +470,6 @@ class Qwen3Model(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
-        input_batch: torch.Tensor | None = None,
     ):
         """
         Perform a forward pass through the Transformer model.
@@ -480,10 +479,6 @@ class Qwen3Model(nn.Module, ModelProtocol):
                 If pipeline parallelism is enabled, this will be the input token indices
                 for the ranks on the first pipeline stage. This will be the activation of the
                 previous pipeline stage if the current rank is not on the first stage.
-            input_batch (torch.Tensor): The input batch read from the dataloader.
-                This will always be the input batch regardless of the pipeline stage.
-                This field is required for non-first PP stages to perform document
-                masking attention (to analyze the boundary of the document).
 
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.

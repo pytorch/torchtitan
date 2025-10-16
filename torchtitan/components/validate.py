@@ -137,12 +137,9 @@ class Validator(BaseValidator):
                             inputs,
                             target=targets,
                             losses=losses,
-                            input_batch=inputs,
                         )
                     else:
-                        self.pp_schedule.eval(
-                            target=targets, losses=losses, input_batch=inputs
-                        )
+                        self.pp_schedule.eval(target=targets, losses=losses)
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
