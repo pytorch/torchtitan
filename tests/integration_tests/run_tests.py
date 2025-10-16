@@ -27,7 +27,6 @@ _TEST_SUITES_FUNCTION = {
 # tests skipped for ROCm
 skip_for_rocm_test_list = [
     "model_only_hf_checkpoint",
-    "2d_eager",
     "2d_compile",
     "pp_dp_1f1b",
     "pp_dp_gpipe",
