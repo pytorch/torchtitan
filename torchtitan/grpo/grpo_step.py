@@ -178,6 +178,7 @@ def compute_grpo_loss_from_predictions(
     ref_model=None,
     input_ids=None,
     use_ref_model=False,
+    inf_logps=None,
 ):
     """
     Compute full GRPO loss from model predictions.
@@ -197,6 +198,7 @@ def compute_grpo_loss_from_predictions(
         ref_model: Reference model (needed if ref_pred not provided and use_ref_model=True)
         input_ids: Input IDs (needed if computing ref_pred)
         use_ref_model: Whether to use reference model
+        inf_logps: Precomputed log probabilities from inference model
 
     Returns:
         loss: GRPO loss
@@ -245,7 +247,18 @@ def compute_grpo_loss_from_predictions(
     else:
         logger.debug("On-policy: no ratio clipping applied")
         clipped_ratio = ratio
-
+    if job_config.grpo.importance_ratio_cap > 0 and inf_logps is not None:
+        # ref: https://fengyao.notion.site/off-policy-rl
+        imp_ratio_mask = inf_logps <= 0
+        imp_ratio_logp = old_logp if old_logp is not None else logp.detach()
+        importance_ratio = torch.exp(imp_ratio_logp - inf_logps).clamp(
+            max=job_config.grpo.importance_ratio_cap
+        )
+        importance_ratio = importance_ratio * imp_ratio_mask.float()
+        importance_ratio = importance_ratio + (1 - imp_ratio_mask.float())
+        clipped_ratio = clipped_ratio * importance_ratio
+    else:
+        importance_ratio = torch.ones_like(clipped_ratio)
     # Compute auxiliary losses
     logit_loss = compute_logit_loss(pred, job_config.grpo.logit_loss_weight, device)
     entropy_loss = compute_entropy_loss(
@@ -375,10 +388,23 @@ def compute_grpo_loss_from_predictions(
             )  # Subtract large value where mask is 0
             logp_min = logp_for_min.min()
             logp_max = logp_for_max.max()
+            if inf_logps is not None:
+                inf_logp_mean = masked_mean(inf_logps, orig_mask)
+                inf_logp_for_min = inf_logps + (1 - orig_mask) * 1e10
+                inf_logp_for_max = inf_logps - (1 - orig_mask) * 1e10
+                inf_logp_min = inf_logp_for_min.min()
+                inf_logp_max = inf_logp_for_max.max()
+            else:
+                inf_logp_mean = torch.tensor(0.0, device=device)
+                inf_logp_min = torch.tensor(0.0, device=device)
+                inf_logp_max = torch.tensor(0.0, device=device)
         else:
             logp_mean = torch.tensor(0.0, device=device)
             logp_min = torch.tensor(0.0, device=device)
             logp_max = torch.tensor(0.0, device=device)
+            inf_logp_mean = torch.tensor(0.0, device=device)
+            inf_logp_min = torch.tensor(0.0, device=device)
+            inf_logp_max = torch.tensor(0.0, device=device)
         threshold_filter_ratio = 1.0 - masked_mean(logp_threshold_mask, orig_mask)
 
         # Collect all metrics
@@ -409,6 +435,18 @@ def compute_grpo_loss_from_predictions(
             "logp_dist/max": logp_max,
             "logp_dist/threshold_filter_ratio": threshold_filter_ratio,
         }
+
+        if inf_logps is not None:
+            metrics.update(
+                {
+                    "inflogp_dist/mean": inf_logp_mean,
+                    "inflogp_dist/min": inf_logp_min,
+                    "inflogp_dist/max": inf_logp_max,
+                    "inflogp_dist/importance_ratio": masked_mean(
+                        importance_ratio, mask
+                    ),
+                }
+            )
 
         if raw_ratio is not None:
             metrics["raw_ratio"] = masked_mean(raw_ratio, mask)

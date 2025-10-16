@@ -882,6 +882,9 @@ class GRPO:
     scale_adv_by_len: bool = False
     """Whether to scale advantages by sequence length, defaults to False"""
 
+    importance_ratio_cap: float = -1.0
+    """Maximum value for importance ratio, -1 means no cap."""
+
 
 @dataclass
 class JobConfig:

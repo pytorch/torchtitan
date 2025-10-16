@@ -57,6 +57,7 @@ def pad_data_to_good_offset(
     rewards = list()
     masks = list()
     lengths = list()
+    inf_logps = list()
     for item in data["batch"]:
         scores = item["scores"]
         scores = np.array(scores)
@@ -115,6 +116,21 @@ def pad_data_to_good_offset(
             labels.append(label_item[1:])
             rewards.append(item["scores"][i])
             masks.append(item["masks"][i][1:])
+            if item["inference_logprobs"] is None:
+                inf_logps.append(np.full(item["masks"][i].shape, 1.0, dtype=np.float32))
+            else:
+                item["inference_logprobs"][i] = np.concatenate(
+                    [
+                        np.array(item["inference_logprobs"][i]),
+                        np.zeros(
+                            max(
+                                0, token_setup_len - len(item["inference_logprobs"][i])
+                            ),
+                            dtype=np.float32,
+                        ),
+                    ]
+                )
+                inf_logps.append(item["inference_logprobs"][i][:-1])
     # sort into 4 buckets...
     raw_items = [
         {
@@ -123,9 +139,10 @@ def pad_data_to_good_offset(
             "mask": mask,
             "reward": reward,
             "length": length,
+            "inf_logp": inf_logp,
         }
-        for (input_id, label, mask, reward, length) in zip(
-            input_ids, labels, masks, rewards, lengths
+        for (input_id, label, mask, reward, length, inf_logp) in zip(
+            input_ids, labels, masks, rewards, lengths, inf_logps
         )
     ]
     sorted_items = sorted(raw_items, key=lambda x: x["length"], reverse=True)
@@ -148,6 +165,7 @@ def pad_data_to_good_offset(
         [x["reward"] for x in items],
         [x["mask"] for x in items],
         [x["length"] for x in items],
+        [x["inf_logp"] for x in items],
     )
 
 
@@ -165,7 +183,15 @@ def prep_data(
     # Now prepare the batch
     batches = list()
 
-    max_token_len, input_ids, labels, rewards, masks, lengths = pad_data_to_good_offset(
+    (
+        max_token_len,
+        input_ids,
+        labels,
+        rewards,
+        masks,
+        lengths,
+        inf_logps,
+    ) = pad_data_to_good_offset(
         data,
         cp_degree,
         dp_degree,
@@ -185,6 +211,7 @@ def prep_data(
                 np.array(input_ids[start:end]),
                 np.array(labels[start:end]),
                 np.array(masks[start:end]),
+                np.array(inf_logps[start:end]),
                 np.array(rewards[start:end]),
             )
         )
@@ -207,6 +234,7 @@ def prep_empty_data_matricies(
     ) // dynamic_batch_size
     batches = [
         [
+            np.zeros((dynamic_batch_size, max_token_len), dtype=np.int64),
             np.zeros((dynamic_batch_size, max_token_len), dtype=np.int64),
             np.zeros((dynamic_batch_size, max_token_len), dtype=np.int64),
             np.zeros((dynamic_batch_size, max_token_len), dtype=np.int64),
