@@ -158,10 +158,10 @@ class Trainer(ForgeEngine):
         parallel_dims = self.parallel_dims
 
         inputs = input_dict["input"]
-        extra_args = {}
+        extra_kwargs = {}
 
         if getattr(self.model_args, "use_flex_attn", False):
-            extra_args["attention_masks"] = model_parts[0].get_attention_masks(
+            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
             )
@@ -187,17 +187,15 @@ class Trainer(ForgeEngine):
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
-                        **extra_args,
+                        **extra_kwargs,
                         target=targets,
                         losses=losses,
-                        input_batch=inputs,
                     )
                 else:
                     self.pp_schedule.step(
-                        **extra_args,
+                        **extra_kwargs,
                         target=targets,
                         losses=losses,
-                        input_batch=inputs,
                     )
 
             # accumulate losses across pipeline microbatches
@@ -215,7 +213,7 @@ class Trainer(ForgeEngine):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_args)
+                    pred = model_parts[0](inputs, **extra_kwargs)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
