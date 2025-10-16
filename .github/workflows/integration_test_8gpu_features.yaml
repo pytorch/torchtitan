@@ -68,6 +68,6 @@ jobs:
         python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
-        
+
         mkdir RUNNER_TEMP/artifacts-to-be-uploaded
         TEST_WITH_ROCM=${{ matrix.gpu-arch-type == 'rocm' && "1" || "0" }} python -m tests.integration_tests.run_tests --test_suite features RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
