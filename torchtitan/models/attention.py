@@ -182,6 +182,6 @@ def create_attention_mask(*args, **kwargs):
     """Create an attention mask using compiled create_block_mask.
 
     This function is cached to avoid recreating BlockMasks for the same
-    argumens.
+    arguments.
     """
     return _compiled_create_block_mask(*args, **kwargs)

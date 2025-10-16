@@ -34,10 +34,10 @@ This results in a very simple and general interface to train modern VLM with int
 ### Dataloader
 This approach requires the dataloader to handle the following aspect:
 - [x] Interleave the correct precise numbers of image tokens in the inputs token based on encoder's patch size and input images' size
-- [x] Convert images/videos to 1D sequence of patchs:
+- [x] Convert images/videos to 1D sequence of patches:
   - `rearrange(pixels, 'n (t pt) (h ph) (w pw) c -> n (t h w) (pt p pw c)', pt=temporal_ps, ph=patch_size, pw=patch_size)`
   - Pad all image patches sequence to a fixed length and return `pixel_values.shape == [N, L, D]`
-- [x] Return a `grid_thw.shape == [N, L, 3]` to keep track of the location indicies of each patches in the images. Padding image can be tracked in the same tensors with values `-1`.
+- [x] Return a `grid_thw.shape == [N, L, 3]` to keep track of the location indices of each patches in the images. Padding image can be tracked in the same tensors with values `-1`.
 - [x] LLM Sample / Document Packing.
 - [x] Captioning dataset: CC12M
 - [x] Interleaved dataset: Obelics

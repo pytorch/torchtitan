@@ -53,7 +53,7 @@ SimpleFSDP relies on compiler backend to perform optimizations (i.e., bucketing 
     - "aot_eager_autobucketing": perform autobucketing at aten fx-level, and perform code execution with aot_eager backend.
 
 
-users can specify the pass (e.g., "aot_eager_autobucketing") via addtional configs:
+users can specify the pass (e.g., "aot_eager_autobucketing") via additional configs:
 
 ```bash
 --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config  --compile.model_backend_override "aot_eager_autobucketing"
