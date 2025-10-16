@@ -24,39 +24,6 @@ _TEST_SUITES_FUNCTION = {
 }
 
 
-# tests skipped for ROCm
-skip_for_rocm_test_list = [
-    "model_only_hf_checkpoint",
-    "2d_eager",
-    "2d_compile",
-    "pp_dp_1f1b",
-    "pp_dp_gpipe",
-    "pp_tp",
-    "pp_dp_tp",
-    "3d_compile",
-    "pp_looped_1f1b",
-    "pp_custom_csv",
-    "optimizer_foreach",
-    "ddp",
-    "hsdp",
-    "fsdp+flex_attn",
-    "fsdp+flex_attn+per_op_sac",
-    "cp_allgather",
-    "cp_alltoall",
-    "hsdp+tp",
-    "fsdp+cp",
-    "hsdp+cp_without_dp_shard",
-    "hsdp+cp_with_dp_shard",
-    "fsdp+tp+cp",
-    "cpu_offload+opt_in_bwd+TP+DP+CP",
-    "fsdp2_memory_estimation",
-    "test_generate",
-    "fsdp_reshard_always",
-    "optional_checkpoint",
-    "float8_emulation",
-    "gradient_accumulation",
-    "validation_tp_cp_pp",
-]
 TEST_WITH_ROCM = os.getenv("TEST_WITH_ROCM", "0") == "1"
 
 
@@ -124,7 +91,8 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
             continue
 
         # Skip the test for ROCm
-        if TEST_WITH_ROCM and test_flavor.test_name in skip_for_rocm_test_list:
+        if TEST_WITH_ROCM and test_flavor.skip_rocm_test:
+            print(f"Skipping tests for ROCm!!! Test: {test_flavor.test_name}")
             continue
 
         # Check if we have enough GPUs

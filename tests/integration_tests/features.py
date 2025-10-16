@@ -24,6 +24,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "default",
             "default",
+            skip_rocm_test=False,
         ),
         OverrideDefinitions(
             [
@@ -33,6 +34,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "1D compile",
             "1d_compile",
+            skip_rocm_test=False,
         ),
         OverrideDefinitions(
             [
@@ -44,6 +46,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "1D compile with selective op AC",
             "1d_compile_sac_op",
+            skip_rocm_test=False,
         ),
         OverrideDefinitions(
             [
