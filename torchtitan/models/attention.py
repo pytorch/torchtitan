@@ -16,7 +16,6 @@ from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
     AuxOutput,
-    BlockMask,
     create_block_mask,
     flex_attention,
 )
@@ -49,23 +48,13 @@ class FlexAttentionWrapper(torch.nn.Module):
         flex_attention, mode="max-autotune-no-cudagraphs"
     )
 
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        *,
-        block_mask: BlockMask,
-        scale: float | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, AuxOutput]:
+    def forward(self, *args, **kwargs) -> torch.Tensor | tuple[torch.Tensor, AuxOutput]:
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
-        return FlexAttentionWrapper._compiled_flex_attn(
-            q, k, v, block_mask=block_mask, scale=scale
-        )
+        return FlexAttentionWrapper._compiled_flex_attn(*args, **kwargs)
 
 
 class ScaledDotProductAttentionWrapper(torch.nn.Module):
