@@ -74,6 +74,7 @@ grpo_by_token = true
 scale_adv_by_len = false
 num_microbatches = 2
 onpolicy_logp_threshold=-6.0
+importance_ratio_cap=2.0
 
 [checkpoint]
 enable = true
