@@ -11,6 +11,7 @@ import torch.nn as nn
 from torch.utils.flop_counter import FlopCounterMode
 
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
+from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
 
@@ -74,7 +75,8 @@ class TestApplyAC(unittest.TestCase):
         # 2. SAC
         # Per-op SAC's policy is to save every other mm
         model_selective_ac = ToyModule()
-        ac_config_no_force = ACConfig(
+        job_config = JobConfig()
+        job_config.activation_checkpoint = ACConfig(
             mode="selective",
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=[],  # Empty list
@@ -82,7 +84,7 @@ class TestApplyAC(unittest.TestCase):
         )
         apply_ac(
             model_selective_ac,
-            ac_config_no_force,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
@@ -92,7 +94,7 @@ class TestApplyAC(unittest.TestCase):
         # 3. Per-op SAC with force recompute "moe.router.gate"
         # This leads to two mms being recomputed since they share the same shape!
         model_with_force_first = ToyModule()
-        ac_config_with_force_first = ACConfig(
+        job_config.activation_checkpoint = ACConfig(
             mode="selective",
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
@@ -100,7 +102,7 @@ class TestApplyAC(unittest.TestCase):
         )
         apply_ac(
             model_with_force_first,
-            ac_config_with_force_first,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
@@ -109,7 +111,7 @@ class TestApplyAC(unittest.TestCase):
 
         # 4. Per-op SAC with force recompute "output"
         model_with_force_last = ToyModule()
-        ac_config_with_force_last = ACConfig(
+        job_config.activation_checkpoint = ACConfig(
             mode="selective",
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
@@ -117,7 +119,7 @@ class TestApplyAC(unittest.TestCase):
         )
         apply_ac(
             model_with_force_last,
-            ac_config_with_force_last,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
@@ -126,13 +128,13 @@ class TestApplyAC(unittest.TestCase):
 
         # 5. Full AC
         model_with_full_ac = ToyModule()
-        ac_config_full_ac = ACConfig(
+        job_config.activation_checkpoint = ACConfig(
             mode="full",
             early_stop=False,
         )
         apply_ac(
             model_with_full_ac,
-            ac_config_full_ac,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
@@ -168,14 +170,14 @@ class TestApplyAC(unittest.TestCase):
         # 2. SAC
         # Per-op SAC's policy is to save every other mm
         model_selective_ac = ToyModule().cuda()
-        ac_config_no_force = ACConfig(
+        job_config.activation_checkpoint = ACConfig(
             mode="selective",
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=[],  # Empty list
         )
         apply_ac(
             model_selective_ac,
-            ac_config_no_force,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
@@ -185,14 +187,14 @@ class TestApplyAC(unittest.TestCase):
         # 3. Per-op SAC with force recompute "moe.router.gate"
         # This leads to two mms being recomputed since they share the same shape!
         model_with_force_first = ToyModule().cuda()
-        ac_config_with_force_first = ACConfig(
+        job_config.activation_checkpoint = ACConfig(
             mode="selective",
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
         )
         apply_ac(
             model_with_force_first,
-            ac_config_with_force_first,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
@@ -201,14 +203,14 @@ class TestApplyAC(unittest.TestCase):
 
         # 4. Per-op SAC with force recompute "output"
         model_with_force_last = ToyModule().cuda()
-        ac_config_with_force_last = ACConfig(
+        job_config.activation_checkpoint = ACConfig(
             mode="selective",
             selective_ac_option="op",
             per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
         )
         apply_ac(
             model_with_force_last,
-            ac_config_with_force_last,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
@@ -217,12 +219,12 @@ class TestApplyAC(unittest.TestCase):
 
         # 5. Full AC
         model_with_full_ac = ToyModule().cuda()
-        ac_config_full_ac = ACConfig(
+        job_config.activation_checkpoint = ACConfig(
             mode="full",
         )
         apply_ac(
             model_with_full_ac,
-            ac_config_full_ac,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
@@ -243,26 +245,29 @@ class TestApplyAC(unittest.TestCase):
 
         model_selective_ac = ToyModule()
         model_selective_ac.load_state_dict(model_no_ac.state_dict())
-        apply_ac(
-            model_selective_ac,
-            ACConfig(
+        job_config = JobConfig()
+        job_config.activation_checkpoint = ACConfig(
                 mode="selective",
                 selective_ac_option="op",
                 per_op_sac_force_recompute_mm_shapes_by_fqns=[],
-            ),
+        )
+        apply_ac(
+            model_selective_ac,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
         model_force_first = ToyModule()
         model_force_first.load_state_dict(model_no_ac.state_dict())
-        apply_ac(
-            model_force_first,
-            ACConfig(
+        job_config.activation_checkpoint =  ACConfig(
                 mode="selective",
                 selective_ac_option="op",
                 per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
-            ),
+        )
+        apply_ac(
+            model_force_first,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
@@ -270,13 +275,14 @@ class TestApplyAC(unittest.TestCase):
 
         model_force_last = ToyModule()
         model_force_last.load_state_dict(model_no_ac.state_dict())
-        apply_ac(
-            model_force_last,
-            ACConfig(
+        job_config.activation_checkpoint = ACConfig(
                 mode="selective",
                 selective_ac_option="op",
                 per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
-            ),
+        )
+        apply_ac(
+            model_force_last,
+            job_config,
             model_compile_enabled=False,
             use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
