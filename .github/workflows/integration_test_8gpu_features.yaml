@@ -40,7 +40,7 @@ jobs:
             index-url: https://download.pytorch.org/whl/nightly/cu126
             is-rocm: 0
           - name: rocm
-            runner: linux.rocm.gpu.gfx942.4
+            runner: linux.rocm.gpu.gfx942.8
             gpu-arch-type: rocm
             gpu-arch-version: "7.0"
             docker-image: torchtitan-rocm-ubuntu-22.04-clang12
@@ -73,8 +73,8 @@ jobs:
 
         if [[ "${{ matrix.is-rocm }}" == "1" ]]; then
           mkdir ~/artifacts-to-be-uploaded
-          TEST_WITH_ROCM=1 python -m tests.integration_tests.run_tests --test_suite features ~/artifacts-to-be-uploaded --ngpu 4
+          TEST_WITH_ROCM=1 python -m tests.integration_tests.run_tests --test_suite features ~/artifacts-to-be-uploaded --ngpu 8
         else
           mkdir artifacts-to-be-uploaded
-          TEST_WITH_ROCM=0 python -m tests.integration_tests.run_tests --test_suite features artifacts-to-be-uploaded --ngpu 4
+          TEST_WITH_ROCM=0 python -m tests.integration_tests.run_tests --test_suite features artifacts-to-be-uploaded --ngpu 8
         fi
