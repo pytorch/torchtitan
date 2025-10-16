@@ -467,15 +467,18 @@ def cp_shard(
     from torch.nn.attention.flex_attention import BlockMask
 
     load_balancer = None
-    """
+
     seq_length = inputs.shape[1]
     load_balancer = _HeadTailLoadBalancer(
         seq_length, cp_mesh.size(0), cp_mesh.device_type
     )
 
+    """
     assert isinstance(attention_masks, BlockMask)
     load_balancer = _PTRRLoadBalancer(attention_masks, cp_mesh.size(0))
     """
+    assert isinstance(attention_masks, BlockMask)
+    logger.info(f"global block_mask sprsity = {attention_masks.sparsity()}")
 
     inputs, labels = _context_parallel_shard(
         mesh=cp_mesh,
@@ -510,5 +513,7 @@ def cp_shard(
         if isinstance(attention_masks, BlockMask)
         else {k: v for k, v in zip(attention_masks.keys(), masks)}
     )
+    assert isinstance(attention_masks, BlockMask)
+    logger.info(f"cp sharded block_mask sprsity = {attention_masks.sparsity()}")
 
     return inputs, labels, attention_masks, order_sensitive_buffers
