@@ -25,7 +25,7 @@ from torchtitan.protocols.model_converter import ModelConverter
 
 class QuantizationConverter(ModelConverter):
     """
-    Base class for quantization converters, which implements generic validation re-usable across all quantization converters.
+    Base class for quantization converters, which implements generic validation reusable across all quantization converters.
     """
 
     enabled: bool = False

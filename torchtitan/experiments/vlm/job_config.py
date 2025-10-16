@@ -25,7 +25,7 @@ class Data:
     """
     packing_buffer_size: int = 0
     """ Set to a value >0 to enable sample packing.
-    This control the buffer uses to store training samples avaliable for packing.
+    This control the buffer uses to store training samples available for packing.
     """
 
 
