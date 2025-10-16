@@ -71,8 +71,10 @@ jobs:
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
-        # adding permission for ROCm workflow
-        sudo chmod -R u+w .
-
-        mkdir artifacts-to-be-uploaded
-        TEST_WITH_ROCM=${{ matrix.is-rocm }} python -m tests.integration_tests.run_tests --test_suite features artifacts-to-be-uploaded --ngpu 4
+        if [[ "${{ matrix.is-rocm }}" == "1" ]]; then
+          mkdir ~/artifacts-to-be-uploaded
+          TEST_WITH_ROCM=1 python -m tests.integration_tests.run_tests --test_suite features ~/artifacts-to-be-uploaded --ngpu 4
+        else
+          mkdir artifacts-to-be-uploaded
+          TEST_WITH_ROCM=0 python -m tests.integration_tests.run_tests --test_suite features artifacts-to-be-uploaded --ngpu 4
+        fi
