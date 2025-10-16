@@ -78,7 +78,6 @@ gptoss_configs = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="gpt_oss",
         model_cls=GptOssModel,
         model_args=gptoss_configs,
         parallelize_fn=parallelize_gptoss,

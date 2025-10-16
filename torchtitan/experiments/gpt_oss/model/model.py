@@ -10,8 +10,16 @@
 from torchtitan.protocols.model import AttentionMasksType
 import torch
 from torch import nn
-from torchtitan.models.attention import build_attention
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.protocols.train_spec import ModelProtocol
+from torchtitan.models.attention import (
+    create_attention_mask,
+    FlexAttentionWrapper,
+    get_causal_mask_mod,
+    get_document_mask_mod,
+    ScaledDotProductAttentionWrapper,
+)
+from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from .args import GptOssModelArgs
 from .moe import GptOssMoE
@@ -169,7 +177,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         rope_cache: torch.Tensor,
-        attention_mask: AttentionMasksType | None,
+        attention_masks: AttentionMasksType | None,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
@@ -194,9 +202,9 @@ class Attention(nn.Module):
         keys = repeat_kv(k, self.n_rep)
         values = repeat_kv(v, self.n_rep)
 
-        q = q.transpose(1, 2).contiguous()
-        k = keys.transpose(1, 2).contiguous()
-        v = values.transpose(1, 2).contiguous()
+        xq = q.transpose(1, 2).contiguous()
+        xk = keys.transpose(1, 2).contiguous()
+        xv = values.transpose(1, 2).contiguous()
 
         if self.use_flex_attn:
             assert isinstance(attention_masks, BlockMask), attention_masks
@@ -366,7 +374,7 @@ class GptOssModel(nn.Module, ModelProtocol):
         )
 
 
-    def forward(self, tokens: torch.Tensor):
+    def forward(self, tokens: torch.Tensor, attention_masks: AttentionMasksType | None = None,):
         """
         Forward pass for the Transformer model.
 
@@ -379,7 +387,7 @@ class GptOssModel(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens)
 
         for layer in self.layers.values():
-            h = layer(h, self.rope_cache)
+            h = layer(h, self.rope_cache, attention_masks)
         h = self.norm(h)
         output = self.output(h)
         return output

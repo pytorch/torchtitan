@@ -25,11 +25,11 @@ from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ReordererSequenceParallel,
 )
-from torchtitan.experiments.llama4.infra.parallelize import apply_fsdp
+from torchtitan.models.llama4.infra.parallelize import apply_fsdp
 from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.tools.logging import logger
 
-from .expert_parallel import ExpertTensorParallel, TensorParallel
+from .expert_parallel import GptossExpertTensorParallel, GptossTensorParallel
 
 
 # for selective op activation checkpointing
