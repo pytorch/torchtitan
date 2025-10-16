@@ -83,7 +83,7 @@ def parallelize_llama(
         )
         apply_ac(
             model,
-            job_config.activation_checkpoint,
+            job_config,
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,

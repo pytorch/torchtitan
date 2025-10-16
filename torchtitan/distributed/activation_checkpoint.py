@@ -18,13 +18,14 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.config.job_config import Debug as DebugConfig
+from torchtitan.config.job_config import JobConfig
 from torchtitan.tools.logging import logger, warn_once
 
 
 _layer_sac_count = 0
 
 
-def _apply_layer_sac(module: nn.Module, ac_config: ACConfig, debug_config:DebugConfig) -> nn.Module:
+def _apply_layer_sac(module: nn.Module, job_config: JobConfig) -> nn.Module:
     """Apply layer selective activation checkpointing to the module.
 
     Args:
@@ -36,14 +37,14 @@ def _apply_layer_sac(module: nn.Module, ac_config: ACConfig, debug_config:DebugC
     """
     global _layer_sac_count
     _layer_sac_count += 1
-    ac_freq = int(ac_config.selective_ac_option)
+    ac_freq = int(job_config.activation_checkpoint.selective_ac_option)
     if not ac_freq or _layer_sac_count % ac_freq == 0:
         return ptd_checkpoint_wrapper(
             module,
-            preserve_rng_state=debug_config.ac_preserve_rng_state,
-            determinism_check=debug_config.ac_determinism_check,
-            early_stop=ac_config.early_stop,
-            debug=debug_config.ac_debug
+            preserve_rng_state=job_config.debug.ac_preserve_rng_state,
+            determinism_check=job_config.debug.ac_determinism_check,
+            early_stop=job_config.activation_checkpoint.early_stop,
+            debug=job_config.debug.ac_debug
         )
     else:
         return module
@@ -51,7 +52,7 @@ def _apply_layer_sac(module: nn.Module, ac_config: ACConfig, debug_config:DebugC
 
 def _apply_op_sac(
     module: nn.Module,
-    ac_config: ACConfig,
+    job_config: JobConfig,
     *,
     base_fqn: str | None = None,
     op_sac_save_list: set[torch._ops.OpOverload],
@@ -60,7 +61,7 @@ def _apply_op_sac(
 
     Args:
         module (nn.Module): The module to apply selective activation checkpointing to.
-        ac_config (ACConfig): The activation checkpointing config.
+        job_config (JobConfig): The job config.
         base_fqn (str, optional): The base fqn of the module. Defaults to None.
         op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
             of recomputing.
@@ -74,6 +75,7 @@ def _apply_op_sac(
     )
 
     mm_recompute_shapes = set()
+    ac_config = job_config.activation_checkpoint
     if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
         for module_fqn, submod in module.named_modules():
             fqn = module_fqn
@@ -128,16 +130,16 @@ def _apply_op_sac(
         return create_selective_checkpoint_contexts(_get_custom_policy(meta))
 
     return ptd_checkpoint_wrapper(
-            module,
-            context_fn=selective_checkpointing_context_fn,
-            preserve_rng_state=dbg_config.ac_preserve_rng_state,
-            determinism_check=dbg_config.ac_determinism_check,
-            early_stop=ac_config.early_stop,
-            debug=dbg_config.ac_debug
-        )
+        module,
+        context_fn=selective_checkpointing_context_fn,
+        preserve_rng_state=job_config.debug.ac_preserve_rng_state,
+        determinism_check=job_config.debug.ac_determinism_check,
+        early_stop=ac_config.early_stop,
+        debug=job_config.debug.ac_debug
+    )
 
 
-def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
+def _apply_full_ac(module: nn.Module, job_config: JobConfig ) -> nn.Module:
     """Apply full activation checkpointing to the module.
 
     Args:
@@ -148,20 +150,17 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
         nn.Module: The module with full activation checkpointing applied.
     """
     return ptd_checkpoint_wrapper(
-        module, preserve_rng_state=False, early_stop=ac_config.early_stop
+        module,
+        preserve_rng_state=job_config.debug.ac_preserve_rng_state,
+        determinism_check=job_config.debug.ac_determinism_check,
+        early_stop=job_config.activation_checkpoint.early_stop,
+        debug=job_config.debug.ac_debug
     )
-    return ptd_checkpoint_wrapper(
-            module,
-            preserve_rng_state=dbg_config.ac_preserve_rng_state,
-            determinism_check=dbg_config.ac_determinism_check,
-            early_stop=ac_config.early_stop,
-            debug=dbg_config.ac_debug
-        )
 
 
 def _apply_op_sac_to_transformer_block_with_flex(
     module: nn.Module,
-    ac_config: ACConfig,
+    job_config: JobConfig,
     *,
     base_fqn: str | None = None,
     model_compile_enabled: bool = False,
@@ -171,7 +170,7 @@ def _apply_op_sac_to_transformer_block_with_flex(
 
     Args:
         module (nn.Module): The transformer block to apply SAC to.
-        ac_config (ACConfig): The activation checkpointing config.
+        job_config (JobConfig): The job config.
         base_fqn (str, optional): The base fqn of the module. Defaults to None.
         model_compile_enabled (bool): Whether model compilation is enabled.
             Defaults to False.
@@ -201,14 +200,15 @@ def _apply_op_sac_to_transformer_block_with_flex(
         ),
     )
 
+
     def wrap_submodule(name: str, full_ac: bool = False) -> None:
         submodule = getattr(module, name)
         if full_ac:
-            submodule = _apply_full_ac(submodule, ac_config)
+            submodule = _apply_full_ac(submodule, job_config)
         else:
             submodule = _apply_op_sac(
                 submodule,
-                ac_config,
+                job_config,
                 base_fqn=f"{base_fqn}.{name}" if base_fqn else name,
                 op_sac_save_list=op_sac_save_list,
             )
@@ -224,7 +224,7 @@ def _apply_op_sac_to_transformer_block_with_flex(
         if model_compile_enabled:
             module = _apply_op_sac(
                 module,
-                ac_config,
+                job_config,
                 base_fqn=base_fqn,
                 op_sac_save_list=op_sac_save_list,
             )
@@ -236,7 +236,7 @@ def _apply_op_sac_to_transformer_block_with_flex(
 
 def _apply_ac_to_transformer_block(
     module: nn.Module,
-    ac_config: ACConfig,
+    job_config: JobConfig,
     *,
     base_fqn: str | None = None,
     model_compile_enabled: bool = False,
@@ -244,13 +244,14 @@ def _apply_ac_to_transformer_block(
     op_sac_save_list: set[torch._ops.OpOverload] | None = None,
 ) -> nn.Module:
     valid_ac_modes = ("full", "selective")
+    ac_config = job_config.activation_checkpoint
     if ac_config.mode not in valid_ac_modes:
         raise ValueError(
             f"Invalid AC mode: {ac_config.mode}. Valid modes: {valid_ac_modes}"
         )
 
     if ac_config.mode == "full":
-        return _apply_full_ac(module, ac_config)
+        return _apply_full_ac(module, job_config)
 
     assert ac_config.mode == "selective", f"{ac_config.mode}"
     use_op_sac = ac_config.selective_ac_option == "op"
@@ -274,22 +275,22 @@ def _apply_ac_to_transformer_block(
             """
             return _apply_op_sac_to_transformer_block_with_flex(
                 module,
-                ac_config,
+                job_config,
                 base_fqn=base_fqn,
                 model_compile_enabled=model_compile_enabled,
                 op_sac_save_list=op_sac_save_list,
             )
         else:
             return _apply_op_sac(
-                module, ac_config, base_fqn=base_fqn, op_sac_save_list=op_sac_save_list
+                module, job_config, base_fqn=base_fqn, op_sac_save_list=op_sac_save_list
             )
 
-    return _apply_layer_sac(module, ac_config)
+    return _apply_layer_sac(module, job_config)
 
 
 def apply_ac(
     model: nn.Module,
-    ac_config: ACConfig,
+    job_config: JobConfig,
     *,
     model_compile_enabled: bool = False,
     use_flex_attn: bool = False,
@@ -312,7 +313,8 @@ def apply_ac(
     Returns:
         None
     """
-
+    ac_config = job_config.activation_checkpoint
+    debug_config = job_config.debug
     if ac_config.mode == "memory_budget":
         assert model_compile_enabled, "Memory budget mode requires model to be compiled"
         if ac_config.visualize_memory_budget_pareto:
@@ -328,7 +330,7 @@ def apply_ac(
         for layer_id, transformer_block in model.layers.named_children():
             transformer_block = _apply_ac_to_transformer_block(
                 transformer_block,
-                ac_config,
+                job_config,
                 base_fqn=f"layers.{layer_id}",
                 model_compile_enabled=model_compile_enabled,
                 use_flex_attn=use_flex_attn,
