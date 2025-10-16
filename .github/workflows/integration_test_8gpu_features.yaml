@@ -71,6 +71,11 @@ jobs:
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
+        # need to chown for ROCm workflow
+        orig_user_id=$(stat -c '%u' .)
+        orig_group_id=$(stat -c '%g' .)
         sudo chown -R $(id -u):$(id -g) .
+        
         mkdir artifacts-to-be-uploaded
+        sudo chown -R orig_user_id:orig_group_id .
         TEST_WITH_ROCM=${{ matrix.is-rocm }} python -m tests.integration_tests.run_tests --test_suite features artifacts-to-be-uploaded --ngpu 4
