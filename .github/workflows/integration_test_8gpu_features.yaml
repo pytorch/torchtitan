@@ -70,21 +70,20 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
 
+        '''
         # debugging CPU shared memory on ROCm runner
         if [ "$GPU_ARCH_TYPE" = "rocm" ]; then
           # Show total and available disk space on the shared memory filesystem (/dev/shm)
           echo "Running shared memory debug for ROCm runner..."
           df -h /dev/shm
-
           # Display mount information related to /dev/shm to verify the size and options
           mount | grep /dev/shm
-
           # List all current shared memory segments in the system
           ipcs -m
-
           # Display shared memory statistics from /proc/meminfo (total, free, used)
           grep Shmem /proc/meminfo
         fi
+        '''
 
 
         mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
