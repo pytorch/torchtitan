@@ -3,18 +3,15 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.models.llama3.infra.pipeline import pipeline_llama
+from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.moe import MoEArgs
-
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_deepseekv3
 from .model.args import DeepSeekV3ModelArgs
@@ -25,17 +22,17 @@ __all__ = [
     "parallelize_deepseekv3",
     "DeepSeekV3ModelArgs",
     "DeepSeekV3Model",
-    "deepseekv3_configs",
+    "deepseekv3_args",
 ]
 
 
-deepseekv3_configs = {
+deepseekv3_args = {
     "debugmodel": DeepSeekV3ModelArgs(
-        vocab_size=2000,
+        vocab_size=2048,
         dim=256,
         inter_dim=1024,
         moe_inter_dim=256,
-        n_layers=3,
+        n_layers=6,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
@@ -43,7 +40,7 @@ deepseekv3_configs = {
             num_shared_experts=2,
             top_k=3,
             score_func="softmax",
-            route_norm=True,
+            route_norm=False,
             score_before_experts=False,
         ),
         q_lora_rank=0,
@@ -54,11 +51,11 @@ deepseekv3_configs = {
         mscale=0.70,
     ),
     "debugmodel_flex_attn": DeepSeekV3ModelArgs(
-        vocab_size=2000,
+        vocab_size=2048,
         dim=256,
         inter_dim=1024,
         moe_inter_dim=256,
-        n_layers=3,
+        n_layers=6,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
@@ -66,7 +63,7 @@ deepseekv3_configs = {
             num_shared_experts=2,
             top_k=3,
             score_func="softmax",
-            route_norm=True,
+            route_norm=False,
             score_before_experts=False,
         ),
         q_lora_rank=0,
@@ -91,7 +88,7 @@ deepseekv3_configs = {
             num_shared_experts=2,
             top_k=6,
             score_func="softmax",
-            route_norm=True,
+            route_norm=False,
             score_before_experts=False,
         ),
         q_lora_rank=0,
@@ -116,7 +113,7 @@ deepseekv3_configs = {
             num_shared_experts=2,
             top_k=6,
             score_func="softmax",
-            route_norm=True,
+            route_norm=False,
             route_scale=16.0,
             score_before_experts=False,
         ),
@@ -160,13 +157,12 @@ deepseekv3_configs = {
 }
 
 
-register_train_spec(
-    TrainSpec(
-        name="deepseek_v3",
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
         model_cls=DeepSeekV3Model,
-        model_args=deepseekv3_configs,
+        model_args=deepseekv3_args,
         parallelize_fn=parallelize_deepseekv3,
-        pipelining_fn=pipeline_llama,
+        pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_hf_dataloader,
@@ -174,4 +170,3 @@ register_train_spec(
         build_loss_fn=build_cross_entropy_loss,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )
-)

@@ -11,22 +11,22 @@ import torch
 from datasets import load_dataset
 
 from torchtitan.config import ConfigManager
+from torchtitan.datasets import DatasetConfig
 from torchtitan.experiments.flux.dataset.flux_dataset import (
     _cc12m_wds_data_processor,
     build_flux_dataloader,
     DATASETS,
-    TextToImageDatasetConfig,
 )
 
 
 class TestFluxDataLoader(unittest.TestCase):
     def setUp(self):
-        DATASETS["cc12m-test-iterable"] = TextToImageDatasetConfig(
+        DATASETS["cc12m-test-iterable"] = DatasetConfig(
             path="torchtitan/experiments/flux/tests/assets/cc12m_test",
             loader=lambda path: load_dataset(
                 path, split="train", data_files={"train": "*tar"}
             ).to_iterable_dataset(num_shards=4),
-            data_processor=_cc12m_wds_data_processor,
+            sample_processor=_cc12m_wds_data_processor,
         )
 
     def tearDown(self):
@@ -50,7 +50,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 config_manager = ConfigManager()
                 config = config_manager.parse_args(
                     [
-                        f"--experimental.custom_args_module={path}",
+                        f"--job.custom_config_module={path}",
                         "--training.img_size",
                         str(256),
                         "--training.dataset",

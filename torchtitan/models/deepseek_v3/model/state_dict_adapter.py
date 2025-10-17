@@ -4,30 +4,33 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+
 import re
 from typing import Any
 
 import torch
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torch.distributed.tensor import DTensor
+from torchtitan.models.utils import MoEStateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
-from .quantization import calculate_scale_shape, dequantize_from_fp8
 
 
-class DeepSeekV3StateDictAdapter(StateDictAdapter):
+class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
     """
     StateDictAdapter for DeepSeekV3 model.
     """
 
-    def __init__(self, model_args: DeepSeekV3ModelArgs, hf_assets_path: str | None):
-        self.model_args = model_args
+    def __init__(
+        self,
+        model_args: DeepSeekV3ModelArgs,
+        hf_assets_path: str | None,
+    ):
+        super().__init__(model_args, hf_assets_path)
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention Module
-            "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
-            "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
-            "model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
             "model.layers.{}.self_attn.kv_a_proj_with_mqa.weight": "layers.{}.attention.wkv_a.weight",
             "model.layers.{}.self_attn.kv_a_layernorm.weight": "layers.{}.attention.kv_norm.weight",
             "model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.wkv_b.weight",
@@ -52,92 +55,49 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
             "lm_head.weight": "output.weight",
         }
 
-    def _split_experts_weights(
-        self, weight: torch.Tensor, n_experts: int
-    ) -> list[torch.Tensor]:
+        # Adjustments for from_hf_map based on model architecture
+        if model_args.q_lora_rank != 0:
+            self.from_hf_map.update(
+                {
+                    "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
+                    "model.layers.{}.self_attn.q_a_layernorm.weight": "layers.{}.attention.q_norm.weight",
+                    "model.layers.{}.self_attn.q_b_proj.weight": "layers.{}.attention.wq_b.weight",
+                }
+            )
+        else:
+            self.from_hf_map.update(
+                {
+                    "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
+                }
+            )
+
+    def get_hf_storage_reader(
+        self, path: str, from_quantized: bool = False
+    ) -> HuggingFaceStorageReader:
         """
-        Split the weights of the experts into a list of tensors.
+        Override default get_hf_storage_reader function to return QuantizedHFStorageReader.
         """
-        split_weight = torch.split(weight, weight.shape[0] // n_experts, dim=0)
-        return split_weight
+        if from_quantized:
+            from torch.distributed.checkpoint.quantized_hf_storage import (
+                QuantizedHuggingFaceStorageReader,
+            )
 
-    def _concatenate_expert_weights(
-        self, expert_weights_by_layer: dict[str, Any], n_experts: int
-    ) -> torch.Tensor:
-        """
-        Concatenate the weights of separate experts into GroupedExpert weights.
-        """
-        for layer, abstract_keys in list(expert_weights_by_layer.items()):
-            for abstract_key, experts in list(abstract_keys.items()):
-                # If we have all the experts for this abstract_key, concatenate them
-                if len(experts) == n_experts:
-                    sorted_expert_ids = sorted(experts.keys())
-                    sorted_experts = [experts[i] for i in sorted_expert_ids]
-                    stacked_tensor = torch.stack(sorted_experts, dim=0)
-
-                    # Remove these experts from the tracking dict to free memory
-                    del expert_weights_by_layer[layer][abstract_key]
-                    if not expert_weights_by_layer[layer]:
-                        del expert_weights_by_layer[layer]
-
-                    return stacked_tensor
-
-        return None
-
-    def _dequantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """
-        Dequantize the weights from float8 to float32.
-        """
-
-        scale_inv_keys = []
-        for key, weight in state_dict.items():
-            if key.endswith(".weight") and key + "_scale_inv" in state_dict:
-                scale_inv = state_dict[key + "_scale_inv"]
-                dequantized_weight = dequantize_from_fp8(
-                    weight, scale_inv, dtype=torch.float32
-                )
-                # update the weight and remove the scale_inv tensor
-                state_dict[key] = dequantized_weight
-                scale_inv_keys.append(key + "_scale_inv")
-
-        for key in scale_inv_keys:
-            state_dict.pop(key)
-
-        return state_dict
-
-    def _add_quantization_scale_inv_tensors(
-        self, state_dict: dict[str, Any]
-    ) -> dict[str, Any]:
-        """
-        Add quantization scale tensors the state_dict.
-        """
-        non_quantized_keys = [
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
-            "norm.weight",
-            "lm_head.weight",
-            "embed_tokens.weight",
-            "mlp.gate.weight",
-        ]
-
-        weight_scale_inv_state_dict = {}
-        for key, value in state_dict.items():
-            if key.endswith(".weight") and not any(
-                non_quantized_key in key for non_quantized_key in non_quantized_keys
-            ):
-                expected_scale_shape = calculate_scale_shape(value)
-                # add weight_scale_inv to the state_dict
-                weight_scale_inv_state_dict[key + "_scale_inv"] = torch.ones(
-                    expected_scale_shape, dtype=torch.float32
-                )
-
-        state_dict.update(weight_scale_inv_state_dict)
-        return state_dict
+            # NOTE: Now we use Quantized HF storage reader to read DeepSeek-V3 671B model.
+            # If loading checkpoints without quantization, use HuggingFaceStorageReader instead
+            BLOCK_SIZE = 128
+            return QuantizedHuggingFaceStorageReader(
+                path=path,
+                target_dtype=torch.float32,
+                block_size=BLOCK_SIZE,
+                thread_count=4,
+            )
+        else:
+            return HuggingFaceStorageReader(path)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
-        2. Split the GroupedExperts' weight into separate expert's wegiht.
+        2. Split the GroupedExperts' weight into separate expert's weight.
         """
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
@@ -149,14 +109,31 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 layer_num = re.search(r"\d+", key).group(0)
                 new_abstract_key = to_hf_map[abstract_key]
 
-                # Split expert weights into separate expert weights
-                split_values = self._split_experts_weights(
-                    value, self.model_args.moe_args.num_experts
-                )
+                # Store the GroupedExperts Weight metadata for from_hf()
+                if isinstance(value, DTensor):
+                    self.grouped_expert_weight_placements[
+                        abstract_key
+                    ] = value.placements
+                    self.grouped_expert_weight_shape[abstract_key] = value.shape
 
-                for expert_num in range(0, self.model_args.moe_args.num_experts):
-                    new_key = new_abstract_key.format(layer_num, expert_num)
-                    hf_state_dict[new_key] = split_values[expert_num].squeeze()
+                    # Split GroupedExperts weight to local individual expert weights
+                    local_expert_fqn = self._get_local_experts_weights(
+                        new_abstract_key,
+                        abstract_key,
+                        layer_num,
+                        value,
+                    )
+                    hf_state_dict.update(local_expert_fqn)
+
+                else:
+                    # keep this path for offline conversion
+                    split_values = self._split_experts_weights(
+                        value, self.model_args.moe_args.num_experts
+                    )
+
+                    for expert_num in range(0, self.model_args.moe_args.num_experts):
+                        new_key = new_abstract_key.format(layer_num, expert_num)
+                        hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
             elif "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
@@ -169,41 +146,49 @@ class DeepSeekV3StateDictAdapter(StateDictAdapter):
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
 
-        hf_state_dict_with_scale_inv = self._add_quantization_scale_inv_tensors(
-            hf_state_dict
-        )
-        return hf_state_dict_with_scale_inv
+        return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
         2. Convert between the HF shape and the torchtitan shape.
-        3. Concate separate expert's wegiht into GroupedExperts' weight.
+        3. Concat separate expert's weight into GroupedExperts' weight.
         """
-        # dequantize the tensor in state_dict and remove the scale_inv tensor
-        hf_state_dict = self._dequantize(hf_state_dict)
-        state_dict = {}
 
+        state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
 
         for key, value in hf_state_dict.items():
             if "mlp.experts" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
                 layer_num, expert_num = re.findall(r"\d+", key)
-                new_key = self.from_hf_map[abstract_key]
-                new_key = new_key.format(layer_num)
+                titan_abstract_key = self.from_hf_map[abstract_key]
+                new_key = titan_abstract_key.format(layer_num)
 
                 # Store the expert's weight in expert_weights_by_layer for concatenating later.
                 if layer_num not in expert_weights_by_layer:
                     expert_weights_by_layer[layer_num] = {}
-                if abstract_key not in expert_weights_by_layer[layer_num]:
-                    expert_weights_by_layer[layer_num][abstract_key] = {}
-                expert_weights_by_layer[layer_num][abstract_key][expert_num] = value
+                if titan_abstract_key not in expert_weights_by_layer[layer_num]:
+                    expert_weights_by_layer[layer_num][titan_abstract_key] = {}
+                expert_weights_by_layer[layer_num][titan_abstract_key][
+                    expert_num
+                ] = value
 
-                # try to concat the expert's weight into GroupedExperts' weight.
-                stacked_value = self._concatenate_expert_weights(
-                    expert_weights_by_layer, self.model_args.moe_args.num_experts
-                )
+                if isinstance(value, DTensor):
+                    stacked_value = self._concatenate_expert_weights_dtensor(
+                        expert_weights_by_layer,
+                        titan_abstract_key,
+                        layer_num,
+                        value.device_mesh,
+                    )
+                else:  # keep this path to be compatible with offline conversion
+                    stacked_value = self._concatenate_expert_weights(
+                        expert_weights_by_layer,
+                        titan_abstract_key,
+                        layer_num,
+                        self.model_args.moe_args.num_experts,
+                    )
+
                 if stacked_value is not None:
                     state_dict[new_key] = stacked_value
 

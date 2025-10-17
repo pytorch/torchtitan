@@ -8,9 +8,7 @@ on:
   pull_request:
     paths:
       - 'torchtitan/experiments/flux/**'
-  schedule:
-    # Runs every 6 hours
-    - cron: '0 */6 * * *'
+
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
   cancel-in-progress: true

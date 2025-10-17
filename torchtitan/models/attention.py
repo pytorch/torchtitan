@@ -7,252 +7,181 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import functools
-from typing import Callable, ClassVar
+from collections.abc import Callable
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
-from torch.distributed.tensor.experimental._attention import create_cp_block_mask
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
+    AuxOutput,
     BlockMask,
     create_block_mask,
     flex_attention,
 )
 
-from torchtitan.tools.utils import has_cuda_capability
 
-# FlexAttention mask type. For each mask type, we initialize it at most once per
-# batch. To record what it is initialized, FLEX_ATTN_MASK_T is used as the key to
-# track the initialized mask.
-FLEX_ATTN_MASK_T = tuple[str, int | None]
+__all__ = [
+    "FlexAttentionWrapper",
+    "ScaledDotProductAttentionWrapper",
+    "get_causal_mask_mod",
+    "get_document_mask_mod",
+    "get_fixed_block_mask_mod",
+    "create_attention_mask",
+]
 
 
-class FlexAttention(torch.nn.Module):
-    """FlexAttention module that uses torch.nn.attention.flex_attention.
+class FlexAttentionWrapper(torch.nn.Module):
+    """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
-    This module is a wrapper around torch.nn.attention.flex_attention. This module
-    implements certain common attention types, such as causal and block_causal.
+    This wrapper serves two purposes:
+    1) Invoke `torch.compile` with a valid mode "max-autotune-no-cudagraphs" to
+       achieve good performance.
+    2) Being a wrapper allows us to apply _ContextParallel to it.
 
-    Args:
-        attn_mask_type (str): The type of attention mask. Currently, we support
-            "causal" and "block_causal". "causal" means the lower triangle of the
-            attention matrix is masked. "block_causal" means the attention matrix
-            is divided into blocks, where block boundary is defined by EOS token,
-            and the lower triangle of each block is masked.
-        fixed_block_size (int | None): The block size to be used to perform attention.
-            If specified, each sequence will be further divided to blocks, where each
-            block has the maximum size of ``fixed_block_size``. A query will only attend
-            to the keys within the same block.
+    Note:
+        The forward function must have q, k, v as the first three arguments, and
+        block_mask as a keyword argument to be compatible with _ContextParallel.
     """
 
-    # We registered flex_attention related attributes as class variables as we
-    # need to amortize the cost of compilation.
-    flex_attn: ClassVar[Callable] = torch.compile(
+    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention, mode="max-autotune-no-cudagraphs"
     )
-    compiled_create_block_mask: ClassVar[Callable] = torch.compile(create_block_mask)
-    used_attn_mask_types: ClassVar[set[FLEX_ATTN_MASK_T]] = set()
-    # Attention mask type to the created BlockMask.
-    # This allows us to keep track the created block masks for each
-    # new batch. We will use this to update the block mask when a
-    # new batch is created. This also allows user to create different
-    # block masks for different layers.
-    block_masks: ClassVar[dict[FLEX_ATTN_MASK_T, BlockMask]] = {}
-
-    # Instance variables.
-    attn_mask_type: str
-
-    def __init__(
-        self, attn_mask_type: str, fixed_block_size: int | None = None
-    ) -> None:
-        super().__init__()
-        if attn_mask_type not in ["causal", "block_causal"]:
-            raise ValueError(f"Unrecognized attn_mask_type {attn_mask_type}.")
-        self.attn_mask_type = attn_mask_type
-        self.fixed_block_size = fixed_block_size
-
-        FlexAttention.used_attn_mask_types.add(self.mask_key)
-
-    @property
-    def mask_key(self) -> FLEX_ATTN_MASK_T:
-        return (self.attn_mask_type, self.fixed_block_size)
 
     def forward(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        *,
+        block_mask: BlockMask,
         scale: float | None = None,
-    ) -> torch.Tensor:
-        block_mask = FlexAttention.block_masks[self.mask_key]
-        return FlexAttention.flex_attn(q, k, v, block_mask=block_mask, scale=scale)
-
-    @staticmethod
-    def _get_causal_mask_mod() -> _mask_mod_signature:
-        def causal_mask(
-            b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
-        ):
-            return q_idx >= kv_idx
-
-        return causal_mask
-
-    @staticmethod
-    def _get_block_causal_mask_mod(
-        batch: torch.Tensor, eos_id: int
-    ) -> _mask_mod_signature:
-        # batch is [b, s, h, d] shape
-        mask = batch == eos_id
-        mask[:, -1] = True
-        acc_mask = torch.cumsum(torch.where(mask, 1, 0), dim=1)
-        seq_idx = torch.zeros_like(acc_mask, dtype=torch.int32)
-        seq_idx[:, 1:] = acc_mask[:, :-1]
-
-        def block_causal_mask(
-            b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
-        ):
-            return (seq_idx[b, q_idx] == seq_idx[b, kv_idx]) & (q_idx >= kv_idx)
-
-        return block_causal_mask
-
-    @staticmethod
-    def _fixed_block_mask_mod(
-        mask_mod: _mask_mod_signature, fixed_block_size: int
-    ) -> _mask_mod_signature:
-        """
-        Given an arbitrary mask_mod, divide the input sequence to blocks
-        and only allow attention within the same block.
-
-        Args:
-            mask_mod: The mask mod to apply to the documents
-            fixed_block_size: The number of tokens in each block.
-        """
-
-        # Credit to @drisspg.
-        def blocked_mask_mod(
-            b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
-        ):
-            # Get the block index of the query and key
-            q_block = q_idx // fixed_block_size
-            kv_block = kv_idx // fixed_block_size
-            # Only allow attention within the same block
-            same_block = q_block == kv_block
-            # Apply the original mask mod
-            inner_mask = mask_mod(
-                b, h, q_idx % fixed_block_size, kv_idx % fixed_block_size
-            )
-
-            return same_block & inner_mask
-
-        blocked_mask_mod.__name__ = (
-            f"blocked_mask_mod_{mask_mod.__name__}_fixed_block_size_{fixed_block_size}"
+    ) -> torch.Tensor | tuple[torch.Tensor, AuxOutput]:
+        # 1. _compiled_flex_attn has to be a class variable, otherwise there will
+        #    be multiple compiled flex_attention instances, which can be slow.
+        # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
+        #    as the first argument, which will cause an error.
+        #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
+        return FlexAttentionWrapper._compiled_flex_attn(
+            q, k, v, block_mask=block_mask, scale=scale
         )
 
-        return blocked_mask_mod
 
-    @staticmethod
-    @torch.no_grad()
-    def init_attention_mask(batch: torch.Tensor, eos_id: int | None) -> None:
-        # batch is [b, s, h, d] shape
-        for mask_key in FlexAttention.used_attn_mask_types:
-            attn_mask_type, fixed_block_size = mask_key
-            match attn_mask_type:
-                case "causal":
-                    if FlexAttention.block_masks.get(mask_key, None) is not None:
-                        continue
-                    # We don't care about batch dimension --
-                    # all samples have the same lower triangle mask.
-                    batch_dimension = 1
-                    mask_mod = FlexAttention._get_causal_mask_mod()
-                case "block_causal":
-                    if eos_id is None:
-                        raise RuntimeError(
-                            "eos_id must be provided for block_causal mask."
-                        )
-                    batch_dimension = batch.shape[0]
-                    mask_mod = FlexAttention._get_block_causal_mask_mod(batch, eos_id)
-                case _:
-                    raise RuntimeError(f"Shouldn't reach here. {attn_mask_type}")
+class ScaledDotProductAttentionWrapper(torch.nn.Module):
+    """Wrapper around `F.scaled_dot_product_attention` to make it CP compatible.
 
-            if fixed_block_size is not None and fixed_block_size > 0:
-                mask_mod = FlexAttention._fixed_block_mask_mod(
-                    mask_mod, fixed_block_size
-                )
+    This wrapper is needed because `F.scaled_dot_product_attention` is not
+    a torch.nn.Module, and thus cannot be applied with _ContextParallel.
+    We need to wrap it into a torch.nn.Module.
 
-            seq_len = batch.shape[1]
-            block_mask = FlexAttention.compiled_create_block_mask(
-                mask_mod, batch_dimension, None, seq_len, seq_len
-            )
-            FlexAttention.block_masks[mask_key] = block_mask
+    Note:
+        The forward function must have q, k, v as the first three arguments to be
+        compatible with _ContextParallel.
+    """
 
+    # TODO: remove sdpa_backends after PyTorch 2.9 is released.
+    sdpa_backends: ClassVar[list[SDPBackend]] = []
 
-class ScaledDotProductAttention(torch.nn.Module):
-    backends: ClassVar[list[SDPBackend]] = []
-
-    def __init__(self, attn_mask_type: str) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        if attn_mask_type != "causal":
-            raise ValueError(
-                "TorchTitan with SDPA currently only supports causal mask."
-            )
-
-        ScaledDotProductAttention._init_backend()
-
-    @classmethod
-    def _init_backend(cls) -> None:
-        if cls.backends:
-            return
-
-        # Add CuDNN on B200 w/ highest priority
-        cls.backends = [
-            SDPBackend.FLASH_ATTENTION,
-            SDPBackend.EFFICIENT_ATTENTION,
-            SDPBackend.MATH,
-        ]
-        if has_cuda_capability(10, 0):
-            cls.backends.insert(0, SDPBackend.CUDNN_ATTENTION)
+        if not self.sdpa_backends:
+            self.sdpa_backends = [
+                SDPBackend.CUDNN_ATTENTION,
+                SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
+            ]
 
     def forward(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        *,
         scale: float | None = None,
     ) -> torch.Tensor:
-        assert self.backends, "SDPA Backends should not be empty."
-        with sdpa_kernel(self.backends, set_priority=True):
-            return F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=scale)
+        with sdpa_kernel(self.sdpa_backends, set_priority=True):
+            return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
 
 
-def build_attention(
-    use_flex_attn: bool, attn_mask_type: str, fixed_block_size: int | None = None
-):
-    if use_flex_attn:
-        return FlexAttention(attn_mask_type, fixed_block_size)
-    else:
-        if fixed_block_size is not None:
-            raise ValueError(
-                "TorchTitan with SDPA currently does not support fixed_block_size."
-            )
-        if attn_mask_type != "causal":
-            raise ValueError(
-                "TorchTitan with SDPA currently only supports causal mask."
-            )
-        return ScaledDotProductAttention(attn_mask_type)
+# We cannot do inner function/closure because we won't be able to cache it --
+# if we an inner function, a new closure will be created every time
+# `get_causal_mask_mod` is called.
+def _causal_mask(
+    b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+) -> torch.Tensor:
+    """Causal mask that prevents attention to future tokens."""
+    return q_idx >= kv_idx
 
 
-def init_attention_mask(
-    batch: torch.Tensor,
-    eos_id: int | None,
-    cp_mesh: torch.distributed.device_mesh.DeviceMesh | None = None,
-) -> None:
+def get_causal_mask_mod() -> _mask_mod_signature:
+    """Returns a causal mask modifier for flex attention.
 
-    # This is not functional yet because we currently gate the use of Flex + CP
-    # while we continue debugging accuracy issues. However, we want to evaluate
-    # the user experience with CP enabled.
-    if cp_mesh is not None:
-        FlexAttention.compiled_create_block_mask = functools.partial(
-            create_cp_block_mask, device_mesh=cp_mesh
-        )
+    Returns:
+        A mask modifier function that implements causal masking.
+    """
+    return _causal_mask
 
-    FlexAttention.init_attention_mask(batch, eos_id)
+
+def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signature:
+    """Creates a document mask that prevents attention across document boundaries.
+
+    Args:
+        batch: Input batch tensor with shape [b, s, h, d]
+        eos_id: End-of-sequence token ID that marks document boundaries
+
+    Returns:
+        A mask modifier function that implements document-level masking.
+    """
+    # batch is [b, s, h, d] shape
+    eos_mask = batch == eos_id
+    eos_mask[:, -1] = True
+    cumulative_mask = torch.cumsum(torch.where(eos_mask, 1, 0), dim=1)
+    sequence_indices = torch.zeros_like(cumulative_mask, dtype=torch.int32)
+    sequence_indices[:, 1:] = cumulative_mask[:, :-1]
+
+    def document_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        return sequence_indices[b, q_idx] == sequence_indices[b, kv_idx]
+
+    return document_mask
+
+
+def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
+    """
+    Divide the input sequence into blocks and only allow attention within the same block.
+
+    Args:
+        fixed_block_size: The number of tokens in each block.
+
+    Returns:
+        A mask modifier function that implements block-wise attention masking.
+    """
+
+    # Credit to @drisspg.
+    def blocked_mask_mod(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        # Get the block index of the query and key
+        q_block = q_idx // fixed_block_size
+        kv_block = kv_idx // fixed_block_size
+        # Only allow attention within the same block
+        return q_block == kv_block
+
+    blocked_mask_mod.__name__ = f"blocked_mask_mod_fixed_block_size_{fixed_block_size}"
+
+    return blocked_mask_mod
+
+
+_compiled_create_block_mask = torch.compile(create_block_mask)
+
+
+@functools.lru_cache(4)
+def create_attention_mask(*args, **kwargs):
+    """Create an attention mask using compiled create_block_mask.
+
+    This function is cached to avoid recreating BlockMasks for the same
+    arguments.
+    """
+    return _compiled_create_block_mask(*args, **kwargs)
