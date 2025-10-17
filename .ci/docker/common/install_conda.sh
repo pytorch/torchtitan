@@ -41,6 +41,7 @@ install_pip_dependencies() {
   # Install all Python dependencies
   pip_install -r /opt/conda/requirements-dev.txt
   pip_install -r /opt/conda/requirements.txt
+  pip_install -r /opt/conda/requirements-flux.txt
   pip_install -r /opt/conda/requirements-vlm.txt
   popd
 }
