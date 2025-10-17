@@ -53,7 +53,7 @@ def _create_device_mesh(
     world_size: int,
     mesh_shape: tuple,
     mesh_dim_names: List[str],
-) -> tuple:
+) -> Dict[str, any]:
     """Util function to create device mesh with communicators for each dimension.
 
     Args:
@@ -62,8 +62,8 @@ def _create_device_mesh(
         mesh_dim_names: List of dimension names for the mesh
 
     Returns:
-        Tuple of (comm, device_mesh, mesh, cur_rank, comm_per_dim), or
-        (None, None, None, None, None) if initialization fails
+        Dictionary containing comm, device_mesh, mesh, and rank, or
+        a dictionary with None values if initialization fails
     """
     backend = os.environ["TEST_BACKEND"]
     device = torch.device("cuda")
@@ -99,10 +99,19 @@ def _create_device_mesh(
             for sub_comm in comm_per_dim.values():
                 sub_comm.finalize()
             comm.finalize()
-            return None, None, None, None, None
+            return {
+                "comm": None,
+                "device_mesh": None,
+                "mesh": None,
+                "comm_per_dim": None,
+            }
         raise
-
-    return comm, device_mesh, mesh, cur_rank, comm_per_dim
+    return {
+        "comm": comm,
+        "device_mesh": device_mesh,
+        "mesh": mesh,
+        "comm_per_dim": comm_per_dim,
+    }
 
 
 def _flatten_comms(
@@ -150,12 +159,16 @@ class TorchCommsParallelDims(ParallelDims):
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
 
-        comm, device_mesh, mesh, cur_rank, comm_per_dim = _create_device_mesh(
-            self.world_size, mesh_shape, mesh_dim_names
-        )
+        result = _create_device_mesh(self.world_size, mesh_shape, mesh_dim_names)
+        comm = result["comm"]
+        device_mesh = result["device_mesh"]
+        mesh = result["mesh"]
+        comm_per_dim = result["comm_per_dim"]
 
         if device_mesh is None:
             return None
+
+        cur_rank = comm.get_rank()
 
         flatten_mesh = [
             mesh.view(self.pp, self.dp_replicate * self.dp_shard, self.cp, self.tp),
@@ -186,7 +199,8 @@ class TorchCommsParallelDims(ParallelDims):
             comm_per_dim,
         )
 
-        # call .finalize() later to release the sub comm before the root comm
+        # Call .finalize() in train.py after training but before destroying the process group
+        # to release sub-communicators before the root communicator.
         self.comms = [*comm_per_dim.values(), comm]
         return device_mesh
 
@@ -233,12 +247,16 @@ class TorchCommsParallelDims(ParallelDims):
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
 
-        comm, device_mesh, mesh, cur_rank, comm_per_dim = _create_device_mesh(
-            self.world_size, mesh_shape, mesh_dim_names
-        )
+        result = _create_device_mesh(self.world_size, mesh_shape, mesh_dim_names)
+        comm = result["comm"]
+        device_mesh = result["device_mesh"]
+        mesh = result["mesh"]
+        comm_per_dim = result["comm_per_dim"]
 
         if device_mesh is None:
             return None
+
+        cur_rank = comm.get_rank()
 
         flatten_mesh = [
             mesh.view(
@@ -293,6 +311,7 @@ class TorchCommsParallelDims(ParallelDims):
             comm_per_dim,
         )
 
-        # call .finalize() later to release the sub comm before the root comm
+        # Call .finalize() in train.py after training but before destroying the process group
+        # to release sub-communicators before the root communicator.
         self.comms = [*comm_per_dim.values(), comm]
         return device_mesh
