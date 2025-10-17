@@ -17,6 +17,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
+from torchtitan.components.quantization.mx.expert_parallel import MXExpertParallel
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
@@ -98,6 +99,7 @@ def parallelize_llama(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
+            job_config,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
             ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
             ep_tp_mesh=(
@@ -436,12 +438,33 @@ def apply_fsdp(
 
 def apply_moe_ep_tp(
     model: nn.Module,
+    job_config: JobConfig,
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
 ):
     assert ep_mesh is not None or tp_mesh is not None
+
+    EP_IMPLS = {
+        "default": ExpertParallel,
+        "mxfp8": MXExpertParallel,
+    }
+    assert (
+        job_config.quantize.expert_parallel_a2a_dispatch_impl in EP_IMPLS
+    ), f"Unknown EP impl: {job_config.quantize.expert_parallel_a2a_dispatch_impl}, must be one of {EP_IMPLS.keys()}"
+    assert (
+        job_config.quantize.expert_parallel_a2a_combine_impl in EP_IMPLS
+    ), f"Unknown EP impl: {job_config.quantize.expert_parallel_a2a_combine_impl}, must be one of {EP_IMPLS.keys()}"
+
+    logger.info(
+        f"Using all-to-all dispatch implementation: {job_config.quantize.expert_parallel_a2a_dispatch_impl}"
+    )
+    logger.info(
+        f"Using all-to-all combine implementation: {job_config.quantize.expert_parallel_a2a_combine_impl}"
+    )
+
+    ep_class = EP_IMPLS[job_config.quantize.expert_parallel_a2a_dispatch_impl]
 
     for transformer_block in model.layers.values():
         if not transformer_block.moe_enabled:
@@ -491,7 +514,7 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            experts_plan = ep_class()
         else:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel()
