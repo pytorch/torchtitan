@@ -4,19 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Callable
 
-import torch
 import torch.nn as nn
-from torch.distributed.tensor import (
-    DeviceMesh,
-    distribute_module,
-    distribute_tensor,
-    DTensor,
-    Replicate,
-    Shard,
-)
-from torch.distributed.tensor.parallel import ParallelStyle
+from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torchtitan.distributed.expert_parallel import ExpertParallel, TensorParallel
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE

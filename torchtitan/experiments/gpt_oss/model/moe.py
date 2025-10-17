@@ -8,6 +8,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from typing import Callable
+
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
@@ -34,7 +35,7 @@ def indices_padding_wrapper(func: Callable) -> Callable:
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
-        num_local_experts = w1.shape[0]
+        num_local_experts = mlp1_weight.shape[0]
         ep_degree = num_tokens_per_expert.shape[0] // num_local_experts
 
         input_shape, x, permuted_indices, num_tokens_per_expert = _permute(
@@ -57,6 +58,7 @@ def indices_padding_wrapper(func: Callable) -> Callable:
 
     return wrapper
 
+
 def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
     x_glu, x_linear = x[..., ::2], x[..., 1::2]
     # Clamp the input values
@@ -65,6 +67,7 @@ def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
     out_glu = x_glu * torch.sigmoid(alpha * x_glu)
     # Note we add an extra bias of 1 to the linear layer
     return out_glu * (x_linear + 1)
+
 
 def _run_experts_for_loop(
     mlp1_weight: torch.Tensor,
@@ -91,10 +94,7 @@ def _run_experts_for_loop(
         )
         out_experts_splits = []
         for expert_idx, x_expert in enumerate(x):
-            h = (
-                torch.matmul(x_expert, mlp1_weight[expert_idx])
-                + mlp1_bias[expert_idx]
-            )
+            h = torch.matmul(x_expert, mlp1_weight[expert_idx]) + mlp1_bias[expert_idx]
             h = swiglu(h, limit=swiglu_limit)
             h = torch.matmul(h, mlp2_weight[expert_idx]) + mlp2_bias[expert_idx]
             out_experts_splits.append(h)
@@ -109,6 +109,7 @@ def _run_experts_for_loop(
         out = torch.bmm(h, mlp2_weight) + mlp2_bias.unsqueeze(1)
 
     return out
+
 
 def _run_experts_grouped_mm(
     mlp1_weight: torch.Tensor,
@@ -129,14 +130,6 @@ def _run_experts_grouped_mm(
         # fall back to regular bmm between 3D tensors
         assert x.dim() == 3
 
-    if isinstance(mlp1_weight, DTensor):
-        mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias = (
-            mlp1_weight.to_local(),
-            mlp1_bias.to_local(),
-            mlp2_weight.to_local(),
-            mlp2_bias.to_local(),
-        )
-
     h = torch._grouped_mm(x.bfloat16(), mlp1_weight.bfloat16(), offs=offsets)
     if offsets is not None:
         b1 = mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
@@ -155,6 +148,7 @@ def _run_experts_grouped_mm(
         h = h + b2.to(h.dtype)
 
     return h
+
 
 class GptOssGroupedExperts(nn.Module):
     def __init__(
@@ -201,15 +195,32 @@ class GptOssGroupedExperts(nn.Module):
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
             else:
                 run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias, self.swiglu_limit, x, num_tokens_per_expert)
+            return run_experts_fn(
+                mlp1_weight,
+                mlp1_bias,
+                mlp2_weight,
+                mlp2_bias,
+                self.swiglu_limit,
+                x,
+                num_tokens_per_expert,
+            )
         else:
-            return _run_experts_for_loop(mlp1_weight, mlp1_bias, mlp2_weight, mlp2_bias, self.swiglu_limit, x, num_tokens_per_expert)
+            return _run_experts_for_loop(
+                mlp1_weight,
+                mlp1_bias,
+                mlp2_weight,
+                mlp2_bias,
+                self.swiglu_limit,
+                x,
+                num_tokens_per_expert,
+            )
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
+
 
 class GptOssMoE(MoE):
     """GptOss MoE implementation that inherits from the base MoE class."""

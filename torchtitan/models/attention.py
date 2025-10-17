@@ -27,6 +27,7 @@ __all__ = [
     "ScaledDotProductAttentionWrapper",
     "get_causal_mask_mod",
     "get_document_mask_mod",
+    "get_sliding_window_mask_mod",
     "get_fixed_block_mask_mod",
     "create_attention_mask",
 ]
@@ -57,14 +58,26 @@ class FlexAttentionWrapper(torch.nn.Module):
         *,
         block_mask: BlockMask,
         scale: float | None = None,
+        return_aux: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, AuxOutput]:
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
+        # 3. In newer PyTorch, return_aux expects an AuxOutput object specifying
+        #    which auxiliary outputs to return, not just a boolean.
+        if return_aux:
+            return_aux_obj = AuxOutput(lse=True, max_scores=False)
+        else:
+            return_aux_obj = None
         return FlexAttentionWrapper._compiled_flex_attn(
-            q, k, v, block_mask=block_mask, scale=scale
+            q,
+            k,
+            v,
+            block_mask=block_mask,
+            scale=scale,
+            return_aux=return_aux_obj,
         )
 
 
@@ -172,6 +185,28 @@ def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
     blocked_mask_mod.__name__ = f"blocked_mask_mod_fixed_block_size_{fixed_block_size}"
 
     return blocked_mask_mod
+
+
+def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
+    """Creates a sliding window mask that only attends to tokens within the fix window size.
+
+    Args:
+        batch: Input batch tensor with shape [b, s, h, d]
+        eos_id: End-of-sequence token ID that marks document boundaries
+
+    Returns:
+        A mask modifier function that implements document-level masking.
+    """
+    # b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    def sliding_window_mod(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        # causal within window
+        keep = (kv_idx <= q_idx) & (q_idx - kv_idx <= window_size)
+        return keep
+
+    sliding_window_mod.__name__ = f"sliding_window_mod_window_size_{window_size}"
+    return sliding_window_mod
 
 
 _compiled_create_block_mask = torch.compile(create_block_mask)

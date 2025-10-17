@@ -7,19 +7,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.protocols.model import AttentionMasksType
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import and_masks, BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.protocols.train_spec import ModelProtocol
 from torchtitan.models.attention import (
     create_attention_mask,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
-    ScaledDotProductAttentionWrapper,
+    get_sliding_window_mask_mod,
 )
-from torch.nn.attention.flex_attention import and_masks, BlockMask
+from torchtitan.protocols.model import AttentionMasksType
+from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import GptOssModelArgs
 from .moe import GptOssMoE
@@ -115,14 +115,8 @@ class Attention(nn.Module):
     Multi-head attention (MLA) module.
     """
 
-    def __init__(
-        self, model_args: GptOssModelArgs, use_sliding_attention: bool = False
-    ):
+    def __init__(self, model_args: GptOssModelArgs):
         super().__init__()
-
-        self.sliding_window_size = (
-            model_args.sliding_window_size if use_sliding_attention else None
-        )
         self.head_dim = model_args.head_dim
         self.n_heads = model_args.n_heads
         self.n_kv_heads = model_args.n_kv_heads
@@ -157,7 +151,7 @@ class Attention(nn.Module):
             self.inner_attention = FlexAttentionWrapper()
         else:
             raise ValueError("Gpt-oss model only supports FlexAttention!")
-    
+
     def init_weights(self, init_std: float):
         linear_list = [
             self.wq,
@@ -172,7 +166,6 @@ class Attention(nn.Module):
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
         nn.init.trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
 
-    
     def forward(
         self,
         x: torch.Tensor,
@@ -208,22 +201,15 @@ class Attention(nn.Module):
 
         if self.use_flex_attn:
             assert isinstance(attention_masks, BlockMask), attention_masks
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
-        
-        # # FlexAttention
-        # output, aux_output = self.attn(
-        #     q,
-        #     k,
-        #     v,
-        #     scale=None,
-        #     return_lse=True,
-        # )
+            output, aux_output = self.inner_attention(
+                xq, xk, xv, block_mask=attention_masks, scale=None, return_aux=True
+            )
 
-        # Apply attention sink rescaling: rescale by σ(lse - w[h])
-        # This is mathematically equivalent to concatenating learnable sink weights
-        lse = aux_output.lse
-        sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
-        output = output * sink_scale.to(output.dtype)
+            # Apply attention sink rescaling: rescale by σ(lse - w[h])
+            # This is mathematically equivalent to concatenating learnable sink weights
+            lse = aux_output.lse
+            sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
+            output = output * sink_scale.to(output.dtype)
 
         output = output.transpose(1, 2).contiguous()  # (B, H, T, D) -> (B, T, H, D)
 
@@ -234,18 +220,6 @@ class Attention(nn.Module):
         output = self.wo(output)  # (bsz, seqlen, dim)
         return output
 
-    # TODO: statically init the mask using train.seq_len
-    def sliding_window_causal(self, seqlen, device):
-        i = torch.arange(seqlen, device=device)
-        q_idx = i[:, None]
-        kv_idx = i[None, :]
-
-        causal_mask = q_idx >= kv_idx
-        if self.sliding_window is None:
-            return causal_mask
-        window_mask = q_idx - kv_idx <= self.sliding_window
-        return causal_mask & window_mask
-
 
 class TransformerBlock(nn.Module):
     """
@@ -255,10 +229,8 @@ class TransformerBlock(nn.Module):
     def __init__(self, layer_id: int, model_args: GptOssModelArgs):
 
         super().__init__()
-        use_sliding_attention = layer_id % 2 == 0
-        self.attention = Attention(
-            model_args, use_sliding_attention=use_sliding_attention
-        )
+        self.use_sliding_attention = layer_id % 2 == 0
+        self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
@@ -270,18 +242,31 @@ class TransformerBlock(nn.Module):
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
-    def forward(self, x: torch.Tensor, rope_cache: torch.Tensor, attention_masks: AttentionMasksType | None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope_cache: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+    ):
         """
         Forward pass for the Transformer block.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
             rope_cache (torch.Tensor): Precomputed cosine and sine frequencies.
+            attention_masks (AttentionMasksType | None): Either a single BlockMask or a dict of BlockMasks keyed by layer.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        x = x + self.attention(self.attention_norm(x), rope_cache, attention_masks)
+        # Extract the appropriate mask for this layer
+        if self.use_sliding_attention:
+            layer_mask = attention_masks.get("sliding_window_mask", None)
+        else:
+            layer_mask = attention_masks.get("basic_mask", None)
+        assert layer_mask is not None
+
+        x = x + self.attention(self.attention_norm(x), rope_cache, layer_mask)
         x = x + self.moe(self.ffn_norm(x))
         return x
 
@@ -357,24 +342,54 @@ class GptOssModel(nn.Module, ModelProtocol):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-        # TODO: implement this function
-        mask_mods = [get_causal_mask_mod()]
+
+        basic_mask_mods = []
+        sliding_window_mask_mods = [
+            get_sliding_window_mask_mod(self.model_args.sliding_window_size)
+        ]
         match self.model_args.attn_mask_type:
             case "causal":
                 B = 1
+                basic_mask_mods.append(get_causal_mask_mod())
+                sliding_window_mask_mods.append(get_causal_mask_mod())
             case "block_causal":
                 B = input_batch.shape[0]
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+                basic_mask_mods.append(
+                    get_document_mask_mod(input_batch, tokenizer.eos_id)
+                )
+                sliding_window_mask_mods.append(
+                    get_document_mask_mod(input_batch, tokenizer.eos_id)
+                )
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
                 )
-        return create_attention_mask(
-            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
+
+        # create basic attention mask: causal or block_causal
+        basic_mask = create_attention_mask(
+            and_masks(*basic_mask_mods),
+            B,
+            None,
+            input_batch.shape[1],
+            input_batch.shape[1],
         )
 
+        # create sliding window mask, has to
+        sliding_window_mask = create_attention_mask(
+            and_masks(*sliding_window_mask_mods),
+            B,
+            None,
+            input_batch.shape[1],
+            input_batch.shape[1],
+        )
 
-    def forward(self, tokens: torch.Tensor, attention_masks: AttentionMasksType | None = None,):
+        return {"basic_mask": basic_mask, "sliding_window_mask": sliding_window_mask}
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        attention_masks: AttentionMasksType | None = None,
+    ):
         """
         Forward pass for the Transformer model.
 
