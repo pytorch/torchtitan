@@ -54,11 +54,11 @@ def _create_device_mesh(
     mesh_shape: tuple,
     mesh_dim_names: List[str],
 ) -> tuple:
-    """Create device mesh with communicators for each dimension.
+    """Util function to create device mesh with communicators for each dimension.
 
     Args:
         world_size: Total number of ranks in the world
-        mesh_shape: Shape tuple for the mesh
+        mesh_shape: Shape of the device mesh
         mesh_dim_names: List of dimension names for the mesh
 
     Returns:
@@ -112,7 +112,7 @@ def _flatten_comms(
     device_mesh: DeviceMesh,
     comm_per_dim: Dict[str, any],
 ) -> None:
-    """Flatten mesh dimensions and create corresponding communicators.
+    """Util function to flatten mesh dimensions and create corresponding communicators.
 
     Args:
         flatten_ranks_per_dim: Mapping of flattened dimension names to ranks
