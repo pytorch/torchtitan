@@ -16,7 +16,7 @@ from torchtitan.components.optimizer import build_optimizers, OptimizersContaine
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.hf_datasets.text_datasets import build_hf_dataloader
+from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.models.llama3 import parallelize_llama
 from torchtitan.protocols import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.train_spec import (
@@ -82,7 +82,7 @@ class TestTrainSpec:
             pipelining_fn=None,
             build_optimizers_fn=build_optimizers,
             build_lr_schedulers_fn=build_lr_schedulers,
-            build_dataloader_fn=build_hf_dataloader,
+            build_dataloader_fn=build_text_dataloader,
             build_tokenizer_fn=build_hf_tokenizer,
             build_loss_fn=build_cross_entropy_loss,
         )
