@@ -21,7 +21,6 @@ from .utils import (
     create_position_encoding_for_latents,
     pack_latents,
     preprocess_data,
-    unpack_latents,
 )
 
 
@@ -131,10 +130,7 @@ class FluxTrainer(Trainer):
 
             # Patchify: Convert latent into a sequence of patches
             latents = pack_latents(latents)
-
-        with torch.no_grad(), torch.device(self.device):
-            target = noise - labels
-            target = pack_latents(target)
+            target = pack_latents(noise - labels)
 
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
@@ -171,7 +167,7 @@ class FluxTrainer(Trainer):
                 )
 
                 loss = self.loss_fn(latent_noise_pred, target)
-            # pred.shape=(bs, seq_len, vocab_size)
+            # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
             del (latent_noise_pred, noise, target)
             loss.backward()
