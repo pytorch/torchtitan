@@ -47,7 +47,14 @@ def parallelize_flux(
             logger.info("Applied FSDP to the model")
 
         if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
+            try:
+                from torch.distributed.tensor.experimental._attention import _cp_options
+
+                _cp_options.enable_load_balance = False
+            except Exception as e:
+                logger.warning(f"Failed to apply Context Parallel, {e}")
+            else:
+                logger.info("Applied Context Parallel to the model")
 
     return model
 
