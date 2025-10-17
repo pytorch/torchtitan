@@ -17,11 +17,7 @@ from torchtitan.train import Trainer
 from .infra.parallelize import parallelize_encoders
 from .model.autoencoder import load_ae
 from .model.hf_embedder import FluxEmbedder
-from .utils import (
-    create_position_encoding_for_latents,
-    pack_latents,
-    preprocess_data,
-)
+from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
 
 
 class FluxTrainer(Trainer):
