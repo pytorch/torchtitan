@@ -47,10 +47,9 @@ Locally tested with:
 ### Known Issues
 
 - **CP** (Context Parallelism) - Temporly not working
-- **Memory Overhead** - TorchComms requires higher peak memory usage. As a workaround, `local_batch_size=1` is currently applied to stay within memory limits.
+- **Memory Overhead** - TorchComms requires higher peak memory usage. As a workaround, we need to reduce `local_batch_size` to avoid out of memory error.
 
 ## Roadmap
 
 - [ ] Add N-D parallelism end-to-end performance and convergence tests
-  - Test with additional models: DeepSeek-V3, Qwen3, Llama4, etc.
-- [ ] Improve documentation and usage examples
+  - Test with additional models: DeepSeek-V3, Qwen3, Llama4, etc. on large scale
