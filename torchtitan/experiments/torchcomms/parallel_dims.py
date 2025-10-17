@@ -49,81 +49,125 @@ def _calculate_ranks_per_dimension(
     return ranks_per_dim
 
 
+def _create_device_mesh(
+    world_size: int,
+    mesh_shape: tuple,
+    mesh_dim_names: List[str],
+) -> tuple:
+    """Create device mesh with communicators for each dimension.
+
+    Args:
+        world_size: Total number of ranks in the world
+        mesh_shape: Shape tuple for the mesh
+        mesh_dim_names: List of dimension names for the mesh
+
+    Returns:
+        Tuple of (comm, device_mesh, mesh, cur_rank, comm_per_dim), or
+        (None, None, None, None, None) if initialization fails
+    """
+    backend = os.environ["TEST_BACKEND"]
+    device = torch.device("cuda")
+    mesh = torch.arange(world_size, dtype=torch.int, device="cpu").view(mesh_shape)
+    comm = torchcomms.new_comm(
+        backend,
+        device,
+        name="comms_test_n_d_parallel",
+    )
+
+    cur_rank = comm.get_rank()
+
+    mesh_sizes = [mesh.size(idx) for idx in range(len(mesh_dim_names))]
+    meshes = [mesh] * len(mesh_dim_names)
+    ranks_per_dim = _calculate_ranks_per_dimension(
+        meshes, mesh_dim_names, mesh_sizes, cur_rank
+    )
+    comm_per_dim = {}
+
+    for dim_name, ranks in ranks_per_dim.items():
+        comm_per_dim[dim_name] = comm.split(ranks, dim_name)
+
+    mesh_dim_comms = tuple(comm_per_dim[name] for name in mesh_dim_names)
+    try:
+        device_mesh = init_device_mesh(
+            mesh_dim_comms=mesh_dim_comms,
+            mesh_dim_names=tuple(mesh_dim_names),
+            _global_comm=comm,
+        )
+    except TypeError as e:
+        # TODO: remove this once PT 2.10 is released
+        if "_rank" in str(e):
+            for sub_comm in comm_per_dim.values():
+                sub_comm.finalize()
+            comm.finalize()
+            return None, None, None, None, None
+        raise
+
+    return comm, device_mesh, mesh, cur_rank, comm_per_dim
+
+
+def _flatten_comms(
+    flatten_ranks_per_dim: Dict[str, List[int]],
+    comm,
+    flatten_mesh_dim_names: Dict[str, List[str]],
+    device_mesh: DeviceMesh,
+    comm_per_dim: Dict[str, any],
+) -> None:
+    """Flatten mesh dimensions and create corresponding communicators.
+
+    Args:
+        flatten_ranks_per_dim: Mapping of flattened dimension names to ranks
+        comm: Base communicator
+        flatten_mesh_dim_names: Mapping of flattened names to original dimension names
+        device_mesh: Device mesh to flatten
+        comm_per_dim: Dictionary to store the created communicators
+    """
+    for flatten_dim_name, ranks in flatten_ranks_per_dim.items():
+        comm_per_dim[flatten_dim_name] = comm.split(ranks, flatten_dim_name)
+        sizes = []
+        strides = []
+        for dim_name in flatten_mesh_dim_names[flatten_dim_name]:
+            layout = device_mesh[dim_name]._layout
+            sizes.append(layout.sizes)
+            strides.append(layout.strides)
+        flatten_layout = _MeshLayout(tuple(sizes), tuple(strides))
+        _flatten_with_comm(
+            device_mesh,
+            flatten_dim_name,
+            comm_per_dim[flatten_dim_name],
+            ranks,
+            flatten_layout,
+        )
+
+
 @dataclass
 class TorchCommsParallelDims(ParallelDims):
     def _build_mesh_without_ep(self) -> DeviceMesh:
-        # TODO: support EP
-        dims = []
-        names = []
-        for d, name in zip(
-            [self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp],
-            ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
-        ):
-            if d > 1:
-                dims.append(d)
-                names.append(name)
+        mesh_shape = (self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp)
+        mesh_dim_names = ["pp", "dp_replicate", "dp_shard", "cp", "tp"]
+
+        dims = [d for d in mesh_shape if d > 1]
+        names = [name for d, name in zip(mesh_shape, mesh_dim_names) if d > 1]
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        backend = os.environ["TEST_BACKEND"]
-        device = torch.device("cuda")
-        mesh = torch.arange(self.world_size, dtype=torch.int, device="cpu").view(
-            self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp
-        )
-        comm = torchcomms.new_comm(
-            backend,
-            device,
-            name="comms_test_n_d_parallel",
+
+        comm, device_mesh, mesh, cur_rank, comm_per_dim = _create_device_mesh(
+            self.world_size, mesh_shape, mesh_dim_names
         )
 
-        # Get current rank to determine which groups this rank belongs to
-        cur_rank = comm.get_rank()
-
-        mesh_dim_names = ["pp", "dp_replicate", "dp_shard", "cp", "tp"]
-        mesh_sizes = [mesh.size(idx) for idx in range(len(mesh_dim_names))]
-        meshes = [mesh] * len(mesh_dim_names)
-        ranks_per_dim = _calculate_ranks_per_dimension(
-            meshes, mesh_dim_names, mesh_sizes, cur_rank
-        )
-        comm_per_dim = {}
-
-        # Create communicators using the new single-list API
-        for dim_name, ranks in ranks_per_dim.items():
-            comm_per_dim[dim_name] = comm.split(ranks, dim_name)
-
-        try:
-            device_mesh = init_device_mesh(
-                mesh_dim_comms=(
-                    comm_per_dim["pp"],
-                    comm_per_dim["dp_replicate"],
-                    comm_per_dim["dp_shard"],
-                    comm_per_dim["cp"],
-                    comm_per_dim["tp"],
-                ),
-                mesh_dim_names=tuple(mesh_dim_names),
-                _global_comm=comm,
-            )
-        except TypeError as e:
-            # TODO: remove this once PT 2.10 is released
-            if "_rank" in str(e):
-                for sub_comm in comm_per_dim.values():
-                    sub_comm.finalize()
-                comm.finalize()
-                return
-            raise
+        if device_mesh is None:
+            return None
 
         flatten_mesh = [
             mesh.view(self.pp, self.dp_replicate * self.dp_shard, self.cp, self.tp),
             mesh.view(self.pp, self.dp_replicate, self.dp_shard * self.cp, self.tp),
             mesh.view(self.pp, self.dp_replicate * self.dp_shard * self.cp, self.tp),
         ]
-
         flattened_mesh_dim_names = ["dp", "dp_shard_cp", "dp_cp"]
         flatten_mesh_dim_names = {
             "dp": ["dp_replicate", "dp_shard"],
             "dp_shard_cp": ["dp_shard", "cp"],
             "dp_cp": ["dp_replicate", "dp_shard", "cp"],
         }
-
         reshape_size = [
             self.dp_replicate * self.dp_shard,
             self.dp_shard * self.cp,
@@ -134,25 +178,121 @@ class TorchCommsParallelDims(ParallelDims):
             flatten_mesh, flattened_mesh_dim_names, reshape_size, cur_rank
         )
 
-        for flatten_dim_name, ranks in flatten_ranks_per_dim.items():
-            comm_per_dim[flatten_dim_name] = comm.split(ranks, flatten_dim_name)
-            sizes = []
-            strides = []
-            # This is important because we need to make sure the layout is correct
-            for dim_name in flatten_mesh_dim_names[flatten_dim_name]:
-                layout = device_mesh[dim_name]._layout
-                sizes.append(layout.sizes)
-                strides.append(layout.strides)
-            flatten_layout = _MeshLayout(tuple(sizes), tuple(strides))
-            _flatten_with_comm(
-                device_mesh,
-                flatten_dim_name,
-                comm_per_dim[flatten_dim_name],
-                ranks,
-                flatten_layout,
-            )
+        _flatten_comms(
+            flatten_ranks_per_dim,
+            comm,
+            flatten_mesh_dim_names,
+            device_mesh,
+            comm_per_dim,
+        )
 
-        # call .finalize() to release the sub comm before the root comm
+        # call .finalize() later to release the sub comm before the root comm
         self.comms = [*comm_per_dim.values(), comm]
+        return device_mesh
 
+    def _build_mesh_with_ep(self) -> DeviceMesh:
+        # With ep, dp_shard and ep are derived submeshes:
+        # dp_shard = dp_shard_mod_ep * dp_shard_in_ep
+        if self.etp == self.tp:
+            # ep = dp_shard_in_ep * cp
+            dp_shard_mod_ep = self.dp_shard * self.cp // self.ep
+            dp_shard_in_ep = self.ep // self.cp
+        else:
+            assert self.etp == 1
+            # ep = dp_shard_in_ep * cp * tp
+            dp_shard_mod_ep = self.dp_shard * self.cp * self.tp // self.ep
+            dp_shard_in_ep = self.ep // (self.cp * self.tp)
+
+        mesh_shape = (
+            self.pp,
+            self.dp_replicate,
+            dp_shard_mod_ep,
+            dp_shard_in_ep,
+            self.cp,
+            self.tp,
+        )
+        mesh_dim_names = [
+            "pp",
+            "dp_replicate",
+            "dp_shard_mod_ep",
+            "dp_shard_in_ep",
+            "cp",
+            "tp",
+        ]
+
+        dims = [
+            d
+            for d, name in zip(mesh_shape, mesh_dim_names)
+            if d > 1 or name == "dp_shard_mod_ep"
+        ]
+        names = [
+            name
+            for d, name in zip(mesh_shape, mesh_dim_names)
+            if d > 1 or name == "dp_shard_mod_ep"
+        ]
+
+        logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
+
+        comm, device_mesh, mesh, cur_rank, comm_per_dim = _create_device_mesh(
+            self.world_size, mesh_shape, mesh_dim_names
+        )
+
+        if device_mesh is None:
+            return None
+
+        flatten_mesh = [
+            mesh.view(
+                self.pp,
+                self.dp_replicate * dp_shard_mod_ep * dp_shard_in_ep,
+                self.cp,
+                self.tp,
+            ),
+            mesh.view(
+                self.pp,
+                self.dp_replicate,
+                dp_shard_mod_ep * dp_shard_in_ep * self.cp,
+                self.tp,
+            ),
+            mesh.view(
+                self.pp,
+                self.dp_replicate * dp_shard_mod_ep * dp_shard_in_ep * self.cp,
+                self.tp,
+            ),
+            mesh.view(
+                self.pp,
+                self.dp_replicate,
+                dp_shard_mod_ep,
+                dp_shard_in_ep * self.cp * self.tp,
+            ),
+        ]
+
+        flattened_mesh_dim_names = ["dp", "dp_shard_cp", "dp_cp", "ep"]
+        flatten_mesh_dim_names = {
+            "dp": ["dp_replicate", "dp_shard_mod_ep", "dp_shard_in_ep"],
+            "dp_shard_cp": ["dp_shard_mod_ep", "dp_shard_in_ep", "cp"],
+            "dp_cp": ["dp_replicate", "dp_shard_mod_ep", "dp_shard_in_ep", "cp"],
+            "ep": ["dp_shard_in_ep", "cp", "tp"],
+        }
+
+        reshape_size = [
+            self.dp_replicate * dp_shard_mod_ep * dp_shard_in_ep,
+            dp_shard_mod_ep * dp_shard_in_ep * self.cp,
+            self.dp_replicate * dp_shard_mod_ep * dp_shard_in_ep * self.cp,
+            dp_shard_in_ep * self.cp * self.tp,
+        ]
+
+        flatten_ranks_per_dim = _calculate_ranks_per_dimension(
+            flatten_mesh, flattened_mesh_dim_names, reshape_size, cur_rank
+        )
+
+        _flatten_comms(
+            flatten_ranks_per_dim,
+            comm,
+            flatten_mesh_dim_names,
+            device_mesh,
+            comm_per_dim,
+        )
+
+        # call .finalize() later to release the sub comm before the root comm
+        self.comms = [*comm_per_dim.values(), comm]
         return device_mesh
