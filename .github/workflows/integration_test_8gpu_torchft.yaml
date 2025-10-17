@@ -5,9 +5,11 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/components/ft.py'
+      - '.github/workflows/integration_test_8gpu_torchft.yaml'
   pull_request:
     paths:
       - 'torchtitan/components/ft.py'
+      - '.github/workflows/integration_test_8gpu_torchft.yaml'
   schedule:
     # Runs every 6 hours
     - cron: '0 */6 * * *'

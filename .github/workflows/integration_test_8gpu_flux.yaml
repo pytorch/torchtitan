@@ -5,9 +5,11 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/flux/**'
+      - '.github/workflows/integration_test_8gpu_flux.yaml'
   pull_request:
     paths:
       - 'torchtitan/experiments/flux/**'
+      - '.github/workflows/integration_test_8gpu_flux.yaml'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
