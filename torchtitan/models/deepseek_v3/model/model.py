@@ -427,8 +427,9 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
 
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
-        for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, attention_masks)
+        for layer_id, layer in self.layers.items():
+            with torch.fx.traceback.annotate({"layer_id": layer_id}):
+                h = layer(h, self.freqs_cis, attention_masks)
         h = self.norm(h) if self.norm is not None else h
         output = self.output(h) if self.output is not None else h
         return output
