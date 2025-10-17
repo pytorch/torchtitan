@@ -2,7 +2,7 @@
 # NOTE: this toml config is a preset for 64 A100 GPUs.
 
 [job]
-dump_folder = "/home/dakota/7b_qwen_base_debug3"
+dump_folder = "/home/dakota/7b_qwen_base_debug"
 description = "qwen_7b_grpo"
 
 [profiling]
@@ -24,7 +24,7 @@ tokenizer_path = "Qwen/Qwen2.5-7B"
 
 [optimizer]
 name = "AdamW"
-lr = 3e-7
+lr = 1e-6
 beta1 = 0.9
 beta2 = 0.999
 weight_decay = 0.1
@@ -66,15 +66,18 @@ entropy_loss_weight = 0.0000
 kl_beta = 0.000
 kl_estimator_type = "k3"
 ref_model_ema = 0.999
-clip_ratio_lower_bound = 0.2
-clip_ratio_upper_bound = 0.25
+clip_ratio_lower_bound = 0.003
+clip_ratio_upper_bound = 0.004
+policy_ratio_type = "sequence"
 pos_scaler = 1.00
 neg_scaler = 1.00
 grpo_by_token = true
 scale_adv_by_len = false
 num_microbatches = 2
-onpolicy_logp_threshold=-6.0
-importance_ratio_cap=2.0
+onpolicy_logp_threshold=0.0
+rollout_is_level = "sequence"
+rollout_is_mode = "truncate"
+rollout_is_threshold = 4.0
 
 [checkpoint]
 enable = true

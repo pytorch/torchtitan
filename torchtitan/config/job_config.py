@@ -882,8 +882,41 @@ class GRPO:
     scale_adv_by_len: bool = False
     """Whether to scale advantages by sequence length, defaults to False"""
 
-    importance_ratio_cap: float = -1.0
-    """Maximum value for importance ratio, -1 means no cap."""
+    policy_ratio_type: Literal["token", "sequence"] = "token"
+    """
+    Policy ratio type. Switches between token level (e.g. GRPO) and sequence level (e.g. GSPO)
+    """
+
+    rollout_is_level: Literal["token", "sequence", "geometric"] = "sequence"
+    """
+    Level of IS aggregation:
+        - "token": Per-token ratios (biased)
+        - "sequence": Product of ratios (unbiased)
+        - "geometric": Geometric mean of ratios (experimental)
+    """
+
+    rollout_is_mode: Literal["truncate", "mask"] = "mask"
+    """
+    rollout_is_mode: How to handle weights exceeding threshold:
+        - "truncate": Cap weights at upper_threshold only (TIS)
+        - "mask": Zero out weights outside [lower_threshold, upper_threshold] (MIS)
+    """
+
+    rollout_is_threshold: float | None = None
+    """
+    Upper threshold for rollout IS, defaults to None. (No Importance Sampling)
+    """
+
+    rollout_is_threshold_lower: float | None = None
+    """
+    Lower threshold for IS weights (mask mode only; if None, defaults to 1/upper)
+    """
+
+    rollout_is_veto_threshold: float = 1e-4
+    """
+    Per-token veto threshold. If any token ratio < this, zero entire sequence.
+        If None, veto mechanism is disabled.
+    """
 
 
 @dataclass
