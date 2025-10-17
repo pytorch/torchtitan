@@ -73,6 +73,7 @@ class ExpertParallel(ParallelStyle):
         self.permuted_indices = None
 
     # performing all-to-all dispatch on the input
+    @torch.fx.traceback.annotate_fn({"EP": "dispatch"})
     def _token_dispatch(self, mod, inputs, device_mesh):
         # annotate module input placements/sharding with input_layouts
         routed_input, num_tokens_per_expert = inputs
@@ -145,6 +146,7 @@ class ExpertParallel(ParallelStyle):
             mod.register_parameter(name, dist_param)
 
     # performing all-to-all combine on the output
+    @torch.fx.traceback.annotate_fn({"EP": "combine"})
     def _token_combine(self, mod, routed_output, device_mesh):
         routed_output = _unpermute(
             routed_output, self.input_shape, self.permuted_indices

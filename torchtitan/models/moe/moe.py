@@ -139,6 +139,7 @@ class GroupedExperts(nn.Module):
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
 
+    @torch.fx.traceback.annotate_fn({"EP": "compute"})
     def forward(
         self,
         x: torch.Tensor,
