@@ -53,7 +53,7 @@ def _create_device_mesh(
     world_size: int,
     mesh_shape: tuple,
     mesh_dim_names: List[str],
-) -> Dict[str, any]:
+) -> Dict:
     """Util function to create device mesh with communicators for each dimension.
 
     Args:
@@ -62,8 +62,12 @@ def _create_device_mesh(
         mesh_dim_names: List of dimension names for the mesh
 
     Returns:
-        Dictionary containing comm, device_mesh, mesh, and rank, or
-        a dictionary with None values if initialization fails
+        Dictionary containing:
+            - comm: Root communicator
+            - device_mesh: Initialized DeviceMesh object
+            - mesh: Tensor representation of the mesh
+            - comm_per_dim: Communicators for each dimension
+        Returns empty dict if initialization fails
     """
     backend = os.environ["TEST_BACKEND"]
     device = torch.device("cuda")
@@ -81,11 +85,13 @@ def _create_device_mesh(
     ranks_per_dim = _calculate_ranks_per_dimension(
         meshes, mesh_dim_names, mesh_sizes, cur_rank
     )
-    comm_per_dim = {}
 
+    # Create sub-communicators for each dimension
+    comm_per_dim = {}
     for dim_name, ranks in ranks_per_dim.items():
         comm_per_dim[dim_name] = comm.split(ranks, dim_name)
 
+    # Initialize device mesh with communicators
     mesh_dim_comms = tuple(comm_per_dim[name] for name in mesh_dim_names)
     try:
         device_mesh = init_device_mesh(
@@ -99,13 +105,9 @@ def _create_device_mesh(
             for sub_comm in comm_per_dim.values():
                 sub_comm.finalize()
             comm.finalize()
-            return {
-                "comm": None,
-                "device_mesh": None,
-                "mesh": None,
-                "comm_per_dim": None,
-            }
+            return {}
         raise
+
     return {
         "comm": comm,
         "device_mesh": device_mesh,
@@ -160,13 +162,16 @@ class TorchCommsParallelDims(ParallelDims):
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
 
         result = _create_device_mesh(self.world_size, mesh_shape, mesh_dim_names)
-        comm = result["comm"]
-        device_mesh = result["device_mesh"]
-        mesh = result["mesh"]
-        comm_per_dim = result["comm_per_dim"]
-
-        if device_mesh is None:
-            return None
+        comm = result.get("comm", None)
+        device_mesh = result.get("device_mesh", None)
+        mesh = result.get("mesh", None)
+        comm_per_dim = result.get("comm_per_dim", None)
+        assert (
+            comm is not None
+            and device_mesh is not None
+            and mesh is not None
+            and comm_per_dim is not None
+        ), "fail to init device mesh"
 
         cur_rank = comm.get_rank()
 
@@ -248,13 +253,16 @@ class TorchCommsParallelDims(ParallelDims):
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
 
         result = _create_device_mesh(self.world_size, mesh_shape, mesh_dim_names)
-        comm = result["comm"]
-        device_mesh = result["device_mesh"]
-        mesh = result["mesh"]
-        comm_per_dim = result["comm_per_dim"]
-
-        if device_mesh is None:
-            return None
+        comm = result.get("comm", None)
+        device_mesh = result.get("device_mesh", None)
+        mesh = result.get("mesh", None)
+        comm_per_dim = result.get("comm_per_dim", None)
+        assert (
+            comm is not None
+            and device_mesh is not None
+            and mesh is not None
+            and comm_per_dim is not None
+        ), "fail to init device mesh"
 
         cur_rank = comm.get_rank()
 
