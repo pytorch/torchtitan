@@ -46,8 +46,8 @@ Locally tested with:
 
 ### Known Issues
 
-- **CP** (Context Parallelism) - Temporly not working
-- **Async TP** - Temporly not working
+- **CP** (Context Parallelism) - Temporarily not working. Work in progress.
+- **Async TP** - Temporarily not working. Work in progress.
 - **Memory Overhead** - TorchComms requires higher peak memory usage. As a workaround, we need to reduce `local_batch_size` to avoid out of memory error.
 
 ## Roadmap
