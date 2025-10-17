@@ -32,12 +32,12 @@ Locally tested with:
 
 **Setup**: Similar setting as [docs/converging.md](../../docs/converging.md) based on [torchtitan/models/llama3/train_configs/llama3_8b.toml](../torchtitan/models/llama3/train_configs/llama3_8b.toml), but `training.local_batch_size = 1`
 
-| Run Name    | Parallelism        | Backend          | Remarks                   |
-| ----------- | ------------------ | ---------------- | ------------------------- |
-| (dist)DP8   | FSDP 8             | c10d.distributed | Baseline                  |
-| DP8         | FSDP 8             | torchcomms       | 1D test set               |
-| DP8_CP2_TP4 | FSDP 8, TP 4, CP 2 | torchcomms       | 3D test set               |
-| DP8_CP8     | FSDP 8, CP 8       | torchcomms       | CP with larger degree     |
+| Run Name    | Parallelism        | Distributed Library | Remarks               |
+| ----------- | ------------------ | ------------------- | --------------------- |
+| (dist)DP8   | FSDP 8             | c10d.distributed    | Baseline              |
+| DP8         | FSDP 8             | torchcomms          | 1D test set           |
+| DP8_CP2_TP4 | FSDP 8, TP 4, CP 2 | torchcomms          | 3D test set           |
+| DP8_CP8     | FSDP 8, CP 8       | torchcomms          | CP with larger degree |
 
 **Results**:
 
