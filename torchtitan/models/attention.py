@@ -15,7 +15,6 @@ import torch.nn.functional as F
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
-    AuxOutput,
     BlockMask,
     create_block_mask,
     flex_attention,
@@ -58,8 +57,8 @@ class FlexAttentionWrapper(torch.nn.Module):
         *,
         block_mask: BlockMask,
         scale: float | None = None,
-        return_aux: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, AuxOutput]:
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
@@ -67,17 +66,14 @@ class FlexAttentionWrapper(torch.nn.Module):
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
         # 3. In newer PyTorch, return_aux expects an AuxOutput object specifying
         #    which auxiliary outputs to return, not just a boolean.
-        if return_aux:
-            return_aux_obj = AuxOutput(lse=True, max_scores=False)
-        else:
-            return_aux_obj = None
+
         return FlexAttentionWrapper._compiled_flex_attn(
             q,
             k,
             v,
             block_mask=block_mask,
             scale=scale,
-            return_aux=return_aux_obj,
+            return_lse=return_lse,
         )
 
 

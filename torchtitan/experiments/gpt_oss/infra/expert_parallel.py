@@ -7,7 +7,7 @@
 
 import torch.nn as nn
 from torch.distributed.tensor import distribute_tensor, Replicate, Shard
-from torchtitan.distributed.expert_parallel import ExpertParallel, TensorParallel
+from torchtitan.distributed.expert_parallel import ExpertTensorParallel, TensorParallel
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class GptossTensorParallel(TensorParallel):
@@ -37,7 +37,7 @@ class GptossTensorParallel(TensorParallel):
 
 
 # This class is for dp2ep with TP (without TP we can just use GptossExpertParallel)
-class GptossExpertTensorParallel(ExpertParallel):
+class GptossExpertTensorParallel(ExpertTensorParallel):
     def _partition_fn_2d(self, name, mod, ep_tp_mesh):
         mod.register_parameter(
             "mlp1_weight",

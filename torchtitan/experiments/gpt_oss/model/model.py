@@ -201,13 +201,12 @@ class Attention(nn.Module):
 
         if self.use_flex_attn:
             assert isinstance(attention_masks, BlockMask), attention_masks
-            output, aux_output = self.inner_attention(
-                xq, xk, xv, block_mask=attention_masks, scale=None, return_aux=True
+            output, lse = self.inner_attention(
+                xq, xk, xv, block_mask=attention_masks, scale=None, return_lse=True
             )
 
             # Apply attention sink rescaling: rescale by σ(lse - w[h])
             # This is mathematically equivalent to concatenating learnable sink weights
-            lse = aux_output.lse
             sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
             output = output * sink_scale.to(output.dtype)
 

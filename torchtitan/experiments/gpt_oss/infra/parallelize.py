@@ -14,7 +14,6 @@ from torch.distributed.tensor.parallel import (
     parallelize_module,
     PrepareModuleInput,
     PrepareModuleInputOutput,
-    PrepareModuleOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -204,35 +203,26 @@ def apply_non_moe_tp(
         },
     )
 
-    (
-        rowwise_parallel,
-        colwise_parallel,
-        prepare_module_input,
-        prepare_module_output,
-    ) = (
-        RowwiseParallel,
-        ColwiseParallel,
-        PrepareModuleInput,
-        PrepareModuleOutput,
-    )
-
     # Apply tensor + sequence parallelism to every transformer block
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
-            "attention": prepare_module_input(
+            "attention": PrepareModuleInput(
                 input_layouts=(Shard(1), Replicate(), None),
                 desired_input_layouts=(Replicate(), Replicate(), None),
             ),
-            "attention.wq": colwise_parallel(use_local_output=False),
-            "attention.wk": colwise_parallel(use_local_output=False),
-            "attention.wv": colwise_parallel(use_local_output=False),
-            "attention.inner_attention": prepare_module_output(
+            "attention.wq": ColwiseParallel(use_local_output=False),
+            "attention.wk": ColwiseParallel(use_local_output=False),
+            "attention.wv": ColwiseParallel(use_local_output=False),
+            "attention.inner_attention": PrepareModuleInputOutput(
+                input_layouts=(Shard(1), Shard(1), Shard(1)),
+                desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
+                use_local_input=True,
                 output_layouts=(Shard(1), Shard(1)),
                 desired_output_layouts=(Shard(1), Shard(1)),
                 use_local_output=False,
             ),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
+            "attention.wo": RowwiseParallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }
 
@@ -261,7 +251,6 @@ def apply_non_moe_tp(
     )
 
 
-# NOTE(jianiw): The function can not be reused now because reimplemented ExpertTensorParallel
 def apply_moe_ep_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh | None,
@@ -269,6 +258,8 @@ def apply_moe_ep_tp(
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
 ):
+    assert ep_mesh is not None or tp_mesh is not None
+
     for transformer_block in model.layers.values():
         if not transformer_block.moe_enabled:
             continue
@@ -304,16 +295,13 @@ def apply_moe_ep_tp(
             experts_mesh = tp_mesh
             # input Replicate, output Partial
             experts_plan = GptossTensorParallel()
-        elif tp_mesh is None:
+        elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
-        elif etp_enabled:
-            experts_mesh = ep_tp_mesh
-            experts_plan = GptossExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)
         else:
-            experts_mesh = ep_mesh
-            experts_plan = ExpertParallel()
+            experts_mesh = ep_tp_mesh
+            experts_plan = GptossExpertTensorParallel()
 
         parallelize_module(
             module=transformer_block.moe.experts,
