@@ -15,8 +15,8 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.config import Optimizer as OptimizerConfig
-from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.hf_datasets.text_datasets import build_hf_dataloader
 from torchtitan.models.llama3 import parallelize_llama
 from torchtitan.protocols import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.train_spec import (

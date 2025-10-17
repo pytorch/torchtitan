@@ -22,7 +22,7 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.config import JobConfig
-from torchtitan.datasets import DatasetConfig
+from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
 from ..model.args import SpecialTokens

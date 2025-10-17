@@ -17,7 +17,7 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
-from torchtitan.datasets import DatasetConfig
+from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
 
@@ -165,7 +165,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         return _state_dict
 
 
-def build_hf_dataloader(
+def build_text_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
@@ -196,7 +196,7 @@ def build_hf_dataloader(
     )
 
 
-def build_hf_validation_dataloader(
+def build_text_validation_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
