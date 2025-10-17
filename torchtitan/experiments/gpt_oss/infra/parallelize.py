@@ -29,7 +29,7 @@ from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
 from torchtitan.models.llama4.infra.parallelize import apply_fsdp
 from torchtitan.tools.logging import logger
 
-from .expert_parallel import GptossExpertTensorParallel
+from .expert_parallel import GptossExpertTensorParallel, GptossTensorParallel
 
 
 # for selective op activation checkpointing
@@ -66,23 +66,22 @@ def parallelize_gptoss(
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
-        if job_config.parallelism.enable_async_tensor_parallel:
-            raise NotImplementedError(
-                "Currently, async TP is not tested for gptoss. \
-                torch.compile is not supported yet, which is required for async TP."
-            )
+        if (
+            job_config.parallelism.enable_async_tensor_parallel
+            and not model_compile_enabled
+        ):
+            raise RuntimeError("Async TP requires torch.compile")
 
         enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.float8.recipe_name in (
+        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
 
+        # For now, float8 all-gather with TP is only supported for tensorwise
+        # float8 scaling recipes. For rowwise recipes, we use regular TP and
+        # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
-        if enable_float8_tensorwise_tp:
-            raise NotImplementedError(
-                "Currently, float8 tensorwise TP is not tested for gptoss"
-            )
 
         apply_non_moe_tp(
             model,
@@ -222,13 +221,13 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None),
-                desired_input_layouts=(Replicate(), None),
+                input_layouts=(Shard(1), Replicate(), None),
+                desired_input_layouts=(Replicate(), Replicate(), None),
             ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
-            "attention.attn": prepare_module_output(
+            "attention.wq": colwise_parallel(use_local_output=False),
+            "attention.wk": colwise_parallel(use_local_output=False),
+            "attention.wv": colwise_parallel(use_local_output=False),
+            "attention.inner_attention": prepare_module_output(
                 output_layouts=(Shard(1), Shard(1)),
                 desired_output_layouts=(Shard(1), Shard(1)),
                 use_local_output=False,
@@ -304,11 +303,11 @@ def apply_moe_ep_tp(
         if ep_mesh is None:
             experts_mesh = tp_mesh
             # input Replicate, output Partial
-            experts_plan = TensorParallel()
+            experts_plan = GptossTensorParallel()
         elif tp_mesh is None:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = GptossExpertParallel()
+            experts_plan = ExpertParallel()
         elif etp_enabled:
             experts_mesh = ep_tp_mesh
             experts_plan = GptossExpertTensorParallel(tp_mesh=tp_mesh, ep_mesh=ep_mesh)

@@ -188,24 +188,29 @@ def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
 
 
 def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
-    """Creates a sliding window mask that only attends to tokens within the fix window size.
+    """Creates a sliding window mask that only attends to tokens within a fixed window size.
 
+    This implements causal sliding window attention where each token can only attend to:
+    - Itself (current token)
+    - Up to `window_size - 1` previous tokens
     Args:
-        batch: Input batch tensor with shape [b, s, h, d]
-        eos_id: End-of-sequence token ID that marks document boundaries
+        window_size: The maximum number of tokens to attend to (including current token).
+                    Must be >= 1. A window_size of 1 means attend only to self.
 
     Returns:
-        A mask modifier function that implements document-level masking.
+        A mask modifier function that implements causal sliding window masking.
     """
-    # b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+
     def sliding_window_mod(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
     ) -> torch.Tensor:
-        # causal within window
-        keep = (kv_idx <= q_idx) & (q_idx - kv_idx <= window_size)
-        return keep
+        # Causal mask: can only attend to current or previous tokens
+        # Window mask: can only attend within the window
+        # q_idx - kv_idx < window_size ensures we look at most window_size-1 tokens back
+        return (kv_idx <= q_idx) & (q_idx - kv_idx < window_size)
 
     sliding_window_mod.__name__ = f"sliding_window_mod_window_size_{window_size}"
+
     return sliding_window_mod
 
 
