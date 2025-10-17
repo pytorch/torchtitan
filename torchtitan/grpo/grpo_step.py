@@ -6,6 +6,7 @@
 import torch
 
 from torchtitan.config.job_config import JobConfig
+from torchtitan.grpo.importance_sampling import compute_rollout_importance_weights
 from torchtitan.grpo.utils import masked_mean
 from torchtitan.tools.logging import logger
 
@@ -78,7 +79,7 @@ def compute_entropy_loss(pred, entropy_loss_fn, entropy_weight, device):
     return entropy_loss
 
 
-def compute_policy_ratio(logp, old_logp=None):
+def compute_policy_ratio(logp, old_logp=None, mask=None, policy_ratio_type="token"):
     """
     Compute the policy ratio for GRPO.
 
@@ -91,10 +92,22 @@ def compute_policy_ratio(logp, old_logp=None):
     """
     if old_logp is None:
         # On-policy: use current logp with detach
-        return torch.exp(logp - logp.detach())
+        log_ratio = logp - logp.detach()
     else:
         # Off-policy: use provided old logp
-        return torch.exp(logp - old_logp)
+        log_ratio = logp - old_logp
+
+    if policy_ratio_type == "sequence" and mask is not None:
+        # Compute sequence-level importance weights (GSPO)
+        # Average log ratios across valid tokens
+        seq_log_ratio = (log_ratio * mask).sum(dim=-1, keepdim=True) / mask.sum(
+            dim=-1, keepdim=True
+        ).clamp(min=1.0)
+        # Broadcast back to token level
+        return torch.exp((logp - logp.detach()) + seq_log_ratio)
+    else:
+        # Token-level importance weights (standard GRPO)
+        return torch.exp(log_ratio)
 
 
 def scale_rewards(reward, pos_scaler, neg_scaler):
@@ -233,7 +246,9 @@ def compute_grpo_loss_from_predictions(
             orig_mask = mask  # no need to clone
 
     # Compute ratio
-    ratio = compute_policy_ratio(logp, old_logp)
+    ratio = compute_policy_ratio(
+        logp, old_logp, mask, job_config.grpo.policy_ratio_type
+    )
 
     # For off-policy, apply clipping to ratio
     if old_logp is not None:
@@ -247,18 +262,23 @@ def compute_grpo_loss_from_predictions(
     else:
         logger.debug("On-policy: no ratio clipping applied")
         clipped_ratio = ratio
-    if job_config.grpo.importance_ratio_cap > 0 and inf_logps is not None:
-        # ref: https://fengyao.notion.site/off-policy-rl
-        imp_ratio_mask = inf_logps <= 0
+    if job_config.grpo.rollout_is_threshold is not None and inf_logps is not None:
+        imp_ratio_mask = (inf_logps <= 0).float() * mask
         imp_ratio_logp = old_logp if old_logp is not None else logp.detach()
-        importance_ratio = torch.exp(imp_ratio_logp - inf_logps).clamp(
-            max=job_config.grpo.importance_ratio_cap
+        importance_ratio, is_metrics = compute_rollout_importance_weights(
+            imp_ratio_logp,
+            inf_logps,
+            imp_ratio_mask,
+            rollout_is_level=job_config.grpo.rollout_is_level,
+            rollout_is_mode=job_config.grpo.rollout_is_mode,
+            rollout_is_threshold=job_config.grpo.rollout_is_threshold,
+            rollout_is_threshold_lower=job_config.grpo.rollout_is_threshold_lower,
+            rollout_is_veto_threshold=job_config.grpo.rollout_is_veto_threshold,
         )
-        importance_ratio = importance_ratio * imp_ratio_mask.float()
-        importance_ratio = importance_ratio + (1 - imp_ratio_mask.float())
         clipped_ratio = clipped_ratio * importance_ratio
     else:
         importance_ratio = torch.ones_like(clipped_ratio)
+        is_metrics = {}
     # Compute auxiliary losses
     logit_loss = compute_logit_loss(pred, job_config.grpo.logit_loss_weight, device)
     entropy_loss = compute_entropy_loss(
@@ -435,6 +455,7 @@ def compute_grpo_loss_from_predictions(
             "logp_dist/max": logp_max,
             "logp_dist/threshold_filter_ratio": threshold_filter_ratio,
         }
+        metrics.update(is_metrics)
 
         if inf_logps is not None:
             metrics.update(

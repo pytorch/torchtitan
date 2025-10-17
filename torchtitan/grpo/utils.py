@@ -88,6 +88,13 @@ def masked_mean(tensor, mask, per_seq=False):
         return (tensor * mask).sum() / mask.sum()
 
 
+def masked_sum(tensor, mask, per_seq=False):
+    if per_seq:
+        return (tensor * mask).sum(dim=-1)
+    else:
+        return (tensor * mask).sum()
+
+
 @register_sharding(torch.ops.aten.amax.default)
 def custom_amax_sharding(x, dim, keepdim):
     if isinstance(dim, list):
