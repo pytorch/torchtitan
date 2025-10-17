@@ -69,7 +69,7 @@ jobs:
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
-        
+
         # debugging CPU shared memory on ROCm runner
         if [ "$GPU_ARCH_TYPE" = "rocm" ]; then
           # Show total and available disk space on the shared memory filesystem (/dev/shm)
