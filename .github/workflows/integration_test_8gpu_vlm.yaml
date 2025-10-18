@@ -5,9 +5,11 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/vlm/**'
+      - '.github/workflows/integration_test_8gpu_vlm.yaml'
   pull_request:
     paths:
       - 'torchtitan/experiments/vlm/**'
+      - '.github/workflows/integration_test_8gpu_vlm.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'

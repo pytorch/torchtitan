@@ -25,10 +25,32 @@ Locally tested with:
 - **FSDP** (`fully_shard`) - Fully Sharded Data Parallel
 - **TP** - Tensor Parallelism
 - **PP** - Pipeline Parallelism
-- **CP** - Context Parallelism
+- **EP** - Expert Parallelism
+- **compile** - `torch.compile` integration
 
-### Roadmap
+### Performance
 
-- [ ] Add N-D parallelism E2E perf and convergence tests
-- [ ] Integrated and tested with Expert Parallelism
-- [ ] Integration and testing with `torch.compile`
+**Setup**: Similar setting as [docs/converging.md](../../docs/converging.md) based on [torchtitan/models/llama3/train_configs/llama3_8b.toml](../torchtitan/models/llama3/train_configs/llama3_8b.toml), but `training.local_batch_size = 1`
+
+| Run Name    | Parallelism        | Distributed Library | Remarks               |
+| ----------- | ------------------ | ------------------- | --------------------- |
+| (dist)DP8   | FSDP 8             | c10d.distributed    | Baseline              |
+| DP8         | FSDP 8             | torchcomms          | 1D test set           |
+| DP8_CP2_TP4 | FSDP 8, TP 4, CP 2 | torchcomms          | 3D test set           |
+| DP8_CP8     | FSDP 8, CP 8       | torchcomms          | CP with larger degree |
+
+**Results**:
+
+![Loss Curves](./asserts/images/loss_curves.png)
+
+
+### Known Issues
+
+- **CP** (Context Parallelism) - Temporarily not working. Work in progress.
+- **Async TP** - Temporarily not working. Work in progress.
+- **Memory Overhead** - TorchComms requires higher peak memory usage. As a workaround, we need to reduce `local_batch_size` to avoid out of memory error.
+
+## Roadmap
+
+- [ ] Add N-D parallelism end-to-end performance and convergence tests
+  - Test with additional models: DeepSeek-V3, Qwen3, Llama4, etc. on large scale
