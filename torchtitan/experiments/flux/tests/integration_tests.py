@@ -81,6 +81,18 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.data_parallel_replicate_degree 1",
+                    "--parallelism.context_parallel_degree 2",
+                ]
+            ],
+            "FSDP+CP",
+            "fsdp+cp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--validation.enable",
                 ]
             ],
