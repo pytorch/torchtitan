@@ -18,8 +18,8 @@ from torchtitan.components.metrics import build_metrics_processor
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.config import ConfigManager, JobConfig
-from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
@@ -57,7 +57,7 @@ class Trainer(ForgeEngine):
         self.tokenizer = build_hf_tokenizer(job_config)
 
         # build dataloader
-        self.dataloader = build_hf_dataloader(
+        self.dataloader = build_text_dataloader(
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
