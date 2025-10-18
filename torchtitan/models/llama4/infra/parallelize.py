@@ -513,14 +513,14 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     # torch._dynamo.config.capture_scalar_outputs = True
     for layer_id, transformer_block in model.layers.named_children():
         # TODO: remove when torch.compile supports fullgraph=True for MoE
-        fullgraph = True
         if transformer_block.moe_enabled:
-            fullgraph = False
-        transformer_block = torch.compile(
-            transformer_block,
-            backend=compile_config.backend,
-            fullgraph=fullgraph,
-        )
+            continue
+        else:
+            transformer_block = torch.compile(
+                transformer_block,
+                backend=compile_config.backend,
+                fullgraph=True,
+            )
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
