@@ -226,8 +226,8 @@ def _validate_mm_dataset(
     return path, config.loader, config.sample_processor
 
 
-class MultiModalDataset(IterableDataset, Stateful):
-    """MultiModal Dataset with support for sample packing."""
+class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
+    """HuggingFace MultiModal Dataset with support for sample packing."""
 
     def __init__(
         self,

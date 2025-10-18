@@ -67,7 +67,7 @@ def _validate_dataset(
     return path, config.loader, config.sample_processor
 
 
-class HuggingFaceDataset(IterableDataset, Stateful):
+class HuggingFaceTextDataset(IterableDataset, Stateful):
     def __init__(
         self,
         dataset_name: str,
@@ -178,7 +178,7 @@ def build_text_dataloader(
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
 
-    hf_ds = HuggingFaceDataset(
+    hf_ds = HuggingFaceTextDataset(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
         tokenizer=tokenizer,
@@ -209,7 +209,7 @@ def build_text_validation_dataloader(
     batch_size = job_config.validation.local_batch_size
     seq_len = job_config.validation.seq_len
 
-    hf_ds = HuggingFaceDataset(
+    hf_ds = HuggingFaceTextDataset(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
         tokenizer=tokenizer,

@@ -103,7 +103,7 @@ class TestTrainSpec:
             pipelining_fn=None,
             build_optimizers_fn=fake_build_optimizers_with_hook,
             build_lr_schedulers_fn=build_lr_schedulers,
-            build_dataloader_fn=build_hf_dataloader,
+            build_dataloader_fn=build_text_dataloader,
             build_tokenizer_fn=build_hf_tokenizer,
             build_loss_fn=build_cross_entropy_loss,
         )
