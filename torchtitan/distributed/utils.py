@@ -305,12 +305,15 @@ def set_pg_timeouts(timeout, world_mesh):
     torch.distributed.barrier(device_ids=[device_module.current_device()])
     device_module.synchronize()
 
-    groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
+    groups = [(mesh_dim, world_mesh.get_group(mesh_dim)) for mesh_dim in range(world_mesh.ndim)]
 
     # None represents the 'default' PG, not part of the mesh
-    groups.append(None)
-    for group in groups:
+    groups.append((0, None))
+    for mesh_dim, group in groups:
         torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+        if group is None:
+            continue
+        group.setGroupName(f"mesh_dim_{mesh_dim}")
 
 
 @torch.no_grad()
