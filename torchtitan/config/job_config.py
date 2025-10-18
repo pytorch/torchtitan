@@ -752,6 +752,24 @@ class Quantize:
     grouped_mm: QuantizedGroupedMM = field(default_factory=QuantizedGroupedMM)
     """Quantized training config for grouped GEMMs"""
 
+    expert_parallel_a2a_dispatch_impl: Literal["default", "mxfp8"] = "default"
+    """
+    All-to-all implementation to use for the token dispatch step in expert parallelism.
+    - "default": Directly uses all_to_all_single with inputs/outputs in original precision.
+    - "mxfp8": Reduces network bandwidth utilization by quantizing inputs to MXFP8,
+               using all_to_all_single on the quantized data and scales, then dequantizing
+               the outputs back to original precision.
+    """
+
+    expert_parallel_a2a_combine_impl: Literal["default", "mxfp8"] = "default"
+    """
+    All-to-all implementation to use for the token combine step in expert parallelism.
+    - "default": Directly uses all_to_all_single with inputs/outputs in original precision.
+    - "mxfp8": Reduces network bandwidth utilization by quantizing inputs to MXFP8,
+               using all_to_all_single on the quantized data and scales, then dequantizing
+               the outputs back to original precision.
+    """
+
 
 @dataclass
 class Comm:
