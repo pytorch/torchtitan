@@ -26,7 +26,8 @@ permissions:
 
 jobs:
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    # TESTING: TO BE CHANGED BACK TO MAIN ONCE https://github.com/pytorch/test-infra/pull/7379 LANDS
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@expose_runner_temp
     strategy:
       matrix:
         include:
@@ -45,6 +46,8 @@ jobs:
             docker-image: torchtitan-rocm-ubuntu-22.04-clang12
             index-url: https://download.pytorch.org/whl/nightly/rocm7.0
     with:
+      # TESTING: TO BE REMOVED ONCE https://github.com/pytorch/test-infra/pull/7379 LANDS
+      test-infra-ref: expose_runner_temp
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
       gpu-arch-version: ${{ matrix.gpu-arch-version }}
