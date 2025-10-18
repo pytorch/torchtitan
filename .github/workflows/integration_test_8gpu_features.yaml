@@ -72,12 +72,8 @@ jobs:
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
-        whoami
-        ls -la .
-        ls -la ${RUNNER_TEMP}
-        ls -la ~/
-
-        # DO I HAVE SUDO?
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        
         export TEST_WITH_ROCM=$([[ "${{ matrix.gpu-arch-type }}" == "rocm" ]] && echo 1 || echo 0)
-        python -m tests.integration_tests.run_tests --test_suite features RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
+        python -m tests.integration_tests.run_tests --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
