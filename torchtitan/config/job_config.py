@@ -4,23 +4,33 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
+
+import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
+
+import torch
+
+from torchtitan.tools.logging import logger
 
 
 @dataclass
 class Job:
     config_file: str | None = None
-    """Job config file"""
+    """File to read job configs from"""
 
-    dump_folder: str = "./torchtitan/outputs"
+    dump_folder: str = "./outputs"
     """Folder to dump job outputs"""
 
     description: str = "default job"
     """Description of the job"""
 
     print_config: bool = False
-    """Print the configs to terminal"""
+    """Print the job configs to terminal"""
+
+    save_config_folder: str | None = None
+    """Folder to save a job_config.json file"""
 
     custom_config_module: str = ""
     """
@@ -908,3 +918,22 @@ class JobConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def maybe_log(self) -> None:
+        if self.job.print_config:
+            logger.info(f"Running with configs: {self.to_dict()}")
+
+        if self.job.save_config_folder is not None:
+            config_file = os.path.join(
+                self.job.dump_folder, self.job.save_config_folder, "job_config.json"
+            )
+            if torch.distributed.is_initialized():
+                if torch.distributed.get_rank() == 0:
+                    os.makedirs(os.path.dirname(config_file), exist_ok=True)
+                    with open(config_file, "w") as f:
+                        json.dump(self.to_dict(), f, indent=2)
+                logger.info(f"Saved job configs to {config_file}")
+            else:
+                logger.warning(
+                    "Job configs logging is disabled due to torch.distributed not initialized."
+                )
