@@ -4,9 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 
 from dataclasses import dataclass, field
 from typing import Literal
@@ -74,8 +71,8 @@ class GptOssModelArgs(BaseModelArgs):
     n_heads: int = 64
     n_kv_heads: int = 8
     sliding_window_size: int = 128
-    use_flex_attn: bool = True
     attn_mask_type: str = "causal"
+    use_flex_attn: bool = True
     # yarn
     original_seq_len: int = 4096
     rope_theta: float = 150000.0
@@ -97,9 +94,9 @@ class GptOssModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
+        if job_config.parallelism.context_parallel_degree > 1:
             raise NotImplementedError(
-                "CP support for FlexAttention is still in progress."
+                "CP support for gpt-oss model is still in progress."
             )
 
     def get_nparams_and_flops(

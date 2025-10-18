@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
 
 from typing import Callable
 
@@ -76,37 +74,31 @@ def _run_experts_for_loop(
     mlp2_bias: torch.Tensor,
     swiglu_limit: float,
     x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor | None = None,
+    num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
-    if num_tokens_per_expert is not None:
-        # NOTE: this would incur a synchronization between device and host
-        num_tokens_per_expert = num_tokens_per_expert.tolist()
+    # NOTE: this would incur a synchronization between device and host
+    num_tokens_per_expert = num_tokens_per_expert.tolist()
 
-        # side-effect code due to the usage of generate_permute_indices
-        num_padding = x.shape[0] - sum(num_tokens_per_expert)
+    # side-effect code due to the usage of generate_permute_indices
+    num_padding = x.shape[0] - sum(num_tokens_per_expert)
 
-        # a tuple of tensors indexed by experts
-        # each with shape (tokens_per_expert(varying), dim)
-        x = torch.split(
-            x[: sum(num_tokens_per_expert)],
-            split_size_or_sections=num_tokens_per_expert,
-            dim=0,
-        )
-        out_experts_splits = []
-        for expert_idx, x_expert in enumerate(x):
-            h = torch.matmul(x_expert, mlp1_weight[expert_idx]) + mlp1_bias[expert_idx]
-            h = swiglu(h, limit=swiglu_limit)
-            h = torch.matmul(h, mlp2_weight[expert_idx]) + mlp2_bias[expert_idx]
-            out_experts_splits.append(h)
-        out = torch.cat(out_experts_splits, dim=0)
-
-        # side-effect code due to the usage of generate_permute_indices
-        out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
-    else:
-        # x shape (num_experts, tokens_per_expert, dim)
-        h = torch.bmm(x, mlp1_weight) + mlp1_bias.unsqueeze(1)
+    # a tuple of tensors indexed by experts
+    # each with shape (tokens_per_expert(varying), dim)
+    x = torch.split(
+        x[: sum(num_tokens_per_expert)],
+        split_size_or_sections=num_tokens_per_expert,
+        dim=0,
+    )
+    out_experts_splits = []
+    for expert_idx, x_expert in enumerate(x):
+        h = torch.matmul(x_expert, mlp1_weight[expert_idx]) + mlp1_bias[expert_idx]
         h = swiglu(h, limit=swiglu_limit)
-        out = torch.bmm(h, mlp2_weight) + mlp2_bias.unsqueeze(1)
+        h = torch.matmul(h, mlp2_weight[expert_idx]) + mlp2_bias[expert_idx]
+        out_experts_splits.append(h)
+    out = torch.cat(out_experts_splits, dim=0)
+
+    # side-effect code due to the usage of generate_permute_indices
+    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
 
     return out
 
@@ -118,34 +110,26 @@ def _run_experts_grouped_mm(
     mlp2_bias: torch.Tensor,
     swiglu_limit: float,
     x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor | None = None,
+    num_tokens_per_expert: torch.Tensor | None,
 ) -> torch.Tensor:
-    if num_tokens_per_expert is not None:
-        offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
-        # grouped mm between a 2D tensor and a 3D tensor
-        assert x.dim() == 2
-        num_tokens_per_expert_long = num_tokens_per_expert.to(torch.long)
-    else:
-        offsets = None
-        # fall back to regular bmm between 3D tensors
-        assert x.dim() == 3
+    offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+    num_tokens_per_expert_long = num_tokens_per_expert.to(torch.long)
 
     h = torch._grouped_mm(x.bfloat16(), mlp1_weight.bfloat16(), offs=offsets)
-    if offsets is not None:
-        b1 = mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
-        tail_slack = x.shape[0] - int(offsets[-1])
-        if tail_slack:
-            b1 = torch.cat([b1, b1.new_zeros((tail_slack, b1.shape[-1]))], dim=0)
-        h = h + b1.to(h.dtype)
+    b1 = mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
+    tail_slack = x.shape[0] - int(offsets[-1])
+    if tail_slack:
+        b1 = torch.cat([b1, b1.new_zeros((tail_slack, b1.shape[-1]))], dim=0)
+    h = h + b1.to(h.dtype)
 
     h = swiglu(h, limit=swiglu_limit)
     h = torch._grouped_mm(h, mlp2_weight.bfloat16(), offs=offsets)
-    if offsets is not None:
-        b2 = mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
-        tail_slack = x.shape[0] - int(offsets[-1])
-        if tail_slack:  # padding
-            b2 = torch.cat([b2, b2.new_zeros((tail_slack, b2.shape[-1]))], dim=0)
-        h = h + b2.to(h.dtype)
+
+    b2 = mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
+    tail_slack = x.shape[0] - int(offsets[-1])
+    if tail_slack:  # padding
+        b2 = torch.cat([b2, b2.new_zeros((tail_slack, b2.shape[-1]))], dim=0)
+    h = h + b2.to(h.dtype)
 
     return h
 
@@ -172,7 +156,7 @@ class GptOssGroupedExperts(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor | None = None,
+        num_tokens_per_expert: torch.Tensor,
     ) -> torch.Tensor:
         if isinstance(self.mlp1_weight, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with

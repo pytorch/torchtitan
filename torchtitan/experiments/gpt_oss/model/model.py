@@ -4,9 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
@@ -144,13 +141,7 @@ class Attention(nn.Module):
             bias=True,
         )
         self.sinks = nn.Parameter(torch.empty(model_args.n_heads))
-
-        self.use_flex_attn = getattr(model_args, "use_flex_attn", False)
-
-        if self.use_flex_attn:
-            self.inner_attention = FlexAttentionWrapper()
-        else:
-            raise ValueError("Gpt-oss model only supports FlexAttention!")
+        self.inner_attention = FlexAttentionWrapper()
 
     def init_weights(self, init_std: float):
         linear_list = [
@@ -199,16 +190,15 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2).contiguous()
         xv = values.transpose(1, 2).contiguous()
 
-        if self.use_flex_attn:
-            assert isinstance(attention_masks, BlockMask), attention_masks
-            output, lse = self.inner_attention(
-                xq, xk, xv, block_mask=attention_masks, scale=None, return_lse=True
-            )
+        assert isinstance(attention_masks, BlockMask), attention_masks
+        output, lse = self.inner_attention(
+            xq, xk, xv, block_mask=attention_masks, scale=None, return_lse=True
+        )
 
-            # Apply attention sink rescaling: rescale by σ(lse - w[h])
-            # This is mathematically equivalent to concatenating learnable sink weights
-            sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
-            output = output * sink_scale.to(output.dtype)
+        # Apply attention sink rescaling: rescale by σ(lse - w[h])
+        # This is mathematically equivalent to concatenating learnable sink weights
+        sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
+        output = output * sink_scale.to(output.dtype)
 
         output = output.transpose(1, 2).contiguous()  # (B, H, T, D) -> (B, T, H, D)
 
@@ -245,7 +235,7 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         rope_cache: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: AttentionMasksType,
     ):
         """
         Forward pass for the Transformer block.
@@ -253,7 +243,7 @@ class TransformerBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
             rope_cache (torch.Tensor): Precomputed cosine and sine frequencies.
-            attention_masks (AttentionMasksType | None): Either a single BlockMask or a dict of BlockMasks keyed by layer.
+            attention_masks (AttentionMasksType): a dict of BlockMasks.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -350,13 +340,9 @@ class GptOssModel(nn.Module, ModelProtocol):
             case "causal":
                 B = 1
                 basic_mask_mods.append(get_causal_mask_mod())
-                sliding_window_mask_mods.append(get_causal_mask_mod())
             case "block_causal":
                 B = input_batch.shape[0]
                 basic_mask_mods.append(
-                    get_document_mask_mod(input_batch, tokenizer.eos_id)
-                )
-                sliding_window_mask_mods.append(
                     get_document_mask_mod(input_batch, tokenizer.eos_id)
                 )
             case _:
@@ -373,9 +359,9 @@ class GptOssModel(nn.Module, ModelProtocol):
             input_batch.shape[1],
         )
 
-        # create sliding window mask, has to
+        # create sliding window mask, has to be created on top of basic attention mask
         sliding_window_mask = create_attention_mask(
-            and_masks(*sliding_window_mask_mods),
+            and_masks(*basic_mask_mods, *sliding_window_mask_mods),
             B,
             None,
             input_batch.shape[1],
@@ -387,13 +373,14 @@ class GptOssModel(nn.Module, ModelProtocol):
     def forward(
         self,
         tokens: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: AttentionMasksType,
     ):
         """
         Forward pass for the Transformer model.
 
         Args:
             tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
+            attention_masks (AttentionMasksType): a dict of BlockMasks.
 
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).

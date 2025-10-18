@@ -64,8 +64,8 @@ class FlexAttentionWrapper(torch.nn.Module):
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
-        # 3. In newer PyTorch, return_aux expects an AuxOutput object specifying
-        #    which auxiliary outputs to return, not just a boolean.
+        # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
+        #    to convert `lse` to be DTensor.
 
         return FlexAttentionWrapper._compiled_flex_attn(
             q,
@@ -200,7 +200,6 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     def sliding_window_mod(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
     ) -> torch.Tensor:
-        # Causal mask: can only attend to current or previous tokens
         # Window mask: can only attend within the window
         # q_idx - kv_idx < window_size ensures we look at most window_size-1 tokens back
         return (kv_idx <= q_idx) & (q_idx - kv_idx < window_size)

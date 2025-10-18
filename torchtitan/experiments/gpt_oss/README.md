@@ -8,8 +8,6 @@ CONFIG_FILE="./torchtitan/experiments/gpt_oss/train_configs/debug_model.toml" ./
 ## Supported Features
 - FSDP/HSDP, TP, EP, ETP
 - Grouped matrix multiplication for efficient computation
-- SwiGLU activation
-- Multi-head attention with sliding window mask and attention sink
 
 
 ## TODO
