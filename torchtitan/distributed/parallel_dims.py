@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
@@ -26,7 +26,8 @@ class ParallelDims:
     etp: int
     world_size: int
 
-    _world_mesh: DeviceMesh = None
+    _meshes: dict[str, DeviceMesh] = field(default_factory=dict)
+    _world_mesh: DeviceMesh | None = None
 
     def __post_init__(self):
         self._validate()
@@ -64,137 +65,178 @@ class ParallelDims:
                 assert ep % (cp * tp) == 0 and (dp_shard * cp * tp) % ep == 0
 
     def build_mesh(self) -> DeviceMesh:
-        # TODO: Current implementation of ParallelDims for dp2ep Expert Parallel
-        #       is not very clean, due to the limited support from DeviceMesh
-        #       for creating two staggered meshes. Will improve.
-        if self.ep > 1:
-            return self._build_mesh_with_ep()
-        else:
-            return self._build_mesh_without_ep()
+        """
+        Build the device mesh with the required mesh dimensions.
 
-    def _build_mesh_with_ep(self) -> DeviceMesh:
-        # With ep, dp_shard and ep are derived submeshes:
-        # dp_shard = dp_shard_mod_ep * dp_shard_in_ep
-        if self.etp == self.tp:
-            # ep = dp_shard_in_ep * cp
-            dp_shard_mod_ep = self.dp_shard * self.cp // self.ep
-            dp_shard_in_ep = self.ep // self.cp
-        else:
-            assert self.etp == 1
-            # ep = dp_shard_in_ep * cp * tp
-            dp_shard_mod_ep = self.dp_shard * self.cp * self.tp // self.ep
-            dp_shard_in_ep = self.ep // (self.cp * self.tp)
+        The following mesh dimensions will be created:
 
-        dims = []
-        names = []
-        for d, name in zip(
-            [
-                self.pp,
-                self.dp_replicate,
-                dp_shard_mod_ep,
-                dp_shard_in_ep,
-                self.cp,
-                self.tp,
-            ],
-            ["pp", "dp_replicate", "dp_shard_mod_ep", "dp_shard_in_ep", "cp", "tp"],
+            pp:      Pipeline Parallelism (PP).
+            spmd:    Used by SPMD DTensor RNG seed.
+            batch:   Used by data loading to determine the global batch size and which
+                     part of the data each rank should read. This dimension includes both
+                     ``dp_replicate`` and ``dp_shard``. The backend is set to ``fake`` for
+                     this dimension to avoid unnecessary process group creation.
+            loss:    Used by all-reduce when computing the loss. Includes ``dp_replicate``,
+                     ``dp_shard``, and ``cp`` degrees, as all are data parallelisms.
+            dp_replicate: For DDP or HSDP replicate dimension.
+            fsdp:    For FSDP dimension. This includes ``cp``.
+            cp:      Context Parallelism (CP).
+            tp:      Tensor Parallelism (TP).
+            ep:      Expert Parallelism (EP).
+            efsdp:   FSDP in the EP region.
+            etp:     TP in the EP region.
+
+        Note: All the dimensions above are created by unflattening the world mesh.
+        This API performs the following unflatten operations:
+
+            ["pp", "spmd"]
+            ["pp", "batch", "cp", "tp"]
+            ["pp", "loss", "tp"]
+            ["pp", "dp_replicate", "fsdp", "tp"]
+            ["pp", "dp_replicate", "efsdp", "ep", "etp"]
+
+        Note: DeviceMesh currently recreates the process group for each dimension.
+        It should share the process group for the same dim group to avoid unnecessary
+        process group creation.
+        """
+
+        def unflatten_mesh(
+            world_mesh: DeviceMesh, dim_names: tuple[str], dim_degrees: tuple[int]
         ):
-            # dp_shard_mod_ep is needed even if it's 1, whose FSDP wrapping
-            # helps the MoE layers do mixed precision training
-            if d > 1 or name == "dp_shard_mod_ep":
-                dims.append(d)
-                names.append(name)
+            """Unflatten the world mesh to create the required mesh dimensions.
 
-        logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+            Uses fake backend for dimensions with degree 1 or for 'batch' dimension
+            to avoid unnecessary process group creation.
+            """
+            backend_override = {}
+            for name, degree in zip(dim_names, dim_degrees, strict=True):
+                if degree == 1 or name == "batch":
+                    backend_override[name] = "fake"
 
-        # Create all the submesh here to ensure all required process groups are
-        # initialized:
-        # Mesh for data loading (no communication on this mesh)
-        dp_mesh_dim_names = []
-        # Mesh for param sharding
-        dp_shard_cp_mesh_dim_names = []
-        # Mesh for loss all-reduce
-        dp_cp_mesh_dim_names = []
-        # Mesh for ep
-        ep_mesh_dim_names = []
-
-        if self.dp_replicate_enabled:
-            dp_mesh_dim_names.append("dp_replicate")
-            dp_cp_mesh_dim_names.append("dp_replicate")
-        # dp_shard_mod_ep is always needed, even if it's 1
-        dp_mesh_dim_names.append("dp_shard_mod_ep")
-        dp_shard_cp_mesh_dim_names.append("dp_shard_mod_ep")
-        dp_cp_mesh_dim_names.append("dp_shard_mod_ep")
-        if "dp_shard_in_ep" in names:
-            dp_mesh_dim_names.append("dp_shard_in_ep")
-            dp_shard_cp_mesh_dim_names.append("dp_shard_in_ep")
-            dp_cp_mesh_dim_names.append("dp_shard_in_ep")
-            ep_mesh_dim_names.append("dp_shard_in_ep")
-        if self.cp_enabled:
-            dp_shard_cp_mesh_dim_names.append("cp")
-            dp_cp_mesh_dim_names.append("cp")
-            ep_mesh_dim_names.append("cp")
-        if self.etp == 1 and self.tp_enabled:
-            ep_mesh_dim_names.append("tp")
-
-        mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
-        mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_shard_cp")
-        mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
-        mesh[tuple(ep_mesh_dim_names)]._flatten(mesh_dim_name="ep")
-
-        return mesh
-
-    def _build_mesh_without_ep(self) -> DeviceMesh:
-        dims = []
-        names = []
-        for d, name in zip(
-            [self.pp, self.dp_replicate, self.dp_shard, self.cp, self.tp],
-            ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
-        ):
-            if d > 1:
-                dims.append(d)
-                names.append(name)
-
-        logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
-
-        # Create all the submesh here to ensure all required process groups are
-        # initialized:
-        # Mesh for data loading (no communication on this mesh)
-        dp_mesh_dim_names = []
-        # Mesh for param sharding
-        dp_shard_cp_mesh_dim_names = []
-        # Mesh for loss all-reduce
-        dp_cp_mesh_dim_names = []
-
-        if self.dp_replicate_enabled:
-            dp_mesh_dim_names.append("dp_replicate")
-            dp_cp_mesh_dim_names.append("dp_replicate")
-        if self.dp_shard_enabled:
-            dp_mesh_dim_names.append("dp_shard")
-            dp_shard_cp_mesh_dim_names.append("dp_shard")
-            dp_cp_mesh_dim_names.append("dp_shard")
-        if self.cp_enabled:
-            dp_shard_cp_mesh_dim_names.append("cp")
-            dp_cp_mesh_dim_names.append("cp")
-
-        if dp_mesh_dim_names != []:
-            mesh[tuple(dp_mesh_dim_names)]._flatten(mesh_dim_name="dp")
-        if dp_shard_cp_mesh_dim_names != []:
-            mesh[tuple(dp_shard_cp_mesh_dim_names)]._flatten(
-                mesh_dim_name="dp_shard_cp"
+            return world_mesh._unflatten(
+                0, dim_degrees, dim_names, backend_override=backend_override
             )
-        if dp_cp_mesh_dim_names != []:
-            mesh[tuple(dp_cp_mesh_dim_names)]._flatten(mesh_dim_name="dp_cp")
 
-        return mesh
+        logger.info(
+            f"Building device mesh with parallelism: "
+            f"pp={self.pp}, dp_replicate={self.dp_replicate}, dp_shard={self.dp_shard}, "
+            f"cp={self.cp}, tp={self.tp}, ep={self.ep}, etp={self.etp}"
+        )
+
+        batch = self.dp_replicate * self.dp_shard
+        loss = self.dp_replicate * self.dp_shard * self.cp
+        fsdp = self.dp_shard * self.cp
+        efsdp = fsdp * self.tp // (self.etp * self.ep)
+        spmd = self.world_size // self.pp
+
+        self._world_mesh = init_device_mesh(
+            device_type, (self.world_size,), mesh_dim_names=("world",)
+        )
+        pp_spmd_mesh = unflatten_mesh(self._world_mesh, ("pp", "spmd"), (self.pp, spmd))
+        data_mesh = unflatten_mesh(
+            self._world_mesh,
+            ("pp", "batch", "cp", "tp"),
+            (self.pp, batch, self.cp, self.tp),
+        )
+        loss_mesh = unflatten_mesh(
+            self._world_mesh, ("pp", "loss", "tp"), (self.pp, loss, self.tp)
+        )
+        dense_mesh = unflatten_mesh(
+            self._world_mesh,
+            ("pp", "dp_replicate", "fsdp", "tp"),
+            (self.pp, self.dp_replicate, fsdp, self.tp),
+        )
+        sparse_mesh = unflatten_mesh(
+            self._world_mesh,
+            ("pp", "dp_replicate", "efsdp", "ep", "etp"),
+            (self.pp, self.dp_replicate, efsdp, self.ep, self.etp),
+        )
+
+        self._meshes = {
+            "pp": pp_spmd_mesh["pp"],
+            "spmd": pp_spmd_mesh["spmd"],
+            "batch": data_mesh["batch"],
+            "loss": loss_mesh["loss"],
+            "dp_replicate": dense_mesh["dp_replicate"],
+            "fsdp": dense_mesh["fsdp"],
+            "cp": data_mesh["cp"],
+            "tp": data_mesh["tp"],
+            "ep": sparse_mesh["ep"],
+            "efsdp": sparse_mesh["efsdp"],
+            "etp": sparse_mesh["etp"],
+        }
+
+        # Validate mesh sizes
+        self._validate_meshes()
+
+        logger.info(
+            f"Successfully created meshes with active dimensions: "
+            f"{list(self.get_all_meshes().keys())}"
+        )
+
+        return self._world_mesh
+
+    def _validate_meshes(self):
+        """Validate that created meshes have the expected sizes."""
+        expected_sizes = {
+            "pp": self.pp,
+            "spmd": self.world_size // self.pp,
+            "batch": self.dp_replicate * self.dp_shard,
+            "loss": self.dp_replicate * self.dp_shard * self.cp,
+            "dp_replicate": self.dp_replicate,
+            "fsdp": self.dp_shard * self.cp,
+            "cp": self.cp,
+            "tp": self.tp,
+            "ep": self.ep,
+            "efsdp": self.dp_shard * self.cp * self.tp // (self.etp * self.ep),
+            "etp": self.etp,
+        }
+
+        for mesh_name, expected_size in expected_sizes.items():
+            actual_size = self._meshes[mesh_name].size()
+            assert actual_size == expected_size, (
+                f"Mesh '{mesh_name}' has unexpected size: "
+                f"expected {expected_size}, got {actual_size}"
+            )
+
+    def get_mesh(self, dim: str) -> DeviceMesh | None:
+        """Get a device mesh by dimension name.
+
+        Args:
+            dim: Name of the mesh dimension. Valid options include:
+                 'pp', 'spmd', 'batch', 'loss', 'dp_replicate', 'fsdp',
+                 'cp', 'tp', 'ep', 'etp', 'efsdp'
+
+        Returns:
+            DeviceMesh for the requested dimension, or None if the dimension
+            has size 1 (i.e., parallelism is disabled for that dimension).
+
+        Raises:
+            ValueError: If the requested dimension name is not valid.
+        """
+        if not self._meshes:
+            self.build_mesh()
+
+        if dim not in self._meshes:
+            valid_dims = sorted(self._meshes.keys())
+            raise ValueError(
+                f"Invalid mesh dim: '{dim}'. Valid dimensions are: {valid_dims}"
+            )
+
+        if self._meshes[dim].size() == 1:
+            return None
+
+        return self._meshes[dim]
+
+    def get_all_meshes(self) -> dict[str, DeviceMesh]:
+        if not self._meshes:
+            self.build_mesh()
+        return {k: v for k, v in self._meshes.items() if v.size() > 1}
 
     @property
     def world_mesh(self) -> DeviceMesh:
-        # doing late init so ParallelDims can still be used as a lightweight
-        # dataclass without having to initialize the world mesh
         if self._world_mesh is None:
-            self._world_mesh = self.build_mesh()
+            self.build_mesh()
         return self._world_mesh
 
     @property
@@ -214,7 +256,7 @@ class ParallelDims:
         return self.cp > 1
 
     @property
-    def dp_cp_enabled(self):
+    def batch_enabled(self):
         return self.dp_enabled or self.cp_enabled
 
     @property
