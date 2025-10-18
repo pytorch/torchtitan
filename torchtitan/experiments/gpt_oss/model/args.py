@@ -29,25 +29,17 @@ class GptOssModelArgs(BaseModelArgs):
         dtype (Literal["bf16", "fp8"]): Data type for computations.
         vocab_size (int): Vocabulary size.
         dim (int): Model dimension.
-        inter_dim (int): Intermediate dimension for MLP layers.
         moe_inter_dim (int): Intermediate dimension for MoE layers.
         n_layers (int): Number of transformer layers.
-        n_dense_layers (int): Number of dense layers in the model.
+        norm_eps (float): Epsilon used for RMSNorm.
+        moe_args (MoEArgs): Arguments for Mixture of Experts (MoE) layers.
+        swiglu_limit (float): SwiGLU activation limit.
+        head_dim (int): Dimension of each attention head.
         n_heads (int): Number of attention heads.
-        n_routed_experts (int): Number of routed experts for MoE layers.
-        n_shared_experts (int): Number of shared experts for MoE layers.
-        n_activated_experts (int): Number of activated experts in MoE layers.
-        n_expert_groups (int): Number of expert groups.
-        n_limited_groups (int): Number of limited groups for MoE routing.
-        score_func (Literal["softmax", "sigmoid"]): Scoring function for MoE routing.
-        route_scale (float): Scaling factor for routing scores.
-        use_grouped_mm (bool): Whether to use grouped matrix multiplication for MoE layers.
-        load_balance_coeff (float | None): Auxiliary-Loss-Free Load balancing coefficient for MoE layers.
-        q_lora_rank (int): LoRA rank for query projections.
-        kv_lora_rank (int): LoRA rank for key-value projections.
-        qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
-        qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.
-        v_head_dim (int): Dimension for value projections.
+        n_kv_heads (int): Number of key-value heads.
+        sliding_window_size (int): Size of the sliding attention window.
+        attn_mask_type (str): Type of basic attention mask.
+        use_flex_attn (bool): Whether to use FlexAttention. Only supports True.
         original_seq_len (int): Original sequence length.
         rope_theta (float): Base for rotary positional encoding.
         rope_factor (float): Scaling factor for extended sequence lengths.
