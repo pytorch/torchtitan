@@ -17,7 +17,7 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
-from torchtitan.datasets import DatasetConfig
+from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
 
@@ -67,7 +67,7 @@ def _validate_dataset(
     return path, config.loader, config.sample_processor
 
 
-class HuggingFaceDataset(IterableDataset, Stateful):
+class HuggingFaceTextDataset(IterableDataset, Stateful):
     def __init__(
         self,
         dataset_name: str,
@@ -165,7 +165,7 @@ class HuggingFaceDataset(IterableDataset, Stateful):
         return _state_dict
 
 
-def build_hf_dataloader(
+def build_text_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
@@ -178,7 +178,7 @@ def build_hf_dataloader(
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
 
-    hf_ds = HuggingFaceDataset(
+    hf_ds = HuggingFaceTextDataset(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
         tokenizer=tokenizer,
@@ -196,7 +196,7 @@ def build_hf_dataloader(
     )
 
 
-def build_hf_validation_dataloader(
+def build_text_validation_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
@@ -209,7 +209,7 @@ def build_hf_validation_dataloader(
     batch_size = job_config.validation.local_batch_size
     seq_len = job_config.validation.seq_len
 
-    hf_ds = HuggingFaceDataset(
+    hf_ds = HuggingFaceTextDataset(
         dataset_name=dataset_name,
         dataset_path=dataset_path,
         tokenizer=tokenizer,

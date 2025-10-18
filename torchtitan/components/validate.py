@@ -14,8 +14,8 @@ from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
-from torchtitan.datasets.hf_datasets import build_hf_validation_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -62,7 +62,7 @@ class Validator(BaseValidator):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
-        self.validation_dataloader = build_hf_validation_dataloader(
+        self.validation_dataloader = build_text_validation_dataloader(
             job_config=job_config,
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
