@@ -72,7 +72,7 @@ class GptOssModelArgs(BaseModelArgs):
     n_kv_heads: int = 8
     sliding_window_size: int = 128
     attn_mask_type: str = "causal"
-    use_flex_attn: bool = True
+    use_flex_attn: bool = True  # NOTE: gpt-oss only support FlexAttention
     # yarn
     original_seq_len: int = 4096
     rope_theta: float = 150000.0
