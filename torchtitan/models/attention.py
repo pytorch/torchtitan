@@ -90,6 +90,7 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.FLASH_ATTENTION,
                 SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH
             ]
 
     def forward(
