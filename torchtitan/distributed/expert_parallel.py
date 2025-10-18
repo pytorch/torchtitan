@@ -21,6 +21,7 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
+from torchtitan.distributed.pipeline_parallel import SyncHook
 from torchtitan.models.moe.utils import _permute, _unpermute
 
 
@@ -159,13 +160,43 @@ class ExpertParallel(ParallelStyle):
         return routed_output
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        return distribute_module(
-            module,
+        """
+        Hooks are called in the order they are registered:
+        SyncHookA, _token_dispatch, SyncHookB (pre hooks)
+        SyncHookC, _token_combine, SyncHookD (post hooks)
+        """
+        inner_wrapped_module = self._wrap_with_inner_hooks(module)
+        distributed_module = distribute_module(
+            inner_wrapped_module,
             device_mesh,
             partition_fn=ExpertParallel._partition_fn,
             input_fn=self._token_dispatch,
             output_fn=self._token_combine,
         )
+        final_module = self._wrap_with_outer_hooks(distributed_module)
+        return final_module
+
+    def _wrap_with_inner_hooks(self, module):
+        def inner_pre_hook(module, input):
+            return (SyncHook.apply(input[0], "A"),) + input[1:]
+
+        def inner_post_hook(module, input, output):
+            return SyncHook.apply(output, "C")
+
+        module.register_forward_pre_hook(inner_pre_hook)
+        module.register_forward_hook(inner_post_hook)
+        return module
+
+    def _wrap_with_outer_hooks(self, module):
+        def outer_pre_hook(module, input):
+            return (SyncHook.apply(input[0], "B"),) + input[1:]
+
+        def outer_post_hook(module, input, output):
+            return SyncHook.apply(output, "D")
+
+        module.register_forward_pre_hook(outer_pre_hook)
+        module.register_forward_hook(outer_post_hook)
+        return module
 
 
 # This class is for dp2ep with TP (without TP we can just use ExpertParallel)
