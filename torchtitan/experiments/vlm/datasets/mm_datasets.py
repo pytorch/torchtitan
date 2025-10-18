@@ -403,7 +403,7 @@ def build_mm_dataloader(
     packing_buffer_size = job_config.data.packing_buffer_size
     special_tokens = SpecialTokens.from_tokenizer(tokenizer)
 
-    dataset = MultiModalDataset(
+    dataset = HuggingFaceMultiModalDataset(
         dataset_name=job_config.training.dataset,
         dataset_path=dataset_path,
         tokenizer=tokenizer,
