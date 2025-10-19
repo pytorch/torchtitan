@@ -24,11 +24,7 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.models.flux.tokenizer import (
-    build_flux_tokenizer,
-    FluxTokenizer,
-)
-from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.models.flux.tokenizer import build_flux_tokenizer, FluxTokenizer
 from torchtitan.tools.logging import logger
 
 

@@ -78,10 +78,8 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
-    custom_job_args = "--job.custom_config_module torchtitan/models/flux/job_config.py"
 
     # Random init encoder for offline testing
-    model_arg = "--model.name flux"
     random_init_encoder_arg = "--training.test_mode"
     clip_encoder_version_arg = (
         "--encoder.clip_encoder tests/assets/clip-vit-large-patch14/"
@@ -101,12 +99,10 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
             # For flux generation, test using inference script
             cmd = (
                 f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
-                f"scripts/flux_inference/run_infer.sh"
+                f"torchtitan/models/flux/run_infer.sh"
             )
 
         cmd += " " + dump_folder_arg
-        cmd += " " + custom_job_args
-        cmd += " " + model_arg
         cmd += " " + random_init_encoder_arg
         cmd += " " + clip_encoder_version_arg
         cmd += " " + t5_encoder_version_arg
@@ -156,7 +152,7 @@ def main():
     parser.add_argument("output_dir")
     parser.add_argument(
         "--config_path",
-        default="./tests/integration_tests/base_config.toml",
+        default="./torchtitan/models/flux/train_configs/debug_model.toml",
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(
