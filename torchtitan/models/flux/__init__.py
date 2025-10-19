@@ -8,7 +8,7 @@ from torchtitan.components.loss import build_mse_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 
-from torchtitan.datasets.flux_dataset import build_flux_dataloader
+from torchtitan.hf_datasets.flux_dataset import build_flux_dataloader
 from torchtitan.protocols.train_spec import TrainSpec
 from .infra.parallelize import parallelize_flux
 from .model.args import FluxModelArgs

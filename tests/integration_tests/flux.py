@@ -78,6 +78,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    custom_job_args = "--job.custom_config_module torchtitan/models/flux/job_config.py"
 
     # Random init encoder for offline testing
     model_arg = "--model.name flux"
@@ -103,8 +104,9 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
                 f"scripts/flux_inference/run_infer.sh"
             )
 
-        cmd += " " + model_arg
         cmd += " " + dump_folder_arg
+        cmd += " " + custom_job_args
+        cmd += " " + model_arg
         cmd += " " + random_init_encoder_arg
         cmd += " " + clip_encoder_version_arg
         cmd += " " + t5_encoder_version_arg
