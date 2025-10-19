@@ -11,8 +11,8 @@ import torch
 from datasets import load_dataset
 
 from torchtitan.config import ConfigManager
-from torchtitan.datasets import DatasetConfig
-from torchtitan.datasets.flux_dataset import (
+from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.hf_datasets.flux_dataset import (
     _cc12m_wds_data_processor,
     build_flux_dataloader,
     DATASETS,
