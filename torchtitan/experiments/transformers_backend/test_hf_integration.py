@@ -421,13 +421,16 @@ def report(inp_dir: str, only: str = None):
             # Regex to capture all metrics from a log line, ignoring ANSI color codes
             pattern = re.compile(
                 r"step:\s*(\d+)\s*"
-                r".*?loss:\s*([0-9]+\.?[0-9]*)\s*"
+                r".*?loss:\s*(-?[0-9]+\.?[0-9]*)\s*"
                 r".*?grad_norm:\s*([0-9]+\.?[0-9]*)\s*"
             )
 
             for match in pattern.finditer(content):
+                loss = float(match.group(2))
+                if loss == -1.0:
+                    continue
                 metrics.steps.append(int(match.group(1)))
-                metrics.loss.append(float(match.group(2)))
+                metrics.loss.append(loss)
                 metrics.grad_norm.append(float(match.group(3)))
                 
         except Exception as e:

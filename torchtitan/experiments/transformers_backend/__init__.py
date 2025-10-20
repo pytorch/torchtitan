@@ -16,14 +16,14 @@ from .infra.pipeline_hf import pipeline_hf_transformers
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize_hf_transformers import parallelize_hf_transformers
-from .model.hf_transformers_args import HFTransformerModelArgs, HFTransformerModel
-
+from .model.args import HFTransformerModelArgs
+from .model.model import HFTransformerModel
 from torchtitan.models.moe import MoEArgs
+
 
 __all__ = [
     "HFTransformerModelArgs",
     "HFTransformerModel",
-    "hf_transformers_configs",
 ]
 
 @dataclass
