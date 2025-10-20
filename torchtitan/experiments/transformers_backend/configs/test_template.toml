@@ -3,8 +3,7 @@
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 debug training"
-print_args = false
-use_for_integration_test = false
+print_config = true
 
 [profiling]
 enable_profiling = true
@@ -77,7 +76,7 @@ selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac bas
 enable=false
 components = ["model", "loss"]
 
-[float8]
+[quantize.linear.float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output"]

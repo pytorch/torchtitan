@@ -25,12 +25,11 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelDims, NoParallel
 
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
-    NoParallel,
     ReordererSequenceParallel,
     TensorParallel,
 )
@@ -198,7 +197,7 @@ def parallelize_hf_transformers(
     if parallel_dims.tp_enabled:
         model.set_tp_mesh(world_mesh["tp"])
         enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.float8.recipe_name in (
+        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )

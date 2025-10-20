@@ -19,8 +19,7 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import (
     build_pipeline_schedule,
-    pipeline_module_split,
-    stage_ids_this_rank,
+    pipeline_module_split
 )
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
@@ -145,6 +144,7 @@ def generate_llm_fqn_per_model_part(
 
     return module_names_per_stage
 
+
 def pipeline_module_split(
     whole_model: nn.Module,
     pp_mesh: DeviceMesh,
@@ -185,7 +185,7 @@ def pipeline_module_split(
         ]
     """
     pp_rank = pp_mesh.get_local_rank()
-    pp_size = pp_mesh.size()
+    pp_degree = pp_mesh.size()
 
     def _build_stage_from_modules(
         stage_idx: int, module_names: list[str], num_stages: int
@@ -194,7 +194,6 @@ def pipeline_module_split(
 
         # Create a set of modules to keep for faster lookup
         modules_to_keep = set(module_names)
-        print(f"Stage {stage_idx}: Modules to keep: {modules_to_keep}")
         for module_name, module_value in model.named_children():
             # Handle layer-like structures (e.g., "layers.0", "layers.1")
             if isinstance(module_value, (nn.ModuleDict, nn.ModuleList)):
@@ -250,7 +249,27 @@ def pipeline_module_split(
         "v" if schedule_class in (ScheduleZBVZeroBubble, ScheduleDualPipeV) else "loop"
     )
 
-    for stage_idx in stage_ids_this_rank(pp_rank, pp_size, num_stages, style=style):
+    def _get_stage_indices() -> tuple[int]:
+        """
+        Compute the stage ids for the stages that will run on this pp rank
+        for either a looped or V style schedule
+        """
+        assert (
+            num_stages % pp_degree == 0
+        ), f"num_stages {num_stages} must be evenly divisible by pp_degree {pp_degree}"
+        stages_per_rank = num_stages // pp_degree
+        if style == "loop":
+            return tuple(pp_rank + s * pp_degree for s in range(stages_per_rank))
+        elif style == "v":
+            assert (
+                stages_per_rank == 2
+            ), f"v schedules assume 2 stages per rank, got {stages_per_rank}"
+            stage_v_pairs = list(
+                zip(range(pp_degree), range(num_stages - 1, pp_degree - 1, -1))
+            )
+            return stage_v_pairs[pp_rank]
+
+    for stage_idx in _get_stage_indices():
         module_names = module_names_per_stage[stage_idx]
         stage, model_chunk = _build_stage_from_modules(
             stage_idx,
@@ -266,7 +285,6 @@ def pipeline_module_split(
 
     return stages, models
 
-
 def pipeline_hf_transformers(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -276,12 +294,6 @@ def pipeline_hf_transformers(
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    if job_config.parallelism.pipeline_parallel_split_points != []:
-        raise ValueError(
-            "pipeline_parallel_split_points is deprecated. Please use module_fqns_per_model_part instead."
-            "You can generate module_fqns_per_model_part programmatically with generate_llm_fqn_per_model_part"
-        )
-
     pp_mesh = parallel_dims.world_mesh["pp"]
 
     # Determine the number of virtual stages based on schedule type

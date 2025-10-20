@@ -31,6 +31,7 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
+import torchtitan.experiments.transformers_backend  # noqa: F401
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # core configs

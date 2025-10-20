@@ -105,19 +105,12 @@ flavors = {
             )
         ) if os.environ.get("USE_MOE", "0") == "1" else None,
     ),
-    "medium": HFTransformerModelArgs(
-        titan_args=TitanModelArgs(
-            dim=1024,
-            n_layers=12,
-        ),
-    ),
     "full": HFTransformerModelArgs(
         titan_args=TitanModelArgs(),
     ),
 }
 
 hf_train_spec = TrainSpec(
-    name="hf_auto_model",
     model_cls=HFTransformerModel,
     model_args=flavors,
     parallelize_fn=parallelize_hf_transformers,
@@ -129,4 +122,4 @@ hf_train_spec = TrainSpec(
     build_loss_fn=build_cross_entropy_loss,
 )
 
-register_train_spec(hf_train_spec)
+register_train_spec("hf_placeholder_name", hf_train_spec)

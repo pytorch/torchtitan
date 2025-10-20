@@ -52,6 +52,7 @@ class TrainSpec:
     build_dataloader_fn: DataLoaderBuilder
     build_tokenizer_fn: TokenizerBuilder | None
     build_loss_fn: LossFunctionBuilder
+    name: str | None = None
     build_validator_fn: ValidatorBuilder | None = None
     build_metrics_processor_fn: MetricsProcessorBuilder | None = None
     state_dict_adapter: type[BaseStateDictAdapter] | None = None
@@ -70,23 +71,13 @@ def register_train_spec(name: str, train_spec: TrainSpec) -> None:
 
 
 def get_train_spec(name: str) -> TrainSpec:
-<<<<<<< HEAD
-    global _train_specs
-
-    if "/" in name: # HF model (dynamic loading)
-        hf_spec = _train_specs["hf_auto_model"]
-        new_spec = dataclasses.replace(hf_spec, name=name)
-        _train_specs[name] = new_spec
-    elif name not in _train_specs:  # Torchtitan
-        raise ValueError(f"Model {name} is not registered.")
-
-    return _train_specs[name]
-=======
     # user-defined TrainSpec has higher priority
     global _extra_train_specs
-    if name in _extra_train_specs:
+    if "/" in name: # HF model (dynamic loading)
+        hf_spec = _extra_train_specs["hf_placeholder_name"]
+        return dataclasses.replace(hf_spec, name=name)
+    elif name in _extra_train_specs:
         return _extra_train_specs[name]
->>>>>>> main
 
     from torchtitan.experiments import _supported_experiments
     from torchtitan.models import _supported_models
