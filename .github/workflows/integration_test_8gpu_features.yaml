@@ -72,8 +72,20 @@ jobs:
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
+        # debugging for CPU shared memory
+        # Show total and available disk space on the shared memory filesystem (/dev/shm)
+        echo "Running shared memory debug for ROCm runner..."
+        df -h /dev/shm
+        # Display mount information related to /dev/shm to verify the size and options
+        mount | grep /dev/shm
+        # List all current shared memory segments in the system
+        ipcs -m
+        # Display shared memory statistics from /proc/meminfo (total, free, used)
+        grep Shmem /proc/meminfo
+        echo "Finished debugging..."
+
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
-        
+
         export TEST_WITH_ROCM=$([[ "${{ matrix.gpu-arch-type }}" == "rocm" ]] && echo 1 || echo 0)
         python -m tests.integration_tests.run_tests --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
