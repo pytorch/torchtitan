@@ -558,7 +558,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logp = batch_dict["logp"]
         ref_logp = batch_dict["ref_logp"]
         curr_len = -1
-        input_ids, labels, masks, rewards = batch
+        input_ids, labels, masks, inf_logps, rewards = batch
         dynamic_batch = list()
         # if tp_rank == 0:
         device_type = utils.device_type
@@ -566,6 +566,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         labels = torch.from_numpy(labels).to(device_type)
         mask = torch.from_numpy(masks).to(device_type)
         reward = torch.from_numpy(rewards).to(device_type).reshape(-1, 1)
+        inf_logps = torch.from_numpy(inf_logps).to(device_type)
         # Multiply by scaling coefs
         reward = scale_rewards(
             reward, job_config.grpo.pos_scaler, job_config.grpo.neg_scaler
@@ -575,6 +576,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if self.tp_group is not None:
             mask = DTensor.from_local(mask, device_mesh=self.tp_mesh)
             reward = DTensor.from_local(reward, device_mesh=self.tp_mesh)
+            if inf_logps is not None:
+                inf_logps = DTensor.from_local(inf_logps, device_mesh=self.tp_mesh)
+            else:
+                inf_logps = None
         # Create the FlexAttention mask according to the input
         if getattr(self.model_args, "use_flex_attn", False):
             cp_mesh = (
@@ -643,6 +648,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     ref_model=self.ref_model_parts[0] if self.use_ref_model else None,
                     input_ids=input_ids,
                     use_ref_model=self.use_ref_model,
+                    inf_logps=inf_logps,
                 )
                 if not job_config.grpo.grpo_by_token:
                     mb_loss = (mb_loss * mask).sum(-1) / mask.sum(-1)
@@ -826,13 +832,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         np.concatenate([item[p] for item in dynamic_batch], axis=0)[
                             :, :curr_len
                         ]
-                        for p in range(3)
+                        for p in range(4)
                     ]
                     batch.append(
-                        np.concatenate([item[3] for item in dynamic_batch], axis=0)
+                        np.concatenate([item[4] for item in dynamic_batch], axis=0)
                     )
                 else:
-                    batch = [dynamic_batch[0][p][:, :curr_len] for p in range(3)] + [
+                    batch = [dynamic_batch[0][p][:, :curr_len] for p in range(4)] + [
                         dynamic_batch[0][-1]
                     ]
                 dynamic_scale = len(dynamic_batch)
