@@ -12,7 +12,6 @@ from typing import Any, Generator, Iterable, Optional
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
-from torchtitan.utils.test_utils import debug_structure_param
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
@@ -172,8 +171,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model_param_count,
             self.metrics_processor.num_flops_per_token,
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
-        
-        debug_structure_param(model)
         
         logger.info(
             f"{color.blue}Model {job_config.model.name} {job_config.model.flavor} "

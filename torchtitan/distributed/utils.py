@@ -100,6 +100,8 @@ def set_determinism(
     if deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
         torch.use_deterministic_algorithms(True)
+        # Otherwise, HF register buffer for ROPE (inv_freq) and this will be by default be initialized to Nan
+        torch.utils.deterministic.fill_uninitialized_memory = False
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         # env var for deterministic CuBLAS
