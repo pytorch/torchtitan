@@ -144,7 +144,7 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
         |_ llama3 #torchtitan model
     """
 
-    base_config = "configs/test_template.toml"
+    base_config = "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/test_template.toml"
     with open(base_config, "r") as f:
         config = toml.load(f)
 
@@ -223,13 +223,11 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
         iter_config["parallelism"]["pipeline_parallel_degree"] = pp
         iter_config["parallelism"]["pipeline_parallel_schedule"] = "GPipe"
         iter_config["job"]["dump_folder"] = str(pc_dir)
-        
-        # if pc == "fsdp1_tp1_cp1_pp2" or pc == BASELINE:
-        #     iter_config["training"]["global_batch_size"] = 1
-        #     iter_config["training"]["local_batch_size"] = 1
 
-        if pc == BASELINE or pc == "fsdp2_tp1_cp1_pp2":
-            iter_config["training"]["local_batch_size"] = 2
+        iter_config["training"]["global_batch_size"] = 4
+        iter_config["training"]["local_batch_size"] = 2
+        iter_config["training"]["mixed_precision_param"] = "float32"
+        iter_config["training"]["mixed_precision_reduce"] = "float32"
 
         config_path = pc_dir / "config.toml"
         with open(config_path, "w") as f:
