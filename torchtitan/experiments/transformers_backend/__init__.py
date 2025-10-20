@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
@@ -34,41 +33,40 @@ class TitanModelArgs:
     dim: int = 4096
     n_layers: int = 32
     n_heads: int = 32
-    n_kv_heads: Optional[int] = None
-    vocab_size: Optional[int] = None
+    n_kv_heads: int | None = None
+    vocab_size: int | None = None
     multiple_of: int = 256
-    ffn_dim_multiplier: Optional[float] = None
+    ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
     max_seq_len: int = 2048
     depth_init: bool = True
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
-    eos_id: int = 0
 
 
 @dataclass
 class DeepSeekV3Args:
     """Arguments specific to DeepSeekV3 models."""
-    moe_args: Optional[MoEArgs] = None
-    n_group: Optional[int] = None
-    topk_group: Optional[int] = None
-    inter_dim: Optional[int] = None
-    moe_inter_dim: Optional[int] = None
-    n_dense_layers: Optional[int] = None
-    n_expert_groups: Optional[int] = None
-    n_limited_groups: Optional[int] = None
-    q_lora_rank: Optional[int] = None
-    kv_lora_rank: Optional[int] = None
-    qk_nope_head_dim: Optional[int] = None
-    qk_rope_head_dim: Optional[int] = None
-    v_head_dim: Optional[int] = None
-    original_seq_len: Optional[int] = None
-    rope_factor: Optional[float] = None
-    beta_fast: Optional[int] = None
-    beta_slow: Optional[int] = None
-    mscale: Optional[float] = None
-    partial_rotary_factor: Optional[float] = None
+    moe_args: MoEArgs | None = None
+    n_group: int | None = None
+    topk_group: int | None = None
+    inter_dim: int | None = None
+    moe_inter_dim: int | None = None
+    n_dense_layers: int | None = None
+    n_expert_groups: int | None = None
+    n_limited_groups: int | None = None
+    q_lora_rank: int | None = None
+    kv_lora_rank: int | None = None
+    qk_nope_head_dim: int | None = None
+    qk_rope_head_dim: int | None = None
+    v_head_dim: int | None = None
+    original_seq_len: int | None = None
+    rope_factor: float | None = None
+    beta_fast: int | None = None
+    beta_slow: int | None = None
+    mscale: float | None = None
+    partial_rotary_factor: float | None = None
     rope_interleave: bool = True
 
 
