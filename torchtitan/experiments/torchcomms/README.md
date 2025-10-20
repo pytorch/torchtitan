@@ -26,6 +26,7 @@ Locally tested with:
 - **TP** - Tensor Parallelism
 - **PP** - Pipeline Parallelism
 - **EP** - Expert Parallelism
+- **CP** - Context Parallelism
 - **compile** - `torch.compile` integration
 
 ### Performance
@@ -46,7 +47,6 @@ Locally tested with:
 
 ### Known Issues
 
-- **CP** (Context Parallelism) - Temporarily not working. Work in progress.
 - **Async TP** - Temporarily not working. Work in progress.
 - **Memory Overhead** - TorchComms requires higher peak memory usage. As a workaround, we need to reduce `local_batch_size` to avoid out of memory error.
 
