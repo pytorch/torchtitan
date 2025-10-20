@@ -22,7 +22,7 @@ from torchtitan.hf_datasets.flux_dataset import (
 class TestFluxDataLoader(unittest.TestCase):
     def setUp(self):
         DATASETS["cc12m-test-iterable"] = DatasetConfig(
-            path="torchtitan/experiments/flux/tests/assets/cc12m_test",
+            path="tests/assets/cc12m_test",
             loader=lambda path: load_dataset(
                 path, split="train", data_files={"train": "*tar"}
             ).to_iterable_dataset(num_shards=4),
@@ -46,11 +46,11 @@ class TestFluxDataLoader(unittest.TestCase):
                 # in the dataset, then the test will fail, due to huggingface's
                 # non-resumption when checkpointing after the first epoch
 
-                path = "torchtitan.experiments.flux.job_config"
+                path = "torchtitan.models.flux.job_config"
                 config_manager = ConfigManager()
                 config = config_manager.parse_args(
                     [
-                        f"--experimental.custom_args_module={path}",
+                        f"--job.custom_config_module={path}",
                         "--training.img_size",
                         str(256),
                         "--training.dataset",
@@ -60,9 +60,9 @@ class TestFluxDataLoader(unittest.TestCase):
                         "--training.classifier_free_guidance_prob",
                         "0.447",
                         "--encoder.t5_encoder",
-                        "google/t5-v1_1-xxl",
+                        "tests/assets/flux_test_encoders/t5-v1_1-xxl",
                         "--encoder.clip_encoder",
-                        "openai/clip-vit-large-patch14",
+                        "tests/assets/flux_test_encoders/clip-vit-large-patch14",
                     ]
                 )
 

@@ -82,9 +82,11 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
     # Random init encoder for offline testing
     random_init_encoder_arg = "--training.test_mode"
     clip_encoder_version_arg = (
-        "--encoder.clip_encoder tests/assets/clip-vit-large-patch14/"
+        "--encoder.clip_encoder tests/assets/flux_test_encoders/clip-vit-large-patch14/"
     )
-    t5_encoder_version_arg = "--encoder.t5_encoder tests/assets/t5-v1_1-xxl/"
+    t5_encoder_version_arg = (
+        "--encoder.t5_encoder tests/assets/flux_test_encoders/t5-v1_1-xxl/"
+    )
     tokenzier_path_arg = "--model.tokenizer_path tests/assets/tokenizer"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
