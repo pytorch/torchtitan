@@ -47,6 +47,10 @@ def parallelize_flux(
             logger.info("Applied FSDP to the model")
 
         if parallel_dims.cp_enabled:
+            # The attention in Flux does not use causal mask.
+            # Currently, load_balance must be disabled in order to support Context Parallelism
+            # in Pytorch's experimental ring attention module
+            # https://github.com/pytorch/pytorch/blob/v2.9.0/torch/distributed/tensor/experimental/_attention.py#L395
             from torch.distributed.tensor.experimental._attention import _cp_options
 
             _cp_options.enable_load_balance = False
