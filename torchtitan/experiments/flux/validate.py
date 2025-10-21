@@ -30,7 +30,6 @@ from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
     preprocess_data,
-    unpack_latents,
 )
 from torchtitan.tools.logging import logger
 
