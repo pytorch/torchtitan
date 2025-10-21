@@ -17,10 +17,21 @@ from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import Qwen3NextModelArgs
 
-from causal_conv1d import causal_conv1d_fn
-from fla.modules import FusedRMSNormGated
-from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+try:
+    from causal_conv1d import causal_conv1d_fn
+    HAS_CASUAL_CONV1D = True
+except ImportError:
+    HAS_CASUAL_CONV1D = False
+    causal_conv1d_fn = None
 
+try:
+    from fla.modules import FusedRMSNormGated
+    from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+    HAS_FLA = True
+except ImportError:
+    HAS_FLA = False
+    FusedRMSNormGated = None
+    chunk_gated_delta_rule = None
 
 # Adapted from https://github.com/pytorch/torchtune/blob/main/torchtune/models/qwen2/_positional_embeddings.py
 def precompute_rope_cache(
@@ -378,6 +389,15 @@ class TransformerBlock(nn.Module):
 class Qwen3NextModel(nn.Module, ModelProtocol):
     def __init__(self, model_args: Qwen3NextModelArgs):
         super().__init__()
+
+        have_linear_attention = any(lt == "linear_attention" for lt in model_args.layer_types)
+        if have_linear_attention:
+            if not HAS_FLA or not HAS_CASUAL_CONV1D:
+                raise ImportError(
+                    "The 'causal_conv1d' and packages are required for models with 'linear_attention' layers. "
+                    "Please install them to proceed: `pip install flash-linear-attention causal_conv1d`"
+                )
+
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
