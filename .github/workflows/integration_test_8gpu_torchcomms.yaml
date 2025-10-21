@@ -1,4 +1,4 @@
-name: SimpleFSDP 8 GPU Integration Tests
+name: TorchComms 8 GPU Integration Tests
 
 on:
   push:
