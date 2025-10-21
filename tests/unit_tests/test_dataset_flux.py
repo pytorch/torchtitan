@@ -12,7 +12,6 @@ from datasets import load_dataset
 
 from torchtitan.config import ConfigManager
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.models.flux.tokenizer import build_flux_tokenizer
 
 
 class TestFluxDataLoader(unittest.TestCase):
@@ -39,8 +38,7 @@ class TestFluxDataLoader(unittest.TestCase):
         del self._DATASETS["cc12m-test-iterable"]
 
     def test_load_dataset(self):
-        # Import here to avoid circular import during test collection
-        from torchtitan.hf_datasets.flux_dataset import build_flux_dataloader
+        from torchtitan.models.flux.flux_datasets import build_flux_dataloader
 
         # The test checks for the correct tensor shapes during the first num_steps
         # The next num_steps ensure the loaded from checkpoint dataloader generates tokens and labels correctly
