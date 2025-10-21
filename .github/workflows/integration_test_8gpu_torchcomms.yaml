@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'torchtitan/experiments/torchcommsp/**'
+      - 'torchtitan/experiments/torchcomms/**'
       - '.github/workflows/integration_test_8gpu_torchcomms.yaml'
   pull_request:
     paths:
