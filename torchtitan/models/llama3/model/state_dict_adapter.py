@@ -45,6 +45,28 @@ class Llama3StateDictAdapter(StateDictAdapter):
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }
+        if model_args.use_qkv_bias:
+            self.from_hf_map.update(
+                {
+                    "model.layers.{}.self_attn.q_proj.bias": "layers.{}.attention.wq.bias",
+                    "model.layers.{}.self_attn.k_proj.bias": "layers.{}.attention.wk.bias",
+                    "model.layers.{}.self_attn.v_proj.bias": "layers.{}.attention.wv.bias",
+                }
+            )
+        if model_args.attention_out_bias:
+            self.from_hf_map.update(
+                {
+                    "model.layers.{}.self_attn.o_proj.bias": "layers.{}.attention.wo.bias",
+                }
+            )
+        if model_args.mlp_bias:
+            self.from_hf_map.update(
+                {
+                    "model.layers.{}.mlp.gate_proj.bias": "layers.{}.feed_forward.w1.bias",
+                    "model.layers.{}.mlp.up_proj.bias": "layers.{}.feed_forward.w3.bias",
+                    "model.layers.{}.mlp.down_proj.bias": "layers.{}.feed_forward.w2.bias",
+                }
+            )
 
     # HuggingFace permutation function (exact copy from their conversion script)
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
@@ -98,7 +120,11 @@ class Llama3StateDictAdapter(StateDictAdapter):
             else n_heads
         )
         dim = self.model_args.dim
-        head_dim = dim // n_heads
+        head_dim = (
+            dim // n_heads
+            if self.model_args.head_dim is None
+            else self.model_args.head_dim
+        )
         hf_state_dict = {}
 
         for key, value in state_dict.items():
@@ -139,7 +165,11 @@ class Llama3StateDictAdapter(StateDictAdapter):
             else n_heads
         )
         dim = self.model_args.dim
-        head_dim = dim // n_heads
+        head_dim = (
+            dim // n_heads
+            if self.model_args.head_dim is None
+            else self.model_args.head_dim
+        )
         state_dict = {}
 
         for key, value in hf_state_dict.items():

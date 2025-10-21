@@ -196,7 +196,9 @@ class Attention(nn.Module):
             bias=model_args.use_qkv_bias,
         )
         self.wo = nn.Linear(
-            model_args.n_heads * self.head_dim, model_args.dim, bias=False
+            model_args.n_heads * self.head_dim,
+            model_args.dim,
+            bias=model_args.attention_out_bias,
         )
         if model_args.use_qk_norm:
             self.q_norm = nn.RMSNorm(self.head_dim, eps=model_args.norm_eps)
@@ -287,6 +289,7 @@ class FeedForward(nn.Module):
         multiple_of: int,
         ffn_dim_multiplier: float | None,
         use_hidden_dim: bool = False,
+        bias: bool = False,
     ):
         super().__init__()
         if not use_hidden_dim:
@@ -296,9 +299,9 @@ class FeedForward(nn.Module):
                 hidden_dim = int(ffn_dim_multiplier * hidden_dim)
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w1 = nn.Linear(dim, hidden_dim, bias=bias)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=bias)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=bias)
 
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
@@ -342,6 +345,7 @@ class TransformerBlock(nn.Module):
             multiple_of=model_args.multiple_of,
             ffn_dim_multiplier=model_args.ffn_dim_multiplier,
             use_hidden_dim=model_args.hidden_dim is not None,
+            bias=model_args.mlp_bias,
         )
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
@@ -456,7 +460,11 @@ class Transformer(nn.Module, ModelProtocol):
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
         return precompute_freqs_cis(
-            self.model_args.dim // self.model_args.n_heads,
+            (
+                self.model_args.dim // self.model_args.n_heads
+                if self.model_args.head_dim is None
+                else self.model_args.head_dim
+            ),
             # Need to compute until at least the max token limit for generation
             # TODO: explain in docs/composability.md why we removed the 2x
             # relaxing in our CP enablement PR

@@ -91,6 +91,20 @@ llama3_configs = {
         multiple_of=4096,
         rope_theta=500000,
     ),
+    "36B_seed_flex_attn": TransformerModelArgs(
+        dim=5120,
+        n_layers=64,
+        n_heads=80,
+        n_kv_heads=8,
+        ffn_dim_multiplier=2,
+        multiple_of=432,
+        rope_theta=10000000,
+        use_flex_attn=True,
+        attn_mask_type="block_causal_by_sequence_lengths",
+        use_qkv_bias=True,
+        vocab_size=155136,
+        head_dim=128,
+    ),
 }
 
 
