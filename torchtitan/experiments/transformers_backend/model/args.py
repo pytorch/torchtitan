@@ -174,7 +174,6 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
         
         # Configure HF-specific settings to match TorchTitan settings
-        self.tie_word_embeddings = False
         self.attention_bias = False
         self.mlp_bias = False
         self.use_cache = False

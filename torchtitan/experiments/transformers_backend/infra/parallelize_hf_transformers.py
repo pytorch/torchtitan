@@ -195,7 +195,6 @@ def parallelize_hf_transformers(
         logger.warning("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
-        model.set_tp_mesh(world_mesh["tp"])
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
@@ -296,9 +295,6 @@ def parallelize_hf_transformers(
             enable_compile=model_compile_enabled,
             enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
-
-    if parallel_dims.pp_enabled:
-        model.set_pp_mesh(world_mesh["pp"])
 
     return model
 

@@ -94,17 +94,9 @@ class HFTransformerModel(nn.Module):
                 layer.moe_enabled = False
 
         self.cp_mesh = None
-        self.tp_mesh = None
-        self.pp_mesh = None
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh
-    
-    def set_tp_mesh(self, mesh):
-        self.tp_mesh = mesh
-    
-    def set_pp_mesh(self, mesh):
-        self.pp_mesh = mesh
 
     def _patch_hf_llama_like(self, decoder_layer_cls, attention_cls, mlp_cls=None):
         """
@@ -155,7 +147,6 @@ class HFTransformerModel(nn.Module):
             `self` is a PreTrainedModel instance.
             """
             config = self.config
-
             # Build tuple of classes to check for layer_idx-based init_std calculation
             layer_idx_classes = [attention_cls]
             if mlp_cls:
@@ -234,8 +225,21 @@ class HFTransformerModel(nn.Module):
                     module.bias.data.zero_()
 
             elif isinstance(module, nn.Embedding):
-                std = config.initializer_range
-                module.weight.data.normal_(mean=0.0, std=std)
+                # When tie_word_embeddings is True, use lm_head initialization
+                if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings:
+                    final_out_std = config.hidden_size**-0.5
+                    cutoff_factor = 3
+                    nn.init.trunc_normal_(
+                        module.weight,
+                        mean=0.0,
+                        std=final_out_std,
+                        a=-cutoff_factor * final_out_std,
+                        b=cutoff_factor * final_out_std,
+                    )
+                else:
+                    std = config.initializer_range
+                    module.weight.data.normal_(mean=0.0, std=std)
+                
                 if module.padding_idx is not None:
                     module.weight.data[module.padding_idx].zero_()
 
@@ -372,8 +376,21 @@ class HFTransformerModel(nn.Module):
                     module.bias.data.zero_()
 
             elif isinstance(module, nn.Embedding):
-                std = config.initializer_range
-                module.weight.data.normal_(mean=0.0, std=std)
+                # When tie_word_embeddings is True, use lm_head initialization
+                if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings:
+                    final_out_std = config.hidden_size**-0.5
+                    cutoff_factor = 3
+                    nn.init.trunc_normal_(
+                        module.weight,
+                        mean=0.0,
+                        std=final_out_std,
+                        a=-cutoff_factor * final_out_std,
+                        b=cutoff_factor * final_out_std,
+                    )
+                else:
+                    std = config.initializer_range
+                    module.weight.data.normal_(mean=0.0, std=std)
+                
                 if module.padding_idx is not None:
                     module.weight.data[module.padding_idx].zero_()
 
@@ -495,7 +512,10 @@ class HFTransformerModel(nn.Module):
 
         self.model.apply(selective_init)
 
-        self.model.tie_weights()
+        #TODO(3outeille): For pipeline parallel, only tie weights if both input and output embeddings are on the same device
+        # Maybe better way of handling this?
+        if not isinstance(self.tok_embeddings, nn.Identity) and not isinstance(self.output, nn.Identity):
+            self.model.tie_weights()
     
     def named_children(self):
         """
