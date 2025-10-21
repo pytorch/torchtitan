@@ -20,6 +20,24 @@ def build_torchcomms_test_list() -> list[OverrideDefinitions]:
     integration_tests_flavors = [
         OverrideDefinitions(
             [
+                [],
+            ],
+            "1D FSDP",
+            "1d",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.tenser_parallel_degree 2",
+                ],
+            ],
+            "FSDP+TP",
+            "2d_dp+tp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
                 [
                     "--parallelism.context_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
