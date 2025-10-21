@@ -12,21 +12,30 @@ from datasets import load_dataset
 
 from torchtitan.config import ConfigManager
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.hf_datasets.flux_dataset import _cc12m_wds_data_processor, DATASETS
 
 
 class TestFluxDataLoader(unittest.TestCase):
     def setUp(self):
-        DATASETS["cc12m-test-iterable"] = DatasetConfig(
+        # Import here to avoid circular import during test collection
+        from torchtitan.hf_datasets.flux_dataset import (
+            _cc12m_wds_data_processor,
+            DATASETS,
+        )
+
+        # Store reference for use in tearDown
+        self._DATASETS = DATASETS
+        self._cc12m_wds_data_processor = _cc12m_wds_data_processor
+
+        self._DATASETS["cc12m-test-iterable"] = DatasetConfig(
             path="tests/assets/cc12m_test",
             loader=lambda path: load_dataset(
                 path, split="train", data_files={"train": "*tar"}
             ).to_iterable_dataset(num_shards=4),
-            sample_processor=_cc12m_wds_data_processor,
+            sample_processor=self._cc12m_wds_data_processor,
         )
 
     def tearDown(self):
-        del DATASETS["cc12m-test-iterable"]
+        del self._DATASETS["cc12m-test-iterable"]
 
     def test_load_dataset(self):
         # Import here to avoid circular import during test collection
