@@ -48,7 +48,6 @@ jobs:
         pip config --user set global.progress_bar off
 
         python -m pip install --force-reinstall --pre torch torchcomms --index-url https://download.pytorch.org/whl/nightly/cu128
-        ./build_ncclx.sh
 
         mkdir artifacts-to-be-uploaded
         TEST_BACKEND=ncclx TRAIN_FILE=torchtitan.experiments.torchcomms.train python -m torchtitan.experiments.torchcomms.integration_tests artifacts-to-be-uploaded --ngpu 8
