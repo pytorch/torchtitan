@@ -30,8 +30,8 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
     
     # Define all possible mappings organized by argument type
     _TT_TO_HF_MAPPINGS = {
-        "base": {
-            # Core TorchTitan mappings (always available)
+        "dense": {
+            # TorchTitan dense model mappings (always available)
             "dim": "hidden_size",
             "n_layers": "num_hidden_layers",
             "n_heads": "num_attention_heads",
@@ -40,8 +40,8 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             "max_seq_len": "max_position_embeddings",
             "eos_id": "eos_token_id",
         },
-        "deepseek_v3": {
-            # DeepSeekV3 specific mappings (only when deepseek_v3_args provided)
+        "moe": {
+            # TorchTitan moe model specific mappings (only when titan_moe_args provided)
             "inter_dim": "intermediate_size",
             "n_dense_layers": "first_k_dense_replace",
         },
@@ -49,21 +49,21 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
     def __init__(
         self,
-        titan_args,
-        deepseek_v3_args=None,
+        titan_dense_args,
+        titan_moe_args=None,
         # HuggingFace specific args
         attn_implementation: str = "sdpa_torchtitan",
         **kwargs,
     ):
         super().__init__(attn_implementation=attn_implementation, **kwargs)
-        assert titan_args is not None, "titan_args is required"
+        assert titan_dense_args is not None, "titan_dense_args is required"
 
         active_mappings = {}
         
-        active_mappings.update(self._TT_TO_HF_MAPPINGS["base"])
+        active_mappings.update(self._TT_TO_HF_MAPPINGS["dense"])
         
-        if deepseek_v3_args is not None:
-            active_mappings.update(self._TT_TO_HF_MAPPINGS["deepseek_v3"])
+        if titan_moe_args is not None:
+            active_mappings.update(self._TT_TO_HF_MAPPINGS["moe"])
         
         self._active_mappings = active_mappings
         
@@ -71,15 +71,15 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
         # Set HF attributes from titan_args based on mappings
         for titan_name, hf_name in self._active_mappings.items():
-            if hasattr(titan_args, titan_name):
-                setattr(self, hf_name, getattr(titan_args, titan_name))
+            if hasattr(titan_dense_args, titan_name):
+                setattr(self, hf_name, getattr(titan_dense_args, titan_name))
 
         # Fill all TorchTitan-specific args (no HF equivalent)
-        self.multiple_of = titan_args.multiple_of
-        self.ffn_dim_multiplier = titan_args.ffn_dim_multiplier
-        self.depth_init = titan_args.depth_init
-        self.use_flex_attn = titan_args.use_flex_attn
-        self.attn_mask_type = titan_args.attn_mask_type
+        self.multiple_of = titan_dense_args.multiple_of
+        self.ffn_dim_multiplier = titan_dense_args.ffn_dim_multiplier
+        self.depth_init = titan_dense_args.depth_init
+        self.use_flex_attn = titan_dense_args.use_flex_attn
+        self.attn_mask_type = titan_dense_args.attn_mask_type
 
         # HuggingFace specific args
         self.attn_implementation = attn_implementation
@@ -87,35 +87,32 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         AttentionInterface._global_mapping[attn_implementation] = sdpa_attention_forward
 
         # Start with passed_args as just titan_args
-        self._passed_args = {**titan_args.__dict__, "attn_implementation": attn_implementation}
+        self._passed_args = {**titan_dense_args.__dict__, "attn_implementation": attn_implementation}
         self._passed_args.update(kwargs)
 
         #NOTE(3outeille): Wait for transformers uniformization of MoE args
-        if deepseek_v3_args is not None:
+        if titan_moe_args is not None:
             # For DeepSeekV3, setting q_lora_rank to 0 in TorchTitan is equivalent to
             # setting it to None in HuggingFace.
-            q_lora_rank = deepseek_v3_args.q_lora_rank
+            q_lora_rank = titan_moe_args.q_lora_rank
             if q_lora_rank == 0:
                 q_lora_rank = None
-            deepseek_v3_args.q_lora_rank = q_lora_rank
+            titan_moe_args.q_lora_rank = q_lora_rank
 
-            self._passed_args.update(**deepseek_v3_args.__dict__)
+            self._passed_args.update(**titan_moe_args.__dict__)
 
-            self.rope_interleave = deepseek_v3_args.rope_interleave
-            self.partial_rotary_factor = deepseek_v3_args.partial_rotary_factor
-
-            if deepseek_v3_args.moe_args is not None:
-                moe_args = deepseek_v3_args.moe_args
+            if titan_moe_args.moe_args is not None:
+                moe_args = titan_moe_args.moe_args
                 self.num_experts_per_tok = moe_args.top_k
                 self.n_routed_experts = moe_args.num_experts
                 self.n_shared_experts = moe_args.num_shared_experts
-                self.moe_intermediate_size = deepseek_v3_args.moe_inter_dim
+                self.moe_intermediate_size = titan_moe_args.moe_inter_dim
                 self._passed_args.update(
                     dict(
                         num_experts_per_tok=moe_args.top_k,
                         n_routed_experts=moe_args.num_experts,
                         n_shared_experts=moe_args.num_shared_experts,
-                        moe_intermediate_size=deepseek_v3_args.moe_inter_dim,
+                        moe_intermediate_size=titan_moe_args.moe_inter_dim,
                     )
                 )
 

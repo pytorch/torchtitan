@@ -27,9 +27,8 @@ __all__ = [
 ]
 
 @dataclass
-class TitanModelArgs:
+class TitanDenseModelArgs:
     """Arguments for the base TorchTitan model."""
-
     dim: int = 4096
     n_layers: int = 32
     n_heads: int = 32
@@ -46,7 +45,7 @@ class TitanModelArgs:
 
 
 @dataclass
-class DeepSeekV3Args:
+class TitanMoeModelArgs:
     """Arguments specific to DeepSeekV3 models."""
     moe_args: MoEArgs | None = None
     n_group: int | None = None
@@ -72,14 +71,13 @@ class DeepSeekV3Args:
 
 flavors = {
     "debugmodel": HFTransformerModelArgs(
-        titan_args=TitanModelArgs(
+        titan_dense_args=TitanDenseModelArgs(
             dim=256,
             n_layers=6,
             n_heads=16,
             n_kv_heads=16,
         ),
-        #TODO(3outeille): use os.environ to switch between models
-        deepseek_v3_args=DeepSeekV3Args(
+        titan_moe_args=TitanMoeModelArgs(
             partial_rotary_factor=4.0,
             inter_dim=1024,
             moe_inter_dim=256,
@@ -103,7 +101,7 @@ flavors = {
         ) if os.environ.get("USE_MOE", "0") == "1" else None,
     ),
     "full": HFTransformerModelArgs(
-        titan_args=TitanModelArgs(),
+        titan_dense_args=TitanDenseModelArgs(),
     ),
 }
 
