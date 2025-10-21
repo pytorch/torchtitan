@@ -78,7 +78,6 @@ flavors = {
             n_heads=16,
             n_kv_heads=16,
         ),
-        pad_token_id=None,
         #TODO(3outeille): use os.environ to switch between models
         deepseek_v3_args=DeepSeekV3Args(
             partial_rotary_factor=4.0,
