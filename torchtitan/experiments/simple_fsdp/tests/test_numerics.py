@@ -79,6 +79,25 @@ class TestSimpleFSDP(FSDPTest):
             losses.append(loss)
         return losses
 
+    def run_simple_fsdp_compiled_aot_eager(self, model, inputs, labels, epoch=20):
+        model = data_parallel(
+            model,
+            device_mesh=self.device_mesh[tuple(self.dp_mesh_dim_names)],
+            mode=self.mode,
+        )
+        # TODO: Add "inductor" backend when it's numerical issues are fixed
+        model = torch.compile(model, backend="aot_eager", fullgraph=True)
+        optim = self.optimizer(model.parameters(), lr=1e-4)
+        losses = []
+        for _ in range(epoch):
+            optim.zero_grad()
+            out = model(inputs)
+            loss = self.loss_fn(out, labels)
+            loss.backward()
+            optim.step()
+            losses.append(loss)
+        return losses
+
     def test_replicate_convergence(self):
         # unit test for replicate mode
         self.mode = "replicate"
@@ -86,14 +105,18 @@ class TestSimpleFSDP(FSDPTest):
         model, inputs, labels = self.get_input()
 
         fsdp2_losses = self.run_fsdp2(copy.deepcopy(model), inputs, labels)
-        simple_fsdp_replicate_losses = self.run_simple_fsdp(
+        simple_fsdp_losses = self.run_simple_fsdp(copy.deepcopy(model), inputs, labels)
+        simple_fsdp_compiled_aot_eager_losses = self.run_simple_fsdp_compiled_aot_eager(
             copy.deepcopy(model), inputs, labels
         )
 
-        for fsdp2_loss, simple_fsdp_replicate_loss in zip(
-            fsdp2_losses, simple_fsdp_replicate_losses
+        for (fsdp2_loss, simple_fsdp_loss, simple_fsdp_compiled_aot_eager_loss,) in zip(
+            fsdp2_losses,
+            simple_fsdp_losses,
+            simple_fsdp_compiled_aot_eager_losses,
         ):
-            assert torch.equal(fsdp2_loss, simple_fsdp_replicate_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_compiled_aot_eager_loss)
 
     def test_fullyshard_convergence(self):
         # unit test for fully_shard mode
@@ -102,14 +125,18 @@ class TestSimpleFSDP(FSDPTest):
         model, inputs, labels = self.get_input()
 
         fsdp2_losses = self.run_fsdp2(copy.deepcopy(model), inputs, labels)
-        simple_fsdp_fullyshard_losses = self.run_simple_fsdp(
+        simple_fsdp_losses = self.run_simple_fsdp(copy.deepcopy(model), inputs, labels)
+        simple_fsdp_compiled_aot_eager_losses = self.run_simple_fsdp_compiled_aot_eager(
             copy.deepcopy(model), inputs, labels
         )
 
-        for fsdp2_loss, simple_fsdp_fullyshard_loss in zip(
-            fsdp2_losses, simple_fsdp_fullyshard_losses
+        for (fsdp2_loss, simple_fsdp_loss, simple_fsdp_compiled_aot_eager_loss,) in zip(
+            fsdp2_losses,
+            simple_fsdp_losses,
+            simple_fsdp_compiled_aot_eager_losses,
         ):
-            assert torch.equal(fsdp2_loss, simple_fsdp_fullyshard_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_compiled_aot_eager_loss)
 
     def test_hybridshard_convergence(self):
         # unit test for hybrid_shard mode
@@ -118,11 +145,15 @@ class TestSimpleFSDP(FSDPTest):
         model, inputs, labels = self.get_input()
 
         fsdp2_losses = self.run_fsdp2(copy.deepcopy(model), inputs, labels)
-        simple_fsdp_hybridshard_losses = self.run_simple_fsdp(
+        simple_fsdp_losses = self.run_simple_fsdp(copy.deepcopy(model), inputs, labels)
+        simple_fsdp_compiled_aot_eager_losses = self.run_simple_fsdp_compiled_aot_eager(
             copy.deepcopy(model), inputs, labels
         )
 
-        for fsdp2_loss, simple_fsdp_hybridshard_loss in zip(
-            fsdp2_losses, simple_fsdp_hybridshard_losses
+        for (fsdp2_loss, simple_fsdp_loss, simple_fsdp_compiled_aot_eager_loss,) in zip(
+            fsdp2_losses,
+            simple_fsdp_losses,
+            simple_fsdp_compiled_aot_eager_losses,
         ):
-            assert torch.equal(fsdp2_loss, simple_fsdp_hybridshard_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_loss)
+            assert torch.equal(fsdp2_loss, simple_fsdp_compiled_aot_eager_loss)
