@@ -924,9 +924,7 @@ class JobConfig:
             logger.info(f"Running with configs: {self.to_dict()}")
 
         if self.job.save_config_file is not None:
-            config_file = os.path.join(
-                self.job.dump_folder, self.job.save_config_file
-            )
+            config_file = os.path.join(self.job.dump_folder, self.job.save_config_file)
             if torch.distributed.is_initialized():
                 if torch.distributed.get_rank() == 0:
                     os.makedirs(os.path.dirname(config_file), exist_ok=True)
