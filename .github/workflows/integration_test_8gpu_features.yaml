@@ -25,7 +25,17 @@ permissions:
       contents: read
 
 jobs:
+  check-disk:
+    runs-on: linux.rocm.gpu.gfx942.4
+    steps:
+      - name: Check disk usage
+        run: |
+          echo "Checking disk space on ROCm runner before container is created..."
+          df -h
+          echo "Finished checking disk space."
+
   build-test:
+    needs: check-disk
     # TESTING: TO BE CHANGED BACK TO MAIN ONCE https://github.com/pytorch/test-infra/pull/7379 LANDS
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@expose_runner_temp
     strategy:
