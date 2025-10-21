@@ -29,7 +29,7 @@ def build_torchcomms_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--parallelism.tenser_parallel_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
                 ],
             ],
             "FSDP+TP",
