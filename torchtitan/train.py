@@ -12,6 +12,8 @@ from typing import Any, Generator, Iterable, Optional
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+
+import torchtitan.experiments.transformers_backend  # noqa: F401  # noqa: F401
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
@@ -30,7 +32,7 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-import torchtitan.experiments.transformers_backend  # noqa: F401
+
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # core configs
@@ -432,7 +434,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         cp_buffers = [inputs, labels]
-        cp_seq_dims = [1, 1] 
+        cp_seq_dims = [1, 1]
         if hasattr(model_parts[0], "freqs_cis"):
             cp_buffers += [m.freqs_cis for m in model_parts]
             cp_seq_dims += [0 for _ in model_parts]

@@ -9,16 +9,16 @@ from dataclasses import dataclass
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
-from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.components.tokenizer import build_hf_tokenizer
-
-from .infra.pipeline_hf import pipeline_hf_transformers
+from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
 
 from .infra.parallelize_hf_transformers import parallelize_hf_transformers
+
+from .infra.pipeline_hf import pipeline_hf_transformers
 from .model.args import HFTransformerModelArgs
 from .model.model import HFTransformerModel
-from torchtitan.models.moe import MoEArgs
 
 
 __all__ = [
@@ -26,9 +26,11 @@ __all__ = [
     "HFTransformerModel",
 ]
 
+
 @dataclass
 class TitanDenseModelArgs:
     """Arguments for the base TorchTitan model."""
+
     dim: int = 4096
     n_layers: int = 32
     n_heads: int = 32
@@ -47,6 +49,7 @@ class TitanDenseModelArgs:
 @dataclass
 class TitanMoeModelArgs:
     """Arguments specific to DeepSeekV3 models."""
+
     moe_args: MoEArgs | None = None
     n_group: int | None = None
     topk_group: int | None = None
@@ -97,8 +100,10 @@ flavors = {
                 score_func="softmax",
                 route_norm=True,
                 score_before_experts=False,
-            )
-        ) if os.environ.get("USE_MOE", "0") == "1" else None,
+            ),
+        )
+        if os.environ.get("USE_MOE", "0") == "1"
+        else None,
     ),
     "full": HFTransformerModelArgs(
         titan_dense_args=TitanDenseModelArgs(),

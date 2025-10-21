@@ -1,17 +1,26 @@
-import math
-import torch
-from torch.nn import init
-from transformers.modeling_utils import PreTrainedModel
-from transformers.configuration_utils import PretrainedConfig
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 import importlib
+import math
+
+import torch
 from torch import nn
-from .args import HFTransformerModelArgs
+from torch.nn import init
 from torchtitan.tools.logging import logger
+from transformers.configuration_utils import PretrainedConfig
+from transformers.modeling_utils import PreTrainedModel
+
+from .args import HFTransformerModelArgs
+
 
 class HFTransformerModel(nn.Module):
     def __init__(self, model_args: HFTransformerModelArgs):
         super().__init__()
-        
+
         # Try to import the model class dynamically from the transformers library if not found in globals
         model_class_name = model_args.architectures[0]
         model_cls = globals().get(model_class_name, None)
@@ -23,8 +32,8 @@ class HFTransformerModel(nn.Module):
                 raise ImportError(
                     f"Could not find model class '{model_class_name}' in globals or transformers. "
                     f"Make sure the class is available. Original error: {e}"
-                )
-        
+                ) from e
+
         # Attempt to patch model weight initialization based on architecture type
         try:
             model_name_prefix = model_class_name.replace("ForCausalLM", "")
@@ -32,28 +41,34 @@ class HFTransformerModel(nn.Module):
 
             attention_cls = getattr(model_module, f"{model_name_prefix}Attention", None)
             mlp_cls = getattr(model_module, f"{model_name_prefix}MLP", None)
-            decoder_layer_cls = getattr(model_module, f"{model_name_prefix}DecoderLayer", None)
+            decoder_layer_cls = getattr(
+                model_module, f"{model_name_prefix}DecoderLayer", None
+            )
 
-            is_moe = hasattr(model_args, "n_routed_experts") #TODO(3outeille): check if this is the most reliable to detect a moe model
+            is_moe = hasattr(
+                model_args, "n_routed_experts"
+            )  # TODO(3outeille): check if this is the most reliable to detect a moe model
             if is_moe:
                 moe_cls = getattr(model_module, f"{model_name_prefix}MoE", None)
                 required_classes = {
                     "Attention": attention_cls,
-                    "MLP": mlp_cls, 
+                    "MLP": mlp_cls,
                     "DecoderLayer": decoder_layer_cls,
-                    "MoE": moe_cls
+                    "MoE": moe_cls,
                 }
-                
+
                 if all(required_classes.values()):
                     logger.info(f"Applying MoE-like patch for {model_name_prefix}")
                     self._patch_hf_moe_like(
                         decoder_layer_cls=decoder_layer_cls,
                         attention_cls=attention_cls,
                         mlp_cls=mlp_cls,
-                        moe_cls=moe_cls
+                        moe_cls=moe_cls,
                     )
                 else:
-                    missing = [name for name, cls in required_classes.items() if not cls]
+                    missing = [
+                        name for name, cls in required_classes.items() if not cls
+                    ]
                     logger.warning(
                         f"Could not find required classes ({', '.join(missing)}) for MoE patching of {model_name_prefix}. "
                         "Skipping MoE-like patch."
@@ -61,18 +76,20 @@ class HFTransformerModel(nn.Module):
             else:
                 required_classes = {
                     "Attention": attention_cls,
-                    "DecoderLayer": decoder_layer_cls
+                    "DecoderLayer": decoder_layer_cls,
                 }
-                
+
                 if all(required_classes.values()):
                     logger.info(f"Applying Llama-like patch for {model_name_prefix}")
                     self._patch_hf_llama_like(
                         decoder_layer_cls=decoder_layer_cls,
                         attention_cls=attention_cls,
-                        mlp_cls=mlp_cls  # mlp_cls can be None
+                        mlp_cls=mlp_cls,  # mlp_cls can be None
                     )
                 else:
-                    missing = [name for name, cls in required_classes.items() if not cls]
+                    missing = [
+                        name for name, cls in required_classes.items() if not cls
+                    ]
                     logger.warning(
                         f"Could not find required classes ({', '.join(missing)}) for {model_name_prefix}. "
                         "Skipping Llama-like patch."
@@ -86,9 +103,12 @@ class HFTransformerModel(nn.Module):
 
         self.model = model_cls(config=model_args)
         self.max_seq_len = model_args.max_seq_len
-        
+
         for layer in self.model.model.layers:
-            if hasattr(model_args, "first_k_dense_replace") and layer.layer_idx >= model_args.first_k_dense_replace:
+            if (
+                hasattr(model_args, "first_k_dense_replace")
+                and layer.layer_idx >= model_args.first_k_dense_replace
+            ):
                 layer.moe_enabled = True
             else:
                 layer.moe_enabled = False
@@ -226,7 +246,10 @@ class HFTransformerModel(nn.Module):
 
             elif isinstance(module, nn.Embedding):
                 # When tie_word_embeddings is True, use lm_head initialization
-                if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings:
+                if (
+                    hasattr(config, "tie_word_embeddings")
+                    and config.tie_word_embeddings
+                ):
                     final_out_std = config.hidden_size**-0.5
                     cutoff_factor = 3
                     nn.init.trunc_normal_(
@@ -239,13 +262,14 @@ class HFTransformerModel(nn.Module):
                 else:
                     std = config.initializer_range
                     module.weight.data.normal_(mean=0.0, std=std)
-                
+
                 if module.padding_idx is not None:
                     module.weight.data[module.padding_idx].zero_()
 
             elif (
                 isinstance(
-                    module, (nn.GroupNorm, nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)
+                    module,
+                    (nn.GroupNorm, nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d),
                 )
                 or "LayerNorm" in module.__class__.__name__
                 or "RMSNorm" in module.__class__.__name__
@@ -331,12 +355,14 @@ class HFTransformerModel(nn.Module):
                     nn.init.trunc_normal_(module.q_a_proj.weight, mean=0.0, std=0.02)
                 if hasattr(module, "q_b_proj"):
                     nn.init.trunc_normal_(module.q_b_proj.weight, mean=0.0, std=0.02)
-                
+
                 if hasattr(module, "kv_a_proj_with_mqa"):
-                    nn.init.trunc_normal_(module.kv_a_proj_with_mqa.weight, mean=0.0, std=0.02)
+                    nn.init.trunc_normal_(
+                        module.kv_a_proj_with_mqa.weight, mean=0.0, std=0.02
+                    )
                 if hasattr(module, "kv_b_proj"):
                     nn.init.trunc_normal_(module.kv_b_proj.weight, mean=0.0, std=0.02)
-                
+
                 if hasattr(module, "o_proj") and init_std is not None:
                     nn.init.trunc_normal_(module.o_proj.weight, mean=0.0, std=init_std)
 
@@ -345,22 +371,39 @@ class HFTransformerModel(nn.Module):
                 # DeepseekV3 uses std=0.02 for up_proj, unlike Llama
                 nn.init.trunc_normal_(module.up_proj.weight, mean=0.0, std=0.02)
                 if init_std is not None:
-                    nn.init.trunc_normal_(module.down_proj.weight, mean=0.0, std=init_std)
+                    nn.init.trunc_normal_(
+                        module.down_proj.weight, mean=0.0, std=init_std
+                    )
 
             elif isinstance(module, moe_cls):
                 if hasattr(module, "gate") and init_std is not None:
                     nn.init.trunc_normal_(module.gate.weight, mean=0.0, std=init_std)
                 if hasattr(module, "experts"):
                     for expert in module.experts:
-                        nn.init.trunc_normal_(expert.gate_proj.weight, mean=0.0, std=0.02)
+                        nn.init.trunc_normal_(
+                            expert.gate_proj.weight, mean=0.0, std=0.02
+                        )
                         nn.init.trunc_normal_(expert.up_proj.weight, mean=0.0, std=0.02)
                         if init_std is not None:
-                            nn.init.trunc_normal_(expert.down_proj.weight, mean=0.0, std=init_std)
-                if hasattr(module, "shared_experts") and module.shared_experts is not None:
-                    nn.init.trunc_normal_(module.shared_experts.gate_proj.weight, mean=0.0, std=0.02)
-                    nn.init.trunc_normal_(module.shared_experts.up_proj.weight, mean=0.0, std=0.02)
+                            nn.init.trunc_normal_(
+                                expert.down_proj.weight, mean=0.0, std=init_std
+                            )
+                if (
+                    hasattr(module, "shared_experts")
+                    and module.shared_experts is not None
+                ):
+                    nn.init.trunc_normal_(
+                        module.shared_experts.gate_proj.weight, mean=0.0, std=0.02
+                    )
+                    nn.init.trunc_normal_(
+                        module.shared_experts.up_proj.weight, mean=0.0, std=0.02
+                    )
                     if init_std is not None:
-                        nn.init.trunc_normal_(module.shared_experts.down_proj.weight, mean=0.0, std=init_std)
+                        nn.init.trunc_normal_(
+                            module.shared_experts.down_proj.weight,
+                            mean=0.0,
+                            std=init_std,
+                        )
 
             elif module is getattr(self, "lm_head", None):
                 final_out_std = config.hidden_size**-0.5
@@ -377,7 +420,10 @@ class HFTransformerModel(nn.Module):
 
             elif isinstance(module, nn.Embedding):
                 # When tie_word_embeddings is True, use lm_head initialization
-                if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings:
+                if (
+                    hasattr(config, "tie_word_embeddings")
+                    and config.tie_word_embeddings
+                ):
                     final_out_std = config.hidden_size**-0.5
                     cutoff_factor = 3
                     nn.init.trunc_normal_(
@@ -390,11 +436,14 @@ class HFTransformerModel(nn.Module):
                 else:
                     std = config.initializer_range
                     module.weight.data.normal_(mean=0.0, std=std)
-                
+
                 if module.padding_idx is not None:
                     module.weight.data[module.padding_idx].zero_()
 
-            elif "LayerNorm" in module.__class__.__name__ or "RMSNorm" in module.__class__.__name__:
+            elif (
+                "LayerNorm" in module.__class__.__name__
+                or "RMSNorm" in module.__class__.__name__
+            ):
                 if hasattr(module, "weight") and module.weight is not None:
                     module.weight.data.fill_(1.0)
                 if hasattr(module, "bias") and module.bias is not None:
@@ -407,52 +456,80 @@ class HFTransformerModel(nn.Module):
     @property
     def tok_embeddings(self):
         """Returns the model's embed_tokens, handling different Hugging Face model structures."""
-        if hasattr(self.model, "model") and hasattr(self.model.model, "embed_tokens"):  # Llama-like
+        if hasattr(self.model, "model") and hasattr(
+            self.model.model, "embed_tokens"
+        ):  # Llama-like
             return self.model.model.embed_tokens
         else:
-            raise AttributeError("Could not find embed_tokens in the model. Please check the model structure.")
+            raise AttributeError(
+                "Could not find embed_tokens in the model. Please check the model structure."
+            )
 
     @tok_embeddings.setter
     def tok_embeddings(self, value):
-        if hasattr(self.model, "model") and hasattr(self.model.model, "embed_tokens"):  # Llama-like
-            setattr(self.model.model, "embed_tokens", value)
+        if hasattr(self.model, "model") and hasattr(
+            self.model.model, "embed_tokens"
+        ):  # Llama-like
+            self.model.model.embed_tokens = value
         else:
-            raise AttributeError("Could not find embed_tokens in the model. Please check the model structure.")
+            raise AttributeError(
+                "Could not find embed_tokens in the model. Please check the model structure."
+            )
 
     @property
     def layers(self):
         """Returns the model's layers, handling different Hugging Face model structures."""
-        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):  # Llama-like
+        if hasattr(self.model, "model") and hasattr(
+            self.model.model, "layers"
+        ):  # Llama-like
             return self.model.model.layers
         else:
             # Add more cases here if needed for other model architectures
-            raise AttributeError("Could not find layers in the model. Please check the model structure.")
+            raise AttributeError(
+                "Could not find layers in the model. Please check the model structure."
+            )
 
     @layers.setter
     def layers(self, value):
-        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):  # Llama-like
-            setattr(self.model.model, "layers", value)
+        if hasattr(self.model, "model") and hasattr(
+            self.model.model, "layers"
+        ):  # Llama-like
+            self.model.model.layers = value
         else:
-            raise AttributeError("Could not find layers in the model. Please check the model structure.")
+            raise AttributeError(
+                "Could not find layers in the model. Please check the model structure."
+            )
 
     @property
     def norm(self):
         """Returns the model's norm, handling different Hugging Face model structures."""
-        if hasattr(self.model, "model") and hasattr(self.model.model, "norm"):  # Llama-like
+        if hasattr(self.model, "model") and hasattr(
+            self.model.model, "norm"
+        ):  # Llama-like
             return self.model.model.norm
-        elif hasattr(self.model, "model") and hasattr(self.model.model, "final_layernorm"):  # Phi-like
+        elif hasattr(self.model, "model") and hasattr(
+            self.model.model, "final_layernorm"
+        ):  # Phi-like
             return self.model.model.final_layernorm
         else:
-            raise AttributeError("Could not find norm in the model. Please check the model structure.")
+            raise AttributeError(
+                "Could not find norm in the model. Please check the model structure."
+            )
 
     @norm.setter
     def norm(self, value):
-        if hasattr(self.model, "model") and hasattr(self.model.model, "norm"):  # Llama-like
-            setattr(self.model.model, "norm", value)
-        elif hasattr(self.model, "model") and hasattr(self.model.model, "final_layernorm"):  # Phi-like
-            setattr(self.model.model, "final_layernorm", value)
+        if hasattr(self.model, "model") and hasattr(
+            self.model.model, "norm"
+        ):  # Llama-like
+            self.model.model.norm = value
+        elif hasattr(self.model, "model") and hasattr(
+            self.model.model, "final_layernorm"
+        ):  # Phi-like
+            self.model.model.final_layernorm = value
         else:
-            raise AttributeError("Could not find norm in the model. Please check the model structure.")
+            raise AttributeError(
+                "Could not find norm in the model. Please check the model structure."
+            )
 
     @property
     def output(self):
@@ -461,34 +538,52 @@ class HFTransformerModel(nn.Module):
             return self.model.lm_head
         else:
             # Add more cases here if needed for other model architectures
-            raise AttributeError("Could not find output (lm_head) in the model. Please check the model structure.")
+            raise AttributeError(
+                "Could not find output (lm_head) in the model. Please check the model structure."
+            )
 
     @output.setter
     def output(self, value):
         if hasattr(self.model, "lm_head"):  # For models like LlamaForCausalLM
-            setattr(self.model, "lm_head", value)
+            self.model.lm_head = value
         else:
-            raise AttributeError("Could not find output (lm_head) in the model. Please check the model structure.")
+            raise AttributeError(
+                "Could not find output (lm_head) in the model. Please check the model structure."
+            )
 
     @property
     def rotary_emb(self):
         """Returns the model's rotary_emb, handling different Hugging Face model structures."""
-        if hasattr(self.model, "model") and hasattr(self.model.model, "rotary_emb"):  # Llama-like
+        if hasattr(self.model, "model") and hasattr(
+            self.model.model, "rotary_emb"
+        ):  # Llama-like
             return self.model.model.rotary_emb
         else:
-            raise AttributeError("Could not find rotary_emb in the model. Please check the model structure.")
+            raise AttributeError(
+                "Could not find rotary_emb in the model. Please check the model structure."
+            )
 
     @rotary_emb.setter
     def rotary_emb(self, value):
-        if hasattr(self.model, "model") and hasattr(self.model.model, "rotary_emb"):  # Llama-like
-            setattr(self.model.model, "rotary_emb", value)
+        if hasattr(self.model, "model") and hasattr(
+            self.model.model, "rotary_emb"
+        ):  # Llama-like
+            self.model.model.rotary_emb = value
         else:
-            raise AttributeError("Could not find rotary_emb in the model. Please check the model structure.")
+            raise AttributeError(
+                "Could not find rotary_emb in the model. Please check the model structure."
+            )
 
     def forward(self, *args, **kwargs):
         local_seq_len = self.max_seq_len
-        local_seq_len //= self.cp_mesh.size() if self.cp_mesh is not None and self.cp_mesh.size() > 1 else 1
-        kwargs["position_ids"] = torch.arange(local_seq_len, device=args[0].device).unsqueeze(0)
+        local_seq_len //= (
+            self.cp_mesh.size()
+            if self.cp_mesh is not None and self.cp_mesh.size() > 1
+            else 1
+        )
+        kwargs["position_ids"] = torch.arange(
+            local_seq_len, device=args[0].device
+        ).unsqueeze(0)
         output = self.model.model(*args, **kwargs)
         output = self.model.lm_head(output.last_hidden_state)
         return output
@@ -512,11 +607,13 @@ class HFTransformerModel(nn.Module):
 
         self.model.apply(selective_init)
 
-        #TODO(3outeille): For pipeline parallel, only tie weights if both input and output embeddings are on the same device
+        # TODO(3outeille): For pipeline parallel, only tie weights if both input and output embeddings are on the same device
         # Maybe better way of handling this?
-        if not isinstance(self.tok_embeddings, nn.Identity) and not isinstance(self.output, nn.Identity):
+        if not isinstance(self.tok_embeddings, nn.Identity) and not isinstance(
+            self.output, nn.Identity
+        ):
             self.model.tie_weights()
-    
+
     def named_children(self):
         """
         Provides a flattened view of the model's main components,

@@ -4,30 +4,30 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import importlib
 from dataclasses import dataclass
-import torch
+
 from torch import nn
-import math
-from torch.nn import init
 from torchtitan.config import JobConfig
+from torchtitan.models.utils import (
+    get_dense_model_nparams_and_flops,
+    get_moe_model_nparams_and_flops,
+)
 from torchtitan.protocols import BaseModelArgs
-from torchtitan.tools.logging import logger
-from torchtitan.models.utils import get_dense_model_nparams_and_flops, get_moe_model_nparams_and_flops
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_utils import AttentionInterface
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
+from transformers.modeling_utils import AttentionInterface
+
 
 @dataclass
 class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
     """
     Configuration class that bridges TorchTitan and HuggingFace Transformers naming conventions.
-    
+
     Uses properties to provide TorchTitan-style access while maintaining HuggingFace compatibility.
     Properties are created dynamically based on which arguments are provided.
     """
-    
+
     # Define all possible mappings organized by argument type
     _TT_TO_HF_MAPPINGS = {
         "dense": {
@@ -59,14 +59,14 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         assert titan_dense_args is not None, "titan_dense_args is required"
 
         active_mappings = {}
-        
+
         active_mappings.update(self._TT_TO_HF_MAPPINGS["dense"])
-        
+
         if titan_moe_args is not None:
             active_mappings.update(self._TT_TO_HF_MAPPINGS["moe"])
-        
+
         self._active_mappings = active_mappings
-        
+
         self._create_dynamic_properties()
 
         # Set HF attributes from titan_args based on mappings
@@ -83,14 +83,17 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
         # HuggingFace specific args
         self.attn_implementation = attn_implementation
-        #NOTE:(3outeille):This will force create_causal_mask to return None
+        # NOTE:(3outeille):This will force create_causal_mask to return None
         AttentionInterface._global_mapping[attn_implementation] = sdpa_attention_forward
 
         # Start with passed_args as just titan_args
-        self._passed_args = {**titan_dense_args.__dict__, "attn_implementation": attn_implementation}
+        self._passed_args = {
+            **titan_dense_args.__dict__,
+            "attn_implementation": attn_implementation,
+        }
         self._passed_args.update(kwargs)
 
-        #NOTE(3outeille): Wait for transformers uniformization of MoE args
+        # NOTE(3outeille): Wait for transformers uniformization of MoE args
         if titan_moe_args is not None:
             # For DeepSeekV3, setting q_lora_rank to 0 in TorchTitan is equivalent to
             # setting it to None in HuggingFace.
@@ -118,13 +121,16 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
     def _create_dynamic_properties(self):
         """Create properties dynamically based on active mappings."""
+
         def _create_property(hf_name: str) -> property:
             def getter(self):
                 return getattr(self, hf_name)
+
             def setter(self, value):
                 setattr(self, hf_name, value)
+
             return property(getter, setter)
-        
+
         for titan_name, hf_name in self._active_mappings.items():
             # Create getter/setter for attribute that don't already exist
             if not hasattr(self.__class__, titan_name):
@@ -149,7 +155,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         hf_model_config = AutoConfig.from_pretrained(
             job_config.model.name,
             attn_implementation=self.attn_implementation,
-            trust_remote_code=True
+            trust_remote_code=True,
         )
 
         # Explicitly update attributes based on mappings
@@ -169,14 +175,14 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         # MoE
         if hasattr(self, "qk_nope_head_dim") and hasattr(self, "qk_rope_head_dim"):
             self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
-        
+
         # Configure HF-specific settings to match TorchTitan settings
         self.attention_bias = False
         self.mlp_bias = False
         self.use_cache = False
         self.initializer_range = 1.0  # use as std for normal init in embedding
-        
-        if not hasattr(self, "inter_dim"): # Only for llama model
+
+        if not hasattr(self, "inter_dim"):  # Only for llama model
             ffn_hidden_size = 4 * self.dim
             ffn_hidden_size = int(2 * ffn_hidden_size / 3)
             if self.ffn_dim_multiplier is not None:
@@ -184,14 +190,14 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             self.intermediate_size = self.multiple_of * (
                 (ffn_hidden_size + self.multiple_of - 1) // self.multiple_of
             )
-        
+
         self.head_dim = self.dim // self.num_attention_heads
-        
+
         return self
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
-        is_moe = hasattr(self, 'n_routed_experts')
-        
+        is_moe = hasattr(self, "n_routed_experts")
+
         if is_moe:
             return get_moe_model_nparams_and_flops(self, model, seq_len)
         else:

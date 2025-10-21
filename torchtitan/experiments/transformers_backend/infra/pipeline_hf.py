@@ -8,29 +8,25 @@ import math
 
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     get_schedule_class,
     PipelineScheduleSingle,
+    ScheduleDualPipeV,
+    ScheduleZBVZeroBubble,
 )
 
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline_parallel import (
-    build_pipeline_schedule,
-    pipeline_module_split
-)
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.pipelining import PipelineStage
+from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
-from torch.distributed.pipelining.schedules import (
-    ScheduleDualPipeV,
-    ScheduleZBVZeroBubble,
-)
 
 # NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
+
 
 def generate_llm_fqn_per_model_part(
     num_stages: int,
@@ -57,11 +53,7 @@ def generate_llm_fqn_per_model_part(
     if num_stages == 1:
         # Single stage gets everything
         layer_names = [f"layers.{i}" for i in range(num_layers)]
-        return [
-            ["tok_embeddings"]
-            + layer_names
-            + ["norm", "output", "rotary_emb"]
-        ]
+        return [["tok_embeddings"] + layer_names + ["norm", "output", "rotary_emb"]]
 
     # Calculate effective layers including weights
     num_effective_layers = num_layers + input_weight + output_weight
@@ -284,6 +276,7 @@ def pipeline_module_split(
         models.append(model_chunk)
 
     return stages, models
+
 
 def pipeline_hf_transformers(
     model: nn.Module,

@@ -25,16 +25,15 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims, NoParallel
+from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
+from torchtitan.distributed import NoParallel, ParallelDims
 
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ExpertTensorParallel,
     ReordererSequenceParallel,
-    TensorParallel,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.tools.logging import logger
 
 # for selective op activation checkpointing
@@ -49,6 +48,7 @@ _save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
 }
+
 
 def _apply_ac_to_transformer_block(
     module: nn.Module, ac_config: ACConfig, *, base_fqn: Optional[str] = None
@@ -137,6 +137,7 @@ def _apply_ac_to_transformer_block(
         else:
             return module
 
+
 def apply_ac(model: nn.Module, ac_config: ACConfig):
     """Apply activation checkpointing to the model."""
     for layer_id, transformer_block in model.layers.named_children():
@@ -146,6 +147,7 @@ def apply_ac(model: nn.Module, ac_config: ACConfig):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+
 
 def apply_ddp(
     model: nn.Module,
@@ -189,9 +191,7 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if (
-        job_config.parallelism.context_parallel_degree > 1
-    ):
+    if job_config.parallelism.context_parallel_degree > 1:
         logger.warning("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
@@ -310,11 +310,11 @@ def apply_non_moe_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
-    
+
     # skipping nn.Identity modules (which are added by pipeline parallelism for unused modules)
     root_plan = {}
-    
-    if hasattr(model, 'tok_embeddings'):
+
+    if hasattr(model, "tok_embeddings"):
         if isinstance(model.tok_embeddings, nn.Identity):
             root_plan["tok_embeddings"] = NoParallel()
         else:
@@ -322,14 +322,14 @@ def apply_non_moe_tp(
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
             )
-    
-    if hasattr(model, 'norm'):
+
+    if hasattr(model, "norm"):
         if isinstance(model.norm, nn.Identity):
             root_plan["norm"] = NoParallel()
         else:
             root_plan["norm"] = SequenceParallel()
-    
-    if hasattr(model, 'output'):
+
+    if hasattr(model, "output"):
         if isinstance(model.output, nn.Identity):
             root_plan["output"] = NoParallel()
         else:
@@ -375,25 +375,33 @@ def apply_non_moe_tp(
         }
 
         if getattr(transformer_block.self_attn, "q_lora_rank", None) is None:
-            layer_plan.update({
-                "self_attn.q_proj": colwise_parallel(),
-                "self_attn.k_proj": colwise_parallel(),
-                "self_attn.v_proj": colwise_parallel(),
-            })
+            layer_plan.update(
+                {
+                    "self_attn.q_proj": colwise_parallel(),
+                    "self_attn.k_proj": colwise_parallel(),
+                    "self_attn.v_proj": colwise_parallel(),
+                }
+            )
         else:
-            layer_plan.update({
-                "self_attn.q_a_proj": NoParallel(),
-                "self_attn.q_a_layernorm": NoParallel(),
-                "self_attn.q_b_proj": colwise_parallel(),
-                "self_attn.kv_a_proj_with_mqa": NoParallel(),
-                "self_attn.kv_a_layernorm": NoParallel(),
-                "self_attn.kv_b_proj": colwise_parallel(),
-            })
+            layer_plan.update(
+                {
+                    "self_attn.q_a_proj": NoParallel(),
+                    "self_attn.q_a_layernorm": NoParallel(),
+                    "self_attn.q_b_proj": colwise_parallel(),
+                    "self_attn.kv_a_proj_with_mqa": NoParallel(),
+                    "self_attn.kv_a_layernorm": NoParallel(),
+                    "self_attn.kv_b_proj": colwise_parallel(),
+                }
+            )
 
         # Handle different names for the output projection layer, e.g. o_proj vs dense
-        o_proj_name = "o_proj" if hasattr(transformer_block.self_attn, "o_proj") else "dense"
-        layer_plan[f"self_attn.{o_proj_name}"] = rowwise_parallel(output_layouts=Shard(1))
-        
+        o_proj_name = (
+            "o_proj" if hasattr(transformer_block.self_attn, "o_proj") else "dense"
+        )
+        layer_plan[f"self_attn.{o_proj_name}"] = rowwise_parallel(
+            output_layouts=Shard(1)
+        )
+
         # For Qwen3 RMSNorm on Q and K
         # TODO(3outeille): we should probably shard(1) then replicate => then use SequenceParallel but for now I am fed up
         if hasattr(transformer_block.self_attn, "q_norm"):
@@ -409,14 +417,20 @@ def apply_non_moe_tp(
                 ),
             }
             # Handle different names for MLP layers, e.g. gate_proj vs fc1
-            gate_proj_name = "gate_proj" if hasattr(transformer_block.mlp, "gate_proj") else "fc1"
+            gate_proj_name = (
+                "gate_proj" if hasattr(transformer_block.mlp, "gate_proj") else "fc1"
+            )
             mlp_plan[f"mlp.{gate_proj_name}"] = colwise_parallel()
 
             if hasattr(transformer_block.mlp, "up_proj"):
                 mlp_plan["mlp.up_proj"] = colwise_parallel()
 
-            down_proj_name = "down_proj" if hasattr(transformer_block.mlp, "down_proj") else "fc2"
-            mlp_plan[f"mlp.{down_proj_name}"] = rowwise_parallel(output_layouts=Shard(1))
+            down_proj_name = (
+                "down_proj" if hasattr(transformer_block.mlp, "down_proj") else "fc2"
+            )
+            mlp_plan[f"mlp.{down_proj_name}"] = rowwise_parallel(
+                output_layouts=Shard(1)
+            )
             layer_plan.update(mlp_plan)
 
         # Some models like Phi-2 don't have post_attention_layernorm
@@ -494,7 +508,11 @@ def apply_fsdp(
         # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
         # - the router and the shared experts are sharded together with the TransformerBlock
         # - the routed experts are sharded with the remaining dp_mod_ep_mesh
-        if hasattr(transformer_block, "moe_enabled") and transformer_block.moe_enabled and ep_degree > 1:
+        if (
+            hasattr(transformer_block, "moe_enabled")
+            and transformer_block.moe_enabled
+            and ep_degree > 1
+        ):
             fsdp_mod_ep_config = fsdp_config.copy()
             fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
             moe_block = transformer_block.mlp
@@ -506,10 +524,7 @@ def apply_fsdp(
             #       shard_placement_fn on the outer TransformerBlock-level FSDP.
             _experts_shard_placement_fn = None
             assert dp_mod_ep_mesh is not None
-            if (
-                dp_mod_ep_mesh.size() * ep_degree
-                > moe_block.experts.num_experts
-            ):
+            if dp_mod_ep_mesh.size() * ep_degree > moe_block.experts.num_experts:
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
             fully_shard(
