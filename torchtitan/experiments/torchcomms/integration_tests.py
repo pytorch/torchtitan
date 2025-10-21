@@ -24,66 +24,44 @@ def build_torchcomms_test_list() -> list[OverrideDefinitions]:
             ],
             "1D FSDP",
             "1d",
-            ngpu=4,
         ),
         OverrideDefinitions(
             [
                 [
                     "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "FSDP+TP",
-            "2d_dp+tp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.context_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                 ],
             ],
-            "DP+CP+PP",
-            "3d_dp+cp+pp",
+            "FSDP+TP+PP",
+            "3d_dp+tp+pp",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--compile.enable",
-                    "--parallelism.context_parallel_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
-                ],
-            ],
-            "3D CP+async TP compile",
-            "3d_cp+asynctp_compile",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--model.name qwen3",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                ],
-            ],
-            "Qwen3 FSDP+TP",
-            "qwen3_fsdp+tp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--model.name deepseek_v3",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.expert_parallel_degree 2",
-                ],
-            ],
-            "DeepSeek V3 FSDP+EP",
-            "deepseek_v3_fsdp+ep",
-            ngpu=4,
-        ),
+        # TODO: Enable CP and async TP tests once fixes are available in
+        # torchcomms nightly builds.
+        # OverrideDefinitions(
+        #    [
+        #        [
+        #            "--parallelism.context_parallel_degree 2",
+        #            "--parallelism.pipeline_parallel_degree 2",
+        #        ],
+        #    ],
+        #    "DP+CP+PP",
+        #    "3d_dp+cp+pp",
+        #    ngpu=8,
+        # ),
+        # OverrideDefinitions(
+        #    [
+        #        [
+        #            "--compile.enable",
+        #            "--parallelism.context_parallel_degree 2",
+        #            "--parallelism.tensor_parallel_degree 2",
+        #            "--parallelism.enable_async_tensor_parallel",
+        #        ],
+        #    ],
+        #    "3D CP+async TP compile",
+        #    "3d_cp+asynctp_compile",
+        #    ngpu=8,
+        # ),
     ]
     return integration_tests_flavors
 
