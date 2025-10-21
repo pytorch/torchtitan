@@ -55,8 +55,13 @@ def apply_rotary_emb(
     xk: torch.Tensor,
     rope_cache: torch.Tensor,
     partial_ratio: float = 1.0,
+    position_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    rope_cache = reshape_for_broadcast(rope_cache, xq)
+    if position_ids is not None:
+        rope_cache = rope_cache[position_ids]
+        rope_cache = rope_cache.unsqueeze(2)  # [batch_size, seqlen, 1, head_dim * 2]
+    else:
+        rope_cache = reshape_for_broadcast(rope_cache, xq)
     head_dim = xq.shape[-1]
     rotary_dim = int(head_dim * partial_ratio)
     cos = rope_cache[..., :rotary_dim].to(dtype=xq.dtype, device=xq.device)
@@ -134,7 +139,12 @@ class Attention(nn.Module):
         self.q_norm.weight.data.zero_()
         self.k_norm.weight.data.zero_()
 
-    def forward(self, x: torch.Tensor, rope_cache: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope_cache: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
+    ):
         bs, seqlen, _ = x.shape
         xq, gate = torch.chunk(self.wq(x), 2, dim=-1)
         xk = self.wk(x)
@@ -149,7 +159,11 @@ class Attention(nn.Module):
         xk = self.k_norm(xk)
 
         xq, xk = apply_rotary_emb(
-            xq, xk, rope_cache, partial_ratio=self.partial_rotary_factor
+            xq,
+            xk,
+            rope_cache,
+            partial_ratio=self.partial_rotary_factor,
+            position_ids=position_ids,
         )
 
         keys = repeat_kv(xk, self.n_rep)
@@ -201,7 +215,12 @@ class GatedDeltaNet(nn.Module):
         )
         self.out_proj = nn.Linear(self.value_dim, model_args.dim, bias=False)
 
-    def forward(self, x: torch.Tensor, _rope_cache: torch.Tensor):
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope_cache: torch.Tensor,
+        position_ids: torch.Tensor | None,
+    ):
         bs, seqlen, dim = x.shape
         projected_qkvz = self.in_proj_qkvz(x)
         projected_ba = self.in_proj_ba(x)
@@ -331,8 +350,15 @@ class TransformerBlock(nn.Module):
         else:
             self.weight_init_std = 0.02 / (2 * model_args.n_layers) ** 0.5
 
-    def forward(self, x: torch.Tensor, rope_cache: torch.Tensor):
-        x = x + self.attention(self.attention_norm(x), rope_cache)
+    def forward(
+        self,
+        x: torch.Tensor,
+        rope_cache: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
+    ):
+        x = x + self.attention(
+            self.attention_norm(x), rope_cache, position_ids=position_ids
+        )
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
         else:
@@ -396,10 +422,15 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
             self.model_args.rope_theta,
         )
 
-    def forward(self, tokens: torch.Tensor, input_batch: torch.Tensor | None = None):
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        input_batch: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+    ):
         h = self.tok_embeddings(tokens)
         for layer in self.layers.values():
-            h = layer(h, self.rope_cache)
+            h = layer(h, self.rope_cache, position_ids=position_ids)
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
         return output
