@@ -17,7 +17,7 @@ from torchtitan.hf_datasets import DatasetConfig
 class TestFluxDataLoader(unittest.TestCase):
     def setUp(self):
         # Import here to avoid circular import during test collection
-        from torchtitan.hf_datasets.flux_dataset import (
+        from torchtitan.models.flux.flux_datasets import (
             _cc12m_wds_data_processor,
             DATASETS,
         )
