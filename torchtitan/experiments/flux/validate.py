@@ -30,7 +30,6 @@ from torchtitan.experiments.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
     preprocess_data,
-    unpack_latents,
 )
 from torchtitan.tools.logging import logger
 
@@ -212,23 +211,46 @@ class FluxValidator(Validator):
 
                 # Patchify: Convert latent into a sequence of patches
                 latents = pack_latents(latents)
+                target = pack_latents(noise - labels)
 
-                with self.maybe_enable_amp:
-                    latent_noise_pred = model(
-                        img=latents,
-                        img_ids=latent_pos_enc,
-                        txt=t5_encodings,
-                        txt_ids=text_pos_enc,
-                        y=clip_encodings,
-                        timesteps=timesteps,
+                optional_context_parallel_ctx = (
+                    dist_utils.create_context_parallel_ctx(
+                        cp_mesh=parallel_dims.world_mesh["cp"],
+                        cp_buffers=[
+                            latents,
+                            latent_pos_enc,
+                            t5_encodings,
+                            text_pos_enc,
+                            target,
+                        ],
+                        cp_seq_dims=[1, 1, 1, 1, 1],
+                        cp_no_restore_buffers={
+                            latents,
+                            latent_pos_enc,
+                            t5_encodings,
+                            text_pos_enc,
+                            target,
+                        },
+                        cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
                     )
+                    if parallel_dims.cp_enabled
+                    else None
+                )
 
-            # Convert sequence of patches to latent shape
-            pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
-            target = noise - labels
-            loss = self.loss_fn(pred, target)
+                with self.validation_context(optional_context_parallel_ctx):
+                    with self.maybe_enable_amp:
+                        latent_noise_pred = model(
+                            img=latents,
+                            img_ids=latent_pos_enc,
+                            txt=t5_encodings,
+                            txt_ids=text_pos_enc,
+                            y=clip_encodings,
+                            timesteps=timesteps,
+                        )
 
-            del pred, noise, target, latent_noise_pred, latents
+                    loss = self.loss_fn(latent_noise_pred, target)
+
+            del noise, target, latent_noise_pred, latents
 
             accumulated_losses.append(loss.detach())
 

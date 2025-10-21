@@ -17,12 +17,7 @@ from torchtitan.train import Trainer
 from .infra.parallelize import parallelize_encoders
 from .model.autoencoder import load_ae
 from .model.hf_embedder import FluxEmbedder
-from .utils import (
-    create_position_encoding_for_latents,
-    pack_latents,
-    preprocess_data,
-    unpack_latents,
-)
+from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
 
 
 class FluxTrainer(Trainer):
@@ -131,25 +126,47 @@ class FluxTrainer(Trainer):
 
             # Patchify: Convert latent into a sequence of patches
             latents = pack_latents(latents)
+            target = pack_latents(noise - labels)
 
-        with self.maybe_enable_amp:
-            latent_noise_pred = model(
-                img=latents,
-                img_ids=latent_pos_enc,
-                txt=t5_encodings,
-                txt_ids=text_pos_enc,
-                y=clip_encodings,
-                timesteps=timesteps,
+        optional_context_parallel_ctx = (
+            dist_utils.create_context_parallel_ctx(
+                cp_mesh=self.parallel_dims.world_mesh["cp"],
+                cp_buffers=[
+                    latents,
+                    latent_pos_enc,
+                    t5_encodings,
+                    text_pos_enc,
+                    target,
+                ],
+                cp_seq_dims=[1, 1, 1, 1, 1],
+                cp_no_restore_buffers={
+                    latents,
+                    latent_pos_enc,
+                    t5_encodings,
+                    text_pos_enc,
+                    target,
+                },
+                cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
             )
+            if self.parallel_dims.cp_enabled
+            else None
+        )
+        with self.train_context(optional_context_parallel_ctx):
+            with self.maybe_enable_amp:
+                latent_noise_pred = model(
+                    img=latents,
+                    img_ids=latent_pos_enc,
+                    txt=t5_encodings,
+                    txt_ids=text_pos_enc,
+                    y=clip_encodings,
+                    timesteps=timesteps,
+                )
 
-            # Convert sequence of patches to latent shape
-            pred = unpack_latents(latent_noise_pred, latent_height, latent_width)
-            target = noise - labels
-            loss = self.loss_fn(pred, target)
-        # pred.shape=(bs, seq_len, vocab_size)
-        # need to free to before bwd to avoid peaking memory
-        del (pred, noise, target)
-        loss.backward()
+                loss = self.loss_fn(latent_noise_pred, target)
+            # latent_noise_pred.shape=(bs, seq_len, vocab_size)
+            # need to free to before bwd to avoid peaking memory
+            del (latent_noise_pred, noise, target)
+            loss.backward()
 
         return loss
 
