@@ -391,11 +391,11 @@ def get_dense_model_nparams_and_flops(
     return nparams, num_flops_per_token
 
 
-def get_moe_model_nparams_and_flops(
+def get_moe_model_nparams_and_para_linear_flops(
     model_args: BaseModelArgs, model: nn.Module, seq_len: int
 ) -> tuple[int, float]:
     """
-    Calculate nparams and nflops for MoE model
+    Calculate nparams and parameterized linear nflops (excluding non-parameter attention matmuls) for MoE model
     """
     nparams_embedding = 0
     nparams_moe_router = 0
@@ -429,20 +429,12 @@ def get_moe_model_nparams_and_flops(
         f"sparse {nparams_sparse:,}, active {nparams_dense + nparams_sparse_active:,}"
     )
 
-    l, h, q, t = (
-        model_args.n_layers,
-        model_args.n_heads,
-        model_args.dim // model_args.n_heads,
-        seq_len,
-    )
-
-    num_flops_per_token = (
-        6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
-        + 12 * l * h * q * t
+    num_para_linear_flops_per_token = 6 * (
+        nparams_dense - nparams_embedding + nparams_sparse_active
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
     if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
         nparams = nparams - nparams_embedding
 
-    return nparams, num_flops_per_token
+    return nparams, num_para_linear_flops_per_token
