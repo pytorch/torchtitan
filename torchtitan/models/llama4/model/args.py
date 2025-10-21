@@ -12,7 +12,7 @@ from torch import nn
 from torchtitan.config import JobConfig
 
 from torchtitan.models.moe import MoEArgs
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.models.utils import get_moe_model_nparams_and_para_linear_flops
 from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
@@ -88,4 +88,14 @@ class TransformerModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_moe_model_nparams_and_flops(self, model, seq_len)
+        (
+            nparams,
+            num_para_linear_flops_per_token,
+        ) = get_moe_model_nparams_and_para_linear_flops(self, model, seq_len)
+        num_nonpara_attn_flops_per_token = (
+            12 * self.n_layers * self.n_heads * (self.dim // self.n_heads) * seq_len
+        )
+        return (
+            nparams,
+            num_para_linear_flops_per_token + num_nonpara_attn_flops_per_token,
+        )
