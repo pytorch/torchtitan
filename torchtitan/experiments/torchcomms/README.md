@@ -25,8 +25,10 @@ Locally tested with:
 - **FSDP** (`fully_shard`) - Fully Sharded Data Parallel
 - **TP** - Tensor Parallelism
 - **PP** - Pipeline Parallelism
+- **CP** - Context Parallelism
 - **EP** - Expert Parallelism
 - **compile** - `torch.compile` integration
+- **Async TP** - Async TP integration
 
 ### Performance
 
@@ -46,8 +48,6 @@ Locally tested with:
 
 ### Known Issues
 
-- **CP** (Context Parallelism) - Temporarily not working. Work in progress.
-- **Async TP** - Temporarily not working. Work in progress.
 - **Memory Overhead** - TorchComms requires higher peak memory usage. As a workaround, we need to reduce `local_batch_size` to avoid out of memory error.
 
 ## Roadmap
