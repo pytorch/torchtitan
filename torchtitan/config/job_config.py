@@ -29,8 +29,8 @@ class Job:
     print_config: bool = False
     """Print the job configs to terminal"""
 
-    config_save_path: str | None = "job_config.json"
-    """Path to save job config into, relative to dump folder"""
+    save_config_file: str | None = None
+    """Path to save job config into"""
 
     custom_config_module: str = ""
     """
@@ -923,9 +923,9 @@ class JobConfig:
         if self.job.print_config:
             logger.info(f"Running with configs: {self.to_dict()}")
 
-        if self.job.config_save_path is not None:
+        if self.job.save_config_file is not None:
             config_file = os.path.join(
-                self.job.dump_folder, self.job.config_save_path
+                self.job.dump_folder, self.job.save_config_file
             )
             if torch.distributed.is_initialized():
                 if torch.distributed.get_rank() == 0:
