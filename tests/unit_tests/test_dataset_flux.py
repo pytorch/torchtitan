@@ -12,6 +12,7 @@ from datasets import load_dataset
 
 from torchtitan.config import ConfigManager
 from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.models.flux.tokenizer import build_flux_tokenizer
 
 
 class TestFluxDataLoader(unittest.TestCase):
