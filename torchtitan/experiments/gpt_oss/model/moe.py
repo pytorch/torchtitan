@@ -16,6 +16,27 @@ from torchtitan.models.moe.utils import _permute, _unpermute
 from .args import GptOssModelArgs
 
 
+class ScaleBiasForward(torch.autograd.Function):
+    """
+    Custom autograd function that scales bias in forward pass but not in backward.
+
+    For tensor parallel MoE, we need to scale the bias by 1/tp_degree in forward
+    to cancel the extra reduction effect, but keep the gradient unchanged in backward.
+    """
+
+    @staticmethod
+    def forward(ctx, bias, tp_degree):
+        ctx.tp_degree = tp_degree
+        if tp_degree > 1:
+            return bias / tp_degree
+        return bias
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Don't scale the gradient - pass it through as-is
+        return grad_output, None
+
+
 def indices_padding_wrapper(func: Callable) -> Callable:
     """
     In order to use torch._grouped_mm, we need to make sure the number of
@@ -32,6 +53,7 @@ def indices_padding_wrapper(func: Callable) -> Callable:
         swiglu_limit: float,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
+        tp_degree: int = 1,
     ) -> torch.Tensor:
         num_local_experts = mlp1_weight.shape[0]
         ep_degree = num_tokens_per_expert.shape[0] // num_local_experts
@@ -48,6 +70,7 @@ def indices_padding_wrapper(func: Callable) -> Callable:
             swiglu_limit,
             x,
             num_tokens_per_expert,
+            tp_degree,
         )
 
         out = _unpermute(out, input_shape, permuted_indices)
@@ -75,6 +98,7 @@ def _run_experts_for_loop(
     swiglu_limit: float,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
+    tp_degree: int = 1,
 ) -> torch.Tensor:
     # NOTE: this would incur a synchronization between device and host
     num_tokens_per_expert = num_tokens_per_expert.tolist()
@@ -93,7 +117,9 @@ def _run_experts_for_loop(
     for expert_idx, x_expert in enumerate(x):
         h = torch.matmul(x_expert, mlp1_weight[expert_idx]) + mlp1_bias[expert_idx]
         h = swiglu(h, limit=swiglu_limit)
-        h = torch.matmul(h, mlp2_weight[expert_idx]) + mlp2_bias[expert_idx]
+        # Apply custom autograd function to scale bias in forward but not in backward
+        b2 = ScaleBiasForward.apply(mlp2_bias[expert_idx], tp_degree)
+        h = torch.matmul(h, mlp2_weight[expert_idx]) + b2
         out_experts_splits.append(h)
     out = torch.cat(out_experts_splits, dim=0)
 
@@ -111,11 +137,13 @@ def _run_experts_grouped_mm(
     swiglu_limit: float,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor | None,
+    tp_degree: int = 1,
 ) -> torch.Tensor:
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
     num_tokens_per_expert_long = num_tokens_per_expert.to(torch.long)
 
     h = torch._grouped_mm(x.bfloat16(), mlp1_weight.bfloat16(), offs=offsets)
+
     b1 = mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
     tail_slack = x.shape[0] - int(offsets[-1])
     if tail_slack:
@@ -125,7 +153,9 @@ def _run_experts_grouped_mm(
     h = swiglu(h, limit=swiglu_limit)
     h = torch._grouped_mm(h, mlp2_weight.bfloat16(), offs=offsets)
 
-    b2 = mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
+    # Apply custom autograd function to scale bias in forward but not in backward
+    b2_base = mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
+    b2 = ScaleBiasForward.apply(b2_base, tp_degree)
     tail_slack = x.shape[0] - int(offsets[-1])
     if tail_slack:  # padding
         b2 = torch.cat([b2, b2.new_zeros((tail_slack, b2.shape[-1]))], dim=0)
@@ -171,6 +201,14 @@ class GptOssGroupedExperts(nn.Module):
             mlp2_weight = self.mlp2_weight
             mlp2_bias = self.mlp2_bias
 
+        # Determine tp_degree from device mesh if available
+        tp_degree = 1
+        if isinstance(self.mlp1_weight, DTensor):
+            mesh_dim_names = self.mlp1_weight.device_mesh.mesh_dim_names
+            if "tp" in mesh_dim_names:
+                tp_dim_idx = mesh_dim_names.index("tp")
+                tp_degree = self.mlp1_weight.device_mesh.size(tp_dim_idx)
+
         if self.use_grouped_mm:
             if (
                 not isinstance(self.mlp1_weight, DTensor)
@@ -187,6 +225,7 @@ class GptOssGroupedExperts(nn.Module):
                 self.swiglu_limit,
                 x,
                 num_tokens_per_expert,
+                tp_degree,
             )
         else:
             return _run_experts_for_loop(
@@ -197,6 +236,7 @@ class GptOssGroupedExperts(nn.Module):
                 self.swiglu_limit,
                 x,
                 num_tokens_per_expert,
+                tp_degree,
             )
 
     def init_weights(self, init_std: float):
