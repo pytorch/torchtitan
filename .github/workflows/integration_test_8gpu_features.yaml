@@ -26,7 +26,6 @@ permissions:
 
 jobs:
   build-test:
-    needs: check-disk
     # TESTING: TO BE CHANGED BACK TO MAIN ONCE https://github.com/pytorch/test-infra/pull/7379 LANDS
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@expose_runner_temp
     strategy:
