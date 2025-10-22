@@ -630,6 +630,26 @@ class ActivationCheckpoint:
     https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
     """
 
+    preserve_rng_state: bool = False
+    """
+    If deterministic output compared to non-checkpointed passes is required, set
+    to true. Results in stashing and restoring the RNG state during each checkpoint,
+    may be slower. See https://docs.pytorch.org/docs/stable/checkpoint.html
+    for details.
+    """
+
+    determinism_check: str = "default"
+    """
+    A string specifying the determinism function. See
+    https://docs.pytorch.org/docs/stable/checkpoint.html for details.
+    """
+
+    debug: bool = False
+    """
+    Capture ac debug information. Will be slower. See
+    https://docs.pytorch.org/docs/stable/checkpoint.html for details.
+    """
+
 
 @dataclass
 class Compile:
@@ -888,15 +908,6 @@ class Debug:
 
     deterministic_warn_only: bool = False
     """Only warns about ops without deterministic implementations rather than erroring out  """
-
-    ac_preserve_rng_state: bool = False
-    """If deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower. See https://docs.pytorch.org/docs/stable/checkpoint.html for details."""
-
-    ac_determinism_check: str = "default"
-    """A string specifying the determinism function. See https://docs.pytorch.org/docs/stable/checkpoint.html for details."""
-
-    ac_debug: bool = False
-    """ Capture ac debug information. Will be slower. See https://docs.pytorch.org/docs/stable/checkpoint.html for details."""
 
     moe_force_load_balance: bool = False
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
