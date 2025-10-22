@@ -99,11 +99,11 @@ Use `--debug.deterministic_warn_only` to only warn about (not stop running) kern
 
 The following debug configs are available for AC.
 
-`ac_preserve_rng_state` - if deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower.
+`preserve_rng_state` - if deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower.
 
-`ac_determinism_check` - A string specifying the determinism function
+`determinism_check` - A string specifying the determinism function
 
-`ac_debug` - capture ac debug information. Will be slower.
+`debug` - capture ac debug information. Will be slower.
 
 See https://docs.pytorch.org/docs/stable/checkpoint.html for details.
 

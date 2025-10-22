@@ -84,7 +84,7 @@ def parallelize_deepseekv3(
         )
 
     if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config)
+        apply_ac(model, job_config.activation_checkpoint)
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
