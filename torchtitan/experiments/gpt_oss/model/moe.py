@@ -115,7 +115,10 @@ def _run_experts_for_loop(
     )
     out_experts_splits = []
     for expert_idx, x_expert in enumerate(x):
-        h = torch.matmul(x_expert, mlp1_weight[expert_idx].transpose(-2, -1)) + mlp1_bias[expert_idx]
+        h = (
+            torch.matmul(x_expert, mlp1_weight[expert_idx].transpose(-2, -1))
+            + mlp1_bias[expert_idx]
+        )
         h = swiglu(h, limit=swiglu_limit)
         # Apply custom autograd function to scale bias in forward but not in backward
         b2 = ScaleBiasForward.apply(mlp2_bias[expert_idx], tp_degree)
@@ -142,7 +145,9 @@ def _run_experts_grouped_mm(
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
     num_tokens_per_expert_long = num_tokens_per_expert.to(torch.long)
 
-    h = torch._grouped_mm(x.bfloat16(), mlp1_weight.transpose(-2, -1).bfloat16(), offs=offsets)
+    h = torch._grouped_mm(
+        x.bfloat16(), mlp1_weight.transpose(-2, -1).bfloat16(), offs=offsets
+    )
 
     b1 = mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
     tail_slack = x.shape[0] - int(offsets[-1])
