@@ -51,13 +51,12 @@ def build_torchcomms_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--compile.enable",
-                    "--parallelism.context_parallel_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.enable_async_tensor_parallel",
                 ],
             ],
-            "3D CP+async TP compile",
-            "3d_cp+asynctp_compile",
+            "2D dP+async TP compile",
+            "2d_dp+asynctp_compile",
             ngpu=8,
         ),
     ]
