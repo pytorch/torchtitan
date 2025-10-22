@@ -25,15 +25,6 @@ permissions:
       contents: read
 
 jobs:
-  check-disk:
-    runs-on: linux.rocm.gpu.gfx942.4
-    steps:
-      - name: Check disk usage
-        run: |
-          echo "Checking disk space on ROCm runner before container is created..."
-          df -h
-          echo "Finished checking disk space."
-
   build-test:
     needs: check-disk
     # TESTING: TO BE CHANGED BACK TO MAIN ONCE https://github.com/pytorch/test-infra/pull/7379 LANDS
@@ -81,18 +72,6 @@ jobs:
         python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
-
-        # debugging for CPU shared memory
-        # Show total and available disk space on the shared memory filesystem (/dev/shm)
-        echo "Running shared memory debug for ROCm runner..."
-        df -h /dev/shm
-        # Display mount information related to /dev/shm to verify the size and options
-        mount | grep /dev/shm
-        # List all current shared memory segments in the system
-        ipcs -m
-        # Display shared memory statistics from /proc/meminfo (total, free, used)
-        grep Shmem /proc/meminfo
-        echo "Finished debugging..."
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
