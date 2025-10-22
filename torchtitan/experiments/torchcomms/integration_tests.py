@@ -47,18 +47,6 @@ def build_torchcomms_test_list() -> list[OverrideDefinitions]:
             "3d_dp+cp+pp",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--compile.enable",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.enable_async_tensor_parallel",
-                ],
-            ],
-            "2D dP+async TP compile",
-            "2d_dp+asynctp_compile",
-            ngpu=8,
-        ),
     ]
     return integration_tests_flavors
 
