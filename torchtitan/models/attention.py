@@ -197,6 +197,11 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
         A mask modifier function that implements causal sliding window masking.
     """
 
+    if window_size < 1:
+        raise ValueError(
+            f"window_size must be >= 1 for sliding window attention mask, got {window_size}"
+        )
+
     def sliding_window_mod(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
     ) -> torch.Tensor:

@@ -183,9 +183,13 @@ class GptOssGroupedExperts(nn.Module):
         self.use_grouped_mm = use_grouped_mm
         self.swiglu_limit = swiglu_limit
 
-        self.mlp1_weight = nn.Parameter(torch.empty((num_experts, hidden_dim * 2, dim)))
+        self.mlp1_weight = nn.Parameter(
+            torch.empty((num_experts, hidden_dim * 2, dim))
+        )  # (num_experts, out_dim, in_dim)
         self.mlp1_bias = nn.Parameter(torch.empty((num_experts, hidden_dim * 2)))
-        self.mlp2_weight = nn.Parameter(torch.empty((num_experts, dim, hidden_dim)))
+        self.mlp2_weight = nn.Parameter(
+            torch.empty((num_experts, dim, hidden_dim))
+        )  # (num_experts, out_dim, in_dim)
         self.mlp2_bias = nn.Parameter(torch.empty((num_experts, dim)))
 
     def forward(
