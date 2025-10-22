@@ -18,15 +18,13 @@ from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 
 from torch.utils.data import IterableDataset
+
 from torchtitan.components.dataloader import ParallelAwareDataloader
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
-from torchtitan.experiments.flux.dataset.tokenizer import (
-    build_flux_tokenizer,
-    FluxTokenizer,
-)
 from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.models.flux.tokenizer import build_flux_tokenizer, FluxTokenizer
 from torchtitan.tools.logging import logger
 
 
@@ -146,7 +144,7 @@ DATASETS = {
         sample_processor=_cc12m_wds_data_processor,
     ),
     "cc12m-test": DatasetConfig(
-        path="torchtitan/experiments/flux/tests/assets/cc12m_test",
+        path="tests/assets/cc12m_test",
         loader=lambda path: load_dataset(
             path, split="train", data_files={"train": "*.tar"}, streaming=True
         ),
