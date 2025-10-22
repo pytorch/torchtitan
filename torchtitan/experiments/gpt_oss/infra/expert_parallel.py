@@ -15,7 +15,7 @@ class GptossTensorParallel(TensorParallel):
         module.register_parameter(
             "mlp1_weight",
             nn.Parameter(
-                distribute_tensor(module.mlp1_weight, device_mesh, [Shard(2)])
+                distribute_tensor(module.mlp1_weight, device_mesh, [Shard(1)])
             ),
         )  # Column-wise sharding
         module.register_parameter(
@@ -25,7 +25,7 @@ class GptossTensorParallel(TensorParallel):
         module.register_parameter(
             "mlp2_weight",
             nn.Parameter(
-                distribute_tensor(module.mlp2_weight, device_mesh, [Shard(1)])
+                distribute_tensor(module.mlp2_weight, device_mesh, [Shard(2)])
             ),
         )  # Row-wise sharding
         module.register_parameter(
@@ -42,7 +42,7 @@ class GptossExpertTensorParallel(ExpertTensorParallel):
         mod.register_parameter(
             "mlp1_weight",
             nn.Parameter(
-                distribute_tensor(mod.mlp1_weight, ep_tp_mesh, [Shard(0), Shard(2)])
+                distribute_tensor(mod.mlp1_weight, ep_tp_mesh, [Shard(0), Shard(1)])
             ),
         )  # Column-wise sharding
         mod.register_parameter(
@@ -54,7 +54,7 @@ class GptossExpertTensorParallel(ExpertTensorParallel):
         mod.register_parameter(
             "mlp2_weight",
             nn.Parameter(
-                distribute_tensor(mod.mlp2_weight, ep_tp_mesh, [Shard(0), Shard(1)])
+                distribute_tensor(mod.mlp2_weight, ep_tp_mesh, [Shard(0), Shard(2)])
             ),
         )  # Row-wise sharding
         mod.register_parameter(

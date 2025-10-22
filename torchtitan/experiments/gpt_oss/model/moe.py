@@ -115,11 +115,11 @@ def _run_experts_for_loop(
     )
     out_experts_splits = []
     for expert_idx, x_expert in enumerate(x):
-        h = torch.matmul(x_expert, mlp1_weight[expert_idx]) + mlp1_bias[expert_idx]
+        h = torch.matmul(x_expert, mlp1_weight[expert_idx].transpose(-2, -1)) + mlp1_bias[expert_idx]
         h = swiglu(h, limit=swiglu_limit)
         # Apply custom autograd function to scale bias in forward but not in backward
         b2 = ScaleBiasForward.apply(mlp2_bias[expert_idx], tp_degree)
-        h = torch.matmul(h, mlp2_weight[expert_idx]) + b2
+        h = torch.matmul(h, mlp2_weight[expert_idx].transpose(-2, -1)) + b2
         out_experts_splits.append(h)
     out = torch.cat(out_experts_splits, dim=0)
 
@@ -136,13 +136,13 @@ def _run_experts_grouped_mm(
     mlp2_bias: torch.Tensor,
     swiglu_limit: float,
     x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor | None,
+    num_tokens_per_expert: torch.Tensor,
     tp_degree: int = 1,
 ) -> torch.Tensor:
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
     num_tokens_per_expert_long = num_tokens_per_expert.to(torch.long)
 
-    h = torch._grouped_mm(x.bfloat16(), mlp1_weight.bfloat16(), offs=offsets)
+    h = torch._grouped_mm(x.bfloat16(), mlp1_weight.transpose(-2, -1).bfloat16(), offs=offsets)
 
     b1 = mlp1_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
     tail_slack = x.shape[0] - int(offsets[-1])
@@ -151,7 +151,7 @@ def _run_experts_grouped_mm(
     h = h + b1.to(h.dtype)
 
     h = swiglu(h, limit=swiglu_limit)
-    h = torch._grouped_mm(h, mlp2_weight.bfloat16(), offs=offsets)
+    h = torch._grouped_mm(h, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets)
 
     # Apply custom autograd function to scale bias in forward but not in backward
     b2_base = mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
@@ -178,9 +178,9 @@ class GptOssGroupedExperts(nn.Module):
         self.use_grouped_mm = use_grouped_mm
         self.swiglu_limit = swiglu_limit
 
-        self.mlp1_weight = nn.Parameter(torch.empty((num_experts, dim, hidden_dim * 2)))
+        self.mlp1_weight = nn.Parameter(torch.empty((num_experts, hidden_dim * 2, dim)))
         self.mlp1_bias = nn.Parameter(torch.empty((num_experts, hidden_dim * 2)))
-        self.mlp2_weight = nn.Parameter(torch.empty((num_experts, hidden_dim, dim)))
+        self.mlp2_weight = nn.Parameter(torch.empty((num_experts, dim, hidden_dim)))
         self.mlp2_bias = nn.Parameter(torch.empty((num_experts, dim)))
 
     def forward(
