@@ -109,7 +109,7 @@ def _run_experts_grouped_mm(
     w2: torch.Tensor,
     w3: torch.Tensor,
     x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor | None,
+    num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
