@@ -36,19 +36,18 @@ def build_torchcomms_test_list() -> list[OverrideDefinitions]:
             "3d_dp+tp+pp",
             ngpu=8,
         ),
-        # TODO: Enable CP and async TP tests once fixes are available in
-        # torchcomms nightly builds.
-        # OverrideDefinitions(
-        #    [
-        #        [
-        #            "--parallelism.context_parallel_degree 2",
-        #            "--parallelism.pipeline_parallel_degree 2",
-        #        ],
-        #    ],
-        #    "DP+CP+PP",
-        #    "3d_dp+cp+pp",
-        #    ngpu=8,
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                ],
+            ],
+            "DP+CP+PP",
+            "3d_dp+cp+pp",
+            ngpu=8,
+        ),
+        # TODO: Enable async TP test once fixes are available for running on CI nodes.
         # OverrideDefinitions(
         #    [
         #        [
