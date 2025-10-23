@@ -4,14 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import asdict, replace
+from dataclasses import fields
+from typing import Any
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
-from torchtitan.models.llama3 import llama3_configs
+from torchtitan.models.llama3 import llama3_args
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .datasets.mm_datasets import build_mm_dataloader
@@ -23,13 +24,18 @@ __all__ = [
     "parallelize_vlm",
     "Llama3Siglip2ModelArgs",
     "Llama3Siglip2Transformer",
-    "llama3_siglip2_configs",
+    "llama3_siglip2_args",
 ]
 
 
-llama3_siglip2_configs = {
+def _get_dict(obj) -> dict[str, Any]:
+    """Convert dataclass to dict, preserving nested dataclasses (unlike asdict)."""
+    return {field.name: getattr(obj, field.name) for field in fields(obj)}
+
+
+llama3_siglip2_args = {
     "debugmodel": Llama3Siglip2ModelArgs(
-        **asdict(replace(llama3_configs["debugmodel"], vocab_size=2048)),
+        **_get_dict(llama3_args["debugmodel_flex_attn"]),
         encoder=Siglip2ModelArgs(
             dim=128,
             ffn_dim=256,
@@ -42,9 +48,8 @@ llama3_siglip2_configs = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="llama3-siglip2",
         model_cls=Llama3Siglip2Transformer,
-        model_args=llama3_siglip2_configs,
+        model_args=llama3_siglip2_args,
         parallelize_fn=parallelize_vlm,
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,

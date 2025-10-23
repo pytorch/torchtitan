@@ -4,23 +4,39 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
+
+import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, List, Literal
+
+import torch
+
+from torchtitan.tools.logging import logger
 
 
 @dataclass
 class Job:
     config_file: str | None = None
-    """Job config file"""
+    """File to read job configs from"""
 
-    dump_folder: str = "./torchtitan/outputs"
+    dump_folder: str = "./outputs"
     """Folder to dump job outputs"""
 
     description: str = "default job"
     """Description of the job"""
 
-    print_args: bool = False
-    """Print the args to terminal"""
+    print_config: bool = False
+    """Print the job configs to terminal"""
+
+    save_config_file: str | None = None
+    """Path to save job config into"""
+
+    custom_config_module: str = ""
+    """
+    This option allows users to extend the existing JobConfig with a customized
+    JobConfig dataclass. Users need to ensure that the path can be imported.
+    """
 
 
 @dataclass
@@ -33,6 +49,20 @@ class Profiling:
 
     profile_freq: int = 10
     """How often to collect profile traces, in iterations"""
+
+    profiler_active: int = 1
+    """
+    The steps profiler is active for.
+
+    This is used to configure torch.profile.schedule.
+    """
+
+    profiler_warmup: int = 3
+    """
+    The number of warmup steps before the active step in each profiling cycle.
+
+    This is used to configure torch.profile.schedule.
+    """
 
     enable_memory_snapshot: bool = False
     """Whether to dump memory snapshot"""
@@ -292,9 +322,11 @@ class Parallelism:
     within an FSDP setup. `reshard_after_forward` controls parameter behavior after forward,
     trading off memory and communication. See torch's `fully_shard` API for more documentation
     on `reshard_after_forward`.
+
     The supported policies include "default", "always" and "never":
+
     - "default" applies default resharding behavior, implementing "smart defaults" for known optimal
-        scenarios.
+      scenarios.
     - "always" will enable `reshard_after_forward` for all forward passes.
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
@@ -313,18 +345,6 @@ class Parallelism:
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
     If using looped schedules, this still specifies the number of physical ranks, not the number
     of stages. Stages per rank are inferred from split points degree, and schedule.
-    """
-
-    pipeline_parallel_split_points: list[str] = field(default_factory=list)
-    """
-    DEPRECATED: Use module_fqns_per_model_part instead.
-    Specify comma-separated names of modules to use as the beginning of a split point.
-    e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
-    the first containing all the layers up to layers.0,
-    the second containing layers.0 and up to layers.2,
-    the third containing layers.2 and all the remaining layers.
-    Note: fully-automated splitting may be enabled in the future,
-    but currently the split points must be specified manually.
     """
 
     module_fqns_per_model_part: list[list[str]] | None = None
@@ -394,15 +414,21 @@ class Parallelism:
     expert_parallel_degree: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+
     Currently, it is supported with the following constraints:
+
     - when etp = tp:
+
       - cp <= ep <= dp_shard * cp
       - ep % cp == 0
       - dp_shard * cp % ep == 0
+
     - when etp = 1:
+
       - cp * tp <= ep <= dp_shard * cp * tp
       - ep % (cp * tp) == 0
       - dp_shard * cp * tp % ep == 0
+
     Note that this is still an experimental feature. Some constraints will be
     relaxed soon when we have more flexible DeviceMesh support.
     """
@@ -422,6 +448,28 @@ class Parallelism:
 class Checkpoint:
     enable: bool = False
     """Whether to enable checkpoint"""
+
+    enable_ft_dataloader_checkpoints: bool = True
+    """
+    Warning: Disabling this can have fault tolerant replicas training
+    over the same data multiple times. Use it with caution if training
+    over the same data is acceptable.
+
+    Used to enable checkpointing the dataloader index for fault tolerant training with torchft.
+
+    Fault tolerant training stores data loader index in the checkpoints, so that training can resume
+    without going over the same batch twice.
+
+    If enabled, data loader state is checkpointed. Otherwise, replicas
+    will train over the same data multiple times, which can result in
+    overfitting.
+
+    The failed replcia will still recover other state e.g. model
+    parameters from other replcias.
+
+    Note, if regular checkpointing is enabled, we also checkpoint the
+    data loader state. But when not using fault tolerance, the entire training starts from scratch.
+    """
 
     folder: str = "checkpoint"
     """
@@ -473,6 +521,14 @@ class Checkpoint:
     non-tensors. The default value is False.
     """
 
+    initial_load_in_hf_quantized: bool = False
+    """
+    Enable loading of HuggingFace's safetensors format with quantized state dict keys. The option
+    is only used when `initial_load_path` and `initial_load_path_in_hf` is specified. This will load
+    checkpoints in HF's model definition and dequantize on model weights if necessary. To support
+    this parameter, the model need to define proper HuggingFaceStorageReader to perform dequantize.
+    """
+
     last_save_model_only: bool = True
     """
     When last_save_model_only=True, only the model will be saved at the end of training,
@@ -501,6 +557,7 @@ class Checkpoint:
     async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
     """
     Which async checkpoint mode to use. Currently there are 3 different modes.
+
     - "disabled": synchronized checkpointing will be used.
     - "async": torch.distributed.checkpoint.async_save will be used.
     - "async_with_pinned_mem": this option utilizes a dedicated pinned memory space and creates a
@@ -547,10 +604,18 @@ class Checkpoint:
     Could be implemented as a separate script, but this way shares more code.
     """
 
+    load_only: bool = False
+    """
+    In certain scenarios, you may only need to load checkpoints for verification or debugging
+    purposes, without saving any new checkpoints. For example, you might use seed checkpoints
+    to validate model correctness. Enabling this option allows checkpoints to be loaded
+    without saving any during the training.
+    """
+
 
 @dataclass
 class ActivationCheckpoint:
-    mode: Literal["selective", "full", "none"] = "selective"
+    mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
 
     selective_ac_option: str = "2"
@@ -577,6 +642,24 @@ class ActivationCheckpoint:
     """
     Whether to stop recomputing early when all activations have already been
     rematerialized.
+    """
+
+    memory_budget: float = 0.5
+    """
+    When mode is set to "memory_budget", this value determines how much
+    partitioner in the compiler should trade off compute for memory.
+    0.0 corresponds to the activation memory from applying
+    activation checkpointing to the full compiled region, and 1.0 corresponds to
+    the activation memory from the default runtime-optimized strategy. Read here:
+    https://pytorch.org/blog/activation-checkpointing-techniques/
+    """
+
+    visualize_memory_budget_pareto: bool = False
+    """
+    This dumps out a SVG visualization of the expected runtime vs. activation
+    memory tradeoffs for all memory budget values from 0 to 1 in increments of
+    0.05 in {--job.dump_folder}/memory_budget_pareto folder. See an example here:
+    https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
     """
 
 
@@ -787,6 +870,8 @@ class Experimental:
 
     custom_args_module: str = ""
     """
+    DEPRECATED (moved to Job.custom_config_module). Will be removed soon.
+
     This option allows users to extend TorchTitan's existing JobConfig by extending
     a user defined JobConfig dataclass. Similar to ``--experimental.custom_model_path``, the user
     needs to ensure that the path can be imported.
@@ -948,3 +1033,20 @@ class JobConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def maybe_log(self) -> None:
+        if self.job.print_config:
+            logger.info(f"Running with configs: {self.to_dict()}")
+
+        if self.job.save_config_file is not None:
+            config_file = os.path.join(self.job.dump_folder, self.job.save_config_file)
+            if torch.distributed.is_initialized():
+                if torch.distributed.get_rank() == 0:
+                    os.makedirs(os.path.dirname(config_file), exist_ok=True)
+                    with open(config_file, "w") as f:
+                        json.dump(self.to_dict(), f, indent=2)
+                logger.info(f"Saved job configs to {config_file}")
+            else:
+                logger.warning(
+                    "Job configs logging is disabled due to torch.distributed not initialized."
+                )

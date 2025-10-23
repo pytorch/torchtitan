@@ -22,7 +22,7 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.config import JobConfig
-from torchtitan.datasets import DatasetConfig
+from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
 from ..model.args import SpecialTokens
@@ -199,6 +199,14 @@ MM_DATASETS = {
         loader=lambda path: load_dataset(path, split="train", streaming=True),
         sample_processor=_process_cc12_wd_sample,
     ),
+    "cc12m-test": DatasetConfig(
+        # TODO: move test cc12m dataset to core test folder
+        path="torchtitan/experiments/flux/tests/assets/cc12m_test",
+        loader=lambda path: load_dataset(
+            path, split="train", data_files={"train": "*.tar"}, streaming=True
+        ),
+        sample_processor=_process_cc12_wd_sample,
+    ),
 }
 
 
@@ -218,8 +226,8 @@ def _validate_mm_dataset(
     return path, config.loader, config.sample_processor
 
 
-class MultiModalDataset(IterableDataset, Stateful):
-    """MultiModal Dataset with support for sample packing."""
+class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
+    """HuggingFace MultiModal Dataset with support for sample packing."""
 
     def __init__(
         self,
@@ -395,7 +403,7 @@ def build_mm_dataloader(
     packing_buffer_size = job_config.data.packing_buffer_size
     special_tokens = SpecialTokens.from_tokenizer(tokenizer)
 
-    dataset = MultiModalDataset(
+    dataset = HuggingFaceMultiModalDataset(
         dataset_name=job_config.training.dataset,
         dataset_path=dataset_path,
         tokenizer=tokenizer,

@@ -7,8 +7,11 @@
 import einops as E
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.llama3 import Transformer as Llama3
+from torchtitan.protocols.model import AttentionMasksType
 
 from ..datasets.mm_datasets import SpecialTokens
 
@@ -71,28 +74,48 @@ class Llama3Siglip2Transformer(Llama3):
         if self.projector is not None:
             self.projector.init_weights()
 
+    def get_attention_masks(
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
+    ) -> AttentionMasksType:
+        masks = super().get_attention_masks(input_batch, tokenizer, extra_inputs)
+        assert isinstance(masks, BlockMask)
+        if self.encoder is not None:
+            encoder_masks = self.encoder.get_attention_masks(
+                input_batch, tokenizer, extra_inputs
+            )
+            assert isinstance(encoder_masks, BlockMask)
+        return {"llama3_masks": masks, "encoder_masks": encoder_masks}
+
     def forward(
         self,
         tokens: torch.Tensor,
         pixel_values: torch.Tensor,
         grid_thw: torch.Tensor,
         special_tokens: SpecialTokens,
-        input_batch: torch.Tensor | None = None,
+        attention_masks: AttentionMasksType | None = None,
     ):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h_BSD = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         if self.encoder is not None:
+            assert (
+                attention_masks is not None
+            ), "encoder only allows FlexAttention, so the llama3 must use FlexAttention as well."
             grid_hw = grid_thw[:, :, 1:]  # Siglip2 only support image hw
             pixel_masks = E.reduce(grid_hw != -1, "n l hw -> n l", reduction="all")
-            i_NLD = self.encoder(pixel_values, pixel_masks, grid_hw)
+            i_NLD = self.encoder(
+                pixel_values, pixel_masks, grid_hw, attention_masks["encoder_masks"]
+            )
             i_NLD = self.projector(i_NLD)
             h_BSD = _scatter_img_tokens(
                 h_BSD, tokens, i_NLD, pixel_masks, special_tokens.img_id
             )
 
         for layer in self.layers.values():
-            h_BSD = layer(h_BSD, self.freqs_cis)
+            h_BSD = layer(h_BSD, self.freqs_cis, attention_masks["llama3_masks"])
 
         h_BSD = self.norm(h_BSD) if self.norm else h_BSD
         output = self.output(h_BSD) if self.output else h_BSD

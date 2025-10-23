@@ -8,12 +8,13 @@
 import re
 from typing import Any
 
+import torch
+from torch.distributed.checkpoint import HuggingFaceStorageReader
+
 from torch.distributed.tensor import DTensor
 from torchtitan.models.utils import MoEStateDictAdapter
 
 from .args import DeepSeekV3ModelArgs
-
-from .quantization import calculate_scale_shape, dequantize_from_fp8
 
 
 class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
@@ -70,60 +71,33 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 }
             )
 
-    def _dequantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def get_hf_storage_reader(
+        self, path: str, from_quantized: bool = False
+    ) -> HuggingFaceStorageReader:
         """
-        Dequantize the weights from float8 to float32.
+        Override default get_hf_storage_reader function to return QuantizedHFStorageReader.
         """
+        if from_quantized:
+            from torch.distributed.checkpoint.quantized_hf_storage import (
+                QuantizedHuggingFaceStorageReader,
+            )
 
-        scale_inv_keys = []
-        for key, weight in state_dict.items():
-            if key.endswith(".weight") and key + "_scale_inv" in state_dict:
-                scale_inv = state_dict[key + "_scale_inv"]
-                dequantized_weight = dequantize_from_fp8(
-                    weight, scale_inv, dtype=torch.float32
-                )
-                # update the weight and remove the scale_inv tensor
-                state_dict[key] = dequantized_weight
-                scale_inv_keys.append(key + "_scale_inv")
-
-        for key in scale_inv_keys:
-            state_dict.pop(key)
-
-        return state_dict
-
-    def _add_quantization_scale_inv_tensors(
-        self, state_dict: dict[str, Any]
-    ) -> dict[str, Any]:
-        """
-        Add quantization scale tensors the state_dict.
-        """
-        non_quantized_keys = [
-            "input_layernorm.weight",
-            "post_attention_layernorm.weight",
-            "norm.weight",
-            "lm_head.weight",
-            "embed_tokens.weight",
-            "mlp.gate.weight",
-        ]
-
-        weight_scale_inv_state_dict = {}
-        for key, value in state_dict.items():
-            if key.endswith(".weight") and not any(
-                non_quantized_key in key for non_quantized_key in non_quantized_keys
-            ):
-                expected_scale_shape = calculate_scale_shape(value)
-                # add weight_scale_inv to the state_dict
-                weight_scale_inv_state_dict[key + "_scale_inv"] = torch.ones(
-                    expected_scale_shape, dtype=torch.float32
-                )
-
-        state_dict.update(weight_scale_inv_state_dict)
-        return state_dict
+            # NOTE: Now we use Quantized HF storage reader to read DeepSeek-V3 671B model.
+            # If loading checkpoints without quantization, use HuggingFaceStorageReader instead
+            BLOCK_SIZE = 128
+            return QuantizedHuggingFaceStorageReader(
+                path=path,
+                target_dtype=torch.float32,
+                block_size=BLOCK_SIZE,
+                thread_count=4,
+            )
+        else:
+            return HuggingFaceStorageReader(path)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
-        2. Split the GroupedExperts' weight into separate expert's wegiht.
+        2. Split the GroupedExperts' weight into separate expert's weight.
         """
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
@@ -172,24 +146,16 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
 
-        # Prepare for dequantization
-        hf_state_dict_with_scale_inv = self._add_quantization_scale_inv_tensors(
-            hf_state_dict
-        )
-        return hf_state_dict_with_scale_inv
+        return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
         2. Convert between the HF shape and the torchtitan shape.
-        3. Concate separate expert's wegiht into GroupedExperts' weight.
+        3. Concat separate expert's weight into GroupedExperts' weight.
         """
 
-        # dequantize the tensor in state_dict and remove the scale_inv tensor
-
-        hf_state_dict = self._dequantize(hf_state_dict)
         state_dict = {}
-
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
 
         for key, value in hf_state_dict.items():
@@ -205,7 +171,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 if titan_abstract_key not in expert_weights_by_layer[layer_num]:
                     expert_weights_by_layer[layer_num][titan_abstract_key] = {}
                 expert_weights_by_layer[layer_num][titan_abstract_key][
-                    expert_num
+                    int(expert_num)
                 ] = value
 
                 if isinstance(value, DTensor):
@@ -215,7 +181,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                         layer_num,
                         value.device_mesh,
                     )
-                else:  # keep this path to be compatibile with offline conversion
+                else:  # keep this path to be compatible with offline conversion
                     stacked_value = self._concatenate_expert_weights(
                         expert_weights_by_layer,
                         titan_abstract_key,

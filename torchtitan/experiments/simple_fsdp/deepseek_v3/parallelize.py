@@ -11,12 +11,15 @@ from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.llama4.infra.parallelize import apply_moe_ep_tp
-from torchtitan.models.deepseek_v3.infra.parallelize import apply_non_moe_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ac
+from torchtitan.models.deepseek_v3.infra.parallelize import (
+    apply_ac,
+    apply_moe_ep_tp,
+    apply_non_moe_tp,
+)
 from torchtitan.tools.logging import logger
 
 from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
+
 
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
@@ -55,11 +58,13 @@ def parallelize_deepseekv3(
                 "Currently, float8 tensorwise TP is not tested for deepseekv3"
             )
 
+        use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
         apply_non_moe_tp(
             model,
             world_mesh["tp"],
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
+            use_flex_attn=use_flex_attn,
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
@@ -125,6 +130,13 @@ def parallelize_deepseekv3(
                 ):
                     experts_shard_dim = 1
 
+                # when EP is enable, the routed experts' gradient reduction is done over
+                # dp_mod_ep_mesh instead of whole dp_mesh.
+                # we add a `fsdp_gradient_divide_factor` to scale gradient over dp_mesh
+                # to be consistent with data.
+                # TODO (ruisizhang123): update the logic following the link below instead
+                # of using a reduction_divide_factor
+                # https://github.com/pytorch/torchtitan/pull/1803#discussion_r2415190883
                 transformer_block.moe.experts = data_parallel(
                     transformer_block.moe.experts,
                     dp_mod_ep_mesh,
@@ -132,11 +144,8 @@ def parallelize_deepseekv3(
                     ac_mode=job_config.activation_checkpoint.mode,
                     mp_policy=mp_policy,
                     shard_dim=experts_shard_dim,
+                    reduction_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
                 )
-                # TODO(ruisizhang123): support set_gradient_divide_factor in simplefsdp
-                # transformer_block.moe.experts.set_gradient_divide_factor(
-                #     parallel_dims.fsdp_gradient_divide_factor,
-                # )
 
         model = data_parallel(
             model,

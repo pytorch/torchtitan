@@ -676,6 +676,64 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    def test_load_only_prevents_saving(self, mock_save, mock_rank):
+        """
+        Test that load_only=True prevents checkpoint saving.
+        """
+        mock_save.side_effect = self.fake_save
+
+        # Configure load_only=True
+        cfg = self.job_config.checkpoint
+        cfg.load_only = True
+        cfg.interval = 1  # Set low interval to ensure saves would normally trigger
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
+        )
+
+        # Test various save conditions that would normally trigger saves
+        manager.save(curr_step=1)  # Regular step save
+        self.assertEqual(mock_save.call_count, 0)
+
+        manager.save(curr_step=5)  # Interval-based save
+        self.assertEqual(mock_save.call_count, 0)
+
+        manager.save(curr_step=10, last_step=True)  # Last step save
+        self.assertEqual(mock_save.call_count, 0)
+
+        manager.close()
+
+        # Verify that saves work normally when load_only=False
+        mock_save.reset_mock()
+        cfg.load_only = False
+
+        manager2 = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
+        )
+
+        manager2.save(curr_step=1)  # Should trigger save now
+        self.assertEqual(mock_save.call_count, 1)
+
+        manager2.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.load")
     @mock.patch("torchtitan.components.checkpoint.dcp.save")
     def test_verify_prefix(self, mock_save, mock_load, mock_rank):

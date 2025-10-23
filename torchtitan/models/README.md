@@ -40,7 +40,7 @@ The folder should be organized as follows
 - `__init__.py`
   - A dictionary of the actual model configurations, of the type `[str: ModelArgs]`.
   - Define `get_train_spec` to return a [`TrainSpec`](/torchtitan/protocols/train_spec.py), consisting a tuple of
-    - model name, model class, model args
+    - model class, model args
       - Model name should be the same as the folder name, which should be added to `torchtitan/models/__init__.py` or ``torchtitan/experiments/__init__.py``.
     - parallelizing function, pipelining function
     - builder functions for optimizer, lr scheduler, data loader, tokenizer, and loss function

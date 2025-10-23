@@ -16,8 +16,7 @@
 
 </div>
 
-`torchtitan` is currently in a pre-release state and under extensive development. We showcase training Llama 3.1 LLMs at scale, and are working on other types of generative AI models, including LLMs with MoE architectures, multimodal LLMs, and diffusion models, in the [`experiments`](torchtitan/experiments) folder.
-To use the latest features of `torchtitan`, we recommend using the most recent PyTorch nightly.
+`torchtitan` is under extensive development. To use the latest features of `torchtitan`, we recommend using the most recent PyTorch nightly.
 
 
 ## Latest News
@@ -25,13 +24,10 @@ To use the latest features of `torchtitan`, we recommend using the most recent P
 - [2025/07] We published [instructions](/torchtitan/models/README.md) on how to add a model to `torchtitan`.
 - [2025/07] We released `torchtitan` [v0.1.0](https://github.com/pytorch/torchtitan/releases), and also set up nightly builds.
 - [2025/04] Our paper was accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620).
-- [2025/04] [Llama 4](torchtitan/experiments/llama4/) initial support is available as an experiment.
 - [2025/04] Training the diffusion model [FLUX](torchtitan/experiments/flux/) with FSDP/HSDP is available as an experiment.
 - [2025/04] The frontend implementation of [SimpleFSDP](torchtitan/experiments/simple_fsdp/), a compiler-based FSDP framework, is available as an experiment.
 - [2024/12] GPU MODE [lecture](https://www.youtube.com/watch?v=VYWRjcUqW6w) on torchtitan.
-- [2024/11] [Presentation](https://www.alluxio.io/videos/ai-ml-infra-meetup-torchtitan-one-stop-pytorch-native-solution-for-production-ready-llm-pre-training) at an AI/ML Infra Meetup.
 - [2024/07] [Presentation](https://pytorch2024.sched.com/event/1fHn3) at PyTorch Conference 2024.
-- [2024/04] [Intro video](https://youtu.be/ee5DOEqD35I?si=_B94PbVv0V5ZnNKE) - learn more about `torchtitan` in under 4 minutes.
 
 
 ## Overview
@@ -46,10 +42,10 @@ The Guiding Principles when building `torchtitan`
 * Bias towards a clean, minimal codebase while providing basic reusable / swappable components.
 
 `torchtitan` has been showcasing PyTorch's latest distributed training features, via pretraining Llama 3.1 LLMs of various sizes.
-To accelerate contributions to and innovations around torchtitan, we are hosting a new [`experiments`](torchtitan/experiments) folder. We look forward to your contributions!
+To accelerate contributions to and innovations around torchtitan, we host an [`experiments`](torchtitan/experiments) folder. We look forward to your contributions!
 
 
-## Llama 3.1 pretraining
+## Llama 3.1 training
 
 ### Key features available
 
@@ -93,17 +89,17 @@ You may want to see how the model is defined or how parallelism techniques are a
 
 ## Installation
 
-One can choose to install `torchtitan` from a stable release, a nightly build, or directly run the source code. Please [install PyTorch](https://pytorch.org/get-started/locally/) before proceeding.
+One can directly run the source code, or install `torchtitan` from a nightly build, or a stable release.
 
-### Stable releases
-One can install the latest [stable release](https://github.com/pytorch/torchtitan/releases) of `torchtitan` via `pip` or `conda`.
-```sh
-pip install torchtitan
+### From source
+
+This method requires the nightly build of PyTorch, or the latest PyTorch built [from source](https://github.com/pytorch/pytorch?tab=readme-ov-file#from-source).
+
+```bash
+git clone https://github.com/pytorch/torchtitan
+cd torchtitan
+pip install -r requirements.txt
 ```
-```sh
-conda install conda-forge::torchtitan
-```
-Note that each stable release pins the nightly versions of `torch` and `torchao`. Please see [release.md](docs/release.md) for more details.
 
 ### Nightly builds
 
@@ -114,15 +110,15 @@ pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu
 pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu126
 ```
 
-### From source
-
-This method requires the nightly build of PyTorch or the latest PyTorch built [from source](https://github.com/pytorch/pytorch?tab=readme-ov-file#from-source).
-
-```bash
-git clone https://github.com/pytorch/torchtitan
-cd torchtitan
-pip install -r requirements.txt
+### Stable releases
+One can install the latest [stable release](https://github.com/pytorch/torchtitan/releases) of `torchtitan` via `pip` or `conda`.
+```sh
+pip install torchtitan
 ```
+```sh
+conda install conda-forge::torchtitan
+```
+Note that each stable release pins the nightly versions of `torch` and `torchao`. Please see [release.md](docs/release.md) for more details.
 
 ### Downloading a tokenizer
 
