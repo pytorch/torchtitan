@@ -41,7 +41,7 @@ jobs:
             docker-image: torchtitan-ubuntu-20.04-clang12
             index-url: https://download.pytorch.org/whl/nightly/cu126
           - name: rocm
-            runner: linux.rocm.gpu.gfx942.4
+            runner: linux.rocm.gpu.gfx942.8
             gpu-arch-type: rocm
             gpu-arch-version: "7.0"
             docker-image: torchtitan-rocm-ubuntu-22.04-clang12
@@ -77,4 +77,4 @@ jobs:
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
         export TEST_WITH_ROCM=$([[ "${{ matrix.gpu-arch-type }}" == "rocm" ]] && echo 1 || echo 0)
-        python -m tests.integration_tests.run_tests --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
+        python -m tests.integration_tests.run_tests --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
