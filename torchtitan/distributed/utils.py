@@ -274,7 +274,7 @@ def init_distributed(
     if comm_config.trace_buf_size > 0:
         # dump on timeout by default if trace buffer is enabled
         _warn_overwrite_env(DUMP_ON_TIMEOUT, "1")
-        # ROCm runner doesn't have write permissions for current working directory. 
+        # ROCm runner doesn't have write permissions for current working directory.
         # Hence, using HOME directory to save results.
         if base_folder and os.access(base_folder, os.W_OK):
             dump_base = base_folder
