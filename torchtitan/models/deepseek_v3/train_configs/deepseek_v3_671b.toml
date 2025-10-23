@@ -1,7 +1,7 @@
 [job]
 dump_folder = "./outputs"
 description = "DeepSeek-V3 671B model training"
-print_args = false
+print_config = false
 
 [profiling]
 enable_profiling = false
@@ -65,7 +65,7 @@ mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]
-enable=true
+enable = true
 components = ["loss"] # ["model", "loss"]
 
 [quantize.linear.float8]

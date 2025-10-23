@@ -20,12 +20,12 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.llama4.infra.parallelize import (
+from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.llama4.infra.parallelize import (
     apply_compile,
     apply_fsdp,
     apply_moe_ep_tp,
 )
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.tools.logging import logger
 
 
@@ -84,6 +84,7 @@ def parallelize_deepseekv3(
             world_mesh["tp"],
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
+            use_flex_attn=use_flex_attn,
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
@@ -113,6 +114,7 @@ def parallelize_deepseekv3(
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
+            base_folder=job_config.job.dump_folder,
         )
 
     if model_compile_enabled:
@@ -180,6 +182,7 @@ def apply_non_moe_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
+    use_flex_attn: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -209,6 +212,18 @@ def apply_non_moe_tp(
         PrepareModuleInput,
     )
 
+    if use_flex_attn:
+        attention_kernel_plan = prepare_module_input(
+            input_layouts=(Shard(1), Shard(1), Shard(1)),
+            desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
+            use_local_output=True,
+        )
+    else:
+        attention_kernel_plan = prepare_module_input(
+            input_layouts=(Shard(1), Shard(1), Shard(1)),
+            desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
+            use_local_output=True,
+        )
     # Apply tensor + sequence parallelism to every transformer block
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
@@ -217,8 +232,8 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate()),
-                desired_input_layouts=(Replicate(), Replicate()),
+                input_layouts=(Shard(1), Replicate(), None),
+                desired_input_layouts=(Replicate(), Replicate(), None),
                 input_kwarg_layouts={
                     "position_ids": Replicate(),
                 },
@@ -233,11 +248,7 @@ def apply_non_moe_tp(
             "attention.wkv_b": colwise_parallel(use_local_output=False),
             "attention.kv_norm": NoParallel(use_local_output=False),
             # NOTE: use_local_output=True so that the inputs to FlexAttention are plain Tensors
-            "attention.sdpa": prepare_module_input(
-                input_layouts=(Shard(1), Shard(1), Shard(1)),
-                desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
-                use_local_output=True,
-            ),
+            "attention.inner_attention": attention_kernel_plan,
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }

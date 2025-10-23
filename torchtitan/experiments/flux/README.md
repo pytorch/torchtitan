@@ -29,7 +29,7 @@ Run the following command to train the model on a single GPU:
 
 ```
 
-If you want to train with other model config, run the following command:
+If you want to train with other model args, run the following command:
 ```bash
 CONFIG_FILE="./torchtitan/experiments/flux/train_configs/flux_schnell_model.toml" ./torchtitan/experiments/flux/run_train.sh
 ```
@@ -50,7 +50,7 @@ python -m torchtitan.experiments.flux.tests.integration_tests <output_dir>
 
 
 ## Supported Features
-- Parallelism: The model supports FSDP, HSDP for training on multiple GPUs.
+- Parallelism: The model supports FSDP, HSDP, CP for training on multiple GPUs.
 - Activation checkpointing: The model uses activation checkpointing to reduce memory usage during training.
 - Distributed checkpointing and loading.
     - Notes on the current checkpointing implementation: To keep the model weights are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of evaluation, and sharding the weights of the module if it is a FSDPModule.
@@ -59,6 +59,6 @@ python -m torchtitan.experiments.flux.tests.integration_tests <output_dir>
 
 
 ## TODO
-- [ ] More parallesim support (Tensor Parallelism, Context Parallelism, etc)
+- [ ] More parallesim support (Tensor Parallelism, Pipeline Parallelism, etc)
 - [ ] Implement the num_flops_per_token calculation in get_nparams_and_flops() function
 - [ ] Add `torch.compile` support

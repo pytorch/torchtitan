@@ -7,6 +7,7 @@
 # This file provides the util functions to apply activation checkpointing to the model.
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
+import os
 from collections import defaultdict
 
 import torch
@@ -294,6 +295,7 @@ def apply_ac(
     model_compile_enabled: bool = False,
     use_flex_attn: bool = False,
     op_sac_save_list: set[torch._ops.OpOverload] | None = None,
+    base_folder: str = "",
 ) -> None:
     """Apply activation checkpointing to the model.
 
@@ -312,15 +314,27 @@ def apply_ac(
         None
     """
 
-    for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = _apply_ac_to_transformer_block(
-            transformer_block,
-            ac_config,
-            base_fqn=f"layers.{layer_id}",
-            model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
-            op_sac_save_list=op_sac_save_list,
-        )
-        model.layers.register_module(layer_id, transformer_block)
+    if ac_config.mode == "memory_budget":
+        assert model_compile_enabled, "Memory budget mode requires model to be compiled"
+        if ac_config.visualize_memory_budget_pareto:
+            pareto_dir = os.path.join(base_folder, "memory_budget_pareto")
+            if not os.path.exists(pareto_dir):
+                os.makedirs(pareto_dir, exist_ok=True)
+            torch._functorch.config.memory_budget_pareto_dir = pareto_dir
+            torch._functorch.config.visualize_memory_budget_pareto = True
+
+        torch._functorch.config.activation_memory_budget = ac_config.memory_budget
+        logger.info(f"Selected {ac_config.memory_budget} budget option")
+    else:
+        for layer_id, transformer_block in model.layers.named_children():
+            transformer_block = _apply_ac_to_transformer_block(
+                transformer_block,
+                ac_config,
+                base_fqn=f"layers.{layer_id}",
+                model_compile_enabled=model_compile_enabled,
+                use_flex_attn=use_flex_attn,
+                op_sac_save_list=op_sac_save_list,
+            )
+            model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")

@@ -10,40 +10,25 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
-from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.protocols.train_spec import TrainSpec
 
-from ..llama3 import (
-    llama3_configs,
-    Llama3StateDictAdapter,
-    parallelize_llama,
-    pipeline_llama,
-    Transformer,
-    TransformerModelArgs,
-)
-
-__all__ = [
-    "parallelize_llama",
-    "pipeline_llama",
-    "TransformerModelArgs",
-    "Transformer",
-    "llama3_configs",
-]
+from ..llama3 import llama3_args, Llama3StateDictAdapter, parallelize_llama, Transformer
 
 
 def get_train_spec() -> TrainSpec:
     return FaultTolerantTrainSpec(
-        name="llama3_ft",
         model_cls=Transformer,
-        model_args=llama3_configs,
+        model_args=llama3_args,
         parallelize_fn=parallelize_llama,
-        pipelining_fn=pipeline_llama,
-        fragment_fn=fragment_llm,
+        pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_hf_dataloader,
+        build_dataloader_fn=build_text_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
         state_dict_adapter=Llama3StateDictAdapter,
+        fragment_fn=fragment_llm,
     )

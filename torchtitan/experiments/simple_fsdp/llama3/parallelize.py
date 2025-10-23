@@ -14,6 +14,8 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_tp
 from torchtitan.tools.logging import logger
 
+from ..backend import get_compile_backend
+
 from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
 
 
@@ -85,6 +87,7 @@ def parallelize_llama(
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
+            base_folder=job_config.job.dump_folder,
         )
 
     # apply data parallel
@@ -122,6 +125,13 @@ def parallelize_llama(
 
     if job_config.compile.enable and "model" in job_config.compile.components:
         torch._inductor.config.reorder_for_peak_memory = False
-        model = torch.compile(model, backend=job_config.compile.backend, fullgraph=True)
+        backend = (
+            job_config.compile.model_backend_override or job_config.compile.backend
+        )
+        model = torch.compile(
+            model,
+            backend=get_compile_backend(backend),
+            fullgraph=True,
+        )
 
     return model

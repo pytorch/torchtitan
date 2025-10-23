@@ -1,8 +1,7 @@
-
 [job]
 dump_folder = "./outputs"
 description = "Flux-dev model"
-print_args = false
+custom_config_module = "torchtitan.experiments.flux.job_config"
 
 [profiling]
 enable_profiling = false
@@ -48,9 +47,6 @@ autoencoder_path = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensor
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
-
-[experimental]
-custom_args_module = "torchtitan.experiments.flux.job_config"
 
 [activation_checkpoint]
 mode = "full"

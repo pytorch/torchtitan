@@ -7,7 +7,7 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from torch import nn
 
@@ -15,6 +15,14 @@ from torchtitan.config import JobConfig
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
+
+
+@dataclass
+class RoPEScalingArgs:
+    scaling_factor: float = 8.0
+    low_freq_factor: float = 1.0
+    high_freq_factor: float = 4.0
+    original_max_position_embeddings: int = 8192
 
 
 @dataclass
@@ -28,7 +36,7 @@ class TransformerModelArgs(BaseModelArgs):
     ffn_dim_multiplier: float | None = None
     norm_eps: float = 1e-5
     rope_theta: float = 10000
-    rope_scaling: bool = False
+    rope_scaling_args: RoPEScalingArgs | None = field(default_factory=RoPEScalingArgs)
     head_dim: int | None = None
     hidden_dim: int | None = None
     use_qkv_bias: bool = False
