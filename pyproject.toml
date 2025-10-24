@@ -39,7 +39,7 @@ dev = [
     "pytest-cov",
     "wandb"
 ]
-nanosets = ["datatrove"]
+nanosets = ["datatrove", "numba"]
 transformers = ["transformers"]
 
 [tool.setuptools.dynamic]

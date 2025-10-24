@@ -215,7 +215,7 @@ class Training:
     dataset_folders: list[str] = field(default_factory=list)
     """List of folders containing tokenized datasets for Nanoset"""
 
-    dataset_weights: list[str] | None = None
+    dataset_weights: list[float] | None = None
     """Optional list of weights for weighted sampling from datasets"""
 
     dataset_random_seed: int = 1234

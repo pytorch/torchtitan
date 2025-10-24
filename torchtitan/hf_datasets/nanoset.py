@@ -7,7 +7,7 @@ import torch
 from datatrove.utils.dataset import DatatroveFolderDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import Tokenizer
-from torchtitan.config_manager import JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
@@ -73,11 +73,10 @@ class Nanoset(torch.utils.data.Dataset):
             self.datatrove_datasets.append(
                 DatatroveFolderDataset(
                     folder_path=dataset_folder,
-                    filename_pattern=os.path.join(dataset_folder, "*.ds"),
                     seq_len=sequence_length,
                     recursive=False,
                     token_size=token_size,
-                    shuffle=True,
+                    shuffle=False,
                 )
             )
 
@@ -273,7 +272,7 @@ def build_nanoset_dataloader(
     nanoset = IterableNanoset(
         dataset_folders=job_config.training.dataset_folders,
         sequence_length=job_config.training.seq_len,
-        token_size=4 if tokenizer.n_words > 65535 else 2,
+        token_size=4 if tokenizer.get_vocab_size() > 65535 else 2,
         dataset_weights=job_config.training.dataset_weights,
         world_size=dp_world_size,
         rank=dp_rank,
