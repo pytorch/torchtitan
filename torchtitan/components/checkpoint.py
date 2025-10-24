@@ -189,21 +189,32 @@ class CheckpointManager:
         self.enable = checkpoint_config.enable
         self.load_only = checkpoint_config.load_only
 
+        self.states = states
+        self.states.update(
+            {
+                MODEL: ModelWrapper(model_parts),
+                OPTIMIZER: optimizers,
+                DATALOADER: dataloader,
+                LR_SCHEDULER: lr_schedulers,
+            }
+        )
+
+        ft_inner_manager = (
+            ft_manager.manager if ft_manager and ft_manager.enabled else None
+        )
         self.ft_manager = (
-            ft_manager.manager
-            if ft_manager
-            and ft_manager.enabled
-            and checkpoint_config.enable_ft_dataloader_checkpoints
+            ft_inner_manager
+            if ft_inner_manager and checkpoint_config.enable_ft_dataloader_checkpoints
             else None
         )
 
-        if ft_manager and ft_manager.enabled and not self.ft_manager:
+        if ft_inner_manager and not self.ft_manager:
             logger.warn(
                 "Fault tolerance is enabled but enable_ft_dataloader_checkpoints is False. "
                 "This means replicas can retrain over the same data multiple times, which can result in overfitting."
             )
 
-        if self.ft_manager:
+        if ft_inner_manager:
             optimizers.init_cache_state_dict()
 
             def state_dict():
@@ -223,7 +234,7 @@ class CheckpointManager:
                 for k, v in state_dict.items():
                     self.states[k].load_state_dict(v)
 
-            self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
+            ft_inner_manager.set_state_dict_fns(load_state_dict, state_dict)
             self.ft_replica_id = ft_manager.replica_id
 
         async_mode = checkpoint_config.async_mode.lower()
@@ -234,15 +245,6 @@ class CheckpointManager:
         if not self.enable and self.ft_manager is None:
             return
 
-        self.states = states
-        self.states.update(
-            {
-                MODEL: ModelWrapper(model_parts),
-                OPTIMIZER: optimizers,
-                DATALOADER: dataloader,
-                LR_SCHEDULER: lr_schedulers,
-            }
-        )
         self.ft_states = {DATALOADER: dataloader}
 
         self.staging = False
