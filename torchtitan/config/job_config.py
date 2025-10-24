@@ -853,7 +853,7 @@ class Experimental:
     DEPRECATED (moved to Job.custom_config_module). Will be removed soon.
 
     This option allows users to extend TorchTitan's existing JobConfig by extending
-    a user defined JobConfig dataclass. Similar to ``--experimental.custom_model_path``, the user
+    a user defined JobConfig dataclass. Similar to ``--experimental.custom_import``, the user
     needs to ensure that the path can be imported.
     """
 
