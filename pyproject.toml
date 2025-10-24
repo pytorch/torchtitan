@@ -37,7 +37,10 @@ dev = [
     "pre-commit",
     "pytest",
     "pytest-cov",
-    "wandb"
+    "wandb",
+    "tomli_w", # test_job_config
+    "expecttest", # test_tokenizer
+    "torchao", # test_model_converter
 ]
 
 [tool.setuptools.dynamic]
@@ -58,3 +61,4 @@ include = ["torchtitan*"]
 
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks
+testpaths = ["tests"]
