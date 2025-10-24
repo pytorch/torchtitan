@@ -40,7 +40,6 @@ dev = [
     "wandb",
     "tomli_w", # test_job_config
     "expecttest", # test_tokenizer
-    "torchao", # test_model_converter
 ]
 
 [tool.setuptools.dynamic]
