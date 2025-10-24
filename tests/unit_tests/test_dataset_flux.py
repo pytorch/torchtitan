@@ -67,7 +67,6 @@ class TestFluxDataLoader(unittest.TestCase):
                         "--training.classifier_free_guidance_prob",
                         "0.447",
                         "--training.test_mode",
-                        "true",
                         "--encoder.t5_encoder",
                         "tests/assets/flux_test_encoders/t5-v1_1-xxl",
                         "--encoder.clip_encoder",
