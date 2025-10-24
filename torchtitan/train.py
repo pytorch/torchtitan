@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import ctypes
 import importlib
 import os
+import signal
 import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
@@ -32,8 +34,12 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 
+c_globals = ctypes.CDLL(None)  # POSIX
+
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+    torch_profiler: torch.profiler.profile | None = None
+
     # core configs
     job_config: JobConfig
     parallel_dims: ParallelDims
@@ -83,11 +89,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
+        ranks = []
+        ft_config = job_config.fault_tolerance
+        if ft_config.enable:
+            group_size = ft_config.group_size
+            replica_id = ft_config.replica_id
+            first_rank = replica_id * group_size
+            last_rank = first_rank + group_size - 1
+            ranks = list(range(first_rank, last_rank + 1))
+
         # init distributed and build meshes
         dist_utils.init_distributed(
             job_config.comm,
             enable_cpu_backend=job_config.training.enable_cpu_offload,
             base_folder=job_config.job.dump_folder,
+            ranks=ranks,
         )
 
         job_config.maybe_log()
@@ -574,13 +590,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if not self.ft_manager.enabled
             else f"replica_{self.ft_manager.replica_id}"
         )
+        self.torch_profiler = maybe_enable_profiling(
+            job_config.profiling,
+            global_step=self.step,
+            base_folder=job_config.job.dump_folder,
+            leaf_folder=leaf_folder,
+        )
+
         with (
-            maybe_enable_profiling(
-                job_config.profiling,
-                global_step=self.step,
-                base_folder=job_config.job.dump_folder,
-                leaf_folder=leaf_folder,
-            ) as torch_profiler,
             maybe_enable_memory_snapshot(
                 job_config.profiling,
                 global_step=self.step,
@@ -604,6 +621,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 ),
             ),
         ):
+            if self.torch_profiler:
+
+                @ctypes.CFUNCTYPE(None, ctypes.c_int)
+                def sigabrt_handler(signal):
+                    logger.info("SIGABRT received. Stopping profiler")
+                    self.torch_profiler.export_chrome_trace("trace.json")
+
+                c_globals.signal(signal.SIGABRT, sigabrt_handler)
+
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():
                 self.step += 1
@@ -627,8 +653,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
-                if torch_profiler:
-                    torch_profiler.step()
+                if self.torch_profiler:
+                    self.torch_profiler.step()
                 if memory_profiler:
                     memory_profiler.step()
 
@@ -637,7 +663,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 if self.step == 1:
                     dist_utils.set_pg_timeouts(
                         timeout=timedelta(
-                            seconds=job_config.comm.train_timeout_seconds
+                            milliseconds=job_config.comm.train_timeout_seconds
                         ),
                         world_mesh=self.parallel_dims.world_mesh,
                     )
@@ -686,10 +712,12 @@ if __name__ == "__main__":
         else:
             trainer.train()
     except Exception:
+        logger.info("Torchtitan training threw an exception")
         if trainer:
             trainer.close()
         raise
     else:
+        logger.info("Torchtitan training completed")
         trainer.close()
         torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
