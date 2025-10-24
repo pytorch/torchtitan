@@ -24,7 +24,7 @@ from torchtitan.tools.logging import logger, warn_once
 _layer_sac_count = 0
 
 
-def _apply_layer_sac(module: nn.Module, ac_config: ACConfig, debug_config: DebugConfig) -> nn.Module:
+def _apply_layer_sac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     """Apply layer selective activation checkpointing to the module.
 
     Args:
@@ -137,7 +137,7 @@ def _apply_op_sac(
     )
 
 
-def _apply_full_ac(module: nn.Module, ac_config: ACConfig ) -> nn.Module:
+def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     """Apply full activation checkpointing to the module.
 
     Args:
@@ -282,7 +282,7 @@ def _apply_ac_to_transformer_block(
                 module, ac_config, base_fqn=base_fqn, op_sac_save_list=op_sac_save_list
             )
 
-    return _apply_layer_sac(module, job_config)
+    return _apply_layer_sac(module, ac_config)
 
 
 def apply_ac(
