@@ -27,6 +27,7 @@ Locally tested with:
 - **PP** - Pipeline Parallelism
 - **CP** - Context Parallelism
 - **EP** - Expert Parallelism
+- **CP** - Context Parallelism
 - **compile** - `torch.compile` integration
 - **Async TP** - Async TP integration
 
