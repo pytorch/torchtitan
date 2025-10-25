@@ -23,6 +23,7 @@ class OverrideDefinitions:
     test_name: str = "default"
     ngpu: int = 4
     disabled: bool = False
+    skip_rocm_test: bool = False
 
     def __repr__(self):
         return self.test_descr
