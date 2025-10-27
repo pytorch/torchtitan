@@ -4,15 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 
 import torch
 import torch.nn as nn
 
-from torch._functorch.aot_autograd import (
-    aot_compile_joint_with_descriptors
-)
-from torch._guards import tracing, TracingContext
+from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
+from torch._guards import tracing
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate
@@ -20,9 +17,11 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 
-from torchtitan.experiments.simple_fsdp.deepseek_v3.model import (
-    SimpleFSDPDeepSeekV3Model,
+from torchtitan.experiments.compiler_toolkit.graph_utils import (
+    export_joint,
+    print_if_rank0,
 )
+
 from torchtitan.experiments.simple_fsdp.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
@@ -34,8 +33,6 @@ from torchtitan.models.deepseek_v3.infra.parallelize import (
     apply_non_moe_tp,
 )
 from torchtitan.tools.logging import logger
-
-from torchtitan.experiments.compiler_toolkit.graph_utils import export_joint, print_if_rank0
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -215,7 +212,7 @@ class CompiledModule(torch.nn.Module):
 
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
-        
+
         # TODO: add support for kwargs
         return self.joint_graph_module(args)
 
@@ -225,7 +222,7 @@ def joint_graph_builder(model, *inputs, **kwargs):
     for input in inputs:
         assert isinstance(input, DTensor)
 
-    # get joint graph 
+    # get joint graph
     (
         joint_with_descriptors,
         tracing_context,
