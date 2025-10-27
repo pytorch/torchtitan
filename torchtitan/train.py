@@ -434,7 +434,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
-        cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],
@@ -460,12 +459,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        return_outputs=False,
                     )
                 else:
                     self.pp_schedule.step(
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        return_outputs=False,
                     )
 
             # accumulate losses across pipeline microbatches

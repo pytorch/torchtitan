@@ -29,8 +29,8 @@ class Job:
     print_config: bool = False
     """Print the job configs to terminal"""
 
-    save_config_folder: str | None = None
-    """Folder to save a job_config.json file"""
+    save_config_file: str | None = None
+    """Path to save job config into"""
 
     custom_config_module: str = ""
     """
@@ -853,7 +853,7 @@ class Experimental:
     DEPRECATED (moved to Job.custom_config_module). Will be removed soon.
 
     This option allows users to extend TorchTitan's existing JobConfig by extending
-    a user defined JobConfig dataclass. Similar to ``--experimental.custom_model_path``, the user
+    a user defined JobConfig dataclass. Similar to ``--experimental.custom_import``, the user
     needs to ensure that the path can be imported.
     """
 
@@ -923,10 +923,8 @@ class JobConfig:
         if self.job.print_config:
             logger.info(f"Running with configs: {self.to_dict()}")
 
-        if self.job.save_config_folder is not None:
-            config_file = os.path.join(
-                self.job.dump_folder, self.job.save_config_folder, "job_config.json"
-            )
+        if self.job.save_config_file is not None:
+            config_file = os.path.join(self.job.dump_folder, self.job.save_config_file)
             if torch.distributed.is_initialized():
                 if torch.distributed.get_rank() == 0:
                     os.makedirs(os.path.dirname(config_file), exist_ok=True)
