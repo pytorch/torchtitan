@@ -11,11 +11,12 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
+
+from torchtitan.experiments.simple_fsdp.llama3.model import SimpleFSDPTransformer
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.models.llama3 import llama3_args
 from torchtitan.protocols.train_spec import TrainSpec
 
-from torchtitan.experiments.simple_fsdp.llama3.model import SimpleFSDPTransformer
 from .parallelize import parallelize_llama
 
 

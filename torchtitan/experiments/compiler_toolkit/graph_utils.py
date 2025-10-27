@@ -7,13 +7,13 @@
 import contextlib
 
 import torch
-from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
 from torch._functorch.aot_autograd import (
     aot_export_joint_with_descriptors,
     JointWithDescriptors,
 )
 from torch._guards import tracing, TracingContext
+from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.tools.logging import logger
 
 
@@ -136,7 +136,9 @@ def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
 
 
 class CompiledModule(torch.nn.Module):
-    def __init__(self, inner: torch.nn.Module, parallel_dims, joint_graph_builder, **overrides):
+    def __init__(
+        self, inner: torch.nn.Module, parallel_dims, joint_graph_builder, **overrides
+    ):
         super().__init__()
         self.inner = inner  # register as submodule
         self.parallel_dims = parallel_dims
