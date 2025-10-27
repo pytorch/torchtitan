@@ -137,7 +137,12 @@ def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
 
 class CompiledModule(torch.nn.Module):
     def __init__(
-        self, inner: torch.nn.Module, parallel_dims, joint_graph_builder, **overrides
+        self,
+        inner: torch.nn.Module,
+        parallel_dims,
+        joint_graph_builder,
+        parallelize_inputs,
+        **overrides
     ):
         super().__init__()
         self.inner = inner  # register as submodule
@@ -145,6 +150,9 @@ class CompiledModule(torch.nn.Module):
 
         self.joint_graph_builder = joint_graph_builder
         self.joint_graph_module = None
+
+        self.parallelize_inputs = parallelize_inputs
+
         self._overrides = overrides  # for custom hooks
 
     def __getattr__(self, name):
@@ -172,13 +180,14 @@ class CompiledModule(torch.nn.Module):
 
     def forward(self, *args, **kwargs):
         assert "forward" not in self._overrides, "forward cannot be overridden"
-        dt_args = tuple(
-            DTensor.from_local(arg, self.parallel_dims.world_mesh["tp"], [Replicate()])
-            for arg in args
+
+        dt_args, dt_kwargs = self.parallelize_inputs(
+            self.parallel_dims.world_mesh, args, kwargs
         )
+
         if self.joint_graph_module is None:
             self.joint_graph_module = self.joint_graph_builder(
-                self.inner, *dt_args, **kwargs
+                self.inner, *dt_args, **dt_kwargs
             )
 
         # calling the line below returns control to torchtitan's runner
