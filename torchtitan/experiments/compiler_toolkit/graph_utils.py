@@ -90,13 +90,18 @@ def _restore_state_dict(
     traced_module.recompile()
 
 
-def export_joint(model, inputs) -> tuple[JointWithDescriptors, TracingContext]:
-    assert isinstance(inputs, tuple)
+def export_joint(
+    model, args, kwargs=None
+) -> tuple[JointWithDescriptors, TracingContext]:
+    if kwargs is None:
+        kwargs = {}
+    assert isinstance(args, tuple)
+    assert isinstance(kwargs, dict)
     with torch._dynamo.config.patch(
         install_free_tensors=True
     ), torch.fx.traceback.preserve_node_meta():
         # TODO: switch to use the official graph_capture API once it is ready
-        gm = _dynamo_graph_capture_for_export(model)(*inputs)
+        gm = _dynamo_graph_capture_for_export(model)(*args, **kwargs)
 
         # Restore the state dict to match the original module
         _restore_state_dict(model, gm)
@@ -108,15 +113,22 @@ def export_joint(model, inputs) -> tuple[JointWithDescriptors, TracingContext]:
         tracing_context = TracingContext(fake_mode)
 
     with tracing(tracing_context):
-        return aot_export_joint_with_descriptors_alone(gm, inputs), tracing_context
+        return (
+            aot_export_joint_with_descriptors_alone(gm, args, kwargs),
+            tracing_context,
+        )
 
 
-def aot_export_joint_with_descriptors_alone(model, inputs):
-    assert isinstance(inputs, tuple)
+def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
+    if kwargs is None:
+        kwargs = {}
+    assert isinstance(args, tuple)
+    assert isinstance(kwargs, dict)
     with contextlib.ExitStack() as stack:
         joint_with_descriptors = aot_export_joint_with_descriptors(
             stack,
             model,
-            inputs,
+            args,
+            kwargs,
         )
         return joint_with_descriptors

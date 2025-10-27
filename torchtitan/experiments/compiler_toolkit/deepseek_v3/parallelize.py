@@ -84,21 +84,19 @@ class CompiledModule(torch.nn.Module):
 
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
-
-        # TODO: add support for kwargs
-        return self.joint_graph_module(args)
+        return self.joint_graph_module(args, kwargs)
 
 
-def joint_graph_builder(model, *inputs, **kwargs):
-    assert isinstance(inputs, tuple)
-    for input in inputs:
-        assert isinstance(input, DTensor)
+def joint_graph_builder(model, *args, **kwargs):
+    assert isinstance(args, tuple)
+    for arg in args:
+        assert isinstance(arg, DTensor)
 
     # get joint graph
     (
         joint_with_descriptors,
         tracing_context,
-    ) = export_joint(model, inputs)
+    ) = export_joint(model, args, kwargs)
 
     def fw_compiler(gm: torch.fx.GraphModule, example_inputs):
         logger.info("fwd_gm:")
@@ -121,13 +119,13 @@ def joint_graph_builder(model, *inputs, **kwargs):
             joint_with_descriptors, fw_compiler=fw_compiler, bw_compiler=bw_compiler
         )
 
-    def wrapper_fn(args):
-        input = [
+    def wrapper_fn(args, kwargs):
+        inputs = [
             *model.parameters(),
             *model.buffers(),
             *args,
         ]
-        return fn(*input)
+        return fn(*inputs, **kwargs)
 
     return wrapper_fn
 
