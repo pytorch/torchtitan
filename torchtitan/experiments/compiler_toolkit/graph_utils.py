@@ -7,6 +7,7 @@
 import contextlib
 
 import torch
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
 from torch._functorch.aot_autograd import (
     aot_export_joint_with_descriptors,
@@ -132,3 +133,54 @@ def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
             kwargs,
         )
         return joint_with_descriptors
+
+
+class CompiledModule(torch.nn.Module):
+    def __init__(self, inner: torch.nn.Module, parallel_dims, joint_graph_builder, **overrides):
+        super().__init__()
+        self.inner = inner  # register as submodule
+        self.parallel_dims = parallel_dims
+
+        self.joint_graph_builder = joint_graph_builder
+        self.joint_graph_module = None
+        self._overrides = overrides  # for custom hooks
+
+    def __getattr__(self, name):
+        # check overrides
+        if "_overrides" in self.__dict__ and name in self._overrides:
+            return self._overrides[name]
+        try:
+            # let nn.Module handle registered stuff
+            return super().__getattr__(name)
+        except AttributeError:
+            # fallback to inner model
+            return getattr(self.inner, name)
+
+    def __setattr__(self, name, value):
+        if "_overrides" in self.__dict__ and name in self._overrides:
+            self._overrides[name] = value
+        else:
+            super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        if "_overrides" in self.__dict__ and name in self._overrides:
+            del self._overrides[name]
+        else:
+            super().__delattr__(name)
+
+    def forward(self, *args, **kwargs):
+        assert "forward" not in self._overrides, "forward cannot be overridden"
+        dt_args = tuple(
+            DTensor.from_local(arg, self.parallel_dims.world_mesh["tp"], [Replicate()])
+            for arg in args
+        )
+        if self.joint_graph_module is None:
+            self.joint_graph_module = self.joint_graph_builder(
+                self.inner, *dt_args, **kwargs
+            )
+
+        # calling the line below returns control to torchtitan's runner
+        # letting it call the backward, and optimizer.
+
+        # TODO: add support for kwargs
+        return self.joint_graph_module(args)
