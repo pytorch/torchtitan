@@ -93,12 +93,10 @@ class TestFluxDataLoader(unittest.TestCase):
                     assert labels.shape == (batch_size, 3, 256, 256)
                     assert input_data["clip_tokens"].shape == (
                         batch_size,
-                        1,
                         77,
                     )
                     assert input_data["t5_tokens"].shape == (
                         batch_size,
-                        1,
                         256,
                     )
 
