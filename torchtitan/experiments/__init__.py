@@ -10,6 +10,6 @@ _supported_experiments = frozenset(
         "simple_fsdp.llama3",
         "simple_fsdp.deepseek_v3",
         "vlm",
-        "joint_graph_runner.deepseek_v3",
+        "compiler_toolkit.deepseek_v3",
     ]
 )

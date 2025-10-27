@@ -9,13 +9,11 @@ import contextlib
 import torch
 import torch.nn as nn
 
-from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
-
 from torch._functorch.aot_autograd import (
-    aot_compile_joint_with_descriptors,
-    aot_export_joint_with_descriptors,
+    aot_compile_joint_with_descriptors
 )
 from torch._guards import tracing, TracingContext
+
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
@@ -37,115 +35,7 @@ from torchtitan.models.deepseek_v3.infra.parallelize import (
 )
 from torchtitan.tools.logging import logger
 
-
-def print_if_rank0(msg):
-    if torch.distributed.get_rank() == 0:
-        print(msg)
-
-
-def graph_capture_and_aot_export_joint_with_descriptors(model, inputs):
-    assert isinstance(inputs, tuple)
-    with torch._dynamo.config.patch(
-        install_free_tensors=True
-    ), torch.fx.traceback.preserve_node_meta():
-        # TODO: switch to use the official graph_capture API once it is ready
-        gm = _dynamo_graph_capture_for_export(model)(*inputs)
-
-        # Restore the state dict to match the original module
-        _restore_state_dict(model, gm)
-
-        print_if_rank0("Dynamo gm:")
-        print_if_rank0(gm.print_readable(print_output=False))
-
-        fake_mode = gm.meta.get("fake_mode", None)
-
-    with tracing(TracingContext(fake_mode)):
-        return aot_export_joint_with_descriptors_alone(gm, inputs), fake_mode
-
-
-def aot_export_joint_with_descriptors_alone(model, inputs):
-    assert isinstance(inputs, tuple)
-    with contextlib.ExitStack() as stack:
-        joint_with_descriptors = aot_export_joint_with_descriptors(
-            stack,
-            model,
-            inputs,
-        )
-        return joint_with_descriptors
-
-
-def _clear_traced_params_buffers(
-    traced_module: torch.fx.GraphModule, const_keys: list[str]
-) -> None:
-    """Remove all parameters and buffers from traced module before restoring."""
-    for key in const_keys:
-        assert key in traced_module._buffers.keys()
-        # We don't want constants to show up as a buffer in the state dict.
-        # Instead they should just be a direct attribute.
-        buffer = getattr(traced_module, key)
-        torch.fx.graph_module._del_attr(traced_module, key)
-        setattr(traced_module, key, buffer)
-
-
-def _restore_state_dict(
-    original_module: torch.nn.Module, traced_module: torch.fx.GraphModule
-) -> None:
-    """
-    TODO: move this into torch.export
-    Restores the state dict of the traced module to match the original module exactly.
-    Preserves the original FQNs with dots, creating intermediate empty modules as needed.
-    Ensures that the ordering of parameters/buffers matches the original module.
-    """
-    # Build ID-based lookups for traced module params/buffers
-    traced_params: dict[int, tuple[str, torch.nn.Parameter]] = {}
-    for name, param in traced_module.named_parameters(remove_duplicate=False):
-        traced_params[id(param)] = (name, param)
-
-    traced_buffers: dict[int, tuple[str, torch.Tensor]] = {}
-    for name, buffer in traced_module.named_buffers(remove_duplicate=False):
-        traced_buffers[id(buffer)] = (name, buffer)
-
-    # Build mapping from old names to new names for graph node updates
-    name_mapping: dict[str, str] = {}
-
-    # Restore parameters in the order they appear in original module
-    for orig_name, orig_param in original_module.named_parameters(
-        remove_duplicate=False
-    ):
-        if id(orig_param) in traced_params:
-            # This param exists in traced module - restore it with original FQN
-            traced_name, traced_param = traced_params[id(orig_param)]
-            torch.fx.graph_module._assign_attr(traced_param, traced_module, orig_name)
-            torch.fx.graph_module._del_attr(traced_module, traced_name)
-            name_mapping[traced_name] = orig_name
-        else:
-            # This param doesn't exist in traced module - add it
-            torch.fx.graph_module._assign_attr(orig_param, traced_module, orig_name)
-
-    # Restore buffers in the order they appear in original module
-    for orig_name, orig_buffer in original_module.named_buffers(remove_duplicate=False):
-        if id(orig_buffer) in traced_buffers:
-            # This buffer exists in traced module - restore it with original FQN
-            traced_name, traced_buffer = traced_buffers[id(orig_buffer)]
-            torch.fx.graph_module._assign_attr(orig_buffer, traced_module, orig_name)
-            name_mapping[traced_name] = orig_name
-            torch.fx.graph_module._del_attr(traced_module, traced_name)
-        else:
-            # This buffer doesn't exist in traced module - add it
-            torch.fx.graph_module._assign_attr(orig_buffer, traced_module, orig_name)
-
-    param_names = [v[0] for v in traced_params.values()]
-    buffer_names = [v[0] for v in traced_buffers.values()]
-    const_keys = set(param_names + buffer_names).difference(set(name_mapping.keys()))
-
-    _clear_traced_params_buffers(traced_module, const_keys)
-
-    # Update get_attr nodes in the graph to use the correct FQNs
-    for node in traced_module.graph.nodes:
-        if node.op == "get_attr" and node.target in name_mapping:
-            node.target = name_mapping[node.target]
-
-    traced_module.recompile()
+from torchtitan.experiments.compiler_toolkit.graph_utils import export_joint, print_if_rank0
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -273,11 +163,14 @@ def parallelize_deepseekv3(
             "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
         )
     if job_config.compile.enable:
-        model = HijackWrapper(model, parallel_dims)
+        # TODO: CompiledModule should take sample input as well, so that we can
+        # compile ahead of time.
+        model = CompiledModule(model, parallel_dims)
+
     return model
 
 
-class HijackWrapper(torch.nn.Module):
+class CompiledModule(torch.nn.Module):
     def __init__(self, inner: torch.nn.Module, parallel_dims, **overrides):
         super().__init__()
         self.inner = inner  # register as submodule
@@ -322,45 +215,41 @@ class HijackWrapper(torch.nn.Module):
 
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
-        # return self.joint_graph_module(*args, **kwargs)
+        
+        # TODO: add support for kwargs
         return self.joint_graph_module(args)
 
 
 def joint_graph_builder(model, *inputs, **kwargs):
-    assert isinstance(model, SimpleFSDPDeepSeekV3Model)
     assert isinstance(inputs, tuple)
     for input in inputs:
         assert isinstance(input, DTensor)
-    assert not kwargs
 
-    # get fw/bw graphs
+    # get joint graph 
     (
         joint_with_descriptors,
-        fake_mode,
-    ) = graph_capture_and_aot_export_joint_with_descriptors(model, inputs)
+        tracing_context,
+    ) = export_joint(model, inputs)
 
-    # verify user annotation show up in the graph
-    for node in joint_with_descriptors.graph_module.graph.nodes:
-        if node.target in {
-            torch.ops.higher_order.flex_attention,
-            torch.ops.higher_order.flex_attention_backward,
-        }:
-            if "custom" not in node.meta:
-                # this is currently failing, as backward nodes are missing the annotation
-                # raise RuntimeError(f"node {node} is not annotated with custom metadata, seeing node.meta: {node.meta}")
-                pass
-
-    def compiler(gm: torch.fx.GraphModule, example_inputs):
-        print_if_rank0("Before compiler:")
+    def fw_compiler(gm: torch.fx.GraphModule, example_inputs):
+        print_if_rank0("fwd_gm:")
         print_if_rank0(gm.print_readable(print_output=False))
 
-        print_if_rank0("After compiler:")
-        print_if_rank0(gm.print_readable(print_output=False))
+        # print_if_rank0("After compiler:")
+        # print_if_rank0(gm.print_readable(print_output=False))
         return gm
 
-    with tracing(TracingContext(fake_mode)):
+    def bw_compiler(gm: torch.fx.GraphModule, example_inputs):
+        print_if_rank0("bwd_gm:")
+        print_if_rank0(gm.print_readable(print_output=False))
+
+        # print_if_rank0("After compiler:")
+        # print_if_rank0(gm.print_readable(print_output=False))
+        return gm
+
+    with tracing(tracing_context):
         fn = aot_compile_joint_with_descriptors(
-            joint_with_descriptors, fw_compiler=compiler, bw_compiler=compiler
+            joint_with_descriptors, fw_compiler=fw_compiler, bw_compiler=bw_compiler
         )
 
     def wrapper_fn(args):
