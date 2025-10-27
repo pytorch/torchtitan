@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from functools import partial
-from importlib.metadata import version
 from importlib.util import find_spec
 from typing import Any, List
 
@@ -17,7 +16,7 @@ from torchtitan.components.quantization import (
 
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.expert_parallel import set_token_group_alignment_size_m
+from torchtitan.models.moe.utils import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
@@ -107,14 +106,6 @@ class MXGroupedMMConverter(QuantizationConverter):
         if find_spec("torchao") is None:
             raise ImportError(
                 "torchao is not installed. Please install it to use MXFP8 linear layers."
-            )
-        torchao_version = version("torchao")
-
-        # Require latest release or nightly builds for prototype features
-        is_nightly_build = torchao_version.startswith("0.14.0")
-        if not is_nightly_build:
-            raise ImportError(
-                f"torchao version {torchao_version} is too old, please install torchao nightly build and try again"
             )
 
         # Can be removed if we enable the emulated versions

@@ -4,23 +4,39 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
+
+import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
+
+import torch
+
+from torchtitan.tools.logging import logger
 
 
 @dataclass
 class Job:
     config_file: str | None = None
-    """Job config file"""
+    """File to read job configs from"""
 
-    dump_folder: str = "./torchtitan/outputs"
+    dump_folder: str = "./outputs"
     """Folder to dump job outputs"""
 
     description: str = "default job"
     """Description of the job"""
 
-    print_args: bool = False
-    """Print the args to terminal"""
+    print_config: bool = False
+    """Print the job configs to terminal"""
+
+    save_config_file: str | None = None
+    """Path to save job config into"""
+
+    custom_config_module: str = ""
+    """
+    This option allows users to extend the existing JobConfig with a customized
+    JobConfig dataclass. Users need to ensure that the path can be imported.
+    """
 
 
 @dataclass
@@ -270,9 +286,6 @@ class Parallelism:
     1 means disabled.
     """
 
-    enable_compiled_autograd: bool = False
-    """Enable CompiledAutograd to compile the backward."""
-
     data_parallel_shard_degree: int = -1
     """
     The `data_parallel_shard_degree` argument specifies the degree of data
@@ -314,18 +327,6 @@ class Parallelism:
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
     If using looped schedules, this still specifies the number of physical ranks, not the number
     of stages. Stages per rank are inferred from split points degree, and schedule.
-    """
-
-    pipeline_parallel_split_points: list[str] = field(default_factory=list)
-    """
-    DEPRECATED: Use module_fqns_per_model_part instead.
-    Specify comma-separated names of modules to use as the beginning of a split point.
-    e.g. "layers.0,layers.2" will cause the model to be split into 3 stages,
-    the first containing all the layers up to layers.0,
-    the second containing layers.0 and up to layers.2,
-    the third containing layers.2 and all the remaining layers.
-    Note: fully-automated splitting may be enabled in the future,
-    but currently the split points must be specified manually.
     """
 
     module_fqns_per_model_part: list[list[str]] | None = None
@@ -429,6 +430,28 @@ class Parallelism:
 class Checkpoint:
     enable: bool = False
     """Whether to enable checkpoint"""
+
+    enable_ft_dataloader_checkpoints: bool = True
+    """
+    Warning: Disabling this can have fault tolerant replicas training
+    over the same data multiple times. Use it with caution if training
+    over the same data is acceptable.
+
+    Used to enable checkpointing the dataloader index for fault tolerant training with torchft.
+
+    Fault tolerant training stores data loader index in the checkpoints, so that training can resume
+    without going over the same batch twice.
+
+    If enabled, data loader state is checkpointed. Otherwise, replicas
+    will train over the same data multiple times, which can result in
+    overfitting.
+
+    The failed replcia will still recover other state e.g. model
+    parameters from other replcias.
+
+    Note, if regular checkpointing is enabled, we also checkpoint the
+    data loader state. But when not using fault tolerance, the entire training starts from scratch.
+    """
 
     folder: str = "checkpoint"
     """
@@ -824,8 +847,10 @@ class Experimental:
 
     custom_args_module: str = ""
     """
+    DEPRECATED (moved to Job.custom_config_module). Will be removed soon.
+
     This option allows users to extend TorchTitan's existing JobConfig by extending
-    a user defined JobConfig dataclass. Similar to ``--experimental.custom_model_path``, the user
+    a user defined JobConfig dataclass. Similar to ``--experimental.custom_import``, the user
     needs to ensure that the path can be imported.
     """
 
@@ -890,3 +915,20 @@ class JobConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def maybe_log(self) -> None:
+        if self.job.print_config:
+            logger.info(f"Running with configs: {self.to_dict()}")
+
+        if self.job.save_config_file is not None:
+            config_file = os.path.join(self.job.dump_folder, self.job.save_config_file)
+            if torch.distributed.is_initialized():
+                if torch.distributed.get_rank() == 0:
+                    os.makedirs(os.path.dirname(config_file), exist_ok=True)
+                    with open(config_file, "w") as f:
+                        json.dump(self.to_dict(), f, indent=2)
+                logger.info(f"Saved job configs to {config_file}")
+            else:
+                logger.warning(
+                    "Job configs logging is disabled due to torch.distributed not initialized."
+                )

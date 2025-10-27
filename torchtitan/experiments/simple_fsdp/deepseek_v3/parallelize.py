@@ -11,12 +11,15 @@ from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.llama4.infra.parallelize import apply_moe_ep_tp
-from torchtitan.models.deepseek_v3.infra.parallelize import apply_non_moe_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ac
+from torchtitan.models.deepseek_v3.infra.parallelize import (
+    apply_ac,
+    apply_moe_ep_tp,
+    apply_non_moe_tp,
+)
 from torchtitan.tools.logging import logger
 
 from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
+
 
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
