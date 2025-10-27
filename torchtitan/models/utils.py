@@ -364,7 +364,16 @@ def get_dense_model_nparams_and_flops(
     model_args: BaseModelArgs, model: nn.Module, head_dims: int, seq_len: int
 ) -> tuple[int, float]:
     """
-    head_dims: the sum of qk and v head dims
+    Args:
+        model_args: BaseModelArgs object containing model configuration parameters.
+        model: nn.Module representing the model.
+        head_dims: The sum of qk and v head dimensions.
+        seq_len: The sequence length in training configs.
+
+    Returns:
+        Tuple of (nparams, num_flops_per_token):
+            nparams: Total number of model parameters.
+            num_flops_per_token: Estimated number of floating point operations per token.
     """
     nparams = sum(p.numel() for p in model.parameters())
     nparams_embedding = sum(
@@ -401,8 +410,19 @@ def get_moe_model_nparams_and_flops(
     seq_len: int,
 ) -> tuple[int, float]:
     """
-    Calculate nparams and parameterized linear nflops (excluding non-parameter attention matmuls) for MoE model
-    head_dims: the sum of qk and v head dims
+    Calculate nparams and nflops for MoE models.
+
+    Args:
+        model_args: BaseModelArgs object containing model configuration parameters including MoE settings.
+        model: nn.Module representing the MoE model.
+        head_dims: The sum of qk and v head dimensions.
+        seq_len: The sequence length in training configs.
+
+    Returns:
+        Tuple of (nparams, num_flops_per_token):
+            nparams: Total number of model parameters including all experts.
+            num_flops_per_token: Estimated number of floating point operations per token
+                                based on active parameters only.
     """
     nparams_embedding = 0
     nparams_moe_router = 0
