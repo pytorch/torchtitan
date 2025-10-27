@@ -106,6 +106,14 @@ def set_determinism(
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
+        # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
+        # reproducibility, since the autotune results may not be deterministic.
+        from torch.nn.attention.flex_attention import flex_attention
+
+        from torchtitan.models.attention import FlexAttentionWrapper
+
+        FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
+
     if not world_mesh:
         if seed is not None:
             torch.manual_seed(seed)
@@ -199,14 +207,7 @@ def get_train_context(
                     torch._dynamo.utils.maybe_enable_compiled_autograd(True)
                 )
 
-            if cp_context is not None:
-                from torch.nn.attention import SDPBackend
-
-                from torchtitan.models.attention import ScaledDotProductAttention
-
-                if SDPBackend.MATH in ScaledDotProductAttention.backends:
-                    ScaledDotProductAttention.backends.remove(SDPBackend.MATH)
-
+            if cp_context:
                 stack.enter_context(cp_context)
 
             yield
@@ -258,7 +259,7 @@ def init_distributed(
         return backend
 
     TRACE_BUFFER_SIZE = "TORCH_FR_BUFFER_SIZE"
-    TRACE_FILE = "TORCH_NCCL_DEBUG_INFO_TEMP_FILE"
+    TRACE_FILE = "TORCH_FR_DUMP_TEMP_FILE"
     DUMP_ON_TIMEOUT = "TORCH_NCCL_DUMP_ON_TIMEOUT"
     ASYNC_ERROR_HANDLING = "TORCH_NCCL_ASYNC_ERROR_HANDLING"
     SKIP_CLEANUP = "3"
@@ -275,8 +276,9 @@ def init_distributed(
         # dump on timeout by default if trace buffer is enabled
         _warn_overwrite_env(DUMP_ON_TIMEOUT, "1")
         dump_dir = os.path.join(base_folder, comm_config.save_traces_folder)
+        prefix = comm_config.save_traces_file_prefix
         os.makedirs(dump_dir, exist_ok=True)
-        _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/rank_")
+        _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),

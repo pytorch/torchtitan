@@ -14,8 +14,8 @@ from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
-from torchtitan.datasets.hf_datasets import build_hf_validation_dataloader
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -62,7 +62,7 @@ class Validator(BaseValidator):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
-        self.validation_dataloader = build_hf_validation_dataloader(
+        self.validation_dataloader = build_text_validation_dataloader(
             job_config=job_config,
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
@@ -137,17 +137,17 @@ class Validator(BaseValidator):
                             inputs,
                             target=targets,
                             losses=losses,
-                            input_batch=inputs,
                         )
                     else:
-                        self.pp_schedule.eval(
-                            target=targets, losses=losses, input_batch=inputs
-                        )
+                        self.pp_schedule.eval(target=targets, losses=losses)
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
                 loss = (
-                    torch.mean(torch.stack(losses)).to(device_type)
+                    # using sum instead of mean because we already rescale the
+                    # loss_fn down by a factor of n_microbatches in
+                    # torchtitan/distributed/pipeline_parallel.py
+                    torch.sum(torch.stack(losses)).to(device_type)
                     if self.pp_has_last_stage
                     else torch.tensor([-1.0], device=device_type)
                 )

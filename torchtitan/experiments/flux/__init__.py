@@ -3,13 +3,10 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
-
 
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .dataset.flux_dataset import build_flux_dataloader
 from .infra.parallelize import parallelize_flux
@@ -28,7 +25,7 @@ __all__ = [
 ]
 
 
-flux_configs = {
+flux_args = {
     "flux-dev": FluxModelArgs(
         in_channels=64,
         out_channels=64,
@@ -107,11 +104,10 @@ flux_configs = {
 }
 
 
-register_train_spec(
-    TrainSpec(
-        name="flux",
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
         model_cls=FluxModel,
-        model_args=flux_configs,
+        model_args=flux_args,
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,
@@ -122,4 +118,3 @@ register_train_spec(
         build_validator_fn=build_flux_validator,
         state_dict_adapter=FluxStateDictAdapter,
     )
-)

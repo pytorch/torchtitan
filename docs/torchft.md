@@ -57,7 +57,7 @@ In a real-world scenario, `torchft_lighthouse` would likely be on a different ma
 ### Using semi-synchronous training (Example 2)
 
 TorchFT provides algorithms that do not require per-step synchronization and
-the replica groups can sychronize weights every N steps.
+the replica groups can synchronize weights every N steps.
 
 **Note on Batch Sizes**: For DiLoCo, there's an important distinction in batch size terminology:
 
@@ -68,12 +68,12 @@ The `--training.global_batch_size` parameter refers to global batch size that wi
 
 #### Replica Group 0
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 ./run_train.sh --parallelism.data_parallel_shard_degree=4 --fault_tolerance.enable --fault_tolerance.group_size=2 --fault_tolerance.replica_id=0 --fault_tolerance.semi_sync_method="diloco" --experimental.custom_args_module=torchtitan.components.ft.config
+CONFIG_FILE=./torchtitan/models/llama3_ft/train_configs/debug_model.toml CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 ./run_train.sh --parallelism.data_parallel_shard_degree=4 --fault_tolerance.enable --fault_tolerance.group_size=2 --fault_tolerance.replica_id=0
 ```
 
 #### Replica Group 1
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 NGPU=4 ./run_train.sh --parallelism.data_parallel_shard_degree=4 --fault_tolerance.enable --fault_tolerance.group_size=2 --fault_tolerance.replica_id=1 --fault_tolerance.semi_sync_method="diloco" --experimental.custom_args_module=torchtitan.components.ft.config
+CONFIG_FILE=./torchtitan/models/llama3_ft/train_configs/debug_model.toml CUDA_VISIBLE_DEVICES=4,5,6,7 NGPU=4 ./run_train.sh --parallelism.data_parallel_shard_degree=4 --fault_tolerance.enable --fault_tolerance.group_size=2 --fault_tolerance.replica_id=1
 ```
 
 ## Fault Tolerance Configuration Options

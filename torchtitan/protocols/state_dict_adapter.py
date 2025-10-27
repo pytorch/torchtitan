@@ -5,13 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
-import logging
 import os
 import re
 from abc import ABC, abstractmethod
 from typing import Any
 
-logger = logging.getLogger()
+from torch.distributed.checkpoint import HuggingFaceStorageReader
+
+from torchtitan.tools.logging import logger
 
 from .model import BaseModelArgs
 
@@ -27,7 +28,11 @@ class BaseStateDictAdapter(ABC):
     """
 
     @abstractmethod
-    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None):
+    def __init__(
+        self,
+        model_args: BaseModelArgs,
+        hf_assets_path: str | None,
+    ):
         pass
 
     @abstractmethod
@@ -54,11 +59,30 @@ class BaseStateDictAdapter(ABC):
         """
         pass
 
+    @abstractmethod
+    def get_hf_storage_reader(
+        self, path: str, from_quantized: bool = False
+    ) -> HuggingFaceStorageReader:
+        """Returns hf storage reader to read HF checkpoint
+
+        Args:
+            path: the path to read HF checkpoint
+
+        Returns:
+            The HuggingFace storage reader to read from HF checkpoint
+
+        """
+        pass
+
 
 class StateDictAdapter(BaseStateDictAdapter):
     """State dict adapter base class which provides convenient default behavior to build fqn_to_index_mapping"""
 
-    def __init__(self, model_args: BaseModelArgs, hf_assets_path: str | None):
+    def __init__(
+        self,
+        model_args: BaseModelArgs,
+        hf_assets_path: str | None,
+    ):
         if hf_assets_path:
             mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
             try:
@@ -75,6 +99,15 @@ class StateDictAdapter(BaseStateDictAdapter):
                 self.fqn_to_index_mapping = {}
                 for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
                     indx = re.search(r"\d+", raw_indx).group(0)
-                    self.fqn_to_index_mapping[hf_key] = indx
+                    self.fqn_to_index_mapping[hf_key] = int(indx)
             else:
                 self.fqn_to_index_mapping = None
+
+    def get_hf_storage_reader(
+        self, path: str, from_quantized: bool = False
+    ) -> HuggingFaceStorageReader:
+        if from_quantized:
+            logger.warning(
+                "Loading from quantized checkpoint format is not supported for this model."
+            )
+        return HuggingFaceStorageReader(path)

@@ -6,7 +6,7 @@ The extension points and protocols mentioned in this note are subject to change.
 ### `TrainSpec`
 
 [`TrainSpec`](../torchtitan/protocols/train_spec.py) supports configuring high-level components in model training, including
-- definitions of model class and model args config
+- definitions of model class and model args
 - model parallelization functions
 - loss functions
 - factory methods for creating dataloader / tokenizer / optimizer / learning rate scheduler / metrics processor
@@ -14,7 +14,7 @@ The extension points and protocols mentioned in this note are subject to change.
 The coarse level abstraction tries to hit a balance between flexible component swapping and a straightforward train script ([train.py](../torchtitan/train.py)).
 Note that among all training components, currently [`CheckpointManager`](../torchtitan/components/checkpoint.py) and [`FTManager`](../torchtitan/components/ft.py) are not configurable since we do not expect them to be customized, but we are open to requests.
 
-To register a `TrainSpec`, please follow the example of [Llama 3.1](../torchtitan/models/llama3/__init__.py) to `register_train_spec`. Please make sure the registration code is called before training initialization. In torchtitan, it is performed during  [module import](../torchtitan/__init__.py).
+To register a `TrainSpec`, please use the `register_train_spec` API, and make sure registration happens before `get_train_spec` is called during training initialization. In torchtitan, `get_train_spec` will dynamically look for models in `torchtitan/models` or `torchtitan/experiments`.
 
 
 ### `ModelConverter`
@@ -36,7 +36,7 @@ This is an ongoing effort, and the level of grouping is subject to change.
 
 ### Extending `JobConfig`
 
-[`JobConfig`](../torchtitan/config/job_config.py) supports custom extension through the `--experimental.custom_args_module` flag.
+[`JobConfig`](../torchtitan/config/job_config.py) supports custom extension through the `--job.custom_config_module` flag.
 This lets you define a custom module that extends `JobConfig` with additional fields.
 
 When specified, your custom `JobConfig` is merged with the default:
@@ -45,14 +45,14 @@ When specified, your custom `JobConfig` is merged with the default:
 
 #### Example
 
-To add a custom `custom_args` section, define your own `JobConfig`:
+To add a custom `custom_config` section, define your own `JobConfig`:
 
 ```python
-# torchtitan/experiments/your_folder/custom_args.py
+# torchtitan/experiments/your_folder/job_config.py
 from dataclasses import dataclass, field
 
 @dataclass
-class CustomArgs:
+class CustomConfig:
     how_is_your_day: str = "good"
     """Just an example."""
 
@@ -68,19 +68,19 @@ class Training:
 
 @dataclass
 class JobConfig:
-    custom_args: CustomArgs = field(default_factory=CustomArgs)
+    custom_config: CustomConfig = field(default_factory=CustomConfig)
     training: Training= field(default_factory=Training)
 ```
 
 Then run your script with:
 
 ```bash
---experimental.custom_args_module=torchtitan.experiments.your_folder.custom_args
+--job.custom_config_module=torchtitan.experiments.your_folder.job_config
 ```
 
 Or specify it in your `.toml` config:
 
 ```toml
-[experimental]
-custom_args_module = "torchtitan.experiments.your_folder.custom_args"
+[job]
+custom_config_module = "torchtitan.experiments.your_folder.job_config"
 ```

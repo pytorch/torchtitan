@@ -3,8 +3,9 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import pytest
 
-from torchtitan.components.quantization.float8 import Float8Converter
+from torchtitan.components.quantization.float8 import Float8LinearConverter
 from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
@@ -39,13 +40,18 @@ def test_build_model_converters_empty_list():
 
 
 def test_build_model_converters_float8_converter():
+    pytest.importorskip("torchao")
     config_manager = ConfigManager()
     config = config_manager.parse_args(
-        ["--model.converters", "float8", "--float8.emulate"]
+        [
+            "--model.converters",
+            "quantize.linear.float8",
+            "--quantize.linear.float8.emulate",
+        ]
     )
     parallel_dims = build_parallel_dims(config, 1)
 
     model_converters = build_model_converters(config, parallel_dims)
     assert isinstance(model_converters, ModelConvertersContainer)
     assert len(model_converters.converters) == 1
-    assert isinstance(model_converters.converters[0], Float8Converter)
+    assert isinstance(model_converters.converters[0], Float8LinearConverter)
