@@ -3,8 +3,6 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import contextlib
 
@@ -15,11 +13,7 @@ from torch._functorch.aot_autograd import (
     JointWithDescriptors,
 )
 from torch._guards import tracing, TracingContext
-
-
-def print_if_rank0(msg) -> None:
-    if torch.distributed.get_rank() == 0:
-        print(msg)
+from torchtitan.tools.logging import logger
 
 
 def _clear_traced_params_buffers(
@@ -107,8 +101,8 @@ def export_joint(model, inputs) -> tuple[JointWithDescriptors, TracingContext]:
         # Restore the state dict to match the original module
         _restore_state_dict(model, gm)
 
-        print_if_rank0("Dynamo gm:")
-        print_if_rank0(gm.print_readable(print_output=False))
+        logger.info("Dynamo gm:")
+        logger.info(gm.print_readable(print_output=False))
 
         fake_mode = gm.meta.get("fake_mode", None)
         tracing_context = TracingContext(fake_mode)
