@@ -12,6 +12,7 @@ _supported_experiments = frozenset(
         "simple_fsdp.deepseek_v3",
         "vlm",
         "compiler_toolkit.deepseek_v3",
-        "autoparallel",
+        "auto_parallel.llama3",
+        "auto_parallel.deepseek_v3",
     ]
 )

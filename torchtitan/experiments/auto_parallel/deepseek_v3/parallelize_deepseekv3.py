@@ -38,7 +38,7 @@ def apply_local_map_to_moe():
         self____modules__layers____modules__1____modules__moe____modules__shared_experts____modules__w3____parameters__weight: "f32[512, 256][256, 1]cuda:0",
         self____modules__layers____modules__1____modules__moe____modules__shared_experts____modules__w2____parameters__weight: "f32[256, 512][512, 1]cuda:0"):
     """
-    from torchtitan.models import moe
+    from torchtitan.models.moe import moe
     from torch.distributed._tensor.experimental import local_map
     moe._moe_forward = local_map(
         moe._moe_forward,
