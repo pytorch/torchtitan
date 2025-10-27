@@ -5,5 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 _supported_experiments = frozenset(
-    ["simple_fsdp.llama3", "simple_fsdp.deepseek_v3", "vlm"]
+    [
+        "gpt_oss",
+        "simple_fsdp.llama3",
+        "simple_fsdp.deepseek_v3",
+        "vlm",
+        "compiler_toolkit.deepseek_v3",
+    ]
 )
