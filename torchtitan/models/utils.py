@@ -361,8 +361,11 @@ class MoEStateDictAdapter(StateDictAdapter):
 
 
 def get_dense_model_nparams_and_flops(
-    model_args: BaseModelArgs, model: nn.Module, seq_len: int
+    model_args: BaseModelArgs, model: nn.Module, head_dims: int, seq_len: int
 ) -> tuple[int, float]:
+    """
+    head_dims: the sum of qk and v head dims
+    """
     nparams = sum(p.numel() for p in model.parameters())
     nparams_embedding = sum(
         sum(p.numel() for p in m.parameters())
@@ -370,10 +373,10 @@ def get_dense_model_nparams_and_flops(
         if isinstance(m, nn.Embedding)
     )
 
-    l, h, q, t = (
+    l, h, qv, t = (
         model_args.n_layers,
         model_args.n_heads,
-        model_args.dim // model_args.n_heads,
+        head_dims,
         seq_len,
     )
     # Reasoning behind the factor of 12 for the self-attention part of the formula:
@@ -382,7 +385,7 @@ def get_dense_model_nparams_and_flops(
     #    but recomputation should not be counted in calculating MFU           (+0)
     # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
     # 4. we follow the convention and do not account for sparsity in causal attention
-    num_flops_per_token = 6 * (nparams - nparams_embedding) + 12 * l * h * q * t
+    num_flops_per_token = 6 * (nparams - nparams_embedding) + 6 * l * h * qv * t
 
     # If weight tying is enabled, subtract embedding parameters from total count
     if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
@@ -391,11 +394,15 @@ def get_dense_model_nparams_and_flops(
     return nparams, num_flops_per_token
 
 
-def get_moe_model_nparams_and_para_linear_flops(
-    model_args: BaseModelArgs, model: nn.Module, seq_len: int
+def get_moe_model_nparams_and_flops(
+    model_args: BaseModelArgs,
+    model: nn.Module,
+    head_dims: int,
+    seq_len: int,
 ) -> tuple[int, float]:
     """
     Calculate nparams and parameterized linear nflops (excluding non-parameter attention matmuls) for MoE model
+    head_dims: the sum of qk and v head dims
     """
     nparams_embedding = 0
     nparams_moe_router = 0
@@ -429,12 +436,20 @@ def get_moe_model_nparams_and_para_linear_flops(
         f"sparse {nparams_sparse:,}, active {nparams_dense + nparams_sparse_active:,}"
     )
 
-    num_para_linear_flops_per_token = 6 * (
-        nparams_dense - nparams_embedding + nparams_sparse_active
+    l, h, qv, t = (
+        model_args.n_layers,
+        model_args.n_heads,
+        head_dims,
+        seq_len,
+    )
+
+    num_flops_per_token = (
+        6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
+        + 6 * l * h * qv * t
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
     if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
         nparams = nparams - nparams_embedding
 
-    return nparams, num_para_linear_flops_per_token
+    return nparams, num_flops_per_token
