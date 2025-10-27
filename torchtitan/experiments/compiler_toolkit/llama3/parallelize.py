@@ -8,10 +8,10 @@
 import torch
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 from torch._guards import tracing
-from torch.utils._pytree import tree_map
 
 from torch.distributed.tensor import DTensor, Replicate
 from torch.fx.passes.regional_inductor import regional_inductor
+from torch.utils._pytree import tree_map
 
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
@@ -67,15 +67,16 @@ def joint_graph_builder(model, *inputs, **kwargs):
             joint_with_descriptors, fw_compiler=compiler, bw_compiler=compiler
         )
 
-    def wrapper_fn(args):
-        input = [
+    def wrapper_fn(args, kwargs):
+        inputs = [
             *model.parameters(),
             *model.buffers(),
             *args,
         ]
-        return fn(*input)
+        return fn(*inputs, **kwargs)
 
     return wrapper_fn
+
 
 def parallelize_inputs(world_mesh, args, kwargs):
     def to_dtensor(tensor):
@@ -87,6 +88,7 @@ def parallelize_inputs(world_mesh, args, kwargs):
     dt_kwargs = tree_map(to_dtensor, kwargs)
 
     return dt_args, dt_kwargs
+
 
 def annotate_model() -> None:
     from torch.fx.traceback import annotate_fn
@@ -112,6 +114,8 @@ def parallelize_llama(
 
     # TODO: CompiledModule should take sample input as well, so that we can
     # compile ahead of time.
-    model = CompiledModule(model, parallel_dims, joint_graph_builder, parallelize_inputs)
+    model = CompiledModule(
+        model, parallel_dims, joint_graph_builder, parallelize_inputs
+    )
 
     return model

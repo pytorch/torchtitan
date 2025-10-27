@@ -7,7 +7,6 @@
 
 import torch
 import torch.nn as nn
-from torch.utils._pytree import tree_map
 
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 from torch._guards import tracing
@@ -15,6 +14,7 @@ from torch._guards import tracing
 from torch.distributed.tensor import DTensor, Replicate
 
 from torch.fx.traceback import annotate_fn
+from torch.utils._pytree import tree_map
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import ExpertParallel
@@ -32,10 +32,10 @@ from torchtitan.models.moe.moe import MoE
 from torchtitan.tools.logging import logger
 
 
-def joint_graph_builder(model, *inputs, **kwargs):
-    assert isinstance(inputs, tuple)
-    for input in inputs:
-        assert isinstance(input, DTensor)
+def joint_graph_builder(model, *args, **kwargs):
+    assert isinstance(args, tuple)
+    for arg in args:
+        assert isinstance(arg, DTensor)
 
     # get joint graph
     (
@@ -112,6 +112,8 @@ def parallelize_deepseekv3(
 
     # TODO: CompiledModule should take sample input as well, so that we can
     # compile ahead of time.
-    model = CompiledModule(model, parallel_dims, joint_graph_builder)
+    model = CompiledModule(
+        model, parallel_dims, joint_graph_builder, parallelize_inputs
+    )
 
     return model

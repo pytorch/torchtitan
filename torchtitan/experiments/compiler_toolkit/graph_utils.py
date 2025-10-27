@@ -13,7 +13,6 @@ from torch._functorch.aot_autograd import (
     JointWithDescriptors,
 )
 from torch._guards import tracing, TracingContext
-from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.tools.logging import logger
 
 
@@ -192,6 +191,4 @@ class CompiledModule(torch.nn.Module):
 
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
-
-        # TODO: add support for kwargs
-        return self.joint_graph_module(args)
+        return self.joint_graph_module(args, kwargs)
