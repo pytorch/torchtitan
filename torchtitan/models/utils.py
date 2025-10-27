@@ -48,7 +48,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         dim_size_to_split: int,
     ) -> tuple[int, int]:
         """
-        Given a [StridedShard(dim=i), Shard(dim=i)] placement, caculate the start index
+        Given a [StridedShard(dim=i), Shard(dim=i)] placement, calculate the start index
         and end index on dim-i for GPU rank (strided_shard_dim_degree, shard_dim_rank)
 
         GPU Layout (strided_shard_rank, shard_rank):
@@ -68,12 +68,12 @@ class MoEStateDictAdapter(StateDictAdapter):
                     2   │    GPU(2, 1)    │
                         └─────────────────┘
 
-        Calulate the start_index from inner dimesion (Shard(dim=i)) to outer demension (StridedShard(dim=i)).
+        Calculate the start_index from inner dimension (Shard(dim=i)) to outer dimension (StridedShard(dim=i)).
         """
 
         block_size = dim_size_to_split // (strided_shard_dim_degree * shard_dim_degree)
 
-        # Error out if can not evenly divded
+        # Error out if can not evenly divided
         if (
             block_size * (strided_shard_dim_degree * shard_dim_degree)
             != dim_size_to_split

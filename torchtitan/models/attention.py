@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
-    AuxOutput,
+    BlockMask,
     create_block_mask,
     flex_attention,
 )
@@ -26,9 +26,26 @@ __all__ = [
     "ScaledDotProductAttentionWrapper",
     "get_causal_mask_mod",
     "get_document_mask_mod",
+    "get_sliding_window_mask_mod",
     "get_fixed_block_mask_mod",
     "create_attention_mask",
 ]
+
+
+class FlexAttentionKernel(torch.nn.Module):
+    """Wrapper to enable FlexCP"""
+
+    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
+        flex_attention, mode="max-autotune-no-cudagraphs"
+    )
+
+    def forward(self, *args, **kwargs):
+        # 1. _compiled_flex_attn has to be a class variable, otherwise there will
+        #    be multiple compiled flex_attention instances, which can be slow.
+        # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
+        #    as the first argument, which will cause an error.
+        #    `FlexAttentionKernel._compiled_flex_attn` is correct.
+        return FlexAttentionKernel._compiled_flex_attn(*args, **kwargs)
 
 
 class FlexAttentionWrapper(torch.nn.Module):
@@ -44,17 +61,33 @@ class FlexAttentionWrapper(torch.nn.Module):
         block_mask as a keyword argument to be compatible with _ContextParallel.
     """
 
-    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="max-autotune-no-cudagraphs"
-    )
+    def __init__(self) -> None:
+        super().__init__()
+        # TODO: remove this wrapper once FlexAttentionWrapper.forward() has the
+        # same signature as flex_attention() and is compatible with _ContextParallel.
+        self._flex_attention_kernel = FlexAttentionKernel()
 
-    def forward(self, *args, **kwargs) -> torch.Tensor | tuple[torch.Tensor, AuxOutput]:
-        # 1. _compiled_flex_attn has to be a class variable, otherwise there will
-        #    be multiple compiled flex_attention instances, which can be slow.
-        # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
-        #    as the first argument, which will cause an error.
-        #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
-        return FlexAttentionWrapper._compiled_flex_attn(*args, **kwargs)
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        block_mask: BlockMask,
+        scale: float | None = None,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Used `return_lse` instead of `return_aux` because of easier TP module notation
+        # to convert `lse` to be DTensor.
+
+        return self._flex_attention_kernel(
+            q,
+            k,
+            v,
+            block_mask=block_mask,
+            scale=scale,
+            return_lse=return_lse,
+        )
 
 
 class ScaledDotProductAttentionWrapper(torch.nn.Module):
@@ -163,6 +196,37 @@ def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
     return blocked_mask_mod
 
 
+def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
+    """Creates a sliding window mask that only attends to tokens within a fixed window size.
+
+    This implements causal sliding window attention where each token can only attend to:
+    - Itself (current token)
+    - Up to `window_size - 1` previous tokens
+    Args:
+        window_size: The maximum number of tokens to attend to (including current token).
+                    Must be >= 1. A window_size of 1 means attend only to self.
+
+    Returns:
+        A mask modifier function that implements causal sliding window masking.
+    """
+
+    if window_size < 1:
+        raise ValueError(
+            f"window_size must be >= 1 for sliding window attention mask, got {window_size}"
+        )
+
+    def sliding_window_mod(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        # Window mask: can only attend within the window
+        # q_idx - kv_idx < window_size ensures we look at most window_size-1 tokens back
+        return (kv_idx <= q_idx) & (q_idx - kv_idx < window_size)
+
+    sliding_window_mod.__name__ = f"sliding_window_mod_window_size_{window_size}"
+
+    return sliding_window_mod
+
+
 _compiled_create_block_mask = torch.compile(create_block_mask)
 
 
@@ -171,6 +235,6 @@ def create_attention_mask(*args, **kwargs):
     """Create an attention mask using compiled create_block_mask.
 
     This function is cached to avoid recreating BlockMasks for the same
-    argumens.
+    arguments.
     """
     return _compiled_create_block_mask(*args, **kwargs)

@@ -78,9 +78,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if job_config.experimental.custom_import:
             importlib.import_module(job_config.experimental.custom_import)
 
-        if job_config.job.print_args:
-            logger.info(f"Running with args: {job_config.to_dict()}")
-
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
@@ -92,17 +89,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             enable_cpu_backend=job_config.training.enable_cpu_offload,
             base_folder=job_config.job.dump_folder,
         )
+
+        job_config.maybe_log()
+
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
-        self.parallel_dims = parallel_dims = ParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
+        self.parallel_dims = parallel_dims = self._create_parallel_dims(
+            parallelism_config, world_size
         )
 
         world_mesh = parallel_dims.world_mesh
@@ -327,10 +320,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(
-            loss_parallel_enabled,
-            parallelism_config.enable_compiled_autograd,
-        )
+        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
             parallel_dims,
             job_config.training.mixed_precision_param,
@@ -376,6 +366,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
+    def _create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
+        return ParallelDims(
+            dp_shard=parallelism_config.data_parallel_shard_degree,
+            dp_replicate=parallelism_config.data_parallel_replicate_degree,
+            cp=parallelism_config.context_parallel_degree,
+            tp=parallelism_config.tensor_parallel_degree,
+            pp=parallelism_config.pipeline_parallel_degree,
+            ep=parallelism_config.expert_parallel_degree,
+            etp=parallelism_config.expert_tensor_parallel_degree,
+            world_size=world_size,
+        )
+
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
@@ -407,67 +409,81 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             yield input_dict, labels
 
+    def post_dataloader_step(
+        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any],]:
+        """Post processing of the batch and label after being loaded from the dataloader."""
+        inputs = input_dict["input"]
+        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+        # For arguments, like attention_masks, we have to put them in a separate
+        # dict as extra_inputs are not forwarded to other stages in PP, but
+        # extra_kwargs are.
+        extra_kwargs = {}
+
+        if getattr(self.model_args, "use_flex_attn", False):
+            extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
+                extra_inputs=extra_inputs,
+            )
+        else:
+            extra_kwargs["attention_masks"] = None
+
+        # Get the order sensitive buffers
+        order_sensitive_buffers = self.model_parts[0].get_order_sensitive_buffers(
+            inputs.size(0), inputs.size(1)
+        )
+        cp_mesh = (
+            self.parallel_dims.world_mesh["cp"]
+            if self.parallel_dims.cp_enabled
+            else None
+        )
+        if cp_mesh:
+            (
+                inputs,
+                labels,
+                extra_kwargs["attention_masks"],
+                *order_sensitive_buffers,
+            ) = dist_utils.cp_shard(
+                cp_mesh,
+                inputs,
+                labels,
+                extra_kwargs["attention_masks"],
+                *order_sensitive_buffers,
+            )
+        extra_kwargs.update(order_sensitive_buffers[0])
+        return inputs, labels, extra_inputs, extra_kwargs
+
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs = input_dict["input"]
-        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        # For arguments, like attention_masks, we have to put them in a separate
-        # dict as extra_inputs are not forwarded to other stages in PP, but
-        # extra_args are.
-        extra_args = {}
-
-        if getattr(self.model_args, "use_flex_attn", False):
-            extra_args["attention_masks"] = model_parts[0].get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
-            )
-        else:
-            extra_args["attention_masks"] = None
-
-        # Get the order sensitive buffers
-        order_sensitive_buffers = model_parts[0].get_order_sensitive_buffers(
-            inputs.size(0), inputs.size(1)
+        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloader_step(
+            input_dict, labels
         )
-        cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
-        if cp_mesh:
-            (
-                inputs,
-                labels,
-                extra_args["attention_masks"],
-                *order_sensitive_buffers,
-            ) = dist_utils.cp_shard(
-                cp_mesh,
-                inputs,
-                labels,
-                extra_args["attention_masks"],
-                *order_sensitive_buffers,
-            )
-        extra_args.update(order_sensitive_buffers[0])
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
             targets, losses = (labels, []) if self.pp_has_last_stage else (None, None)
-            if self.pp_has_first_stage:
-                self.pp_schedule.step(
-                    inputs,
-                    **extra_inputs,
-                    **extra_args,
-                    target=targets,
-                    losses=losses,
-                    input_batch=inputs,
-                )
-            else:
-                self.pp_schedule.step(
-                    **extra_args,
-                    target=targets,
-                    losses=losses,
-                    input_batch=inputs,
-                )
+            with self.train_context():
+                if self.pp_has_first_stage:
+                    self.pp_schedule.step(
+                        inputs,
+                        **extra_inputs,
+                        **extra_kwargs,
+                        target=targets,
+                        losses=losses,
+                        return_outputs=False,
+                    )
+                else:
+                    self.pp_schedule.step(
+                        **extra_kwargs,
+                        target=targets,
+                        losses=losses,
+                        return_outputs=False,
+                    )
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
@@ -481,17 +497,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # Non-PP forward / backward
-            assert len(model_parts) == 1
-            with self.maybe_enable_amp:
-                pred = model_parts[0](
-                    inputs,
-                    **extra_inputs,
-                    **extra_args,
-                )
-                loss = self.loss_fn(pred, labels)
-            # need to free pred before bwd to avoid peaking memory
-            del pred
-            loss.backward()
+            with self.train_context():
+                assert len(model_parts) == 1
+                with self.maybe_enable_amp:
+                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    loss = self.loss_fn(pred, labels)
+                # need to free pred before bwd to avoid peaking memory
+                del pred
+                loss.backward()
 
         return loss
 

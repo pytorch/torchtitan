@@ -194,21 +194,12 @@ def create_context_parallel_ctx(
     )
 
 
-def get_train_context(
-    enable_loss_parallel: bool, enable_compiled_autograd: bool
-) -> Generator[None, None, None]:
+def get_train_context(enable_loss_parallel: bool) -> Generator[None, None, None]:
     @contextlib.contextmanager
     def context(cp_context: Generator[None, None, None] | None = None):
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
-
-            if enable_compiled_autograd:
-                stack.enter_context(
-                    torch._dynamo.utils.maybe_enable_compiled_autograd(True)
-                )
-
-                stack.enter_context(cp_context)
 
             yield
 
@@ -461,9 +452,10 @@ def cp_shard(
     order_sensitive_buffers_seq_dims: dict[str, int],
 ):
     from torch.distributed.tensor.experimental._attention import _context_parallel_shard
+    from torch.distributed.tensor.experimental._load_balancer import _PTRRLoadBalancer
     from torch.nn.attention.flex_attention import BlockMask
 
-    load_balancer = None
+    load_balancer = _PTRRLoadBalancer(attention_masks, cp_mesh.size(0))
     inputs, labels = _context_parallel_shard(
         mesh=cp_mesh,
         buffers=(inputs, labels),
