@@ -45,6 +45,7 @@ _op_sac_save_list = {
     torch._higher_order_ops.flex_attention,
 }
 
+
 # Adapted from llama4/infra/parallelize.py
 def parallelize_gptoss(
     model: nn.Module,
@@ -168,7 +169,6 @@ def parallelize_gptoss(
             model,
             dp_mesh,
             enable_compile=model_compile_enabled,
-            enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
     return model
