@@ -14,13 +14,17 @@ from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 from torch._guards import tracing
 
 from torch.distributed.tensor import DTensor, Replicate
+
+from torch.fx.traceback import annotate_fn
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.expert_parallel import ExpertParallel
 
 from torchtitan.experiments.compiler_toolkit.graph_utils import export_joint
 from torchtitan.experiments.simple_fsdp.deepseek_v3.parallelize import (
     parallelize_deepseekv3 as simple_fsdp_parallelize_deepseekv3,
 )
+from torchtitan.models.moe.moe import MoE
 from torchtitan.tools.logging import logger
 
 
@@ -128,11 +132,24 @@ def joint_graph_builder(model, *inputs, **kwargs):
     return wrapper_fn
 
 
+def annotate_model() -> None:
+    # annotate the MoE with dispatch, compute and combine
+    ExpertParallel._token_dispatch = annotate_fn({"EP": "dispatch"})(
+        ExpertParallel._token_dispatch
+    )
+    ExpertParallel._token_combine = annotate_fn({"EP": "combine"})(
+        ExpertParallel._token_combine
+    )
+    MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
+
+
 def parallelize_deepseekv3(
     model: nn.Module,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ) -> CompiledModule:
+
+    annotate_model()
 
     # Diable torch.compile over the model in the compiler toolkit style workflow
     with disable_compile(job_config):
