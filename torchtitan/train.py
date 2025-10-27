@@ -429,6 +429,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 extra_inputs=extra_inputs,
             )
 
+        # Get the order sensitive buffers
+        order_sensitive_buffers = model_parts[0].get_order_sensitive_buffers(
+            inputs.size(0), inputs.size(1)
+        )
+        extra_args.update(order_sensitive_buffers[0])
+
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         optional_context_parallel_ctx = (
