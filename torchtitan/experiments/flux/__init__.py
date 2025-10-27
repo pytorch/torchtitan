@@ -3,9 +3,6 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
-
 
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
@@ -28,7 +25,7 @@ __all__ = [
 ]
 
 
-flux_configs = {
+flux_args = {
     "flux-dev": FluxModelArgs(
         in_channels=64,
         out_channels=64,
@@ -110,7 +107,7 @@ flux_configs = {
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
         model_cls=FluxModel,
-        model_args=flux_configs,
+        model_args=flux_args,
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,

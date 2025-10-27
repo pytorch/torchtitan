@@ -18,8 +18,8 @@ from torchtitan.components.metrics import build_metrics_processor
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.config import ConfigManager, JobConfig
-from torchtitan.datasets.hf_datasets import build_hf_dataloader
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
@@ -44,7 +44,7 @@ class Trainer(ForgeEngine):
     def __init__(self, job_config: JobConfig):
         logger.info(f"Starting job: {job_config.job.description}")
 
-        if job_config.job.print_args:
+        if job_config.job.print_config:
             logger.info(f"Running with args: {job_config.to_dict()}")
 
         if job_config.experimental.custom_import:
@@ -57,7 +57,7 @@ class Trainer(ForgeEngine):
         self.tokenizer = build_hf_tokenizer(job_config)
 
         # build dataloader
-        self.dataloader = build_hf_dataloader(
+        self.dataloader = build_text_dataloader(
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
@@ -158,10 +158,10 @@ class Trainer(ForgeEngine):
         parallel_dims = self.parallel_dims
 
         inputs = input_dict["input"]
-        extra_args = {}
+        extra_kwargs = {}
 
         if getattr(self.model_args, "use_flex_attn", False):
-            extra_args["attention_masks"] = model_parts[0].get_attention_masks(
+            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
             )
@@ -187,17 +187,15 @@ class Trainer(ForgeEngine):
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
-                        **extra_args,
+                        **extra_kwargs,
                         target=targets,
                         losses=losses,
-                        input_batch=inputs,
                     )
                 else:
                     self.pp_schedule.step(
-                        **extra_args,
+                        **extra_kwargs,
                         target=targets,
                         losses=losses,
-                        input_batch=inputs,
                     )
 
             # accumulate losses across pipeline microbatches
@@ -215,7 +213,7 @@ class Trainer(ForgeEngine):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_args)
+                    pred = model_parts[0](inputs, **extra_kwargs)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
