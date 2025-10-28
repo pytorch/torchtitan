@@ -57,12 +57,6 @@ class ParallelDims:
 
         if ep > 1:
             assert etp == tp or etp == 1, "Currently we only support ETP=TP or ETP=1"
-            if etp == tp:
-                # EP would borrow all cp and some dp_shard degree
-                assert ep % cp == 0 and (dp_shard * cp) % ep == 0
-            elif etp == 1:
-                # EP would borrow all cp and tp and some dp_shard degree
-                assert ep % (cp * tp) == 0 and (dp_shard * cp * tp) % ep == 0
 
     def build_mesh(self) -> DeviceMesh:
         """
@@ -71,7 +65,6 @@ class ParallelDims:
         The following mesh dimensions will be created:
 
             pp:      Pipeline Parallelism (PP).
-            spmd:    Used by SPMD DTensor RNG seed.
             batch:   Used by data loading to determine the global batch size and which
                      part of the data each rank should read. This dimension includes both
                      ``dp_replicate`` and ``dp_shard``. The backend is set to ``fake`` for
@@ -79,7 +72,7 @@ class ParallelDims:
             loss:    Used by all-reduce when computing the loss. Includes ``dp_replicate``,
                      ``dp_shard``, and ``cp`` degrees, as all are data parallelisms.
             dp_replicate: For DDP or HSDP replicate dimension.
-            fsdp:    For FSDP dimension. This includes ``cp``.
+            fsdp:    For FSDP dimension. This includes ``dp_shard`` and ``cp``.
             cp:      Context Parallelism (CP).
             tp:      Tensor Parallelism (TP).
             ep:      Expert Parallelism (EP).
@@ -89,7 +82,6 @@ class ParallelDims:
         Note: All the dimensions above are created by unflattening the world mesh.
         This API performs the following unflatten operations:
 
-            ["pp", "spmd"]
             ["pp", "batch", "cp", "tp"]
             ["pp", "loss", "tp"]
             ["pp", "dp_replicate", "fsdp", "tp"]
@@ -127,20 +119,16 @@ class ParallelDims:
         loss = self.dp_replicate * self.dp_shard * self.cp
         fsdp = self.dp_shard * self.cp
         efsdp = fsdp * self.tp // (self.etp * self.ep)
-        spmd = self.world_size // self.pp
 
         self._world_mesh = init_device_mesh(
             device_type, (self.world_size,), mesh_dim_names=("world",)
         )
-        pp_spmd_mesh = unflatten_mesh(self._world_mesh, ("pp", "spmd"), (self.pp, spmd))
-        data_mesh = unflatten_mesh(
+        dataloading_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "batch", "cp", "tp"),
             (self.pp, batch, self.cp, self.tp),
         )
-        loss_mesh = unflatten_mesh(
-            self._world_mesh, ("pp", "loss", "tp"), (self.pp, loss, self.tp)
-        )
+        loss_mesh = dataloading_mesh["batch", "cp"].flatten("loss_mesh")
         dense_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "fsdp", "tp"),
@@ -153,14 +141,13 @@ class ParallelDims:
         )
 
         self._meshes = {
-            "pp": pp_spmd_mesh["pp"],
-            "spmd": pp_spmd_mesh["spmd"],
-            "batch": data_mesh["batch"],
+            "pp": dataloading_mesh["pp"],
+            "batch": dataloading_mesh["batch"],
             "loss": loss_mesh["loss"],
             "dp_replicate": dense_mesh["dp_replicate"],
             "fsdp": dense_mesh["fsdp"],
-            "cp": data_mesh["cp"],
-            "tp": data_mesh["tp"],
+            "cp": dataloading_mesh["cp"],
+            "tp": dataloading_mesh["tp"],
             "ep": sparse_mesh["ep"],
             "efsdp": sparse_mesh["efsdp"],
             "etp": sparse_mesh["etp"],
@@ -180,7 +167,6 @@ class ParallelDims:
         """Validate that created meshes have the expected sizes."""
         expected_sizes = {
             "pp": self.pp,
-            "spmd": self.world_size // self.pp,
             "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp,
             "dp_replicate": self.dp_replicate,
@@ -199,34 +185,38 @@ class ParallelDims:
                 f"expected {expected_size}, got {actual_size}"
             )
 
-    def get_mesh(self, dim: str) -> DeviceMesh | None:
-        """Get a device mesh by dimension name.
+    def get_mesh(self, dims: str | list[str]) -> DeviceMesh | None:
+        """Get a device mesh by dimension names.
 
         Args:
-            dim: Name of the mesh dimension. Valid options include:
-                 'pp', 'spmd', 'batch', 'loss', 'dp_replicate', 'fsdp',
+            dims: Names of the mesh dimension. Valid options include:
+                 'pp', 'batch', 'loss', 'dp_replicate', 'fsdp',
                  'cp', 'tp', 'ep', 'etp', 'efsdp'
 
         Returns:
-            DeviceMesh for the requested dimension, or None if the dimension
-            has size 1 (i.e., parallelism is disabled for that dimension).
+            DeviceMesh for the requested dimension(s), or None if any of
+            dimension(s) has size 1 (i.e., parallelism is disabled for that dimension).
 
         Raises:
-            ValueError: If the requested dimension name is not valid.
+            ValueError: If the requested dimension name(s) is not valid.
         """
         if not self._meshes:
             self.build_mesh()
 
-        if dim not in self._meshes:
+        if isinstance(dims, str):
+            dims = [dims]
+
+        if not all(dim in self._meshes for dim in dims):
             valid_dims = sorted(self._meshes.keys())
             raise ValueError(
-                f"Invalid mesh dim: '{dim}'. Valid dimensions are: {valid_dims}"
+                f"Invalid mesh dim: '{dims}'. Valid dimensions are: {valid_dims}"
             )
 
-        if self._meshes[dim].size() == 1:
+        if any(self._meshes[dim].size() == 1 for dim in dims):
             return None
 
-        return self._meshes[dim]
+        meshes = [self._meshes[dim] for dim in dims]
+        return meshes[0] if len(meshes) == 1 else DeviceMesh._concatenate(meshes)
 
     def get_all_meshes(self) -> dict[str, DeviceMesh]:
         if not self._meshes:
@@ -256,7 +246,7 @@ class ParallelDims:
         return self.cp > 1
 
     @property
-    def batch_enabled(self):
+    def dp_cp_enabled(self):
         return self.dp_enabled or self.cp_enabled
 
     @property

@@ -526,7 +526,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if not self.metrics_processor.should_log(self.step):
             return
 
-        if parallel_dims.batch_enabled:
+        if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
             batch_mesh = parallel_dims.get_mesh("batch")

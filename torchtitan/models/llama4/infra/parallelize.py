@@ -105,7 +105,7 @@ def parallelize_llama(
             tp_mesh=tp_mesh,
             ep_mesh=parallel_dims.get_mesh("ep"),
             etp_mesh=parallel_dims.get_mesh("etp"),
-            etp_enabled=parallel_dims.etp_enabled,
+            ep_etp_mesh=parallel_dims.get_mesh(["ep", "etp"]),
         )
 
     model_compile_enabled = (
@@ -127,23 +127,16 @@ def parallelize_llama(
 
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # dp_mesh is the mesh for FSDP/HSDP
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh = DeviceMesh._concatenate(
-                [parallel_dims.get_mesh("dp_replicate"), parallel_dims.get_mesh("fsdp")]
-            )
-        else:
-            dp_mesh = parallel_dims.get_mesh("fsdp")
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
         dp_mod_ep_mesh = None
         if parallel_dims.ep_enabled:
             if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh = DeviceMesh._concatenate(
-                    [
-                        parallel_dims.get_mesh("dp_replicate"),
-                        parallel_dims.get_mesh("efsdp"),
-                    ]
-                )
+                dp_mod_ep_mesh = parallel_dims.get_mesh(["dp_replicate", "efsdp"])
             else:
                 dp_mod_ep_mesh = parallel_dims.get_mesh("efsdp")
 
@@ -438,6 +431,7 @@ def apply_moe_ep_tp(
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
     etp_mesh: DeviceMesh | None,
+    ep_etp_mesh: DeviceMesh | None,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -481,17 +475,19 @@ def apply_moe_ep_tp(
                 parallelize_plan=moe_layer_plan,
             )
 
-        experts_mesh, experts_plan = None, None
+        expert_mesh, experts_plan = None, None
         if ep_mesh is None:
+            assert ep_etp_mesh is None
             experts_mesh = tp_mesh
             # input Replicate, output Partial
             experts_plan = TensorParallel()
         elif tp_mesh is None or etp_mesh is None:
+            assert ep_etp_mesh is None
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
         else:
-            experts_mesh = DeviceMesh._concatenate([ep_mesh, etp_mesh])
+            experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()
 
         parallelize_module(

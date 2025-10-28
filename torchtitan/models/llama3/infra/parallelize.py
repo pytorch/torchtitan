@@ -111,12 +111,10 @@ def parallelize_llama(
 
     if parallel_dims.fsdp_enabled:
         # dp_mesh is the mesh for FSDP/HSDP
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh = DeviceMesh._concatenate(
-                [parallel_dims.get_mesh("dp_replicate"), parallel_dims.get_mesh("fsdp")]
-            )
-        else:
-            dp_mesh = parallel_dims.get_mesh("fsdp")
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(names)
         apply_fsdp(
             model,
             dp_mesh,
