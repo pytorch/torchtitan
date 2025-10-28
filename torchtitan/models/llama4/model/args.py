@@ -89,5 +89,10 @@ class TransformerModelArgs(BaseModelArgs):
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
         return get_moe_model_nparams_and_flops(
-            self, model, 2 * (self.dim // self.n_heads), seq_len
+            self,
+            model,
+            self.n_layers,
+            self.n_heads,
+            2 * (self.dim // self.n_heads),
+            seq_len,
         )

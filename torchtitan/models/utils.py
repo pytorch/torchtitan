@@ -361,7 +361,12 @@ class MoEStateDictAdapter(StateDictAdapter):
 
 
 def get_dense_model_nparams_and_flops(
-    model_args: BaseModelArgs, model: nn.Module, head_dims: int, seq_len: int
+    model_args: BaseModelArgs,
+    model: nn.Module,
+    n_layers: int,
+    n_heads: int,
+    head_dims: int,
+    seq_len: int,
 ) -> tuple[int, float]:
     """
     Args:
@@ -382,19 +387,17 @@ def get_dense_model_nparams_and_flops(
         if isinstance(m, nn.Embedding)
     )
 
-    l, h, qv, t = (
-        model_args.n_layers,
-        model_args.n_heads,
-        head_dims,
-        seq_len,
-    )
-    # Reasoning behind the factor of 12 for the self-attention part of the formula:
-    # 1. each self-attention has 2 matmul in the forward and 4 in the backward (6)
+    # Reasoning behind the factor of 6 for the self-attention part of the formula:
+    # 1. each self-attention has 2 matmul (attention scores and value aggregation,
+    #    combined in head_dims, counted as 1) in the forward and 4 (counted as 2)
+    #    in the backward                                                      (3)
     # 2. the flash attention does 1 more matmul recomputation in the backward
     #    but recomputation should not be counted in calculating MFU           (+0)
     # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
     # 4. we follow the convention and do not account for sparsity in causal attention
-    num_flops_per_token = 6 * (nparams - nparams_embedding) + 6 * l * h * qv * t
+    num_flops_per_token = (
+        6 * (nparams - nparams_embedding) + 6 * n_layers * n_heads * head_dims * seq_len
+    )
 
     # If weight tying is enabled, subtract embedding parameters from total count
     if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
@@ -406,6 +409,8 @@ def get_dense_model_nparams_and_flops(
 def get_moe_model_nparams_and_flops(
     model_args: BaseModelArgs,
     model: nn.Module,
+    n_layers: int,
+    n_heads: int,
     head_dims: int,
     seq_len: int,
 ) -> tuple[int, float]:
@@ -456,16 +461,9 @@ def get_moe_model_nparams_and_flops(
         f"sparse {nparams_sparse:,}, active {nparams_dense + nparams_sparse_active:,}"
     )
 
-    l, h, qv, t = (
-        model_args.n_layers,
-        model_args.n_heads,
-        head_dims,
-        seq_len,
-    )
-
     num_flops_per_token = (
         6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
-        + 6 * l * h * qv * t
+        + 6 * n_layers * n_heads * head_dims * seq_len
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
