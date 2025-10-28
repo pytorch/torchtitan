@@ -8,6 +8,7 @@
 import torch
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 from torch._guards import tracing
+from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 
 from torch.distributed.tensor import DTensor
 from torch.fx.passes.regional_inductor import regional_inductor
@@ -31,6 +32,36 @@ from torchtitan.experiments.simple_fsdp.llama3.parallelize import (
 from torchtitan.tools.logging import logger
 
 
+# TODO: support passing configs into schedule_overlap_bucketing
+def autobucketing_reordering_pass(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
+    schedule_overlap_bucketing(
+        gm, collective_bucketing=True, schedule_overlap_bucketing=False
+    )
+    gm.recompile()
+    return gm
+
+
+def compiler(name: str, gm: torch.fx.GraphModule, example_inputs):
+    logger.info(f"{name} before compiler:")
+    logger.info(gm.print_readable(print_output=False))
+
+    gm = autobucketing_reordering_pass(gm)
+
+    gm = regional_inductor(gm, example_inputs)
+
+    logger.info(f"{name} after compiler:")
+    logger.info(gm.print_readable(print_output=False))
+    return gm
+
+
+def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
+    return compiler("fwd_gm", gm, example_inputs)
+
+
+def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
+    return compiler("bwd_gm", gm, example_inputs)
+
+
 def joint_graph_builder(model, *args, **kwargs):
     assert isinstance(model, SimpleFSDPTransformer)
     assert isinstance(args, tuple)
@@ -51,21 +82,9 @@ def joint_graph_builder(model, *args, **kwargs):
         }:
             assert "compile_with_inductor" in node.meta.get("custom", {})
 
-    def compiler(gm: torch.fx.GraphModule, example_inputs):
-        logger.info("Before compiler:")
-        logger.info(gm.print_readable(print_output=False))
-
-        # gm = schedule_overlap_bucketing(gm)
-
-        gm = regional_inductor(gm, example_inputs)
-
-        logger.info("After compiler:")
-        logger.info(gm.print_readable(print_output=False))
-        return gm
-
     with tracing(tracing_context):
         fn = aot_compile_joint_with_descriptors(
-            joint_with_descriptors, fw_compiler=compiler, bw_compiler=compiler
+            joint_with_descriptors, fw_compiler=fw_compiler, bw_compiler=bw_compiler
         )
 
     def wrapper_fn(args, kwargs):
