@@ -506,7 +506,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         for _microbatch in range(self.gradient_accumulation_steps):
             if self.parallel_dims.fsdp_enabled:
                 # NOTE: prefetches the model
-                self.model_parts[0].unshard()
+                self.model_parts[0].unshard(async_op=True)
             input_dict, labels = next(data_iterator)
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
