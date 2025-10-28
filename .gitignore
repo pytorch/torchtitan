@@ -39,3 +39,6 @@ Sessionx.vim
 
 # macOS dir files
 .DS_Store
+
+# env files
+.env
