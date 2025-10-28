@@ -5,18 +5,21 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from tests.integration_tests import OverrideDefinitions
+import os
 
+from tests.integration_tests import OverrideDefinitions
 
 # Use RUNNER_TEMP if defined (in GitHub Actions), else fallback to relative path
 runner_temp = os.getenv("RUNNER_TEMP")
 if runner_temp:
     checkpoint_path = os.path.join(
         runner_temp,
-        "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/"
+        "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
     )
 else:
-    checkpoint_path = "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/"
+    checkpoint_path = (
+        "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/"
+    )
 
 
 def build_features_test_list() -> list[OverrideDefinitions]:
