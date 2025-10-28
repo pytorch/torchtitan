@@ -119,6 +119,8 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         return get_moe_model_nparams_and_flops(
             self,
             model,
+            self.n_layers,
+            self.n_heads,
             self.qk_nope_head_dim + self.qk_rope_head_dim + self.v_head_dim,
             seq_len,
         )
