@@ -4,6 +4,12 @@
 dump_folder = "./outputs"
 description = "Llama 3 8B training"
 
+[gcs_dataset]
+enable = true
+project_id = "tpu-pytorch"
+bucket_name = "torchprime"
+data_prefix = "jackoh-exp/gcs-connector/c4_test"
+
 [profiling]
 enable_profiling = true
 save_traces_folder = "profile_trace"
@@ -30,10 +36,12 @@ warmup_steps = 200  # lr scheduler warm up
 
 [training]
 local_batch_size = 1
-seq_len = 8192
+seq_len = 2048
 max_norm = 1.0  # grad norm clipping
 steps = 1000
 dataset = "c4"
+enable_cpu_offload = true
+dtype = "bfloat16"
 
 [parallelism]
 data_parallel_replicate_degree = 1

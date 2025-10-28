@@ -881,6 +881,15 @@ class Validation:
 
 
 @dataclass
+class GCSDatasetConfig:
+    """Config for loading a dataset from Google Cloud Storage."""
+    enable: bool = False
+    project_id: str = ""
+    bucket_name: str = ""
+    data_prefix: str = ""
+
+
+@dataclass
 class JobConfig:
     """
     Default container for training configuration.
@@ -890,6 +899,7 @@ class JobConfig:
     profiling: Profiling = field(default_factory=Profiling)
     metrics: Metrics = field(default_factory=Metrics)
     model: Model = field(default_factory=Model)
+    gcs_dataset: GCSDatasetConfig = field(default_factory=GCSDatasetConfig)
     optimizer: Optimizer = field(default_factory=Optimizer)
     lr_scheduler: LRScheduler = field(default_factory=LRScheduler)
     training: Training = field(default_factory=Training)

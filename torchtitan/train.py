@@ -15,6 +15,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.gcs_dataloader import build_gcs_dataloader
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
 from torchtitan.components.loss import rescale_accumulated_loss
@@ -130,12 +131,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else None
         )
 
-        self.dataloader = self.train_spec.build_dataloader_fn(
-            dp_world_size=dp_degree,
-            dp_rank=dp_rank,
-            tokenizer=self.tokenizer,
-            job_config=job_config,
-        )
+        if job_config.gcs_dataset.enable:
+            logger.info("Using GCS dataloader.")
+            # Ensure dataflux-pytorch is installed
+            try:
+                import dataflux_pytorch
+            except ImportError:
+                raise ImportError("Please install dataflux-pytorch to use GCS dataloader: pip install gcs-connector-for-pytorch")
+            self.dataloader = build_gcs_dataloader(
+                job_config, dp_degree, dp_rank, self.tokenizer
+            )
+        else:
+            self.dataloader = self.train_spec.build_dataloader_fn(
+                dp_world_size=dp_degree,
+                dp_rank=dp_rank,
+                tokenizer=self.tokenizer,
+                job_config=job_config,
+            )
 
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
