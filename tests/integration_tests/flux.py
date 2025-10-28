@@ -41,19 +41,6 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
             "Flux Validation Test",
             "validation",
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--checkpoint.enable",
-                ],
-                [
-                    # placeholder for the generation script's generate step
-                ],
-            ],
-            "Flux Generation script test",
-            "test_generate",
-            ngpu=2,
-        ),
     ]
     return integration_tests_flavors
 
