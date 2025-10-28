@@ -520,6 +520,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
             transformer_block,
             backend=compile_config.backend,
             fullgraph=fullgraph,
+            mode="light",
         )
         model.layers.register_module(layer_id, transformer_block)
 

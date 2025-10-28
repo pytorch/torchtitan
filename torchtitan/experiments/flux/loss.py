@@ -23,5 +23,5 @@ def build_mse_loss(job_config: JobConfig, **kwargs):
     loss_fn = mse_loss
     if job_config.compile.enable and "loss" in job_config.compile.components:
         logger.info("Compiling the loss function with torch.compile")
-        loss_fn = torch.compile(loss_fn, backend=job_config.compile.backend)
+        loss_fn = torch.compile(loss_fn, backend=job_config.compile.backend, mode="light")
     return loss_fn
