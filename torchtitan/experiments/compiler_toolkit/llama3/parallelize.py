@@ -31,18 +31,17 @@ from torchtitan.experiments.simple_fsdp.llama3.parallelize import (
 from torchtitan.tools.logging import logger
 
 
-def joint_graph_builder(model, *inputs, **kwargs):
+def joint_graph_builder(model, *args, **kwargs):
     assert isinstance(model, SimpleFSDPTransformer)
-    assert isinstance(inputs, tuple)
-    for input in inputs:
-        assert isinstance(input, DTensor)
-    assert not kwargs
+    assert isinstance(args, tuple)
+    for arg in args:
+        assert isinstance(arg, DTensor)
 
     # get joint graph
     (
         joint_with_descriptors,
         tracing_context,
-    ) = export_joint(model, inputs)
+    ) = export_joint(model, args, kwargs)
 
     # verify user annotation show up in the graph
     for node in joint_with_descriptors.graph_module.graph.nodes:
