@@ -33,10 +33,9 @@ def estimate_memory(job_config: JobConfig):
     # Get the world size
     world_size = int(os.environ["WORLD_SIZE"])
 
-    if job_config.compile.enable or job_config.parallelism.enable_compiled_autograd:
+    if job_config.compile.enable:
         logger.info("Compile mode is not supported yet. Switching to eager mode.")
         job_config.compile.enable = False
-        job_config.parallelism.enable_compiled_autograd = False
 
     # init fake pg
     store = FakeStore()
@@ -80,10 +79,7 @@ def estimate_memory(job_config: JobConfig):
     loss_parallel_enabled = (
         parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
     )
-    train_context = dist_utils.get_train_context(
-        loss_parallel_enabled,
-        job_config.parallelism.enable_compiled_autograd,
-    )
+    train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
     # build model (using meta init)
     model_args = train_spec.model_args[job_config.model.flavor]

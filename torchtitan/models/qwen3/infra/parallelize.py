@@ -170,7 +170,6 @@ def parallelize_qwen3(
             model,
             world_mesh,
             enable_compile=model_compile_enabled,
-            enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
     # Enable weight tying after applying parallelisms
