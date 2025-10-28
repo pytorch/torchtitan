@@ -8,6 +8,17 @@
 from tests.integration_tests import OverrideDefinitions
 
 
+# Use RUNNER_TEMP if defined (in GitHub Actions), else fallback to relative path
+runner_temp = os.getenv("RUNNER_TEMP")
+if runner_temp:
+    checkpoint_path = os.path.join(
+        runner_temp,
+        "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/"
+    )
+else:
+    checkpoint_path = "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/"
+
+
 def build_features_test_list() -> list[OverrideDefinitions]:
     """
     key is the config file name and value is a list of OverrideDefinitions
@@ -100,7 +111,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 ],
                 [
                     "--checkpoint.enable",
-                    "--checkpoint.initial_load_path artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
+                    f"--checkpoint.initial_load_path {checkpoint_path}",
                     "--checkpoint.initial_load_model_only",
                     "--checkpoint.initial_load_in_hf",
                 ],
