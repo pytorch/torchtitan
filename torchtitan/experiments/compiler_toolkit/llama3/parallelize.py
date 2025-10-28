@@ -9,13 +9,15 @@ import torch
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 from torch._guards import tracing
 
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor
 from torch.fx.passes.regional_inductor import regional_inductor
-from torch.utils._pytree import tree_map
 
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.compiler_toolkit.common_utils import disable_compile
+from torchtitan.experiments.compiler_toolkit.common_utils import (
+    disable_compile,
+    parallelize_inputs,
+)
 
 from torchtitan.experiments.compiler_toolkit.graph_utils import (
     CompiledModule,
@@ -76,18 +78,6 @@ def joint_graph_builder(model, *inputs, **kwargs):
         return fn(*inputs, **kwargs)
 
     return wrapper_fn
-
-
-def parallelize_inputs(world_mesh, args, kwargs):
-    def to_dtensor(tensor):
-        if isinstance(tensor, torch.Tensor):
-            return DTensor.from_local(tensor, world_mesh["tp"], [Replicate()])
-        return tensor
-
-    dt_args = tree_map(to_dtensor, args)
-    dt_kwargs = tree_map(to_dtensor, kwargs)
-
-    return dt_args, dt_kwargs
 
 
 def annotate_model() -> None:
