@@ -25,23 +25,12 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
                 [
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
-                ]
-            ],
-            "HSDP",
-            "hsdp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.data_parallel_replicate_degree 1",
                     "--parallelism.context_parallel_degree 2",
                 ]
             ],
-            "FSDP+CP",
-            "fsdp+cp",
-            ngpu=4,
+            "HSDP+CP",
+            "hsdp+cp",
+            ngpu=8,
         ),
         OverrideDefinitions(
             [
