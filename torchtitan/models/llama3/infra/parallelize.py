@@ -27,7 +27,6 @@ from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.tools.logging import logger
 
 
@@ -370,48 +369,3 @@ def apply_cp(
             device_mesh=cp_mesh,
             parallelize_plan=cp_plan,
         )
-
-
-def cp_shard(
-    cp_mesh: DeviceMesh,
-    inputs: torch.Tensor,
-    labels: torch.Tensor,
-    attention_masks: AttentionMasksType,
-    order_sensitive_buffers: dict[str, torch.Tensor],
-    order_sensitive_buffers_seq_dims: dict[str, int],
-):
-    from torch.distributed.tensor.experimental._attention import _context_parallel_shard
-    from torch.nn.attention.flex_attention import BlockMask
-
-    load_balancer = None
-    inputs, labels = _context_parallel_shard(
-        mesh=cp_mesh,
-        buffers=(inputs, labels),
-        seq_dims=(1, 1),
-        load_balancer=load_balancer,
-    )
-
-    masks = (
-        [attention_masks]
-        if isinstance(attention_masks, BlockMask)
-        else list(attention_masks.values())
-    )
-    masks = _context_parallel_shard(
-        mesh=cp_mesh,
-        buffers=masks,
-        seq_dims=(2,) * len(masks),
-        load_balancer=load_balancer,
-    )
-    attention_masks = (
-        masks[0]
-        if isinstance(attention_masks, BlockMask)
-        else {k: v for k, v in zip(attention_masks.keys(), masks)}
-    )
-
-    order_sensitive_buffers = _context_parallel_shard(
-        mesh=cp_mesh,
-        buffers=order_sensitive_buffers,
-        seq_dims=order_sensitive_buffers_seq_dims,
-        load_balancer=load_balancer,
-    )
-    return inputs, labels, attention_masks, order_sensitive_buffers
