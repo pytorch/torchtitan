@@ -132,3 +132,63 @@ def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
             kwargs,
         )
         return joint_with_descriptors
+
+
+class CompiledModule(torch.nn.Module):
+    def __init__(
+        self,
+        inner: torch.nn.Module,
+        parallel_dims,
+        joint_graph_builder,
+        parallelize_inputs,
+        **overrides
+    ):
+        super().__init__()
+        self.inner = inner  # register as submodule
+        self.parallel_dims = parallel_dims
+
+        self.joint_graph_builder = joint_graph_builder
+        self.joint_graph_module = None
+
+        self.parallelize_inputs = parallelize_inputs
+
+        self._overrides = overrides  # for custom hooks
+
+    def __getattr__(self, name):
+        # check overrides
+        if "_overrides" in self.__dict__ and name in self._overrides:
+            return self._overrides[name]
+        try:
+            # let nn.Module handle registered stuff
+            return super().__getattr__(name)
+        except AttributeError:
+            # fallback to inner model
+            return getattr(self.inner, name)
+
+    def __setattr__(self, name, value):
+        if "_overrides" in self.__dict__ and name in self._overrides:
+            self._overrides[name] = value
+        else:
+            super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        if "_overrides" in self.__dict__ and name in self._overrides:
+            del self._overrides[name]
+        else:
+            super().__delattr__(name)
+
+    def forward(self, *args, **kwargs):
+        assert "forward" not in self._overrides, "forward cannot be overridden"
+
+        dt_args, dt_kwargs = self.parallelize_inputs(
+            self.parallel_dims.world_mesh, args, kwargs
+        )
+
+        if self.joint_graph_module is None:
+            self.joint_graph_module = self.joint_graph_builder(
+                self.inner, *dt_args, **dt_kwargs
+            )
+
+        # calling the line below returns control to torchtitan's runner
+        # letting it call the backward, and optimizer.
+        return self.joint_graph_module(args, kwargs)
