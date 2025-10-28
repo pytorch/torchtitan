@@ -18,7 +18,6 @@ from torch.utils._pytree import tree_map
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.expert_parallel import ExpertParallel
-from torchtitan.experiments.compiler_toolkit.common_utils import disable_compile
 
 from torchtitan.experiments.compiler_toolkit.graph_utils import (
     CompiledModule,
@@ -103,12 +102,13 @@ def parallelize_deepseekv3(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ) -> CompiledModule:
+    assert (
+        not job_config.compile.enable
+    ), "compile.enable should be False in the compiler toolkit style workflow."
 
     annotate_model()
 
-    # Disable torch.compile over the model in the compiler toolkit style workflow
-    with disable_compile(job_config):
-        model = simple_fsdp_parallelize_deepseekv3(model, parallel_dims, job_config)
+    model = simple_fsdp_parallelize_deepseekv3(model, parallel_dims, job_config)
 
     # TODO: CompiledModule should take sample input as well, so that we can
     # compile ahead of time.
