@@ -34,7 +34,9 @@ from torchtitan.tools.logging import logger
 
 # TODO: support passing configs into schedule_overlap_bucketing
 def autobucketing_reordering_pass(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
-    schedule_overlap_bucketing(gm)
+    schedule_overlap_bucketing(
+        gm, collective_bucketing=True, schedule_overlap_bucketing=False
+    )
     gm.recompile()
     return gm
 
