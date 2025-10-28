@@ -53,9 +53,7 @@ def pack_wds_dataset(tar_destination, source_folder, number_of_samples):
 
 
 if __name__ == "__main__":
-    tar_destination = (
-        "torchtitan/tests/assets/cc12m_test/cc12m-train-0000.tar"
-    )
+    tar_destination = "torchtitan/tests/assets/cc12m_test/cc12m-train-0000.tar"
     source_folder = "cc12m_test"
     number_of_samples = 32
     pack_wds_dataset(tar_destination, source_folder, number_of_samples)
