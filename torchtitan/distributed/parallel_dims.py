@@ -128,7 +128,7 @@ class ParallelDims:
             ("pp", "batch", "cp", "tp"),
             (self.pp, batch, self.cp, self.tp),
         )
-        loss_mesh = dataloading_mesh["batch", "cp"].flatten("loss_mesh")
+        loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
         dense_mesh = unflatten_mesh(
             self._world_mesh,
             ("pp", "dp_replicate", "fsdp", "tp"),
@@ -143,7 +143,7 @@ class ParallelDims:
         self._meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
-            "loss": loss_mesh["loss"],
+            "loss": loss_mesh,
             "dp_replicate": dense_mesh["dp_replicate"],
             "fsdp": dense_mesh["fsdp"],
             "cp": dataloading_mesh["cp"],
