@@ -41,6 +41,14 @@ class FluxEmbedder(nn.Module):
                 )
 
         self.hf_module = self.hf_module.eval().requires_grad_(False)
+        # This is to make sure the encoders works with FSDP
+        self.make_parameters_contiguous()
+
+    def make_parameters_contiguous(self):
+        """Make all non-contiguous parameters contiguous to avoid FSDP issues."""
+        for name, param in self.hf_module.named_parameters():
+            if not param.is_contiguous():
+                param.data = param.data.contiguous()
 
     def forward(self, batch_tokens: Tensor) -> Tensor:
         """
