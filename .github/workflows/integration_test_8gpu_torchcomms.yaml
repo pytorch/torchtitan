@@ -51,3 +51,4 @@ jobs:
 
         mkdir artifacts-to-be-uploaded
         TEST_BACKEND=ncclx TRAIN_FILE=torchtitan.experiments.torchcomms.train python -m torchtitan.experiments.torchcomms.integration_tests artifacts-to-be-uploaded --ngpu 8
+        rm -rf artifacts-to-be-uploaded/*/checkpoint
