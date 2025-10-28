@@ -67,10 +67,6 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
-
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
@@ -90,6 +86,11 @@ def parallelize_llama(
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
+
+    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+    if parallel_dims.cp_enabled:
+        logger.info("Applied Context Parallel to the model")
+        apply_cp(model, world_mesh["cp"], use_flex_attn)
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -130,9 +131,6 @@ def parallelize_llama(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
 
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
@@ -328,3 +326,46 @@ def apply_ddp(
     replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
 
     logger.info("Applied DDP to the model")
+
+
+def apply_cp(
+    model: nn.Module,
+    cp_mesh: DeviceMesh,
+    use_flex_attn: bool,
+) -> None:
+    """
+    Apply context parallelism to the model.
+    """
+    from torch.distributed.tensor.experimental._attention import (
+        _ContextParallel,
+        _enable_context_parallel_dispatcher,
+    )
+
+    # Apply context parallelism to every transformer block
+    # TODO: make seq_sim configurable once the implementation doesn't assume 2
+    # internally.
+    if use_flex_attn:
+        cp_plan = _ContextParallel(
+            seq_dim=2, attention_type=_ContextParallel.AttentionType.FLEX
+        )
+    else:
+        # This is currently required as DTensor dispatcher is not enabled to
+        # dispatch SDPA to CP implementation. We don't disable the CP
+        # dispatching in TorchTitan as it is not needed. But there is a
+        # corresponding API, _disable_context_parallel_dispatcher to do
+        # that if users have this use case.
+        _enable_context_parallel_dispatcher()
+        cp_plan = _ContextParallel(
+            seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
+        )
+
+    for transformer_block in model.layers.values():
+        module = transformer_block.attention.inner_attention
+        if use_flex_attn:
+            module = module._flex_attention_kernel
+
+        parallelize_module(
+            module=module,
+            device_mesh=cp_mesh,
+            parallelize_plan=cp_plan,
+        )

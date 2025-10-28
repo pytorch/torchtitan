@@ -32,6 +32,22 @@ __all__ = [
 ]
 
 
+class FlexAttentionKernel(torch.nn.Module):
+    """Wrapper to enable FlexCP"""
+
+    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
+        flex_attention, mode="max-autotune-no-cudagraphs"
+    )
+
+    def forward(self, *args, **kwargs):
+        # 1. _compiled_flex_attn has to be a class variable, otherwise there will
+        #    be multiple compiled flex_attention instances, which can be slow.
+        # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
+        #    as the first argument, which will cause an error.
+        #    `FlexAttentionKernel._compiled_flex_attn` is correct.
+        return FlexAttentionKernel._compiled_flex_attn(*args, **kwargs)
+
+
 class FlexAttentionWrapper(torch.nn.Module):
     """Wrapper around `flex_attention` to make it torch.compile and CP compatible.
 
@@ -45,9 +61,11 @@ class FlexAttentionWrapper(torch.nn.Module):
         block_mask as a keyword argument to be compatible with _ContextParallel.
     """
 
-    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="max-autotune-no-cudagraphs"
-    )
+    def __init__(self) -> None:
+        super().__init__()
+        # TODO: remove this wrapper once FlexAttentionWrapper.forward() has the
+        # same signature as flex_attention() and is compatible with _ContextParallel.
+        self._flex_attention_kernel = FlexAttentionKernel()
 
     def forward(
         self,
@@ -59,15 +77,10 @@ class FlexAttentionWrapper(torch.nn.Module):
         scale: float | None = None,
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # 1. _compiled_flex_attn has to be a class variable, otherwise there will
-        #    be multiple compiled flex_attention instances, which can be slow.
-        # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
-        #    as the first argument, which will cause an error.
-        #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
-        # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
-        #    to convert `lse` to be DTensor.
+        # Used `return_lse` instead of `return_aux` because of easier TP module notation
+        # to convert `lse` to be DTensor.
 
-        return FlexAttentionWrapper._compiled_flex_attn(
+        return self._flex_attention_kernel(
             q,
             k,
             v,
