@@ -201,7 +201,7 @@ MM_DATASETS = {
     ),
     "cc12m-test": DatasetConfig(
         # TODO: move test cc12m dataset to core test folder
-        path="torchtitan/models/flux/tests/assets/cc12m_test",
+        path="torchtitan/tests/assets/cc12m_test",
         loader=lambda path: load_dataset(
             path, split="train", data_files={"train": "*.tar"}, streaming=True
         ),
