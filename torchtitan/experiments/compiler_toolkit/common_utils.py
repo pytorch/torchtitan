@@ -8,7 +8,7 @@ from contextlib import contextmanager
 
 import torch
 from torch.distributed.tensor import DTensor, Replicate
-from torch.utils._pytree import tree_map
+from torch.utils._pytree import register_pytree_node, tree_map
 
 from torchtitan.config import JobConfig
 
@@ -40,3 +40,16 @@ def parallelize_inputs(world_mesh, args, kwargs):
     dt_kwargs = kwargs
 
     return dt_args, dt_kwargs
+
+
+def register_blockmask_pytree_node():
+    from torch.nn.attention.flex_attention import BlockMask
+
+    if BlockMask not in torch.utils._pytree.SUPPORTED_NODES:
+        register_pytree_node(
+            BlockMask,
+            BlockMask._flatten,
+            BlockMask._unflatten,
+            flatten_with_keys_fn=BlockMask._flatten_with_keys,
+            serialized_type_name="torch.nn.attention.flex_attention.BlockMask",
+        )
