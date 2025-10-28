@@ -452,10 +452,22 @@ def cp_shard(
     order_sensitive_buffers_seq_dims: dict[str, int],
 ):
     from torch.distributed.tensor.experimental._attention import _context_parallel_shard
-    from torch.distributed.tensor.experimental._load_balancer import _PTRRLoadBalancer
+    from torch.distributed.tensor.experimental._load_balancer import (
+        _HeadTailLoadBalancer,
+        _PTRRLoadBalancer,
+    )
     from torch.nn.attention.flex_attention import BlockMask
 
-    load_balancer = _PTRRLoadBalancer(attention_masks, cp_mesh.size(0))
+    seq_len = inputs.size(1)
+    cp_world_size = cp_mesh.size(0)
+    if isinstance(attention_masks, BlockMask):
+        load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
+    else:
+        # For multiple BlockMasks or SDPA, we use the _HeadTailLoadBalancer.
+        load_balancer = _HeadTailLoadBalancer(
+            seq_len, cp_world_size, cp_mesh.device_type
+        )
+
     inputs, labels = _context_parallel_shard(
         mesh=cp_mesh,
         buffers=(inputs, labels),
