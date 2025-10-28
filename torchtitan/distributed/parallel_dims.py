@@ -79,11 +79,11 @@ class ParallelDims:
             efsdp:   FSDP in the EP region.
             etp:     TP in the EP region.
 
-        Note: All the dimensions above are created by unflattening the world mesh.
+        Note: Most dimensions above are created by unflattening the world mesh, except for loss,
+        which is created by flattening the batch and cp dimensions.
         This API performs the following unflatten operations:
 
             ["pp", "batch", "cp", "tp"]
-            ["pp", "loss", "tp"]
             ["pp", "dp_replicate", "fsdp", "tp"]
             ["pp", "dp_replicate", "efsdp", "ep", "etp"]
 
