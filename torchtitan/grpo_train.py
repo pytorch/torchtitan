@@ -965,6 +965,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 nb_loss = nb_loss
                 loss += nb_loss.mean().item() / len(microbatches)
                 self.ntokens_seen += n_tokens_seen
+                # Accumulate tokens for MFU/throughput computation
+                self.metrics_processor.ntokens_since_last_log += n_tokens_seen
 
             grad_norm = dist_utils.clip_grad_norm_(
                 [p for m in self.model_parts for p in m.parameters()],
