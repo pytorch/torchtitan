@@ -19,6 +19,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Comm as CommConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
@@ -199,9 +200,6 @@ def get_train_context(enable_loss_parallel: bool) -> Generator[None, None, None]
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
-
-            if cp_context:
-                stack.enter_context(cp_context)
 
             yield
 
@@ -443,3 +441,65 @@ def _clip_grad_norm_with_ep(
     torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
 
     return total_norm
+
+
+def cp_shard(
+    cp_mesh: DeviceMesh,
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
+    attention_masks: AttentionMasksType | None,
+    order_sensitive_buffers: dict[str, torch.Tensor],
+    order_sensitive_buffers_seq_dims: dict[str, int],
+):
+    from torch.distributed.tensor.experimental._attention import _context_parallel_shard
+    from torch.distributed.tensor.experimental._load_balancer import (
+        _HeadTailLoadBalancer,
+        _PTRRLoadBalancer,
+    )
+    from torch.nn.attention.flex_attention import BlockMask
+
+    seq_len = inputs.size(1)
+    cp_world_size = cp_mesh.size(0)
+    if isinstance(attention_masks, BlockMask):
+        load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
+    else:
+        # For multiple BlockMasks or SDPA, we use the _HeadTailLoadBalancer.
+        load_balancer = _HeadTailLoadBalancer(
+            seq_len, cp_world_size, cp_mesh.device_type
+        )
+
+    inputs, labels = _context_parallel_shard(
+        mesh=cp_mesh,
+        buffers=(inputs, labels),
+        seq_dims=(1, 1),
+        load_balancer=load_balancer,
+    )
+
+    order_sensitive_buffers = _context_parallel_shard(
+        mesh=cp_mesh,
+        buffers=order_sensitive_buffers,
+        seq_dims=order_sensitive_buffers_seq_dims,
+        load_balancer=load_balancer,
+    )
+
+    if attention_masks is None:
+        return inputs, labels, None, order_sensitive_buffers
+
+    masks = (
+        [attention_masks]
+        if isinstance(attention_masks, BlockMask)
+        else list(attention_masks.values())
+    )
+    masks = _context_parallel_shard(
+        mesh=cp_mesh,
+        buffers=masks,
+        seq_dims=(2,) * len(masks),
+        load_balancer=load_balancer,
+    )
+    attention_masks = (
+        masks[0]
+        if isinstance(attention_masks, BlockMask)
+        else {k: v for k, v in zip(attention_masks.keys(), masks)}
+    )
+
+    return inputs, labels, attention_masks, order_sensitive_buffers

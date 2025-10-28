@@ -409,12 +409,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             yield input_dict, labels
 
-    def forward_backward_step(
+    def post_dataloader_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
-    ) -> torch.Tensor:
-        model_parts = self.model_parts
-        parallel_dims = self.parallel_dims
-
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any],]:
+        """Post processing of the batch and label after being loaded from the dataloader."""
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
         # For arguments, like attention_masks, we have to put them in a separate
@@ -423,32 +421,53 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         extra_kwargs = {}
 
         if getattr(self.model_args, "use_flex_attn", False):
-            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
+            extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
+        else:
+            extra_kwargs["attention_masks"] = None
 
-        # apply context parallelism if cp is enabled
-        # ensure CP handles the separate freqs_cis buffer for each pp stage
-        optional_context_parallel_ctx = (
-            dist_utils.create_context_parallel_ctx(
-                cp_mesh=parallel_dims.world_mesh["cp"],
-                cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
-                cp_seq_dims=[1, 1] + [0 for _ in model_parts],
-                cp_no_restore_buffers={inputs, labels},
-                cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
-            )
-            if parallel_dims.cp_enabled
+        # Get the order sensitive buffers
+        order_sensitive_buffers = self.model_parts[0].get_order_sensitive_buffers(
+            inputs.size(0), inputs.size(1)
+        )
+        cp_mesh = (
+            self.parallel_dims.world_mesh["cp"]
+            if self.parallel_dims.cp_enabled
             else None
+        )
+        if cp_mesh:
+            (
+                inputs,
+                labels,
+                extra_kwargs["attention_masks"],
+                *order_sensitive_buffers,
+            ) = dist_utils.cp_shard(
+                cp_mesh,
+                inputs,
+                labels,
+                extra_kwargs["attention_masks"],
+                *order_sensitive_buffers,
+            )
+        extra_kwargs.update(order_sensitive_buffers[0])
+        return inputs, labels, extra_inputs, extra_kwargs
+
+    def forward_backward_step(
+        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ) -> torch.Tensor:
+        model_parts = self.model_parts
+        parallel_dims = self.parallel_dims
+
+        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloader_step(
+            input_dict, labels
         )
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
-            with self.train_context(optional_context_parallel_ctx):
-                targets, losses = (
-                    (labels, []) if self.pp_has_last_stage else (None, None)
-                )
+            targets, losses = (labels, []) if self.pp_has_last_stage else (None, None)
+            with self.train_context():
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
@@ -478,7 +497,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # Non-PP forward / backward
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context():
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
