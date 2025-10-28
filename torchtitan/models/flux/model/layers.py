@@ -12,7 +12,25 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 
-from torchtitan.experiments.flux.model.math import attention, rope
+
+def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
+    assert dim % 2 == 0
+    scale = torch.arange(0, dim, 2, dtype=pos.dtype, device=pos.device) / dim
+    omega = 1.0 / (theta**scale)
+    out = torch.einsum("...n,d->...nd", pos, omega)
+    out = torch.stack(
+        [torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1
+    )
+    out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
+    return out.float()
+
+
+def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
+    xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
+    xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
+    xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
+    xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
+    return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
 
 
 class EmbedND(nn.Module):
@@ -34,12 +52,16 @@ class EmbedND(nn.Module):
 
 def timestep_embedding(t: Tensor, dim, max_period=10000, time_factor: float = 1000.0):
     """
-    Create sinusoidal timestep embeddings.
-    :param t: a 1-D Tensor of N indices, one per batch element.
-                      These may be fractional.
-    :param dim: the dimension of the output.
-    :param max_period: controls the minimum frequency of the embeddings.
-    :return: an (N, D) Tensor of positional embeddings.
+    Creates sinusoidal timestep embeddings.
+
+    Args:
+        t (Tensor): A 1-D Tensor of N indices, one per batch element. These may be fractional.
+        dim (int): The dimension of the output.
+        max_period (int, optional): Controls the minimum frequency of the embeddings. Default is 10000.
+        time_factor (float, optional): Scaling factor for time. Default is 1000.0.
+
+    Returns:
+        Tensor: An (N, D) Tensor of positional embeddings.
     """
     t = time_factor * t
     half = dim // 2
@@ -112,7 +134,9 @@ class SelfAttention(nn.Module):
         qkv = self.qkv(x)
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
-        x = attention(q, k, v, pe=pe)
+        q, k = apply_rope(q, k, pe)
+        x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        x = rearrange(x, "B H L D -> B L (H D)")
         x = self.proj(x)
         return x
 
@@ -229,7 +253,10 @@ class DoubleStreamBlock(nn.Module):
         k = torch.cat((txt_k, img_k), dim=2)
         v = torch.cat((txt_v, img_v), dim=2)
 
-        attn = attention(q, k, v, pe=pe)
+        q, k = apply_rope(q, k, pe)
+        attn = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        attn = rearrange(attn, "B H L D -> B L (H D)")
+
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
         # calculate the img blocks
@@ -298,7 +325,10 @@ class SingleStreamBlock(nn.Module):
         q, k = self.norm(q, k, v)
 
         # compute attention
-        attn = attention(q, k, v, pe=pe)
+        q, k = apply_rope(q, k, pe)
+        attn = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        attn = rearrange(attn, "B H L D -> B L (H D)")
+
         # compute activation in mlp stream, cat again and run second linear layer
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         return x + mod.gate * output

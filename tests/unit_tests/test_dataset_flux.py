@@ -11,28 +11,35 @@ import torch
 from datasets import load_dataset
 
 from torchtitan.config import ConfigManager
-from torchtitan.experiments.flux.dataset.flux_dataset import (
-    _cc12m_wds_data_processor,
-    build_flux_dataloader,
-    DATASETS,
-)
 from torchtitan.hf_datasets import DatasetConfig
 
 
 class TestFluxDataLoader(unittest.TestCase):
     def setUp(self):
-        DATASETS["cc12m-test-iterable"] = DatasetConfig(
-            path="torchtitan/experiments/flux/tests/assets/cc12m_test",
+        # Import here to avoid circular import during test collection
+        from torchtitan.models.flux.flux_datasets import (
+            _cc12m_wds_data_processor,
+            DATASETS,
+        )
+
+        # Store reference for use in tearDown
+        self._DATASETS = DATASETS
+        self._cc12m_wds_data_processor = _cc12m_wds_data_processor
+
+        self._DATASETS["cc12m-test-iterable"] = DatasetConfig(
+            path="tests/assets/cc12m_test",
             loader=lambda path: load_dataset(
                 path, split="train", data_files={"train": "*tar"}
             ).to_iterable_dataset(num_shards=4),
-            sample_processor=_cc12m_wds_data_processor,
+            sample_processor=self._cc12m_wds_data_processor,
         )
 
     def tearDown(self):
-        del DATASETS["cc12m-test-iterable"]
+        del self._DATASETS["cc12m-test-iterable"]
 
     def test_load_dataset(self):
+        from torchtitan.models.flux.flux_datasets import build_flux_dataloader
+
         # The test checks for the correct tensor shapes during the first num_steps
         # The next num_steps ensure the loaded from checkpoint dataloader generates tokens and labels correctly
         for world_size in [2]:
@@ -46,7 +53,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 # in the dataset, then the test will fail, due to huggingface's
                 # non-resumption when checkpointing after the first epoch
 
-                path = "torchtitan.experiments.flux.job_config"
+                path = "torchtitan.models.flux.job_config"
                 config_manager = ConfigManager()
                 config = config_manager.parse_args(
                     [
@@ -59,10 +66,11 @@ class TestFluxDataLoader(unittest.TestCase):
                         str(batch_size),
                         "--training.classifier_free_guidance_prob",
                         "0.447",
+                        "--training.test_mode",
                         "--encoder.t5_encoder",
-                        "google/t5-v1_1-xxl",
+                        "tests/assets/flux_test_encoders/t5-v1_1-xxl",
                         "--encoder.clip_encoder",
-                        "openai/clip-vit-large-patch14",
+                        "tests/assets/flux_test_encoders/clip-vit-large-patch14",
                     ]
                 )
 
@@ -85,12 +93,10 @@ class TestFluxDataLoader(unittest.TestCase):
                     assert labels.shape == (batch_size, 3, 256, 256)
                     assert input_data["clip_tokens"].shape == (
                         batch_size,
-                        1,
                         77,
                     )
                     assert input_data["t5_tokens"].shape == (
                         batch_size,
-                        1,
                         256,
                     )
 

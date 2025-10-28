@@ -10,9 +10,9 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.config import ConfigManager, JobConfig
-from torchtitan.experiments.flux.dataset.tokenizer import build_flux_tokenizer
-from torchtitan.experiments.flux.sampling import generate_image, save_image
-from torchtitan.experiments.flux.train import FluxTrainer
+from torchtitan.models.flux.inference.sampling import generate_image, save_image
+from torchtitan.models.flux.tokenizer import build_flux_tokenizer
+from torchtitan.models.flux.train import FluxTrainer
 from torchtitan.tools.logging import init_logger, logger
 
 

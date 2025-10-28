@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from torch import nn
 
-from torchtitan.experiments.flux.model.autoencoder import AutoEncoderParams
+from torchtitan.models.flux.model.autoencoder import AutoEncoderParams
 
 from torchtitan.protocols import BaseModelArgs
 from torchtitan.tools.logging import logger

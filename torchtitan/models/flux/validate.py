@@ -18,15 +18,13 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import Validator
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.flux.dataset.flux_dataset import (
-    build_flux_validation_dataloader,
-)
+from torchtitan.models.flux.flux_datasets import build_flux_validation_dataloader
+from torchtitan.models.flux.inference.sampling import generate_image, save_image
+from torchtitan.models.flux.model.autoencoder import AutoEncoder
+from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 
-from torchtitan.experiments.flux.dataset.tokenizer import build_flux_tokenizer
-from torchtitan.experiments.flux.model.autoencoder import AutoEncoder
-from torchtitan.experiments.flux.model.hf_embedder import FluxEmbedder
-from torchtitan.experiments.flux.sampling import generate_image, save_image
-from torchtitan.experiments.flux.utils import (
+from torchtitan.models.flux.tokenizer import build_flux_tokenizer
+from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
     preprocess_data,
