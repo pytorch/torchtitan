@@ -278,7 +278,7 @@ def init_distributed(
         runner_temp = os.getenv("RUNNER_TEMP")
         if runner_temp:
             dump_dir = os.path.join(
-                runner_temp, base_folder, comm_config.save_traces_folder
+                runner_temp, "artifacts-to-be-uploaded", base_folder, comm_config.save_traces_folder
             )
         else:
             dump_dir = os.path.join(base_folder, comm_config.save_traces_folder)
