@@ -56,7 +56,7 @@ class Qwen3ModelArgs(BaseModelArgs):
         self.max_seq_len = seq_len
 
         self.moe_args._debug_force_load_balance = (
-            job_config.training.debug_moe_force_load_balance
+            job_config.debug.moe_force_load_balance
         )
 
     def get_nparams_and_flops(

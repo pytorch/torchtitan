@@ -34,8 +34,7 @@ class FluxTrainer(Trainer):
         dist_utils.set_determinism(
             self.parallel_dims.world_mesh,
             self.device,
-            job_config.training.seed,
-            job_config.training.deterministic,
+            job_config.debug,
             distinct_seed_mesh_dim="dp_shard",
         )
 

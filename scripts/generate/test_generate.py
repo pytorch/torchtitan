@@ -25,7 +25,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 from torchtitan.components.metrics import build_device_memory_monitor
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigManager, Debug as DebugConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools import utils
@@ -133,7 +133,8 @@ def test_generate(
         # sequences would require https://github.com/pytorch/torchtitan/pull/686
         apply_tp_minus_sp(model, parallel_dims.world_mesh["tp"])
 
-    dist_utils.set_determinism(world_mesh, device, seed, deterministic)
+    debug_config = DebugConfig(seed=seed, deterministic=deterministic)
+    dist_utils.set_determinism(world_mesh, device, debug_config)
 
     # materalize model
     model.to_empty(device=device_type)
