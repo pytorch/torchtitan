@@ -9,7 +9,7 @@ import os
 
 from tests.integration_tests import OverrideDefinitions
 
-# Use RUNNER_TEMP if defined (in GitHub Actions), else fallback to relative path
+# Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
 runner_temp = os.getenv("RUNNER_TEMP")
 if runner_temp:
     checkpoint_path = os.path.join(
