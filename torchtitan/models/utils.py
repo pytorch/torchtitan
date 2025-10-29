@@ -363,8 +363,6 @@ class MoEStateDictAdapter(StateDictAdapter):
 def get_dense_model_nparams_and_flops(
     model_args: BaseModelArgs,
     model: nn.Module,
-    n_layers: int,
-    n_heads: int,
     head_dims: int,
     seq_len: int,
 ) -> tuple[int, float]:
@@ -396,7 +394,8 @@ def get_dense_model_nparams_and_flops(
     # 3. each matmul performs 1 multiplication and 1 addition                 (*2)
     # 4. we follow the convention and do not account for sparsity in causal attention
     num_flops_per_token = (
-        6 * (nparams - nparams_embedding) + 6 * n_layers * n_heads * head_dims * seq_len
+        6 * (nparams - nparams_embedding)
+        + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
@@ -409,8 +408,6 @@ def get_dense_model_nparams_and_flops(
 def get_moe_model_nparams_and_flops(
     model_args: BaseModelArgs,
     model: nn.Module,
-    n_layers: int,
-    n_heads: int,
     head_dims: int,
     seq_len: int,
 ) -> tuple[int, float]:
@@ -463,7 +460,7 @@ def get_moe_model_nparams_and_flops(
 
     num_flops_per_token = (
         6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
-        + 6 * n_layers * n_heads * head_dims * seq_len
+        + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count

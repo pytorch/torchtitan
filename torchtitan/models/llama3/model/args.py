@@ -66,8 +66,6 @@ class TransformerModelArgs(BaseModelArgs):
         return get_dense_model_nparams_and_flops(
             self,
             model,
-            self.n_layers,
-            self.n_heads,
             2 * (self.dim // self.n_heads),
             seq_len,
         )
