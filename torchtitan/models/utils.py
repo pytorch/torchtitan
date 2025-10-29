@@ -414,8 +414,6 @@ def get_dense_model_nparams_and_flops(
 def get_moe_model_nparams_and_flops(
     model_args: BaseModelArgs,
     model: nn.Module,
-    n_layers: int,
-    n_heads: int,
     head_dims: int,
     seq_len: int,
 ) -> tuple[int, int]:
