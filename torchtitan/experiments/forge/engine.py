@@ -104,8 +104,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
         dist_utils.set_determinism(
             world_mesh,
             self.device,
-            job_config.training.seed,
-            job_config.training.deterministic,
+            job_config.debug,
         )
         self.train_spec = get_train_spec(job_config.model.name)
 
