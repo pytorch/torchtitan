@@ -73,10 +73,7 @@ def register_train_spec(name: str, train_spec: TrainSpec) -> None:
 def get_train_spec(name: str) -> TrainSpec:
     # user-defined TrainSpec has higher priority
     global _extra_train_specs
-    if "/" in name:  # HF model (dynamic loading)
-        hf_spec = _extra_train_specs["hf_placeholder_name"]
-        return dataclasses.replace(hf_spec, name=name)
-    elif name in _extra_train_specs:
+    if name in _extra_train_specs:
         return _extra_train_specs[name]
 
     from torchtitan.experiments import _supported_experiments

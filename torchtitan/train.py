@@ -13,7 +13,6 @@ from typing import Any, Generator, Iterable, Optional
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
-import torchtitan.experiments.transformers_backend  # noqa: F401  # noqa: F401
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError

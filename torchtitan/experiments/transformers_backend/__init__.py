@@ -10,9 +10,9 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.models.moe import MoEArgs
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize_hf_transformers import parallelize_hf_transformers
 
@@ -110,16 +110,15 @@ flavors = {
     ),
 }
 
-hf_train_spec = TrainSpec(
-    model_cls=HFTransformerModel,
-    model_args=flavors,
-    parallelize_fn=parallelize_hf_transformers,
-    pipelining_fn=pipeline_hf_transformers,
-    build_optimizers_fn=build_optimizers,
-    build_lr_schedulers_fn=build_lr_schedulers,
-    build_dataloader_fn=build_hf_dataloader,
-    build_tokenizer_fn=build_hf_tokenizer,
-    build_loss_fn=build_cross_entropy_loss,
-)
-
-register_train_spec("hf_placeholder_name", hf_train_spec)
+def get_train_spec() -> TrainSpec:
+    return TrainSpec(
+        model_cls=HFTransformerModel,
+        model_args=flavors,
+        parallelize_fn=parallelize_hf_transformers,
+        pipelining_fn=pipeline_hf_transformers,
+        build_optimizers_fn=build_optimizers,
+        build_lr_schedulers_fn=build_lr_schedulers,
+        build_dataloader_fn=build_text_dataloader,
+        build_tokenizer_fn=build_hf_tokenizer,
+        build_loss_fn=build_cross_entropy_loss,
+    )
