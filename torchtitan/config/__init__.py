@@ -16,6 +16,7 @@ from .job_config import (
     ActivationCheckpoint,
     Checkpoint,
     Comm,
+    Debug,
     FaultTolerance,
     Job,
     JobConfig,
@@ -28,7 +29,6 @@ from .job_config import (
     Quantize,
     Training,
     Validation,
-    Debug
 )
 from .manager import ConfigManager
 
@@ -50,5 +50,5 @@ __all__ = [
     "Profiling",
     "Training",
     "Validation",
-    "Debug"
+    "Debug",
 ]

@@ -17,8 +17,7 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import Comm as CommConfig, TORCH_DTYPE_MAP
-from torchtitan.config import Debug as DebugConfig
+from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -100,7 +99,9 @@ def set_determinism(
     if debug_config.deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
         torch.use_deterministic_algorithms(True)
-        torch.use_deterministic_algorithms(True, warn_only=debug_config.deterministic_warn_only)
+        torch.use_deterministic_algorithms(
+            True, warn_only=debug_config.deterministic_warn_only
+        )
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         # env var for deterministic CuBLAS

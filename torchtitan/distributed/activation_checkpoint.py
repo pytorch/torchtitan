@@ -17,7 +17,6 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
-from torchtitan.config.job_config import Debug as DebugConfig
 from torchtitan.tools.logging import logger, warn_once
 
 
@@ -43,7 +42,7 @@ def _apply_layer_sac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
             preserve_rng_state=ac_config.preserve_rng_state,
             determinism_check=ac_config.determinism_check,
             early_stop=ac_config.early_stop,
-            debug=ac_config.debug
+            debug=ac_config.debug,
         )
     else:
         return module
@@ -133,7 +132,7 @@ def _apply_op_sac(
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
-        debug=ac_config.debug
+        debug=ac_config.debug,
     )
 
 
@@ -152,7 +151,7 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
         preserve_rng_state=ac_config.preserve_rng_state,
         determinism_check=ac_config.determinism_check,
         early_stop=ac_config.early_stop,
-        debug=ac_config.debug
+        debug=ac_config.debug,
     )
 
 
@@ -197,7 +196,6 @@ def _apply_op_sac_to_transformer_block_with_flex(
             "is sparse. But we still apply SAC to an entire dense block.\n"
         ),
     )
-
 
     def wrap_submodule(name: str, full_ac: bool = False) -> None:
         submodule = getattr(module, name)

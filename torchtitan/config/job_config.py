@@ -912,6 +912,7 @@ class Debug:
     moe_force_load_balance: bool = False
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
 
+
 @dataclass
 class JobConfig:
     """

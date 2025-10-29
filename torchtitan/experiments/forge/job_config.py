@@ -12,6 +12,7 @@ from torchtitan.config.job_config import (
     Checkpoint,
     Comm,
     Compile,
+    Debug,
     Job,
     LRScheduler,
     MemoryEstimation,
@@ -20,7 +21,6 @@ from torchtitan.config.job_config import (
     Parallelism,
     Quantize,
     Training,
-    Debug,
 )
 
 
