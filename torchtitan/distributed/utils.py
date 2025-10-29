@@ -272,13 +272,22 @@ def init_distributed(
     # enable torch nccl flight recorder in the mode that would dump files if timeout is detected
     _warn_overwrite_env(TRACE_BUFFER_SIZE, str(comm_config.trace_buf_size))
     if comm_config.trace_buf_size > 0:
+        print("------------------------------------------------------------------")
+        print("------------------------------------------------------------------")
+        print(base_folder)
+        print(comm_config.save_traces_folder)
+        print("------------------------------------------------------------------")
+        print("------------------------------------------------------------------")
         # dump on timeout by default if trace buffer is enabled
         _warn_overwrite_env(DUMP_ON_TIMEOUT, "1")
         # Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
         runner_temp = os.getenv("RUNNER_TEMP")
         if runner_temp:
             dump_dir = os.path.join(
-                runner_temp, "artifacts-to-be-uploaded", base_folder, comm_config.save_traces_folder
+                runner_temp,
+                "artifacts-to-be-uploaded",
+                base_folder,
+                comm_config.save_traces_folder,
             )
         else:
             dump_dir = os.path.join(base_folder, comm_config.save_traces_folder)
