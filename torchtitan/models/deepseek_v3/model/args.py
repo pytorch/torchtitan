@@ -113,4 +113,9 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_moe_model_nparams_and_flops(self, model, seq_len)
+        return get_moe_model_nparams_and_flops(
+            self,
+            model,
+            self.qk_nope_head_dim + self.qk_rope_head_dim + self.v_head_dim,
+            seq_len,
+        )
