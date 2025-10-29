@@ -83,11 +83,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
+        ranks = []
+        ft_config = job_config.fault_tolerance
+        if ft_config.enable:
+            group_size = ft_config.group_size
+            replica_id = ft_config.replica_id
+            first_rank = replica_id * group_size
+            last_rank = first_rank + group_size - 1
+            ranks = list(range(first_rank, last_rank + 1))
+
         # init distributed and build meshes
         dist_utils.init_distributed(
             job_config.comm,
             enable_cpu_backend=job_config.training.enable_cpu_offload,
             base_folder=job_config.job.dump_folder,
+            ranks=ranks,
         )
 
         job_config.maybe_log()
