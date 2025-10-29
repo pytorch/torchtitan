@@ -277,7 +277,9 @@ def init_distributed(
         # Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
         runner_temp = os.getenv("RUNNER_TEMP")
         if runner_temp:
-            dump_dir = os.path.join(runner_temp, base_folder, comm_config.save_traces_folder)
+            dump_dir = os.path.join(
+                runner_temp, base_folder, comm_config.save_traces_folder
+            )
         else:
             dump_dir = os.path.join(base_folder, comm_config.save_traces_folder)
         prefix = comm_config.save_traces_file_prefix
