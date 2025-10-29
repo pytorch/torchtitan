@@ -23,7 +23,7 @@ enable_wandb = false
 name = "transformers_backend"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
-hf_assets_path = "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/tokenizer"
+hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
 [hf_transformers]
@@ -47,7 +47,7 @@ seq_len = 2048
 max_norm = 1.0  # grad norm clipping
 steps = 10
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
-dataset_path = "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/c4_test"
+dataset_path = "./tests/assets/c4_test"
 mixed_precision_param = "float32" # force float32 for comparison
 mixed_precision_reduce = "float32"
 
