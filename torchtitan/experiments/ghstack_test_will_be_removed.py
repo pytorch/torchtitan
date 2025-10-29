@@ -5,3 +5,5 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+
+torch.cuda.is_available()
