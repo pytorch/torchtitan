@@ -155,7 +155,7 @@ def joint_graph_builder(
         model_kwargs: Dict of model input keyword arguments
         fw_compiler: Optional custom forward compiler function
         bw_compiler: Optional custom backward compiler function
-        validation_fn: Optional function to validate the joint graph
+        joint_custom_pass: Optional custom pass to run on the joint graph
     """
     assert isinstance(model_args, tuple)
     for arg in model_args:
