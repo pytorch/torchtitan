@@ -303,6 +303,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
+        self.n_layers = model_args.n_layers
 
         self.attention = Attention(model_args)
 
@@ -355,7 +356,7 @@ class TransformerBlock(nn.Module):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            self.moe.init_weights(self.weight_init_std, buffer_device)
+            self.moe.init_weights(self.weight_init_std, buffer_device, self.n_layers)
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 
