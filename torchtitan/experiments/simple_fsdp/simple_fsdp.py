@@ -210,6 +210,7 @@ class ReplicateComputation(torch.nn.Module):
         mode,
         regional_ac,
         mp_policy,
+        reshard_after_forward,
         reduction_divide_factor,
     ):
         super().__init__()
@@ -228,6 +229,7 @@ class ReplicateComputation(torch.nn.Module):
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype = mp_policy.param_dtype
         self.reduce_dtype = mp_policy.reduce_dtype
+        self.reshard_after_forward = reshard_after_forward
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -290,7 +292,11 @@ class ReplicateComputation(torch.nn.Module):
         if not _active_parametrization:
             return x
 
-        if self.regional_ac and self.mode in ("fully_shard", "hybrid_shard"):
+        if (
+            self.regional_ac
+            and self.mode in ("fully_shard", "hybrid_shard")
+            and self.reshard_after_forward
+        ):
             # apply checkpointing to implement reshard_after_forward
             output = checkpoint(
                 self.replicate_compute,
@@ -310,6 +316,7 @@ def data_parallel(
     mode: str = "replicate",
     ac_mode: str = "none",
     mp_policy: MixedPrecisionPolicy | None = None,
+    reshard_after_forward: bool = True,
     shard_dim: int = 0,
     reduction_divide_factor: float | None = None,
 ):
@@ -374,6 +381,7 @@ def data_parallel(
                 mode,
                 regional_ac,
                 mp_policy=mp_policy,
+                reshard_after_forward=reshard_after_forward,
                 reduction_divide_factor=reduction_divide_factor,
             ),
         )
