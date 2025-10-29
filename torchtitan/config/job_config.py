@@ -397,19 +397,7 @@ class Parallelism:
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
 
-    Currently, it is supported with the following constraints:
-
-    - when etp = tp:
-
-      - cp <= ep <= dp_shard * cp
-      - ep % cp == 0
-      - dp_shard * cp % ep == 0
-
-    - when etp = 1:
-
-      - cp * tp <= ep <= dp_shard * cp * tp
-      - ep % (cp * tp) == 0
-      - dp_shard * cp * tp % ep == 0
+    Currently, etp is either 1 or is the same as tp.
 
     Note that this is still an experimental feature. Some constraints will be
     relaxed soon when we have more flexible DeviceMesh support.
