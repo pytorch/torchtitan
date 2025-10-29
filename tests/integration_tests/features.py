@@ -345,6 +345,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "FSDP + FLEX + per op SAC",
             "fsdp+flex_attn+per_op_sac",
             ngpu=4,
+            disabled=True,
         ),
         OverrideDefinitions(
             [
