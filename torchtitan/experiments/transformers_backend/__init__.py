@@ -3,7 +3,6 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-import os
 from dataclasses import dataclass
 
 from torchtitan.components.loss import build_cross_entropy_loss
@@ -80,6 +79,14 @@ flavors = {
             n_heads=16,
             n_kv_heads=16,
         ),
+    ),
+    "debugmodel_moe": HFTransformerModelArgs(
+        titan_dense_args=TitanDenseModelArgs(
+            dim=256,
+            n_layers=6,
+            n_heads=16,
+            n_kv_heads=16,
+        ),
         titan_moe_args=TitanMoeModelArgs(
             partial_rotary_factor=4.0,
             inter_dim=1024,
@@ -101,9 +108,7 @@ flavors = {
                 route_norm=True,
                 score_before_experts=False,
             ),
-        )
-        if os.environ.get("USE_MOE", "0") == "1"
-        else None,
+        ),
     ),
     "full": HFTransformerModelArgs(
         titan_dense_args=TitanDenseModelArgs(),

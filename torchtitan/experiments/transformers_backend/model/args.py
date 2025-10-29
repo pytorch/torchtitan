@@ -103,19 +103,51 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             titan_moe_args.q_lora_rank = q_lora_rank
 
             self._passed_args.update(**titan_moe_args.__dict__)
-
+            
             if titan_moe_args.moe_args is not None:
                 moe_args = titan_moe_args.moe_args
+                
+                # Store moe_args for nparams/flops calculation
+                self.moe_args = moe_args
                 self.num_experts_per_tok = moe_args.top_k
                 self.n_routed_experts = moe_args.num_experts
                 self.n_shared_experts = moe_args.num_shared_experts
                 self.moe_intermediate_size = titan_moe_args.moe_inter_dim
+                
+                # Set MoE-specific attributes directly on config for model access
+                if hasattr(titan_moe_args, 'rope_interleave'):
+                    self.rope_interleave = titan_moe_args.rope_interleave
+                if hasattr(titan_moe_args, 'partial_rotary_factor'):
+                    self.partial_rotary_factor = titan_moe_args.partial_rotary_factor
+                if hasattr(titan_moe_args, 'n_group'):
+                    self.n_group = titan_moe_args.n_group
+                if hasattr(titan_moe_args, 'topk_group'):
+                    self.topk_group = titan_moe_args.topk_group
+                if hasattr(titan_moe_args, 'kv_lora_rank'):
+                    self.kv_lora_rank = titan_moe_args.kv_lora_rank
+                if hasattr(titan_moe_args, 'q_lora_rank'):
+                    self.q_lora_rank = q_lora_rank  # Use the modified version (0 -> None)
+                if hasattr(titan_moe_args, 'qk_nope_head_dim'):
+                    self.qk_nope_head_dim = titan_moe_args.qk_nope_head_dim
+                if hasattr(titan_moe_args, 'qk_rope_head_dim'):
+                    self.qk_rope_head_dim = titan_moe_args.qk_rope_head_dim
+                if hasattr(titan_moe_args, 'v_head_dim'):
+                    self.v_head_dim = titan_moe_args.v_head_dim
+        
                 self._passed_args.update(
                     dict(
                         num_experts_per_tok=moe_args.top_k,
                         n_routed_experts=moe_args.num_experts,
                         n_shared_experts=moe_args.num_shared_experts,
                         moe_intermediate_size=titan_moe_args.moe_inter_dim,
+                        rope_interleave=titan_moe_args.rope_interleave,
+                        partial_rotary_factor=titan_moe_args.partial_rotary_factor,
+                        n_group=titan_moe_args.n_group,
+                        topk_group=titan_moe_args.topk_group,
+                        kv_lora_rank=titan_moe_args.kv_lora_rank,
+                        qk_nope_head_dim=titan_moe_args.qk_nope_head_dim,
+                        qk_rope_head_dim=titan_moe_args.qk_rope_head_dim,
+                        v_head_dim=titan_moe_args.v_head_dim,
                     )
                 )
 
