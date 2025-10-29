@@ -19,7 +19,7 @@ from torch.distributed._tensor import (
     Replicate,
     Shard,
 )
-from torch.distributed.device_mesh import _mesh_resources, DeviceMesh
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
@@ -95,19 +95,7 @@ def _distribute_dtensor(
     """
     inner_spec = tensor._spec
     outer_mesh, inner_mesh = device_mesh, inner_spec.mesh
-    outer_global_mesh = _mesh_resources.get_root_mesh(outer_mesh)
-    inner_global_mesh = _mesh_resources.get_root_mesh(inner_mesh)
-    if outer_global_mesh != inner_global_mesh or (
-        outer_global_mesh is None or inner_global_mesh is None
-    ):
-        raise AssertionError(
-            "Cannot distribute tensor across two meshes without the same root mesh: \n"
-            f"outer global mesh: {outer_global_mesh}\ninner global mesh: {inner_global_mesh}"
-        )
-    assert outer_mesh.mesh_dim_names is not None
-    assert inner_mesh.mesh_dim_names is not None
-    submesh_names = outer_mesh.mesh_dim_names + inner_mesh.mesh_dim_names
-    spanned_mesh = outer_global_mesh[submesh_names]
+    spanned_mesh = DeviceMesh._concatenate((outer_mesh, inner_mesh))
 
     if len(dp_placements) == 1:
         assert dp_placements[0].is_replicate() or dp_placements[0].is_shard()
