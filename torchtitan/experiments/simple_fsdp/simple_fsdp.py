@@ -7,7 +7,6 @@
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import cast
 
 import torch
 import torch.nn as nn
@@ -281,7 +280,7 @@ class ReplicateComputation(torch.nn.Module):
 
         return output
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: DTensor) -> torch.Tensor:
         global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
@@ -291,17 +290,16 @@ class ReplicateComputation(torch.nn.Module):
         if not _active_parametrization:
             return x
 
-        assert isinstance(x, DTensor)
         if self.regional_ac and self.mode in ("fully_shard", "hybrid_shard"):
             # apply checkpointing to implement reshard_after_forward
             output = checkpoint(
                 self.replicate_compute,
-                cast(DTensor, x),
+                x,
                 use_reentrant=False,
                 context_fn=fsdp_policy,
             )
         else:
-            output = self.replicate_compute(cast(DTensor, x))
+            output = self.replicate_compute(x)
 
         return output
 
