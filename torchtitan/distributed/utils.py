@@ -281,7 +281,7 @@ def init_distributed(
         # dump on timeout by default if trace buffer is enabled
         _warn_overwrite_env(DUMP_ON_TIMEOUT, "1")
         # Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
-        '''
+        """
         runner_temp = os.getenv("RUNNER_TEMP")
         if runner_temp:
             dump_dir = os.path.join(
@@ -291,7 +291,7 @@ def init_distributed(
                 comm_config.save_traces_folder,
             )
         else:
-        '''
+        """
         dump_dir = os.path.join(base_folder, comm_config.save_traces_folder)
         prefix = comm_config.save_traces_file_prefix
         os.makedirs(dump_dir, exist_ok=True)
