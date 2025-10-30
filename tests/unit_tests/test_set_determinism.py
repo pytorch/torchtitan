@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
+from torchtitan.config import Debug as DebugConfig
 from torchtitan.distributed.utils import set_determinism
 
 
@@ -87,11 +88,11 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
                 fake_mesh = FakeDeviceMesh(mesh_dim_names, mesh_sizes, rank_coords)
 
                 # Call set_determinism with distinct seeds only on PP dimension
+                debug_config = DebugConfig(seed=base_seed, deterministic=False)
                 set_determinism(
                     world_mesh=fake_mesh,
                     device=self.device,
-                    seed=base_seed,
-                    deterministic=False,
+                    debug_config=debug_config,
                     distinct_seed_mesh_dims=["pp"],
                 )
 
@@ -156,11 +157,11 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
                     fake_mesh = FakeDeviceMesh(mesh_dim_names, mesh_sizes, rank_coords)
 
                     # Call set_determinism with distinct seeds on dp_shard and dp_replicate only
+                    debug_config = DebugConfig(seed=base_seed, deterministic=False)
                     set_determinism(
                         world_mesh=fake_mesh,
                         device=self.device,
-                        seed=base_seed,
-                        deterministic=False,
+                        debug_config=debug_config,
                         distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
                     )
 
