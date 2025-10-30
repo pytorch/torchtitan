@@ -304,6 +304,12 @@ class Qwen3VLLMCompatModel(nn.Module, ModelProtocol):
         self.norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
 
+        # IMPORTANT: To match vLLM's behavior and Qwen3's config
+        # (tie_word_embeddings: true), tie output layer weights to
+        # embedding weights. When either weight updates during training,
+        # both update together
+        self.output.weight = self.tok_embeddings.weight
+
     def init_weights(
         self,
         buffer_device: torch.device | None = None,
