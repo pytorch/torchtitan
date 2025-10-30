@@ -134,7 +134,12 @@ def test_generate(
         apply_tp_minus_sp(model, parallel_dims.world_mesh["tp"])
 
     debug_config = DebugConfig(seed=seed, deterministic=deterministic)
-    dist_utils.set_determinism(world_mesh=world_mesh, device=device, debug_config=debug_config, distinct_seed_mesh_dims=["pp"])
+    dist_utils.set_determinism(
+        world_mesh=world_mesh,
+        device=device,
+        debug_config=debug_config,
+        distinct_seed_mesh_dims=["pp"],
+    )
 
     # materalize model
     model.to_empty(device=device_type)
