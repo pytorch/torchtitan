@@ -57,3 +57,4 @@ jobs:
         # Getting error - Cuda failure 217 'peer access is not supported between these two devices'
         python -m tests.integration_tests.ft artifacts-to-be-uploaded --ngpu 8
         # pkill -9 torchft_lighthouse
+        rm -rf artifacts-to-be-uploaded/*/checkpoint

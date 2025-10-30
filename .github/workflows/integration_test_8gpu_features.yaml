@@ -75,3 +75,6 @@ jobs:
 
         export TEST_WITH_ROCM=$([[ "${{ matrix.gpu-arch-type }}" == "rocm" ]] && echo 1 || echo 0)
         python -m tests.integration_tests.run_tests --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
+        rm -rf artifacts-to-be-uploaded/*/checkpoint
