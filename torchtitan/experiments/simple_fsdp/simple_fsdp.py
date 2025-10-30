@@ -94,7 +94,7 @@ def _distribute_dtensor(
     """
     inner_spec = tensor._spec
     outer_mesh, inner_mesh = device_mesh, inner_spec.mesh
-    spanned_mesh = DeviceMesh._concatenate((outer_mesh, inner_mesh))
+    spanned_mesh = DeviceMesh._concatenate([outer_mesh, inner_mesh])
 
     if len(dp_placements) == 1:
         assert dp_placements[0].is_replicate() or dp_placements[0].is_shard()
