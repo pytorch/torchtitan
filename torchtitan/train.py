@@ -120,6 +120,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             world_mesh,
             self.device,
             job_config.debug,
+            distinct_seed_mesh_dims=["pp"],
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
