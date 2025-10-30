@@ -104,7 +104,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             else:
                 if key not in to_hf_map:
                     continue
-                # Skip output.weight if weight tying is enabled (HF checkpoint won't have lm_head.weight)
                 if self.model_args.enable_weight_tying and key == "output.weight":
                     continue
                 new_key = to_hf_map[key]
