@@ -53,3 +53,4 @@ jobs:
 
         mkdir artifacts-to-be-uploaded
         python -m torchtitan.experiments.vlm.tests.integration_tests artifacts-to-be-uploaded --ngpu 4
+        rm -rf artifacts-to-be-uploaded/*/checkpoint
