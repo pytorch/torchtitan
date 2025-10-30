@@ -121,8 +121,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
 
-        # If weight tying is enabled and lm_head.weight is not in HF checkpoint,
-        # copy from embed_tokens.weight
         if self.model_args.enable_weight_tying and "lm_head.weight" not in hf_state_dict:
             if "model.embed_tokens.weight" in hf_state_dict:
                 hf_state_dict = dict(hf_state_dict)  # Make a copy to avoid modifying original
