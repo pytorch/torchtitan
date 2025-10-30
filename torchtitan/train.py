@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
@@ -118,8 +119,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         dist_utils.set_determinism(
             world_mesh,
             self.device,
-            job_config.training.seed,
-            job_config.training.deterministic,
+            job_config.debug,
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
@@ -320,10 +320,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(
-            loss_parallel_enabled,
-            parallelism_config.enable_compiled_autograd,
-        )
+        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
             parallel_dims,
             job_config.training.mixed_precision_param,

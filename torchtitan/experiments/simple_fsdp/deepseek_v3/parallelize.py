@@ -91,6 +91,20 @@ def parallelize_deepseekv3(
         reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
     )
 
+    match job_config.parallelism.fsdp_reshard_after_forward:
+        case "always":
+            reshard_after_forward = True
+        case "never":
+            reshard_after_forward = False
+        case "default":
+            # For PP, by default do not reshard after forward to avoid per-microbatch
+            # all-gathers, which can be expensive and non-overlapped
+            reshard_after_forward = not parallel_dims.pp_enabled
+        case _:
+            raise ValueError(
+                f"Invalid reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+            )
+
     # apply data parallel
     dp_mesh: DeviceMesh | None = None
     if (
@@ -143,6 +157,7 @@ def parallelize_deepseekv3(
                     dp_mode,
                     ac_mode=job_config.activation_checkpoint.mode,
                     mp_policy=mp_policy,
+                    reshard_after_forward=reshard_after_forward,
                     shard_dim=experts_shard_dim,
                     reduction_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
                 )
@@ -153,6 +168,7 @@ def parallelize_deepseekv3(
             dp_mode,
             ac_mode=job_config.activation_checkpoint.mode,
             mp_policy=mp_policy,
+            reshard_after_forward=reshard_after_forward,
         )
 
         logger.info(
