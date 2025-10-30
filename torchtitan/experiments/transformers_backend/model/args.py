@@ -46,6 +46,28 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             "n_dense_layers": "first_k_dense_replace",
         },
     }
+    
+    # Declarative list of TorchTitan-only attributes (no HF equivalent)
+    _TT_SPECIFIC_ATTRIBUTES = [
+        "multiple_of",
+        "ffn_dim_multiplier",
+        "depth_init",
+        "use_flex_attn",
+        "attn_mask_type",
+    ]
+    
+    # MoE attributes that should be copied directly
+    _MOE_SHARED_ATTRIBUTES = [
+        "rope_interleave",
+        "partial_rotary_factor",
+        "n_group",
+        "topk_group",
+        "kv_lora_rank",
+        "q_lora_rank",
+        "qk_nope_head_dim",
+        "qk_rope_head_dim",
+        "v_head_dim",
+    ]
 
     def __init__(
         self,
@@ -58,101 +80,81 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         super().__init__(attn_implementation=attn_implementation, **kwargs)
         assert titan_dense_args is not None, "titan_dense_args is required"
 
-        active_mappings = {}
+        # Create getter/setter dynamically for TT <-> HF attribute mappings
+        self._create_getter_setter_dynamically(titan_moe_args is not None)
+        
+        self._titan_injected_model_args = {}
+        self._titan_injected_model_args.update(kwargs)
+        self._configure_hf_attention(attn_implementation)
 
-        active_mappings.update(self._TT_TO_HF_MAPPINGS["dense"])
-
+        self._initialize_dense_attributes(titan_dense_args)
+        
         if titan_moe_args is not None:
-            active_mappings.update(self._TT_TO_HF_MAPPINGS["moe"])
-
-        self._active_mappings = active_mappings
-
-        self._create_dynamic_properties()
-
-        # Set HF attributes from titan_args based on mappings
-        for titan_name, hf_name in self._active_mappings.items():
+            self._initialize_moe_attributes(titan_moe_args)
+        
+    def _initialize_dense_attributes(self, titan_dense_args):
+        """Initialize all dense model attributes."""
+        # Set mapped attributes (TorchTitan <-> HuggingFace)
+        for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
             if hasattr(titan_dense_args, titan_name):
-                setattr(self, hf_name, getattr(titan_dense_args, titan_name))
+                value = getattr(titan_dense_args, titan_name)
+                setattr(self, hf_name, value)
+        
+        # Set TorchTitan-only attributes
+        for attr_name in self._TT_SPECIFIC_ATTRIBUTES:
+            if hasattr(titan_dense_args, attr_name):
+                setattr(self, attr_name, getattr(titan_dense_args, attr_name))
+        
+        # Update passed_args
+        self._titan_injected_model_args.update(titan_dense_args.__dict__)
 
-        # Fill all TorchTitan-specific args (no HF equivalent)
-        self.multiple_of = titan_dense_args.multiple_of
-        self.ffn_dim_multiplier = titan_dense_args.ffn_dim_multiplier
-        self.depth_init = titan_dense_args.depth_init
-        self.use_flex_attn = titan_dense_args.use_flex_attn
-        self.attn_mask_type = titan_dense_args.attn_mask_type
+    def _initialize_moe_attributes(self, titan_moe_args):
+        """Initialize all MoE-specific attributes."""
+        if titan_moe_args.moe_args is None:
+            self._titan_injected_model_args.update(titan_moe_args.__dict__)
+            return
+        
+        moe_args = titan_moe_args.moe_args
+        
+        # Convert q_lora_rank (0 -> None for HuggingFace compatibility)
+        self.q_lora_rank = None if titan_moe_args.q_lora_rank == 0 else titan_moe_args.q_lora_rank
+        
+        # Set core MoE attributes
+        self.moe_args = moe_args
+        self.num_experts_per_tok = moe_args.top_k
+        self.n_routed_experts = moe_args.num_experts
+        self.n_shared_experts = moe_args.num_shared_experts
+        self.moe_intermediate_size = titan_moe_args.moe_inter_dim
+        
+        # Set remaining architecture-specific MoE attributes
+        for attr in self._MOE_SHARED_ATTRIBUTES:
+            if attr == "q_lora_rank":
+                continue  # Already set above
+            if hasattr(titan_moe_args, attr):
+                setattr(self, attr, getattr(titan_moe_args, attr))
+        
+        # Track all MoE arguments
+        self._titan_injected_model_args.update(titan_moe_args.__dict__)
+        self._titan_injected_model_args.update({
+            "num_experts_per_tok": moe_args.top_k,
+            "n_routed_experts": moe_args.num_experts,
+            "n_shared_experts": moe_args.num_shared_experts,
+            "moe_intermediate_size": titan_moe_args.moe_inter_dim,
+            "q_lora_rank": self.q_lora_rank,
+        })
 
-        # HuggingFace specific args
+    def _configure_hf_attention(self, attn_implementation: str):
+        """Configure HuggingFace attention settings."""
+        self._titan_injected_model_args["attn_implementation"] = attn_implementation
         self.attn_implementation = attn_implementation
         # NOTE:(3outeille):This will force create_causal_mask to return None
         AttentionInterface._global_mapping[attn_implementation] = sdpa_attention_forward
 
-        # Start with passed_args as just titan_args
-        self._passed_args = {
-            **titan_dense_args.__dict__,
-            "attn_implementation": attn_implementation,
-        }
-        self._passed_args.update(kwargs)
-
-        # NOTE(3outeille): Wait for transformers uniformization of MoE args
-        if titan_moe_args is not None:
-            # For DeepSeekV3, setting q_lora_rank to 0 in TorchTitan is equivalent to
-            # setting it to None in HuggingFace.
-            q_lora_rank = titan_moe_args.q_lora_rank
-            if q_lora_rank == 0:
-                q_lora_rank = None
-            titan_moe_args.q_lora_rank = q_lora_rank
-
-            self._passed_args.update(**titan_moe_args.__dict__)
-            
-            if titan_moe_args.moe_args is not None:
-                moe_args = titan_moe_args.moe_args
-                
-                # Store moe_args for nparams/flops calculation
-                self.moe_args = moe_args
-                self.num_experts_per_tok = moe_args.top_k
-                self.n_routed_experts = moe_args.num_experts
-                self.n_shared_experts = moe_args.num_shared_experts
-                self.moe_intermediate_size = titan_moe_args.moe_inter_dim
-                
-                # Set MoE-specific attributes directly on config for model access
-                if hasattr(titan_moe_args, 'rope_interleave'):
-                    self.rope_interleave = titan_moe_args.rope_interleave
-                if hasattr(titan_moe_args, 'partial_rotary_factor'):
-                    self.partial_rotary_factor = titan_moe_args.partial_rotary_factor
-                if hasattr(titan_moe_args, 'n_group'):
-                    self.n_group = titan_moe_args.n_group
-                if hasattr(titan_moe_args, 'topk_group'):
-                    self.topk_group = titan_moe_args.topk_group
-                if hasattr(titan_moe_args, 'kv_lora_rank'):
-                    self.kv_lora_rank = titan_moe_args.kv_lora_rank
-                if hasattr(titan_moe_args, 'q_lora_rank'):
-                    self.q_lora_rank = q_lora_rank  # Use the modified version (0 -> None)
-                if hasattr(titan_moe_args, 'qk_nope_head_dim'):
-                    self.qk_nope_head_dim = titan_moe_args.qk_nope_head_dim
-                if hasattr(titan_moe_args, 'qk_rope_head_dim'):
-                    self.qk_rope_head_dim = titan_moe_args.qk_rope_head_dim
-                if hasattr(titan_moe_args, 'v_head_dim'):
-                    self.v_head_dim = titan_moe_args.v_head_dim
-        
-                self._passed_args.update(
-                    dict(
-                        num_experts_per_tok=moe_args.top_k,
-                        n_routed_experts=moe_args.num_experts,
-                        n_shared_experts=moe_args.num_shared_experts,
-                        moe_intermediate_size=titan_moe_args.moe_inter_dim,
-                        rope_interleave=titan_moe_args.rope_interleave,
-                        partial_rotary_factor=titan_moe_args.partial_rotary_factor,
-                        n_group=titan_moe_args.n_group,
-                        topk_group=titan_moe_args.topk_group,
-                        kv_lora_rank=titan_moe_args.kv_lora_rank,
-                        qk_nope_head_dim=titan_moe_args.qk_nope_head_dim,
-                        qk_rope_head_dim=titan_moe_args.qk_rope_head_dim,
-                        v_head_dim=titan_moe_args.v_head_dim,
-                    )
-                )
-
-    def _create_dynamic_properties(self):
-        """Create properties dynamically based on active mappings."""
+    def _create_getter_setter_dynamically(self, has_moe: bool):
+        """
+        Create properties dynamically based on tt and hf attribute mappings.
+        For example, creates a property 'dim' that reads/writes to 'hidden_size'.
+        """
 
         def _create_property(hf_name: str) -> property:
             def getter(self):
@@ -162,8 +164,13 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
                 setattr(self, hf_name, value)
 
             return property(getter, setter)
+        
+        # Setup attribute mappings
+        self._tt_to_hf_attribute_map = dict(self._TT_TO_HF_MAPPINGS["dense"])
+        if has_moe:
+            self._tt_to_hf_attribute_map.update(self._TT_TO_HF_MAPPINGS["moe"])
 
-        for titan_name, hf_name in self._active_mappings.items():
+        for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
             # Create getter/setter for attribute that don't already exist
             if not hasattr(self.__class__, titan_name):
                 setattr(self.__class__, titan_name, _create_property(hf_name))
@@ -176,7 +183,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         # displays the arguments passed during initialization.
         args_lines = [
             f"{k}={getattr(self, k)!r}"
-            for k in sorted(self._passed_args.keys())
+            for k in sorted(self._titan_injected_model_args.keys())
             if hasattr(self, k)
         ]
         args_str = "\n".join(args_lines)
@@ -191,7 +198,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         )
 
         # Explicitly update attributes based on mappings
-        for titan_name, hf_name in self._active_mappings.items():
+        for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
             if hasattr(hf_model_config, hf_name):
                 setattr(self, titan_name, getattr(hf_model_config, hf_name))
 
@@ -200,7 +207,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             setattr(self, key, value)
 
         # Update our attributes with the passed args from flavors
-        for key, value in self._passed_args.items():
+        for key, value in self._titan_injected_model_args.items():
             if hasattr(self, key) and value is not None:
                 setattr(self, key, value)
 
