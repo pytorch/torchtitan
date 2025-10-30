@@ -24,6 +24,9 @@ _TEST_SUITES_FUNCTION = {
 }
 
 
+TEST_WITH_ROCM = os.getenv("TEST_WITH_ROCM", "0") == "1"
+
+
 def _run_cmd(cmd):
     return subprocess.run([cmd], text=True, shell=True)
 
@@ -85,6 +88,10 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
             continue
 
         if test_flavor.disabled:
+            continue
+
+        # Skip the test for ROCm
+        if TEST_WITH_ROCM and test_flavor.skip_rocm_test:
             continue
 
         # Check if we have enough GPUs

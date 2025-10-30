@@ -20,11 +20,12 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ReordererSequenceParallel,
 )
-from torchtitan.models.llama3.infra.parallelize import apply_ac, apply_ddp
+from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama4.infra.parallelize import apply_fsdp
 from torchtitan.tools.logging import logger
 
@@ -116,7 +117,7 @@ def parallelize_gptoss(
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
-            save_list=_op_sac_save_list,
+            op_sac_save_list=_op_sac_save_list,
         )
 
     dp_mesh: DeviceMesh | None = None

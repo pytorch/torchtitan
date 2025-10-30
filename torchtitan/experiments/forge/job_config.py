@@ -12,6 +12,7 @@ from torchtitan.config.job_config import (
     Checkpoint,
     Comm,
     Compile,
+    Debug,
     Job,
     LRScheduler,
     MemoryEstimation,
@@ -45,6 +46,7 @@ class ForgeJobConfig:
     # fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
     # experimental: Experimental = field(default_factory=Experimental)
     # validation: Validation = field(default_factory=Validation)
+    debug: Debug = field(default_factory=Debug)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
