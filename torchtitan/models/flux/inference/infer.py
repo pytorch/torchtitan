@@ -25,11 +25,24 @@ def inference(config: JobConfig):
     # Distributed processing setup: Each GPU/process handles a subset of prompts
     world_size = int(os.environ["WORLD_SIZE"])
     global_rank = int(os.environ["RANK"])
-    original_prompts = open(config.inference.prompts_path).readlines()
-    total_prompts = len(original_prompts)
 
-    # Distribute prompts across processes using round-robin assignment
-    prompts = original_prompts[global_rank::world_size]
+    single_prompt_mode = config.inference.prompt is not None
+
+    # Use single prompt if specified, otherwise read from file
+    if single_prompt_mode:
+        original_prompts = [config.inference.prompt]
+        logger.info(f"Using single prompt: {config.inference.prompt}")
+        bs = 1
+        # If only single prompt, each rank will generate an image with the same prompt
+        prompts = original_prompts
+    else:
+        original_prompts = open(config.inference.prompts_path).readlines()
+        logger.info(f"Reading prompts from: {config.inference.prompts_path}")
+        bs = config.inference.local_batch_size
+        # Distribute prompts across processes using round-robin assignment
+        prompts = original_prompts[global_rank::world_size]
+
+    total_prompts = len(original_prompts)
 
     trainer.checkpointer.load(step=config.checkpoint.load_step)
     t5_tokenizer, clip_tokenizer = build_flux_tokenizer(config)
@@ -39,15 +52,19 @@ def inference(config: JobConfig):
 
     if prompts:
         # Generate images for this process's assigned prompts
-        bs = config.inference.local_batch_size
 
         output_dir = os.path.join(
             config.job.dump_folder,
             config.inference.save_img_folder,
         )
-
         # Create mapping from local indices to global prompt indices
-        global_ids = list(range(global_rank, total_prompts, world_size))
+        if single_prompt_mode:
+            # In single prompt mode, all ranks process the same prompt (index 0)
+            # But each rank generates a different image (different seed/rank)
+            global_ids = [0] * len(prompts)
+        else:
+            # In multi-prompt mode, use round-robin distribution
+            global_ids = list(range(global_rank, total_prompts, world_size))
 
         for i in range(0, len(prompts), bs):
             images = generate_image(
