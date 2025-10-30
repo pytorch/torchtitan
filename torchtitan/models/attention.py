@@ -110,7 +110,9 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         super().__init__()
         self.flash_attn_varlen_func = flash_attn_varlen_func
         from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+        from vllm.attention.utils.fa_utils import get_flash_attn_version
         self.vllm_is_batch_invariant = vllm_is_batch_invariant
+        self.fa_version = get_flash_attn_version()
 
     def forward(
         self,
@@ -155,6 +157,7 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
             softmax_scale=scale,
             causal=True,
             num_splits=1 if self.vllm_is_batch_invariant() else 0,
+            fa_version=self.fa_version,
         )
 
         # Convert back to batch format

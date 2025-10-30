@@ -87,6 +87,84 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 SiluAndMul = VLLMSiluAndMul
 
 
+class RMSNormFunction(torch.autograd.Function):
+    """
+    Autograd function for RMS normalization using vLLM's Triton kernel in forward
+    and batch-invariant operations in backward.
+    """
+
+    @staticmethod
+    def forward(ctx, input, weight, eps):
+        """
+        Forward pass using vLLM's rms_norm Triton kernel.
+
+        Args:
+            input: Input tensor [*, hidden_size]
+            weight: Weight tensor [hidden_size]
+            eps: Epsilon for numerical stability
+
+        Returns:
+            output: Normalized and scaled tensor [*, hidden_size]
+        """
+        # Use vLLM's Triton kernel for forward (deterministic)
+        output = vllm_rms_norm(input, weight, eps)
+
+        # Save for backward
+        ctx.save_for_backward(input, weight)
+        ctx.eps = eps
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        Backward pass using batch-invariant PyTorch operations.
+
+        Returns:
+            (grad_input, grad_weight, None)
+        """
+        input, weight = ctx.saved_tensors
+        eps = ctx.eps
+
+        # Compute forward pass values needed for backward
+        # variance = mean(x^2) along last dim
+        variance = (input * input).mean(dim=-1, keepdim=True)
+        rms = torch.sqrt(variance + eps)
+        x_norm = input / rms
+
+        # Gradient w.r.t. weight
+        # grad_weight = sum(grad_output * x_norm) over all dims except last
+        grad_weight = (grad_output * x_norm).sum(dim=tuple(range(grad_output.ndim - 1)))
+
+        # Gradient w.r.t. input
+        # grad_x_norm = grad_output * weight
+        grad_x_norm = grad_output * weight
+
+        # grad_x = (grad_x_norm - mean(grad_x_norm * x_norm) * x_norm) / rms
+        mean_term = (grad_x_norm * x_norm).mean(dim=-1, keepdim=True)
+        grad_input = (grad_x_norm - mean_term * x_norm) / rms
+
+        return grad_input, grad_weight, None
+
+
+def rms_norm_with_gradients(input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    RMS normalization with gradient support.
+
+    Uses vLLM's Triton kernel for forward pass (deterministic) and
+    batch-invariant PyTorch operations for backward pass.
+
+    Args:
+        input: Input tensor [*, hidden_size]
+        weight: Weight tensor [hidden_size]
+        eps: Epsilon for numerical stability
+
+    Returns:
+        output: Normalized and scaled tensor [*, hidden_size]
+    """
+    return RMSNormFunction.apply(input, weight, eps)
+
+
 class VLLMRMSNorm(nn.Module):
     """
     RMSNorm using vLLM's exact Triton kernel for bitwise determinism.
@@ -99,8 +177,8 @@ class VLLMRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Use vLLM's exact RMSNorm Triton kernel
-        return vllm_rms_norm(x, self.weight, self.eps)
+        # Use vLLM's RMSNorm with gradient support for training
+        return rms_norm_with_gradients(x, self.weight, self.eps)
 
     def reset_parameters(self):
         nn.init.ones_(self.weight)
@@ -303,6 +381,12 @@ class Qwen3VLLMCompatModel(nn.Module, ModelProtocol):
 
         self.norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+
+        # IMPORTANT: To match vLLM's behavior and Qwen3's config
+        # (tie_word_embeddings: true), tie output layer weights to
+        # embedding weights. When either weight updates during training,
+        # both update together
+        self.output.weight = self.tok_embeddings.weight
 
     def init_weights(
         self,
