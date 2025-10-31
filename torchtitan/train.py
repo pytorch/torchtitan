@@ -288,8 +288,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
         # where it issues a single all-reduce for all parameters at once for better performance
         self.optimizers.register_step_post_hook(
-            lambda *args, **kwargs: model_converters.post_optimizer_hook(
-                self.model_parts
+            lambda o, *args, **kwargs: model_converters.post_optimizer_hook(
+                o, *args, **kwargs
             )
         )
         self.metrics_processor.optimizers = self.optimizers
@@ -383,7 +383,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         """Returns an iterator that processes batches from the data iterator."""
-        device_type = utils.device_type
+        # device_type = utils.device_type
         data_iterator = iter(data_iterable)
 
         while True:
@@ -405,8 +405,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # Move tensors to the appropriate device
             for k, v in input_dict.items():
                 if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(device_type)
-            labels = labels.to(device_type)
+                    input_dict[k] = v.to(self.device, non_blocking=True)
+            labels = labels.to(self.device, non_blocking=True)
 
             yield input_dict, labels
 
@@ -485,8 +485,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
+                pred.to("meta")
                 del pred
                 loss.backward()
+
+        inputs.to("meta")
+        del inputs
+        labels.to("meta")
+        del labels
 
         return loss
 
@@ -509,25 +515,31 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.job_config.training.max_norm,
-            foreach=True,
-            pp_mesh=(
-                parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
-            ),
-            ep_enabled=parallel_dims.ep_enabled,
-        )
+        grad_norm = -1.0
+        if not self.job_config.optimizer.early_step_in_backward:
+            grad_norm = dist_utils.clip_grad_norm_(
+                [p for m in self.model_parts for p in m.parameters()],
+                self.job_config.training.max_norm,
+                foreach=True,
+                pp_mesh=(
+                    parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
+                ),
+                ep_enabled=parallel_dims.ep_enabled,
+            )
+            grad_norm = grad_norm.item()
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()
 
-        # Reduce the data collected over gradient accumulation steps.
-        loss = torch.sum(torch.stack(accumulated_losses))
-
         # log metrics
         if not self.metrics_processor.should_log(self.step):
             return
+
+        # Reduce the data collected over gradient accumulation steps.
+        loss = 0
+        while len(accumulated_losses) > 0:
+            loss += accumulated_losses.pop()
+        # loss = torch.sum(torch.stack(accumulated_losses))
 
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
@@ -555,7 +567,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.step,
             global_avg_loss,
             global_max_loss,
-            grad_norm.item(),
+            grad_norm,
             extra_metrics=extra_metrics,
         )
 
