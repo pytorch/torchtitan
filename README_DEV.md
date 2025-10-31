@@ -16,7 +16,7 @@
 [rank0]:[titan] 2025-10-30 14:32:59,693 - root - INFO - step: 10  loss:  3.8790  grad_norm:  1.4802  memory:  2.49GiB(3.14%)  tps: 183,058  tflops: 99.39  mfu: 10.05%
 ```
 
-## This Branch 
+## This Branch
 
 ```
 [rank0]:[titan] 2025-10-30 14:57:42,612 - root - INFO - step:  1  loss:  8.2308  grad_norm:  3.5201  memory:  2.53GiB(3.20%)  tps: 4,355  tflops: 2.36  mfu: 0.24%
@@ -53,7 +53,7 @@
 [rank0]:[titan] 2025-10-30 20:36:46,413 - root - INFO - step: 100  loss:  6.4956  grad_norm:  1.8129  memory: 52.53GiB(66.33%)  tps: 11,572  tflops: 209.53  mfu: 21.19%
 ```
 
-## This Branch 
+## This Branch
 
 ```
 [rank0]:[titan] 2025-10-30 20:16:42,705 - root - INFO - step:  1  loss: 12.0097  grad_norm:  1.7039  memory: 38.12GiB(48.14%)  tps: 400  tflops: 7.25  mfu: 0.73%
@@ -74,4 +74,3 @@
 [rank0]:[titan] 2025-10-30 20:19:34,362 - root - INFO - step: 120  loss:  6.1344  grad_norm:  0.8170  memory: 52.78GiB(66.65%)  tps: 11,222  tflops: 203.19  mfu: 20.55%
 [rank0]:[titan] 2025-10-30 20:19:48,736 - root - INFO - step: 130  loss:  6.0316  grad_norm:  0.9751  memory: 52.78GiB(66.65%)  tps: 11,399  tflops: 206.39  mfu: 20.87%
 ```
-

@@ -7,9 +7,9 @@
 
 import torch
 from einops import rearrange
-from triton.testing import do_bench
 
 from torchtitan.models.moe.moe import FeedForward, MoE, MoEArgs, MoEOld
+from triton.testing import do_bench
 
 
 # NOTE: @goon -  torch.testing.assert_close is very strict and hard to pass. Use the more-lenient
