@@ -4,9 +4,11 @@ description = "Gpt-oss debug training"
 print_config = false
 
 [profiling]
-enable_profiling = false
+enable_profiling = true
 save_traces_folder = "profile_trace"
-profile_freq = 10
+profile_freq = 2
+profiler_active = 1
+profiler_warmup = 1
 enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
@@ -36,8 +38,8 @@ decay_type = "linear"
 min_lr_factor = 0.0
 
 [training]
-local_batch_size = 8
-seq_len = 2048
+local_batch_size = 1
+seq_len = 1024
 max_norm = 1.0  # grad norm clipping
 steps = 10
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)

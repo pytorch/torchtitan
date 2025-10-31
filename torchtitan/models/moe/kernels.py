@@ -109,7 +109,7 @@ def fill_indices_cpu(
     max_len: int,
 ):
     # We need to preallocate the output - we ignore device and force it on cpu
-    # device = tokens_per_expert_group.device
+    device = tokens_per_expert_group.device
     permuted_indices = torch.full(
         (max_len,),
         -1,
@@ -134,7 +134,7 @@ def fill_indices_cpu(
                     # device=device,
                 )
             write_start += length
-    return permuted_indices
+    return permuted_indices.to(device)
 
 
 def generate_permute_indices(

@@ -80,11 +80,11 @@ class GptOssModelArgs(BaseModelArgs):
             )
         self.max_seq_len = seq_len
 
-        if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
-            logger.warning(
-                "Failed to use grouped mm, which is only supported on SM90 or later",
-            )
-            self.moe_args.use_grouped_mm = False
+        # if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
+        #     logger.warning(
+        #         "Failed to use grouped mm, which is only supported on SM90 or later",
+        #     )
+        #     self.moe_args.use_grouped_mm = False
 
         if job_config.parallelism.context_parallel_degree > 1:
             raise NotImplementedError(

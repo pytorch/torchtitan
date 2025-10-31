@@ -50,6 +50,7 @@ def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
             ep_degree,
             padded_max_len,
             TOKEN_GROUP_ALIGN_SIZE_M,
+            use_cpu=True,
         )
 
     x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
