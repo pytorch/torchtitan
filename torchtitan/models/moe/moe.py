@@ -345,7 +345,6 @@ class TokenReorderer(nn.Module):
         )
 
         top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
-        # NOTE: @goon - no longer returning token_indices_experts_sorted//top_k
 
         return (
             top_scores_experts_sorted,
