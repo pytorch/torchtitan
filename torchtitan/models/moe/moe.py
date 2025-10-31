@@ -582,5 +582,4 @@ class MoE(MoEOld):
 
         if out is None:
             return out_experts.reshape(bs, slen, dim)
-        out = (out + out_experts).reshape(bs, slen, dim)
-        return out
+        return (out + out_experts).reshape(bs, slen, dim)
