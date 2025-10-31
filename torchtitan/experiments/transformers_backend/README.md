@@ -4,12 +4,12 @@
 
 - Requirements `transformers==4.55.4`
 
-- Config: `torchtitan/torchtitan/experiments/transformers_backend/configs/qwen3_fsdp2_tp2_pp2.toml` 
+- Config: `torchtitan/torchtitan/experiments/transformers_backend/configs/qwen3_fsdp2_tp2_pp2.toml`
 ```diff
 ...
 [model]
 - name = "llama3"
-+ name = "transformers_backend" 
++ name = "transformers_backend"
 flavor = "debugmodel"
 hf_assets_path = "./tests/assets/tokenizer"
 

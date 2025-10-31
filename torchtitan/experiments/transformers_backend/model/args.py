@@ -46,7 +46,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             "n_dense_layers": "first_k_dense_replace",
         },
     }
-    
+
     # Declarative list of TorchTitan-only attributes (no HF equivalent)
     _TT_SPECIFIC_ATTRIBUTES = [
         "multiple_of",
@@ -55,7 +55,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         "use_flex_attn",
         "attn_mask_type",
     ]
-    
+
     # MoE attributes that should be copied directly
     _MOE_SHARED_ATTRIBUTES = [
         "rope_interleave",
@@ -82,16 +82,16 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
         # Create getter/setter dynamically for TT <-> HF attribute mappings
         self._create_getter_setter_dynamically(titan_moe_args is not None)
-        
+
         self._titan_injected_model_args = {}
         self._titan_injected_model_args.update(kwargs)
         self._configure_hf_attention(attn_implementation)
 
         self._initialize_dense_attributes(titan_dense_args)
-        
+
         if titan_moe_args is not None:
             self._initialize_moe_attributes(titan_moe_args)
-        
+
     def _initialize_dense_attributes(self, titan_dense_args):
         """Initialize all dense model attributes."""
         # Set mapped attributes (TorchTitan <-> HuggingFace)
@@ -99,12 +99,12 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             if hasattr(titan_dense_args, titan_name):
                 value = getattr(titan_dense_args, titan_name)
                 setattr(self, hf_name, value)
-        
+
         # Set TorchTitan-only attributes
         for attr_name in self._TT_SPECIFIC_ATTRIBUTES:
             if hasattr(titan_dense_args, attr_name):
                 setattr(self, attr_name, getattr(titan_dense_args, attr_name))
-        
+
         # Update passed_args
         self._titan_injected_model_args.update(titan_dense_args.__dict__)
 
@@ -113,35 +113,39 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         if titan_moe_args.moe_args is None:
             self._titan_injected_model_args.update(titan_moe_args.__dict__)
             return
-        
+
         moe_args = titan_moe_args.moe_args
-        
+
         # Convert q_lora_rank (0 -> None for HuggingFace compatibility)
-        self.q_lora_rank = None if titan_moe_args.q_lora_rank == 0 else titan_moe_args.q_lora_rank
-        
+        self.q_lora_rank = (
+            None if titan_moe_args.q_lora_rank == 0 else titan_moe_args.q_lora_rank
+        )
+
         # Set core MoE attributes
         self.moe_args = moe_args
         self.num_experts_per_tok = moe_args.top_k
         self.n_routed_experts = moe_args.num_experts
         self.n_shared_experts = moe_args.num_shared_experts
         self.moe_intermediate_size = titan_moe_args.moe_inter_dim
-        
+
         # Set remaining architecture-specific MoE attributes
         for attr in self._MOE_SHARED_ATTRIBUTES:
             if attr == "q_lora_rank":
                 continue  # Already set above
             if hasattr(titan_moe_args, attr):
                 setattr(self, attr, getattr(titan_moe_args, attr))
-        
+
         # Track all MoE arguments
         self._titan_injected_model_args.update(titan_moe_args.__dict__)
-        self._titan_injected_model_args.update({
-            "num_experts_per_tok": moe_args.top_k,
-            "n_routed_experts": moe_args.num_experts,
-            "n_shared_experts": moe_args.num_shared_experts,
-            "moe_intermediate_size": titan_moe_args.moe_inter_dim,
-            "q_lora_rank": self.q_lora_rank,
-        })
+        self._titan_injected_model_args.update(
+            {
+                "num_experts_per_tok": moe_args.top_k,
+                "n_routed_experts": moe_args.num_experts,
+                "n_shared_experts": moe_args.num_shared_experts,
+                "moe_intermediate_size": titan_moe_args.moe_inter_dim,
+                "q_lora_rank": self.q_lora_rank,
+            }
+        )
 
     def _configure_hf_attention(self, attn_implementation: str):
         """Configure HuggingFace attention settings."""
@@ -164,7 +168,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
                 setattr(self, hf_name, value)
 
             return property(getter, setter)
-        
+
         # Setup attribute mappings
         self._tt_to_hf_attribute_map = dict(self._TT_TO_HF_MAPPINGS["dense"])
         if has_moe:

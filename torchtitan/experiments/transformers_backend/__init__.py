@@ -115,6 +115,7 @@ flavors = {
     ),
 }
 
+
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
         model_cls=HFTransformerModel,
