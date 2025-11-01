@@ -17,12 +17,15 @@ from torchtitan.models.attention import (
     create_attention_mask,
     get_causal_mask_mod,
     get_document_mask_mod,
-    VLLMCompatibleFlashAttention,
 )
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
-from .args import Qwen3ModelArgs
+# Import from local experiment's models
+from ..attention import VLLMCompatibleFlashAttention
+
+# Import from main torchtitan
+from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
 
 # Import vLLM's exact operations for bitwise determinism
 from vllm.model_executor.layers.activation import SiluAndMul as VLLMSiluAndMul

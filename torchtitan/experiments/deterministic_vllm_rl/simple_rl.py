@@ -307,7 +307,7 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
 
     if use_vllm_compat:
         # Create and load model (using vLLM-compat for bitwise determinism)
-        from torchtitan.models.qwen3.model.model_vllm_compat import Qwen3VLLMCompatModel
+        from models.qwen3 import Qwen3VLLMCompatModel
         model = Qwen3VLLMCompatModel(model_args)
         # Convert to vLLM-compat format (merged gate_up_proj, down_proj)
         vllm_compat_state = torchtitan_to_vllm_compat(state_dict)
