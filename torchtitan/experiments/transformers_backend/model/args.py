@@ -215,6 +215,9 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             if hasattr(self, key) and value is not None:
                 setattr(self, key, value)
 
+        if hasattr(job_config.training, 'seq_len') and job_config.training.seq_len != self.max_seq_len:
+            self.max_seq_len = job_config.training.seq_len
+        
         # MoE
         if hasattr(self, "qk_nope_head_dim") and hasattr(self, "qk_rope_head_dim"):
             self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
