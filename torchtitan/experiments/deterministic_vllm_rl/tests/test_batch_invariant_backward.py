@@ -1,15 +1,16 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Test batch_invariant_backward module to ensure it works correctly.
 """
 
 import torch
-import sys
-from pathlib import Path
 
-# Add current directory to path
-sys.path.insert(0, str(Path(__file__).parent))
-
-from batch_invariant_backward import (
+from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
     enable_batch_invariant_backward_mode,
     disable_batch_invariant_backward_mode,
     mm_batch_invariant_backward,

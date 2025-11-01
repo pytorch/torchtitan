@@ -21,6 +21,8 @@ This experiment solves both problems by:
 - **Gradient Support**: Full backward pass support for training
 - **Model Compatibility**: Drop-in replacement for standard Qwen3 models in TorchTitan
 
+**Note**: This experiment currently supports single-device training only. We plan to extend support for distributed training with tensor parallelism and pipeline parallelism in the future.
+
 ## Architecture
 
 ### Components
@@ -110,8 +112,7 @@ loss.backward()
 Run the complete RL training loop:
 
 ```bash
-cd torchtitan/experiments/deterministic_vllm_rl
-python simple_rl.py
+VLLM_BATCH_INVARIANT=1 VLLM_FLASH_ATTN_VERSION=3 python -m torchtitan.experiments.deterministic_vllm_rl.simple_rl
 ```
 
 This will:

@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Test if batch_invariant operations are EXACTLY deterministic.
 
@@ -5,8 +11,8 @@ This runs the same operation multiple times and checks if results are bit-for-bi
 """
 
 import torch
-from batch_invariant_backward import enable_batch_invariant_backward_mode
-from vllm.model_executor.layers.batch_invariant import disable_batch_invariant_mode, matmul_persistent
+from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import enable_batch_invariant_backward_mode
+from vllm.model_executor.layers.batch_invariant import disable_batch_invariant_mode
 
 print("Enabling batch_invariant_backward mode...")
 disable_batch_invariant_mode()

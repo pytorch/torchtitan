@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Simple RL training loop with GRPO-style advantage estimation.
 
@@ -11,19 +17,16 @@ This demonstrates:
 """
 
 import os
-import tempfile
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoConfig
 from safetensors.torch import load_file, save_file
 from huggingface_hub import snapshot_download
-import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 
-import torchtitan.experiments.compat
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
-from weights_vllm_compat import torchtitan_to_vllm_compat, vllm_compat_to_torchtitan
-from weights.converter import torchtitan_to_vllm, vllm_to_torchtitan
+from torchtitan.experiments.deterministic_vllm_rl.weights_vllm_compat import torchtitan_to_vllm_compat, vllm_compat_to_torchtitan
+from torchtitan.experiments.deterministic_vllm_rl.weights.converter import torchtitan_to_vllm, vllm_to_torchtitan
 
 from vllm import LLM, SamplingParams
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
@@ -307,7 +310,7 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
 
     if use_vllm_compat:
         # Create and load model (using vLLM-compat for bitwise determinism)
-        from models.qwen3 import Qwen3VLLMCompatModel
+        from torchtitan.experiments.deterministic_vllm_rl.models.qwen3 import Qwen3VLLMCompatModel
         model = Qwen3VLLMCompatModel(model_args)
         # Convert to vLLM-compat format (merged gate_up_proj, down_proj)
         vllm_compat_state = torchtitan_to_vllm_compat(state_dict)
@@ -618,7 +621,6 @@ def rl_update_step(
         metrics: Dict of training metrics
     """
     # Update vLLM weights from current policy
-    from weights_vllm_compat import torchtitan_to_vllm_compat
     titan_state = model.state_dict()
     vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
     vllm_engine.update_weights(vllm_compat_state)
@@ -626,8 +628,6 @@ def rl_update_step(
     # Round-trip: load weights back from disk to maintain consistency with vLLM
     import glob
     from safetensors.torch import load_file as sf_load
-    from weights.converter import vllm_to_torchtitan
-    from weights_vllm_compat import torchtitan_to_vllm_compat as titan_to_vllm_compat
 
     shard_files = sorted(glob.glob(os.path.join(vllm_engine.temp_model_dir, "model-*.safetensors")))
     if shard_files:
@@ -642,7 +642,7 @@ def rl_update_step(
 
         if use_vllm_compat:
             # Convert to vLLM-compat format for vLLM-compatible model
-            weights_for_model = titan_to_vllm_compat(titan_from_disk)
+            weights_for_model = torchtitan_to_vllm_compat(titan_from_disk)
         else:
             # Use standard TorchTitan format for standard model
             weights_for_model = titan_from_disk
@@ -776,7 +776,7 @@ def main():
         print("Batch invariance detected - using vLLM-compatible model")
         # Add backward pass support to vLLM's batch_invariant mode
         print("Adding gradient support to vLLM's batch_invariant mode...")
-        from batch_invariant_backward import patch_batch_invariant_with_gradients
+        from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import patch_batch_invariant_with_gradients
         patch_batch_invariant_with_gradients()
     else:
         print("Batch invariance NOT detected - using standard model")

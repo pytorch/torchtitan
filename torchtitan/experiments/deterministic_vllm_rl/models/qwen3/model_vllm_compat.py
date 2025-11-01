@@ -8,28 +8,23 @@
 # Uses merged gate_up projections and vLLM Flash Attention
 
 import torch
-import torch.nn.functional as F
 from torch import nn
-from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.attention import (
-    create_attention_mask,
-    get_causal_mask_mod,
-    get_document_mask_mod,
-)
-from torchtitan.protocols.model import AttentionMasksType
-from torchtitan.protocols.train_spec import ModelProtocol
-
-# Import from local experiment's models
-from ..attention import VLLMCompatibleFlashAttention
 
 # Import from main torchtitan
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
+from torchtitan.protocols.model import AttentionMasksType
+from torchtitan.protocols.train_spec import ModelProtocol
 
 # Import vLLM's exact operations for bitwise determinism
 from vllm.model_executor.layers.activation import SiluAndMul as VLLMSiluAndMul
-from vllm.model_executor.layers.batch_invariant import rms_norm as vllm_rms_norm
+
+# Import gradient-enabled operations from experiment utilities
+from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import rms_norm_with_gradients
+
+# Import from local experiment's models
+from ..attention import VLLMCompatibleFlashAttention
 
 
 # RoPE functions (same as original)
@@ -88,84 +83,6 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 # Use vLLM's exact SiluAndMul kernel for bitwise determinism
 SiluAndMul = VLLMSiluAndMul
-
-
-class RMSNormFunction(torch.autograd.Function):
-    """
-    Autograd function for RMS normalization using vLLM's Triton kernel in forward
-    and batch-invariant operations in backward.
-    """
-
-    @staticmethod
-    def forward(ctx, input, weight, eps):
-        """
-        Forward pass using vLLM's rms_norm Triton kernel.
-
-        Args:
-            input: Input tensor [*, hidden_size]
-            weight: Weight tensor [hidden_size]
-            eps: Epsilon for numerical stability
-
-        Returns:
-            output: Normalized and scaled tensor [*, hidden_size]
-        """
-        # Use vLLM's Triton kernel for forward (deterministic)
-        output = vllm_rms_norm(input, weight, eps)
-
-        # Save for backward
-        ctx.save_for_backward(input, weight)
-        ctx.eps = eps
-
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        """
-        Backward pass using batch-invariant PyTorch operations.
-
-        Returns:
-            (grad_input, grad_weight, None)
-        """
-        input, weight = ctx.saved_tensors
-        eps = ctx.eps
-
-        # Compute forward pass values needed for backward
-        # variance = mean(x^2) along last dim
-        variance = (input * input).mean(dim=-1, keepdim=True)
-        rms = torch.sqrt(variance + eps)
-        x_norm = input / rms
-
-        # Gradient w.r.t. weight
-        # grad_weight = sum(grad_output * x_norm) over all dims except last
-        grad_weight = (grad_output * x_norm).sum(dim=tuple(range(grad_output.ndim - 1)))
-
-        # Gradient w.r.t. input
-        # grad_x_norm = grad_output * weight
-        grad_x_norm = grad_output * weight
-
-        # grad_x = (grad_x_norm - mean(grad_x_norm * x_norm) * x_norm) / rms
-        mean_term = (grad_x_norm * x_norm).mean(dim=-1, keepdim=True)
-        grad_input = (grad_x_norm - mean_term * x_norm) / rms
-
-        return grad_input, grad_weight, None
-
-
-def rms_norm_with_gradients(input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """
-    RMS normalization with gradient support.
-
-    Uses vLLM's Triton kernel for forward pass (deterministic) and
-    batch-invariant PyTorch operations for backward pass.
-
-    Args:
-        input: Input tensor [*, hidden_size]
-        weight: Weight tensor [hidden_size]
-        eps: Epsilon for numerical stability
-
-    Returns:
-        output: Normalized and scaled tensor [*, hidden_size]
-    """
-    return RMSNormFunction.apply(input, weight, eps)
 
 
 class VLLMRMSNorm(nn.Module):
@@ -253,10 +170,14 @@ class Attention(nn.Module):
             self.k_norm = None
 
         # QKV projections
-        self.wq = nn.Linear(model_args.dim, model_args.n_heads * self.head_dim, bias=False)
+        self.wq = nn.Linear(
+            model_args.dim, model_args.n_heads * self.head_dim, bias=False
+        )
         self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(model_args.n_heads * self.head_dim, model_args.dim, bias=False)
+        self.wo = nn.Linear(
+            model_args.n_heads * self.head_dim, model_args.dim, bias=False
+        )
 
         # Always use vLLM compatible flash attention
         self.inner_attention = VLLMCompatibleFlashAttention()
@@ -303,7 +224,9 @@ class Attention(nn.Module):
         xv = values.transpose(1, 2)
 
         # Apply flash attention (vLLM compatible, no flex attention)
-        assert attention_masks is None, "vLLM compat mode doesn't use flex attention masks"
+        assert (
+            attention_masks is None
+        ), "vLLM compat mode doesn't use flex attention masks"
         output = self.inner_attention(xq, xk, xv, scale=self.scaling)
 
         # Transpose back
