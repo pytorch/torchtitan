@@ -145,21 +145,11 @@ class VLLMRolloutEngine:
                 seed=42,  # Fixed seed for determinism
                 enforce_eager=True,
             )
+            print("✓ Created new vLLM engine")
         else:
-            # vLLM V1's reload_weights() is broken - it doesn't actually reload from disk
-            # The only reliable way is to recreate the engine
-            del self.llm
-            torch.cuda.empty_cache()
-
-            self.llm = LLM(
-                model=self.temp_model_dir,
-                trust_remote_code=True,
-                max_model_len=2048,
-                dtype="bfloat16",
-                gpu_memory_utilization=0.3,
-                seed=42,  # Fixed seed for determinism
-                enforce_eager=True,
-            )
+            # Use collective_rpc to call reload_weights on all workers
+            # This reloads weights from temp_model_dir without recreating the engine
+            self.llm.collective_rpc("reload_weights")
 
     @torch.no_grad()
     def generate(
