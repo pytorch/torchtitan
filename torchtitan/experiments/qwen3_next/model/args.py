@@ -57,9 +57,8 @@ class Qwen3NextModelArgs(BaseModelArgs):
     max_seq_len: int = 4096
     depth_init: bool = True
 
-    use_flex_attn: bool = False
-    attn_mask_type: str = "causal"
-    eos_id: int = 151645
+    use_flex_attn: bool = True
+    attn_mask_type: str = "block_causal"
 
     enable_weight_tying: bool = False
 
@@ -99,6 +98,9 @@ class Qwen3NextModelArgs(BaseModelArgs):
                 )
                 for i in range(self.n_layers)
             ]
+
+        if not self.use_flex_attn:
+            raise ValueError("Qwen3-Next requires FlexAttention")
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
