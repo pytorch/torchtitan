@@ -10,7 +10,6 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize_hf_transformers import parallelize_hf_transformers
@@ -44,33 +43,6 @@ class TitanDenseModelArgs:
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
 
-
-@dataclass
-class TitanMoeModelArgs:
-    """Arguments specific to DeepSeekV3 models."""
-
-    moe_args: MoEArgs | None = None
-    n_group: int | None = None
-    topk_group: int | None = None
-    inter_dim: int | None = None
-    moe_inter_dim: int | None = None
-    n_dense_layers: int | None = None
-    n_expert_groups: int | None = None
-    n_limited_groups: int | None = None
-    q_lora_rank: int | None = None
-    kv_lora_rank: int | None = None
-    qk_nope_head_dim: int | None = None
-    qk_rope_head_dim: int | None = None
-    v_head_dim: int | None = None
-    original_seq_len: int | None = None
-    rope_factor: float | None = None
-    beta_fast: int | None = None
-    beta_slow: int | None = None
-    mscale: float | None = None
-    partial_rotary_factor: float | None = None
-    rope_interleave: bool = True
-
-
 flavors = {
     "debugmodel": HFTransformerModelArgs(
         titan_dense_args=TitanDenseModelArgs(
@@ -78,36 +50,6 @@ flavors = {
             n_layers=6,
             n_heads=16,
             n_kv_heads=16,
-        ),
-    ),
-    "debugmodel_moe": HFTransformerModelArgs(
-        titan_dense_args=TitanDenseModelArgs(
-            dim=256,
-            n_layers=6,
-            n_heads=16,
-            n_kv_heads=16,
-        ),
-        titan_moe_args=TitanMoeModelArgs(
-            partial_rotary_factor=4.0,
-            inter_dim=1024,
-            moe_inter_dim=256,
-            n_dense_layers=1,
-            n_group=2,
-            topk_group=1,
-            kv_lora_rank=512,
-            q_lora_rank=0,
-            qk_nope_head_dim=128,
-            qk_rope_head_dim=64,
-            v_head_dim=128,
-            mscale=0.70,
-            moe_args=MoEArgs(
-                num_experts=8,
-                num_shared_experts=2,
-                top_k=3,
-                score_func="softmax",
-                route_norm=True,
-                score_before_experts=False,
-            ),
         ),
     ),
     "full": HFTransformerModelArgs(

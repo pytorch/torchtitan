@@ -45,55 +45,26 @@ class HFTransformerModel(nn.Module):
                 model_module, f"{model_name_prefix}DecoderLayer", None
             )
 
-            is_moe = hasattr(
-                model_args, "n_routed_experts"
-            )  # TODO(3outeille): check if this is the most reliable to detect a moe model
-            if is_moe:
-                moe_cls = getattr(model_module, f"{model_name_prefix}MoE", None)
-                required_classes = {
-                    "Attention": attention_cls,
-                    "MLP": mlp_cls,
-                    "DecoderLayer": decoder_layer_cls,
-                    "MoE": moe_cls,
-                }
+            required_classes = {
+                "Attention": attention_cls,
+                "DecoderLayer": decoder_layer_cls,
+            }
 
-                if all(required_classes.values()):
-                    logger.info(f"Applying MoE-like patch for {model_name_prefix}")
-                    self._patch_hf_moe_like(
-                        decoder_layer_cls=decoder_layer_cls,
-                        attention_cls=attention_cls,
-                        mlp_cls=mlp_cls,
-                        moe_cls=moe_cls,
-                    )
-                else:
-                    missing = [
-                        name for name, cls in required_classes.items() if not cls
-                    ]
-                    logger.warning(
-                        f"Could not find required classes ({', '.join(missing)}) for MoE patching of {model_name_prefix}. "
-                        "Skipping MoE-like patch."
-                    )
+            if all(required_classes.values()):
+                logger.info(f"Applying Llama-like patch for {model_name_prefix}")
+                self._patch_hf_llama_like(
+                    decoder_layer_cls=decoder_layer_cls,
+                    attention_cls=attention_cls,
+                    mlp_cls=mlp_cls,  # mlp_cls can be None
+                )
             else:
-                required_classes = {
-                    "Attention": attention_cls,
-                    "DecoderLayer": decoder_layer_cls,
-                }
-
-                if all(required_classes.values()):
-                    logger.info(f"Applying Llama-like patch for {model_name_prefix}")
-                    self._patch_hf_llama_like(
-                        decoder_layer_cls=decoder_layer_cls,
-                        attention_cls=attention_cls,
-                        mlp_cls=mlp_cls,  # mlp_cls can be None
-                    )
-                else:
-                    missing = [
-                        name for name, cls in required_classes.items() if not cls
-                    ]
-                    logger.warning(
-                        f"Could not find required classes ({', '.join(missing)}) for {model_name_prefix}. "
-                        "Skipping Llama-like patch."
-                    )
+                missing = [
+                    name for name, cls in required_classes.items() if not cls
+                ]
+                logger.warning(
+                    f"Could not find required classes ({', '.join(missing)}) for {model_name_prefix}. "
+                    "Skipping Llama-like patch."
+                )
 
         except Exception as e:
             logger.warning(
@@ -103,17 +74,10 @@ class HFTransformerModel(nn.Module):
 
         self.model = model_cls(config=model_args)
         self.max_seq_len = model_args.max_seq_len
+        self.cp_mesh = None
 
         for layer in self.model.model.layers:
-            if (
-                hasattr(model_args, "first_k_dense_replace")
-                and layer.layer_idx >= model_args.first_k_dense_replace
-            ):
-                layer.moe_enabled = True
-            else:
-                layer.moe_enabled = False
-
-        self.cp_mesh = None
+            layer.moe_enabled = False
 
     def set_cp_mesh(self, mesh):
         self.cp_mesh = mesh
@@ -275,175 +239,6 @@ class HFTransformerModel(nn.Module):
                 or "RMSNorm" in module.__class__.__name__
             ):
                 # Norms can exist without weights (in which case they are None from torch primitives)
-                if hasattr(module, "weight") and module.weight is not None:
-                    module.weight.data.fill_(1.0)
-                if hasattr(module, "bias") and module.bias is not None:
-                    module.bias.data.zero_()
-
-        decoder_layer_cls.__init__ = _decoder_layer_init_patched
-        PreTrainedModel._init_weights = _init_weights_patched
-        PreTrainedModel._initialize_weights = _initialize_weights_patched
-
-    def _patch_hf_moe_like(self, decoder_layer_cls, attention_cls, mlp_cls, moe_cls):
-        """
-        This patch modifies a Hugging Face MoE (Mixture-of-Experts) model's weight
-        initialization to match the initialization scheme used in TorchTitan,
-        drawing from patterns in models like DeepseekV3.
-
-        The patch targets:
-        - `PreTrainedModel._initialize_weights`: For correct meta device initialization.
-        - `PreTrainedModel._init_weights`: To implement TorchTitan's specific initialization
-          for attention, MLP, MoE, embedding, and layer norm layers.
-        - `DecoderLayer.__init__`: Adds `layer_idx` to attention, MLP, and MoE expert
-          modules, required for depth-dependent initialization.
-        """
-
-        _original_decoder_layer_init = decoder_layer_cls.__init__
-
-        def _decoder_layer_init_patched(self, config: PretrainedConfig, layer_idx: int):
-            _original_decoder_layer_init(self, config, layer_idx)
-            self.layer_idx = layer_idx
-
-            if hasattr(self, "self_attn"):
-                self.self_attn.layer_idx = layer_idx
-
-            if hasattr(self, "mlp"):
-                self.mlp.layer_idx = layer_idx
-                if hasattr(self.mlp, "experts"):
-                    for expert in self.mlp.experts:
-                        expert.layer_idx = layer_idx
-                if hasattr(self.mlp, "shared_experts"):
-                    # Not all MoE models have shared experts
-                    if self.mlp.shared_experts is not None:
-                        self.mlp.shared_experts.layer_idx = layer_idx
-
-        def _initialize_weights_patched(self, module):
-            if getattr(module, "_is_hf_initialized", False):
-                return
-            for param in module.parameters(recurse=True):
-                if param.device.type == "meta":
-                    return
-            self._init_weights(module)
-            module._is_hf_initialized = True
-
-        def _init_weights_patched(self, module):
-            """
-            Patched version of _init_weights for MoE models.
-            """
-            config = self.config
-            init_std = None
-
-            if isinstance(module, (attention_cls, mlp_cls, moe_cls)):
-                if hasattr(module, "layer_idx"):
-                    layer_idx = module.layer_idx
-                    if hasattr(config, "depth_init") and config.depth_init:
-                        init_std = 0.02 / (2 * (layer_idx + 1)) ** 0.5
-                    else:
-                        # Fallback for models without depth_init
-                        init_std = 0.02 / (2 * config.num_hidden_layers) ** 0.5
-
-            if isinstance(module, attention_cls):
-                # Handle different attention projection layer names by initializing if they exist
-                if hasattr(module, "q_proj"):
-                    nn.init.trunc_normal_(module.q_proj.weight, mean=0.0, std=0.02)
-                if hasattr(module, "k_proj"):
-                    nn.init.trunc_normal_(module.k_proj.weight, mean=0.0, std=0.02)
-                if hasattr(module, "v_proj"):
-                    nn.init.trunc_normal_(module.v_proj.weight, mean=0.0, std=0.02)
-
-                if hasattr(module, "q_a_proj"):
-                    nn.init.trunc_normal_(module.q_a_proj.weight, mean=0.0, std=0.02)
-                if hasattr(module, "q_b_proj"):
-                    nn.init.trunc_normal_(module.q_b_proj.weight, mean=0.0, std=0.02)
-
-                if hasattr(module, "kv_a_proj_with_mqa"):
-                    nn.init.trunc_normal_(
-                        module.kv_a_proj_with_mqa.weight, mean=0.0, std=0.02
-                    )
-                if hasattr(module, "kv_b_proj"):
-                    nn.init.trunc_normal_(module.kv_b_proj.weight, mean=0.0, std=0.02)
-
-                if hasattr(module, "o_proj") and init_std is not None:
-                    nn.init.trunc_normal_(module.o_proj.weight, mean=0.0, std=init_std)
-
-            elif isinstance(module, mlp_cls):
-                nn.init.trunc_normal_(module.gate_proj.weight, mean=0.0, std=0.02)
-                # DeepseekV3 uses std=0.02 for up_proj, unlike Llama
-                nn.init.trunc_normal_(module.up_proj.weight, mean=0.0, std=0.02)
-                if init_std is not None:
-                    nn.init.trunc_normal_(
-                        module.down_proj.weight, mean=0.0, std=init_std
-                    )
-
-            elif isinstance(module, moe_cls):
-                if hasattr(module, "gate") and init_std is not None:
-                    nn.init.trunc_normal_(module.gate.weight, mean=0.0, std=init_std)
-                if hasattr(module, "experts"):
-                    for expert in module.experts:
-                        nn.init.trunc_normal_(
-                            expert.gate_proj.weight, mean=0.0, std=0.02
-                        )
-                        nn.init.trunc_normal_(expert.up_proj.weight, mean=0.0, std=0.02)
-                        if init_std is not None:
-                            nn.init.trunc_normal_(
-                                expert.down_proj.weight, mean=0.0, std=init_std
-                            )
-                if (
-                    hasattr(module, "shared_experts")
-                    and module.shared_experts is not None
-                ):
-                    nn.init.trunc_normal_(
-                        module.shared_experts.gate_proj.weight, mean=0.0, std=0.02
-                    )
-                    nn.init.trunc_normal_(
-                        module.shared_experts.up_proj.weight, mean=0.0, std=0.02
-                    )
-                    if init_std is not None:
-                        nn.init.trunc_normal_(
-                            module.shared_experts.down_proj.weight,
-                            mean=0.0,
-                            std=init_std,
-                        )
-
-            elif module is getattr(self, "lm_head", None):
-                final_out_std = config.hidden_size**-0.5
-                cutoff_factor = 3
-                nn.init.trunc_normal_(
-                    module.weight,
-                    mean=0.0,
-                    std=final_out_std,
-                    a=-cutoff_factor * final_out_std,
-                    b=cutoff_factor * final_out_std,
-                )
-                if module.bias is not None:
-                    module.bias.data.zero_()
-
-            elif isinstance(module, nn.Embedding):
-                # When tie_word_embeddings is True, use lm_head initialization
-                if (
-                    hasattr(config, "tie_word_embeddings")
-                    and config.tie_word_embeddings
-                ):
-                    final_out_std = config.hidden_size**-0.5
-                    cutoff_factor = 3
-                    nn.init.trunc_normal_(
-                        module.weight,
-                        mean=0.0,
-                        std=final_out_std,
-                        a=-cutoff_factor * final_out_std,
-                        b=cutoff_factor * final_out_std,
-                    )
-                else:
-                    std = config.initializer_range
-                    module.weight.data.normal_(mean=0.0, std=std)
-
-                if module.padding_idx is not None:
-                    module.weight.data[module.padding_idx].zero_()
-
-            elif (
-                "LayerNorm" in module.__class__.__name__
-                or "RMSNorm" in module.__class__.__name__
-            ):
                 if hasattr(module, "weight") and module.weight is not None:
                     module.weight.data.fill_(1.0)
                 if hasattr(module, "bias") and module.bias is not None:

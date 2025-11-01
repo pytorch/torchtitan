@@ -8,10 +8,7 @@ from dataclasses import dataclass
 
 from torch import nn
 from torchtitan.config import JobConfig
-from torchtitan.models.utils import (
-    get_dense_model_nparams_and_flops,
-    get_moe_model_nparams_and_flops,
-)
+from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols import BaseModelArgs
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
@@ -39,12 +36,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             "norm_eps": "rms_norm_eps",
             "max_seq_len": "max_position_embeddings",
             "eos_id": "eos_token_id",
-        },
-        "moe": {
-            # TorchTitan moe model specific mappings (only when titan_moe_args provided)
-            "inter_dim": "intermediate_size",
-            "n_dense_layers": "first_k_dense_replace",
-        },
+        }
     }
 
     # Declarative list of TorchTitan-only attributes (no HF equivalent)
@@ -56,23 +48,9 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         "attn_mask_type",
     ]
 
-    # MoE attributes that should be copied directly
-    _MOE_SHARED_ATTRIBUTES = [
-        "rope_interleave",
-        "partial_rotary_factor",
-        "n_group",
-        "topk_group",
-        "kv_lora_rank",
-        "q_lora_rank",
-        "qk_nope_head_dim",
-        "qk_rope_head_dim",
-        "v_head_dim",
-    ]
-
     def __init__(
         self,
         titan_dense_args,
-        titan_moe_args=None,
         # HuggingFace specific args
         attn_implementation: str = "sdpa_torchtitan",
         **kwargs,
@@ -81,16 +59,13 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         assert titan_dense_args is not None, "titan_dense_args is required"
 
         # Create getter/setter dynamically for TT <-> HF attribute mappings
-        self._create_getter_setter_dynamically(titan_moe_args is not None)
+        self._create_getter_setter_dynamically(has_moe=False)
 
         self._titan_injected_model_args = {}
         self._titan_injected_model_args.update(kwargs)
         self._configure_hf_attention(attn_implementation)
 
         self._initialize_dense_attributes(titan_dense_args)
-
-        if titan_moe_args is not None:
-            self._initialize_moe_attributes(titan_moe_args)
 
     def _initialize_dense_attributes(self, titan_dense_args):
         """Initialize all dense model attributes."""
@@ -107,46 +82,6 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
         # Update passed_args
         self._titan_injected_model_args.update(titan_dense_args.__dict__)
-
-    def _initialize_moe_attributes(self, titan_moe_args):
-        """Initialize all MoE-specific attributes."""
-        if titan_moe_args.moe_args is None:
-            self._titan_injected_model_args.update(titan_moe_args.__dict__)
-            return
-
-        moe_args = titan_moe_args.moe_args
-
-        # Convert q_lora_rank (0 -> None for HuggingFace compatibility)
-        self.q_lora_rank = (
-            None if titan_moe_args.q_lora_rank == 0 else titan_moe_args.q_lora_rank
-        )
-
-        # Set core MoE attributes
-        self.moe_args = moe_args
-        self.num_experts_per_tok = moe_args.top_k
-        self.n_routed_experts = moe_args.num_experts
-        self.n_shared_experts = moe_args.num_shared_experts
-        self.moe_intermediate_size = titan_moe_args.moe_inter_dim
-
-        # Set remaining architecture-specific MoE attributes
-        for attr in self._MOE_SHARED_ATTRIBUTES:
-            if attr == "q_lora_rank":
-                continue  # Already set above
-            if hasattr(titan_moe_args, attr):
-                setattr(self, attr, getattr(titan_moe_args, attr))
-
-        # Track all MoE arguments
-        self._titan_injected_model_args.update(titan_moe_args.__dict__)
-        self._titan_injected_model_args.update(
-            {
-                "num_experts_per_tok": moe_args.top_k,
-                "n_routed_experts": moe_args.num_experts,
-                "n_shared_experts": moe_args.num_shared_experts,
-                "moe_intermediate_size": titan_moe_args.moe_inter_dim,
-                "q_lora_rank": self.q_lora_rank,
-            }
-        )
-
     def _configure_hf_attention(self, attn_implementation: str):
         """Configure HuggingFace attention settings."""
         self._titan_injected_model_args["attn_implementation"] = attn_implementation
@@ -217,10 +152,6 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
         if hasattr(job_config.training, 'seq_len') and job_config.training.seq_len != self.max_seq_len:
             self.max_seq_len = job_config.training.seq_len
-        
-        # MoE
-        if hasattr(self, "qk_nope_head_dim") and hasattr(self, "qk_rope_head_dim"):
-            self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
         # Configure HF-specific settings to match TorchTitan settings
         self.attention_bias = False
@@ -242,9 +173,4 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         return self
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
-        is_moe = hasattr(self, "n_routed_experts")
-
-        if is_moe:
-            return get_moe_model_nparams_and_flops(self, model, seq_len)
-        else:
-            return get_dense_model_nparams_and_flops(self, model, seq_len)
+        return get_dense_model_nparams_and_flops(self, model, seq_len)
