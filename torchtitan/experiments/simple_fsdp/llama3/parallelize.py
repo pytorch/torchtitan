@@ -9,10 +9,12 @@ import torch.nn as nn
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.activation_checkpoint import apply_ac as apply_ac_for_zero3
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_tp
 from torchtitan.tools.logging import logger
+
+from ..activation_checkpoint import apply_ac as apply_ac_for_zero2
 
 from ..backend import get_compile_backend
 
@@ -76,11 +78,28 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, tp_mesh)
 
+    match job_config.parallelism.fsdp_reshard_after_forward:
+        case "always":
+            reshard_after_forward = True
+        case "never":
+            reshard_after_forward = False
+        case "default":
+            # For PP, by default do not reshard after forward to avoid per-microbatch
+            # all-gathers, which can be expensive and non-overlapped
+            reshard_after_forward = not parallel_dims.pp_enabled
+        case _:
+            raise ValueError(
+                f"Invalid reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+            )
+
     if job_config.activation_checkpoint.mode != "none":
         use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
         model_compile_enabled = (
             job_config.compile.enable and "model" in job_config.compile.components
         )
+
+        apply_ac = apply_ac_for_zero3 if reshard_after_forward else apply_ac_for_zero2
+
         apply_ac(
             model,
             job_config.activation_checkpoint,
@@ -111,20 +130,6 @@ def parallelize_llama(
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
-
-        match job_config.parallelism.fsdp_reshard_after_forward:
-            case "always":
-                reshard_after_forward = True
-            case "never":
-                reshard_after_forward = False
-            case "default":
-                # For PP, by default do not reshard after forward to avoid per-microbatch
-                # all-gathers, which can be expensive and non-overlapped
-                reshard_after_forward = not parallel_dims.pp_enabled
-            case _:
-                raise ValueError(
-                    f"Invalid reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
-                )
 
         model = data_parallel(
             model,
