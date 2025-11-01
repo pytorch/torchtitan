@@ -625,30 +625,6 @@ def rl_update_step(
     vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
     vllm_engine.update_weights(vllm_compat_state)
 
-    # Round-trip: load weights back from disk to maintain consistency with vLLM
-    import glob
-    from safetensors.torch import load_file as sf_load
-
-    shard_files = sorted(glob.glob(os.path.join(vllm_engine.temp_model_dir, "model-*.safetensors")))
-    if shard_files:
-        # Load all shards
-        all_disk_state = {}
-        for shard_file in shard_files:
-            shard_state = sf_load(shard_file)
-            all_disk_state.update(shard_state)
-
-        # Convert back to TorchTitan format
-        titan_from_disk = vllm_to_torchtitan(all_disk_state)
-
-        if use_vllm_compat:
-            # Convert to vLLM-compat format for vLLM-compatible model
-            weights_for_model = torchtitan_to_vllm_compat(titan_from_disk)
-        else:
-            # Use standard TorchTitan format for standard model
-            weights_for_model = titan_from_disk
-
-        # Load back into model
-        model.load_state_dict(weights_for_model, strict=False)
 
     # Generate samples using vLLM
     completions, vllm_log_probs, vllm_token_ids, vllm_token_log_probs, prompt_token_ids = vllm_engine.generate(
