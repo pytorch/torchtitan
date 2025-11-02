@@ -430,8 +430,7 @@ class MoE(nn.Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # top_scores shape (bs*slen*top_k,)
-        # token_indices_experts_sorted shape (bs*slen*top_k,)
+        # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)
         # NOTE: the reason we need to compute num_tokens_per_expert again is:
         #       1st computation in router is to update self.tokens_per_expert
