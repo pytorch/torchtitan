@@ -414,7 +414,7 @@ class MoE(nn.Module):
         x = x.view(-1, dim)
 
         # top_scores shape (bs*slen, top_k)
-        # token_indices_experts_sorted shape (bs*slen*top_k,)
+        # selected_experts_indices shape (bs*slen, top_k)
         # num_tokens_per_expert shape (num_experts,)
         (
             top_scores,
