@@ -467,15 +467,15 @@ class MoE(nn.Module):
             top_scores = top_scores.flatten()
             top_scores[token_indices_experts_sorted] = top_scores_experts_sorted
             routed_input[token_indices_experts_sorted] = routed_output
-            routed_input = routed_input.reshape(bs * slen, -1, dim)
-            top_scores = top_scores.reshape(bs * slen, 1, -1)
+            routed_input = routed_input.reshape(-1, self.router.top_k, dim)
+            top_scores = top_scores.reshape(-1, 1, self.router.top_k)
             out_experts = (
                 torch.bmm(top_scores, routed_input.float()).to(x.dtype).squeeze(1)
             )
         else:
             # Unsort routed outputs and save an allocation: store unsorted outputs in routed_input
             routed_input[token_indices_experts_sorted] = routed_output
-            out_experts = routed_input.reshape(bs * slen, -1, dim).sum(dim=1)
+            out_experts = routed_input.reshape(-1, self.router.top_k, dim).sum(dim=1)
 
         if out is None:
             return out_experts.reshape(bs, slen, dim)
