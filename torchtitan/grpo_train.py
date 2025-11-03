@@ -555,11 +555,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         dynamic_scale = batch_dict["dynamic_scale"]
         dynamic_grad_accum_size = batch_dict["dynamic_grad_accum_size"]
         total_masked_tokens = batch_dict["total_masked_tokens"]
-        logp = batch_dict["logp"]
-        ref_logp = batch_dict["ref_logp"]
         curr_len = -1
         input_ids, labels, masks, inf_logps, rewards = batch
-        dynamic_batch = list()
         # if tp_rank == 0:
         device_type = utils.device_type
         input_ids = torch.from_numpy(input_ids).to(device_type)
