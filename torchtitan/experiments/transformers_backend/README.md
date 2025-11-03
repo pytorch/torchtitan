@@ -23,7 +23,7 @@ hf_assets_path = "./tests/assets/tokenizer"
 ## Supported Features
 
 - The following models were tested:
-    - Dense (FSDP/CP/TP/PP)
+    - Dense (FSDP/CP/TP/PP/`torch.compile`)
         - `meta-llama/Llama-3.2-1B`
         - `microsoft/phi-2`
         - `Qwen/Qwen2.5-7B`
