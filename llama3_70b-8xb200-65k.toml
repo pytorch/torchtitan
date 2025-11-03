@@ -1,0 +1,67 @@
+# NOTE: this toml config is a preset for 64 A100 GPUs.
+
+[job]
+dump_folder = "./outputs"
+description = "Llama 3 70B training"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 15
+
+[metrics]
+log_freq = 10
+enable_tensorboard = false
+save_tb_folder = "tb"
+
+[model]
+name = "llama3"
+flavor = "70B"
+hf_assets_path = "./assets/hf/Llama-3.1-70B"
+converters = ["quantize.linear.float8"]
+
+[optimizer]
+name = "AdamW"
+lr = 1.5e-4
+eps = 1e-8
+implementation = "fused"
+early_step_in_backward = true
+
+[lr_scheduler]
+warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
+
+[training]
+local_batch_size = 1
+seq_len = 65536
+max_norm = 1.0  # grad norm clipping
+steps = 1000
+dataset = "c4"
+dtype = "bfloat16"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = 4
+tensor_parallel_degree = 2
+pipeline_parallel_degree = 1
+context_parallel_degree = 1
+enable_async_tensor_parallel = true
+
+[checkpoint]
+enable = false
+folder = "checkpoint"
+interval = 500
+last_save_model_only = true
+export_dtype = "float32"
+async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+
+[activation_checkpoint]
+mode = "full"
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = true
+precompute_float8_dynamic_scale_for_fsdp = true
+filter_fqns = ["output"]
+
+[compile]
+enable=true
+components = ["model", "loss"]
