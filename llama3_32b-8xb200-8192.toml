@@ -16,7 +16,7 @@ save_tb_folder = "tb"
 
 [model]
 name = "llama3"
-flavor = "34B"
+flavor = "32B"
 hf_assets_path = "./assets/hf/Llama-3.1-8B"
 converters = ["quantize.linear.float8"]
 
