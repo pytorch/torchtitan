@@ -140,6 +140,13 @@ class ParallelDims:
             (self.pp, self.dp_replicate, efsdp, self.ep, self.etp),
         )
 
+        # We have created all the required 1D meshes. This part is to create the
+        # all the 2D meshes. We pre-created 2D meshes and error out if the users
+        # try to access a 2D mesh that is not pre-created.
+        hsdp_mesh = dense_mesh["dp_replicate", "fsdp"]
+        ehsdp_mesh = sparse_mesh["dp_replicate", "efsdp"]
+        ep_etp_mesh = sparse_mesh["ep", "etp"]
+
         self._meshes = {
             "pp": dataloading_mesh["pp"],
             "batch": dataloading_mesh["batch"],
@@ -151,6 +158,9 @@ class ParallelDims:
             "ep": sparse_mesh["ep"],
             "efsdp": sparse_mesh["efsdp"],
             "etp": sparse_mesh["etp"],
+            "dp_replicate_fsdp": hsdp_mesh,
+            "dp_replicate_efsdp": ehsdp_mesh,
+            "ep_etp": ep_etp_mesh,
         }
 
         # Validate mesh sizes
@@ -176,6 +186,12 @@ class ParallelDims:
             "ep": self.ep,
             "efsdp": self.dp_shard * self.cp * self.tp // (self.etp * self.ep),
             "etp": self.etp,
+            "dp_replicate_fsdp": (self.dp_replicate, self.dp_shard * self.cp),
+            "dp_replicate_efsdp": (
+                self.dp_replicate,
+                self.dp_shard * self.cp * self.tp // (self.etp * self.ep),
+            ),
+            "ep_etp": (self.ep, self.etp),
         }
 
         for mesh_name, expected_size in expected_sizes.items():
@@ -206,17 +222,17 @@ class ParallelDims:
         if isinstance(dims, str):
             dims = [dims]
 
-        if not all(dim in self._meshes for dim in dims):
-            valid_dims = sorted(self._meshes.keys())
+        mesh_name = "_".join(dims)
+        if mesh_name not in self._meshes:
             raise ValueError(
-                f"Invalid mesh dim: '{dims}'. Valid dimensions are: {valid_dims}"
+                f"Invalid mesh dim: '{mesh_name}'. "
+                f"Valid dimensions are: {list(self._meshes.keys())}"
             )
 
         if any(self._meshes[dim].size() == 1 for dim in dims):
             return None
 
-        meshes = [self._meshes[dim] for dim in dims]
-        return meshes[0] if len(meshes) == 1 else DeviceMesh._concatenate(meshes)
+        return self._meshes[mesh_name]
 
     def get_all_meshes(self) -> dict[str, DeviceMesh]:
         if not self._meshes:
