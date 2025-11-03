@@ -5,7 +5,7 @@ description = "Llama 3 8B training"
 [profiling]
 enable_profiling = false
 save_traces_folder = "profile_trace"
-profile_freq = 100
+profile_freq = 15
 
 [metrics]
 log_freq = 10
@@ -29,7 +29,7 @@ early_step_in_backward = true
 warmup_steps = 200  # lr scheduler warm up
 
 [training]
-local_batch_size = 5
+local_batch_size = 
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
 steps = 1000
