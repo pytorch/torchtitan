@@ -475,7 +475,7 @@ def apply_moe_ep_tp(
                 parallelize_plan=moe_layer_plan,
             )
 
-        expert_mesh, experts_plan = None, None
+        experts_mesh, experts_plan = None, None
         if ep_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = tp_mesh
