@@ -16,7 +16,7 @@ save_tb_folder = "tb"
 
 [model]
 name = "qwen3"
-flavor = "32B"
+flavor = "30B-A3B"
 hf_assets_path = "./assets/hf/Qwen3-32B"
 # converters = ["float8"]
 
@@ -29,8 +29,8 @@ eps = 1e-8
 warmup_steps = 600  # lr scheduler warm up, 20% total steps
 
 [training]
-local_batch_size = 2
-seq_len = 4096
+local_batch_size = 8 # hit 80% memory
+seq_len = 8192
 max_norm = 1.0  # grad norm clipping
 steps = 3000
 dataset = "c4"
@@ -41,6 +41,8 @@ data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 1
 context_parallel_degree = 1
+expert_parallel_degree = 1 # originally without this line
+
 
 [checkpoint]
 enable = false
@@ -51,7 +53,7 @@ export_dtype = "float16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = "full"  # ["none", "selective", "full"]
+mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]
