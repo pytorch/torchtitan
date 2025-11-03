@@ -28,7 +28,7 @@ class FluxTrainer(Trainer):
         # (mainly for debugging, expect perf loss).
         # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
         dist_utils.set_determinism(
-            self.parallel_dims.world_mesh,
+            self.parallel_dims,
             self.device,
             job_config.debug,
             distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
@@ -129,7 +129,7 @@ class FluxTrainer(Trainer):
 
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
-                cp_mesh=self.parallel_dims.world_mesh["cp"],
+                cp_mesh=self.parallel_dims.get_mesh("cp"),
                 cp_buffers=[
                     latents,
                     latent_pos_enc,
