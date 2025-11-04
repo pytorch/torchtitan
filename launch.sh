@@ -89,6 +89,7 @@ else
           --mem-fraction-static 0.80 \
           --log-level="error" \
           --attention-backend triton \
+          --dtype="bfloat16" \
           --port $PORT > ${LOGDIR}/sglang_${LOG_ID}.log 2>&1 &
         sleep 3  # wait so sglang can find ports without conflicts :)
     done
@@ -104,5 +105,6 @@ else
       --mem-fraction-static 0.80 \
       --log-level="error" \
       --attention-backend triton \
+      --dtype="bfloat16" \
       --port 9007 > ${LOGDIR}/sglang_${LOG_ID}.log 2>&1
 fi
