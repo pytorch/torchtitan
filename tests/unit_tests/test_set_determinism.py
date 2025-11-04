@@ -208,6 +208,27 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
             f"Expected {mesh_sizes[0] * mesh_sizes[1]} unique seeds for (dp_shard, dp_replicate) combinations",
         )
 
+    @patch("torch.distributed.distributed_c10d.get_world_size")
+    @patch("torch.distributed.distributed_c10d.get_rank")
+    def test_set_determinism_single_gpu(self, mock_get_rank, mock_get_world_size):
+        """Test set_determinism for single GPU (empty mesh)"""
+        mock_get_world_size.return_value = 1
+        mock_get_rank.return_value = 0
+
+        base_seed = 42
+
+        fake_mesh = MagicMock()
+        fake_mesh.mesh_dim_names = None
+        fake_mesh.get_coordinate.return_value = None
+
+        debug_config = DebugConfig(seed=base_seed, deterministic=False)
+        set_determinism(
+            world_mesh=fake_mesh,
+            device=self.device,
+            debug_config=debug_config,
+            distinct_seed_mesh_dims=["pp"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
