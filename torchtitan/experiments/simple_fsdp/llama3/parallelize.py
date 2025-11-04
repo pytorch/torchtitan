@@ -126,13 +126,13 @@ def parallelize_llama(
     ):
         if parallel_dims.dp_replicate_enabled:
             if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+                dp_mesh_dim_names = ["dp_replicate", "dp_shard_cp"]
                 dp_mode = "hybrid_shard"
             else:
-                dp_mesh_dim_names = ("dp_replicate",)
+                dp_mesh_dim_names = ["dp_replicate"]
                 dp_mode = "replicate"
         else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+            dp_mesh_dim_names = ["dp_shard_cp"]
             dp_mode = "fully_shard"
 
         mp_policy = MixedPrecisionPolicy(
@@ -142,7 +142,7 @@ def parallelize_llama(
 
         model = data_parallel(
             model,
-            parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
+            parallel_dims.get_mesh(dp_mesh_dim_names),
             mode=dp_mode,
             mp_policy=mp_policy,
         )

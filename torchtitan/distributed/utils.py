@@ -183,15 +183,10 @@ def set_determinism(
         )
 
         # Filter out all distinct dimensions to get duplicate_seed_mesh
-        duplicate_seed_mesh_dims = [
+        duplicate_seed_meshes = list(
             v
             for k, v in parallel_dims.get_all_meshes().items()
             if k not in distinct_seed_mesh_dims
-        ]
-        duplicate_seed_mesh = (
-            parallel_dims.get_mesh(duplicate_seed_mesh_dims)
-            if duplicate_seed_mesh_dims
-            else None
         )
     else:
         duplicate_seed_meshes = [parallel_dims.world_mesh]
@@ -529,7 +524,9 @@ def _clip_grad_norm_with_ep(
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
+        total_norm = (
+            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
+        )
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:
