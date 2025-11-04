@@ -67,10 +67,6 @@ class TensorParallel(ParallelStyle):
 class ExpertParallel(ParallelStyle):
     def __init__(self):
         super().__init__()
-        self.input_splits = None
-        self.output_splits = None
-        self.input_shape = None
-        self.permuted_indices = None
 
     # performing all-to-all dispatch on the input
     def _token_dispatch(self, mod, inputs, device_mesh):
@@ -103,14 +99,14 @@ class ExpertParallel(ParallelStyle):
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=False)
             )
-            self.input_splits = input_splits.tolist()
-            self.output_splits = output_splits.tolist()
+            input_splits = input_splits.tolist()
+            output_splits = output_splits.tolist()
 
         # perform all-to-all
         routed_input = all_to_all_single_autograd(
             routed_input,
-            self.output_splits,
-            self.input_splits,
+            output_splits,
+            input_splits,
             device_mesh.get_group(),
         )
 
@@ -127,15 +123,22 @@ class ExpertParallel(ParallelStyle):
         # of GroupedExperts, as it does not need padding.
 
         (
-            self.input_shape,
+            input_shape,
             routed_input,
-            self.permuted_indices,
+            permuted_indices,
             num_tokens_per_expert_group,
         ) = _permute(
             routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
         )
 
-        return routed_input, num_tokens_per_expert_group
+        return (
+            routed_input,
+            num_tokens_per_expert_group,
+            input_shape,
+            permuted_indices,
+            input_splits,
+            output_splits,
+        )
 
     @staticmethod
     def _partition_fn(name, mod, device_mesh):
@@ -145,15 +148,20 @@ class ExpertParallel(ParallelStyle):
             mod.register_parameter(name, dist_param)
 
     # performing all-to-all combine on the output
-    def _token_combine(self, mod, routed_output, device_mesh):
-        routed_output = _unpermute(
-            routed_output, self.input_shape, self.permuted_indices
-        )
+    def _token_combine(self, mod, mod_outputs, device_mesh):
+        (
+            routed_output,
+            input_shape,
+            permuted_indices,
+            input_splits,
+            output_splits,
+        ) = mod_outputs
+        routed_output = _unpermute(routed_output, input_shape, permuted_indices)
 
         routed_output = all_to_all_single_autograd(
             routed_output,
-            self.input_splits,
-            self.output_splits,
+            input_splits,
+            output_splits,
             device_mesh.get_group(),
         )
         return routed_output
@@ -204,9 +212,9 @@ class ExpertTensorParallel(ExpertParallel):
             nn.Parameter(distribute_tensor(mod.w3, ep_tp_mesh, [Shard(0), Shard(1)])),
         )  # Column-wise sharding
 
-    def _token_combine(self, mod, routed_output, device_mesh):
+    def _token_combine(self, mod, mod_outputs, device_mesh):
         # token combine happens on the EP mesh, whereas device_mesh is [ep, tp] mesh
-        return super()._token_combine(mod, routed_output, device_mesh["ep"])
+        return super()._token_combine(mod, mod_outputs, device_mesh["ep"])
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
