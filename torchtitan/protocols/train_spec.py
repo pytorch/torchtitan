@@ -51,7 +51,6 @@ class TrainSpec:
     build_dataloader_fn: DataLoaderBuilder
     build_tokenizer_fn: TokenizerBuilder | None
     build_loss_fn: LossFunctionBuilder
-    name: str | None = None
     build_validator_fn: ValidatorBuilder | None = None
     build_metrics_processor_fn: MetricsProcessorBuilder | None = None
     state_dict_adapter: type[BaseStateDictAdapter] | None = None
