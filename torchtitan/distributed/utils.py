@@ -57,9 +57,12 @@ def _dist_reduce(
 
 def dist_max(
     x: torch.Tensor,
-    mesh: DeviceMesh,
+    mesh: DeviceMesh | None = None,
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
+    if mesh is None:
+        assert not isinstance(x, DTensor), "mesh is required for DTensor input"
+        return x.item()
     return _dist_reduce(
         x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh, extra_pg=extra_pg
     )
@@ -67,9 +70,12 @@ def dist_max(
 
 def dist_sum(
     x: torch.Tensor,
-    mesh: DeviceMesh,
+    mesh: DeviceMesh | None = None,
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
+    if mesh is None:
+        assert not isinstance(x, DTensor), "mesh is required for DTensor input"
+        return x.item()
     return _dist_reduce(
         x, reduceOp=c10d.ReduceOp.SUM.name, mesh=mesh, extra_pg=extra_pg
     )
@@ -77,9 +83,12 @@ def dist_sum(
 
 def dist_mean(
     x: torch.Tensor,
-    mesh: DeviceMesh,
+    mesh: DeviceMesh | None = None,
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
+    if mesh is None:
+        assert not isinstance(x, DTensor), "mesh is required for DTensor input"
+        return x.item()
     return _dist_reduce(
         x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh, extra_pg=extra_pg
     )

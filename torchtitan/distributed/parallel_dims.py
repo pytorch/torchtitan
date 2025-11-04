@@ -195,7 +195,10 @@ class ParallelDims:
         }
 
         for mesh_name, expected_size in expected_sizes.items():
-            actual_size = self._meshes[mesh_name].size()
+            if isinstance(expected_size, tuple):
+                actual_size = self._meshes[mesh_name].shape
+            else:
+                actual_size = self._meshes[mesh_name].size()
             assert actual_size == expected_size, (
                 f"Mesh '{mesh_name}' has unexpected size: "
                 f"expected {expected_size}, got {actual_size}"
@@ -234,10 +237,15 @@ class ParallelDims:
 
         return self._meshes[mesh_name]
 
-    def get_all_meshes(self) -> dict[str, DeviceMesh]:
+    def get_all_meshes(self, one_dimensioal_only: bool = True) -> dict[str, DeviceMesh]:
         if not self._meshes:
             self.build_mesh()
-        return {k: v for k, v in self._meshes.items() if v.size() > 1}
+        if one_dimensioal_only:
+            return {
+                k: v for k, v in self._meshes.items() if v.ndim == 1 and v.size() > 1
+            }
+        else:
+            return {k: v for k, v in self._meshes.items() if v.size() > 1}
 
     @property
     def world_mesh(self) -> DeviceMesh:
