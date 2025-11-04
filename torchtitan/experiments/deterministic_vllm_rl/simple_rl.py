@@ -732,7 +732,7 @@ def main():
     output_dir = "./converted"
 
     group_size = 4  # For GRPO - samples per prompt
-    num_steps = 2  # Quick test - change to 100 for full training
+    num_steps = 100
     learning_rate = 1e-5
 
     # Check if batch invariance is enabled
