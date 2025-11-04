@@ -356,8 +356,8 @@ def build_optimizers_with_moe_load_balancing(
         model_parts: list[nn.Module],
         parallel_dims: ParallelDims,
     ):
-        dp_cp_mesh = (
-            parallel_dims.get_mesh("dp_cp") if parallel_dims.dp_cp_enabled else None
+        loss_mesh = (
+            parallel_dims.get_mesh("loss") if parallel_dims.dp_cp_enabled else None
         )
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
@@ -379,9 +379,9 @@ def build_optimizers_with_moe_load_balancing(
 
         tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
-        if dp_cp_mesh is not None:
+        if loss_mesh is not None:
             # Perform single all-reduce to get global statistics across all processes
-            pg = dp_cp_mesh.get_group()
+            pg = loss_mesh.get_group()
             torch.distributed.all_reduce(
                 tokens_per_expert_by_layer, group=pg, op=torch.distributed.ReduceOp.SUM
             )

@@ -104,7 +104,7 @@ def build_token_imbalance_ce_loss(
     # NOTE: The device mesh where the input tokens w/ shape BSD can be sliced:
     # DP split the batch dim B
     # CP split the sequence dim S
-    token_mesh = parallel_dims.get_mesh("dp_cp")
+    token_mesh = parallel_dims.get_mesh("loss")
     ft_pg = ft_manager.loss_sync_pg
     loss_fn = partial(token_imbalance_ce_loss, token_mesh=token_mesh, ft_pg=ft_pg)
     if job_config.compile.enable and "loss" in job_config.compile.components:
