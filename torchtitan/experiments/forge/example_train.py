@@ -262,8 +262,8 @@ class Trainer(ForgeEngine):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             global_avg_loss, global_max_loss = (
-                dist_utils.dist_mean(loss, parallel_dims.get_mesh("dp_cp")),
-                dist_utils.dist_max(loss, parallel_dims.get_mesh("dp_cp")),
+                dist_utils.dist_mean(loss, parallel_dims.get_mesh("loss")),
+                dist_utils.dist_max(loss, parallel_dims.get_mesh("loss")),
             )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
