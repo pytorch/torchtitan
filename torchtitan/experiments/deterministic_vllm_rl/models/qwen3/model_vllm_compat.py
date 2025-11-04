@@ -12,16 +12,16 @@ from torch import nn
 
 from torchtitan.components.tokenizer import BaseTokenizer
 
-# Import from main torchtitan
-from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
-from torchtitan.protocols.model import AttentionMasksType
-from torchtitan.protocols.train_spec import ModelProtocol
-
 # Import gradient-enabled operations from experiment utilities
 from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
     rms_norm_with_gradients,
     silu_and_mul_with_gradients,
 )
+
+# Import from main torchtitan
+from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
+from torchtitan.protocols.model import AttentionMasksType
+from torchtitan.protocols.train_spec import ModelProtocol
 
 # Import from local experiment's models
 from ..attention import VLLMCompatibleFlashAttention

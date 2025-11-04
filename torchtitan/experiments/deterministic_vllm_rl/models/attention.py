@@ -14,11 +14,13 @@ from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 class VLLMCompatibleFlashAttention(torch.nn.Module):
     """Wrapper around FlashAttention as used by VLLM"""
+
     def __init__(self) -> None:
         super().__init__()
         self.flash_attn_varlen_func = flash_attn_varlen_func
-        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
         from vllm.attention.utils.fa_utils import get_flash_attn_version
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
         self.vllm_is_batch_invariant = vllm_is_batch_invariant
         self.fa_version = get_flash_attn_version()
 
@@ -51,17 +53,29 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         # Create cumulative sequence lengths
         # cu_seqlens: [0, seq_len, 2*seq_len, ..., batch_size*seq_len]
         cu_seqlens = torch.arange(
-            0, (batch_size + 1) * seq_len, seq_len,
-            dtype=torch.int32, device=q.device
+            0, (batch_size + 1) * seq_len, seq_len, dtype=torch.int32, device=q.device
         )
 
         # Wrap Flash Attention with manual backward pass
         class FlashAttnWithBackward(torch.autograd.Function):
             @staticmethod
-            def forward(ctx, q, k, v, cu_seqlens, seq_len, scale, num_splits, flash_fn, fa_version):
+            def forward(
+                ctx,
+                q,
+                k,
+                v,
+                cu_seqlens,
+                seq_len,
+                scale,
+                num_splits,
+                flash_fn,
+                fa_version,
+            ):
                 # Call flash attention for forward (fast)
                 output = flash_fn(
-                    q, k, v,
+                    q,
+                    k,
+                    v,
                     cu_seqlens_q=cu_seqlens,
                     cu_seqlens_k=cu_seqlens,
                     max_seqlen_q=seq_len,
@@ -94,7 +108,9 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 k_batch = k.reshape(batch_size, seq_len, num_heads, head_dim)
                 v_batch = v.reshape(batch_size, seq_len, num_heads, head_dim)
                 out_batch = output.reshape(batch_size, seq_len, num_heads, head_dim)
-                grad_out_batch = grad_output.reshape(batch_size, seq_len, num_heads, head_dim)
+                grad_out_batch = grad_output.reshape(
+                    batch_size, seq_len, num_heads, head_dim
+                )
 
                 # Transpose to (batch, num_heads, seq_len, head_dim)
                 q_t = q_batch.transpose(1, 2)
@@ -108,11 +124,16 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 scores = torch.matmul(q_t, k_t.transpose(-2, -1)) * scale
 
                 # Apply causal mask
-                causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool), diagonal=1)
-                scores = scores.masked_fill(causal_mask, float('-inf'))
+                causal_mask = torch.triu(
+                    torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool),
+                    diagonal=1,
+                )
+                scores = scores.masked_fill(causal_mask, float("-inf"))
 
                 # Softmax
-                attn_weights = torch.nn.functional.softmax(scores, dim=-1)  # (B, H, N, N)
+                attn_weights = torch.nn.functional.softmax(
+                    scores, dim=-1
+                )  # (B, H, N, N)
 
                 # Backward through attention
                 # out = attn_weights @ v
@@ -140,18 +161,29 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 grad_k_t = torch.matmul(grad_scores.transpose(-2, -1), q_t)
 
                 # Transpose back and reshape to varlen format
-                grad_q = grad_q_t.transpose(1, 2).reshape(total_tokens, num_heads, head_dim)
-                grad_k = grad_k_t.transpose(1, 2).reshape(total_tokens, num_heads, head_dim)
-                grad_v = grad_v_t.transpose(1, 2).reshape(total_tokens, num_heads, head_dim)
+                grad_q = grad_q_t.transpose(1, 2).reshape(
+                    total_tokens, num_heads, head_dim
+                )
+                grad_k = grad_k_t.transpose(1, 2).reshape(
+                    total_tokens, num_heads, head_dim
+                )
+                grad_v = grad_v_t.transpose(1, 2).reshape(
+                    total_tokens, num_heads, head_dim
+                )
 
                 return grad_q, grad_k, grad_v, None, None, None, None, None, None
 
         # Call Flash Attention varlen with custom backward
         output_varlen = FlashAttnWithBackward.apply(
-            q_varlen, k_varlen, v_varlen,
-            cu_seqlens, seq_len, scale,
+            q_varlen,
+            k_varlen,
+            v_varlen,
+            cu_seqlens,
+            seq_len,
+            scale,
             1 if self.vllm_is_batch_invariant() else 0,
-            self.flash_attn_varlen_func, self.fa_version,
+            self.flash_attn_varlen_func,
+            self.fa_version,
         )
 
         # Convert back to batch format

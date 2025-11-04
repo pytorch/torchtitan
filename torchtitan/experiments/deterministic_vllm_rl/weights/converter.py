@@ -12,9 +12,10 @@ This script provides bidirectional weight conversion:
 - torchtitan_to_vllm: Load weights from TorchTitan format and convert to vLLM format
 """
 
+from pathlib import Path
+
 import torch
 from safetensors.torch import load_file, save_file
-from pathlib import Path
 
 
 # Weight name mapping from HuggingFace/vLLM to TorchTitan
@@ -40,7 +41,9 @@ VLLM_TO_TITAN_MAP = {
 }
 
 
-def vllm_to_torchtitan(vllm_path_or_state: str | dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+def vllm_to_torchtitan(
+    vllm_path_or_state: str | dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
     """
     Load weights from vLLM format (HuggingFace) and convert to TorchTitan format.
 
@@ -195,9 +198,13 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print("Usage:")
         print("  Convert vLLM to TorchTitan:")
-        print("    python weight_converter.py vllm_to_titan <vllm_model_path> <output_path>")
+        print(
+            "    python weight_converter.py vllm_to_titan <vllm_model_path> <output_path>"
+        )
         print("  Convert TorchTitan to vLLM:")
-        print("    python weight_converter.py titan_to_vllm <titan_checkpoint_path> <output_path>")
+        print(
+            "    python weight_converter.py titan_to_vllm <titan_checkpoint_path> <output_path>"
+        )
         sys.exit(1)
 
     mode = sys.argv[1]

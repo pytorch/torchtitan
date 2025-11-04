@@ -42,6 +42,7 @@ from torch.autograd import Function
 # Custom autograd Functions for vLLM operations
 # ============================================================================
 
+
 class SiluAndMulFunction(Function):
     """
     Autograd function for vLLM's SiluAndMul activation.
@@ -86,7 +87,7 @@ class SiluAndMulFunction(Function):
 
         where d_silu(x) = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
         """
-        x, = ctx.saved_tensors
+        (x,) = ctx.saved_tensors
 
         # Split input into gate and up
         d = x.shape[-1] // 2
@@ -175,6 +176,7 @@ class RMSNormFunction(Function):
 # ============================================================================
 # Backward operation implementations for autograd
 # ============================================================================
+
 
 def matmul_backward_impl(grad_output, self, other, output_mask):
     """
@@ -324,8 +326,8 @@ def rms_norm_backward_impl(grad_output, input, weight, eps):
 # Registration
 # ============================================================================
 
-_batch_invariant_backward_MODE = False
-_batch_invariant_backward_LIB = None
+_batch_invariant_backward_mode = False
+_batch_invariant_backward_lib = None
 
 
 def patch_batch_invariant_with_gradients():
@@ -335,28 +337,35 @@ def patch_batch_invariant_with_gradients():
     implementations by registering the backward operations. vLLM handles all the
     forward passes, we just add gradient support.
     """
-    global _batch_invariant_backward_MODE, _batch_invariant_backward_LIB
+    global _batch_invariant_backward_mode, _batch_invariant_backward_lib
 
-    if _batch_invariant_backward_MODE:
+    if _batch_invariant_backward_mode:
         return
 
     # Get vLLM's batch_invariant library (already created by init_batch_invariance)
     from vllm.model_executor.layers import batch_invariant as vllm_bi
 
-    if not hasattr(vllm_bi, '_batch_invariant_LIB') or vllm_bi._batch_invariant_LIB is None:
+    if (
+        not hasattr(vllm_bi, "_batch_invariant_LIB")
+        or vllm_bi._batch_invariant_LIB is None
+    ):
         raise RuntimeError(
             "vLLM's batch_invariant mode is not initialized. "
             "Call init_batch_invariance() first."
         )
 
     # Use vLLM's existing library - don't destroy it!
-    _batch_invariant_backward_LIB = vllm_bi._batch_invariant_LIB
+    _batch_invariant_backward_lib = vllm_bi._batch_invariant_LIB
 
     # Just add the backward operations - everything else is already handled by vLLM
-    _batch_invariant_backward_LIB.impl("aten::matmul_backward", matmul_backward_impl, "CUDA")
-    _batch_invariant_backward_LIB.impl("aten::linear_backward", linear_backward_impl, "CUDA")
+    _batch_invariant_backward_lib.impl(
+        "aten::matmul_backward", matmul_backward_impl, "CUDA"
+    )
+    _batch_invariant_backward_lib.impl(
+        "aten::linear_backward", linear_backward_impl, "CUDA"
+    )
 
-    _batch_invariant_backward_MODE = True
+    _batch_invariant_backward_mode = True
 
 
 def enable_batch_invariant_backward_mode():
@@ -366,25 +375,28 @@ def enable_batch_invariant_backward_mode():
 
 def disable_batch_invariant_backward_mode():
     """Disable batch invariant backward mode."""
-    global _batch_invariant_backward_MODE, _batch_invariant_backward_LIB
+    global _batch_invariant_backward_mode, _batch_invariant_backward_lib
 
-    if _batch_invariant_backward_LIB is not None:
-        _batch_invariant_backward_LIB._destroy()
+    if _batch_invariant_backward_lib is not None:
+        _batch_invariant_backward_lib._destroy()
 
-    _batch_invariant_backward_MODE = False
-    _batch_invariant_backward_LIB = None
+    _batch_invariant_backward_mode = False
+    _batch_invariant_backward_lib = None
 
 
 def is_batch_invariant_backward_mode_enabled():
     """Check if batch invariant backward mode is enabled."""
-    return _batch_invariant_backward_MODE
+    return _batch_invariant_backward_mode
 
 
 # ============================================================================
 # Public API for gradient-enabled vLLM operations
 # ============================================================================
 
-def rms_norm_with_gradients(input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+
+def rms_norm_with_gradients(
+    input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
+) -> torch.Tensor:
     """
     RMS normalization with gradient support.
 

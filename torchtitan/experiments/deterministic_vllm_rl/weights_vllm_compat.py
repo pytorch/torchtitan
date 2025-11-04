@@ -12,11 +12,14 @@ Converts between:
 - vLLM compat format (merged gate_up_proj = [w1; w3])
 """
 
-import torch
 from typing import Dict
 
+import torch
 
-def torchtitan_to_vllm_compat(torchtitan_state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+
+def torchtitan_to_vllm_compat(
+    torchtitan_state_dict: Dict[str, torch.Tensor]
+) -> Dict[str, torch.Tensor]:
     """
     Convert TorchTitan Qwen3 state dict to vLLM-compatible format.
 
@@ -28,9 +31,9 @@ def torchtitan_to_vllm_compat(torchtitan_state_dict: Dict[str, torch.Tensor]) ->
 
     for key, tensor in torchtitan_state_dict.items():
         # Handle FFN weight merging
-        if '.feed_forward.w1.weight' in key:
+        if ".feed_forward.w1.weight" in key:
             # Get the corresponding w3 weight
-            w3_key = key.replace('.feed_forward.w1.weight', '.feed_forward.w3.weight')
+            w3_key = key.replace(".feed_forward.w1.weight", ".feed_forward.w3.weight")
             w1_weight = tensor
             w3_weight = torchtitan_state_dict[w3_key]
 
@@ -39,16 +42,20 @@ def torchtitan_to_vllm_compat(torchtitan_state_dict: Dict[str, torch.Tensor]) ->
             gate_up_weight = torch.cat([w1_weight, w3_weight], dim=0)
 
             # Save with new key
-            new_key = key.replace('.feed_forward.w1.weight', '.feed_forward.gate_up_proj.weight')
+            new_key = key.replace(
+                ".feed_forward.w1.weight", ".feed_forward.gate_up_proj.weight"
+            )
             vllm_compat_state_dict[new_key] = gate_up_weight
 
-        elif '.feed_forward.w3.weight' in key:
+        elif ".feed_forward.w3.weight" in key:
             # Skip w3, already merged with w1
             continue
 
-        elif '.feed_forward.w2.weight' in key:
+        elif ".feed_forward.w2.weight" in key:
             # Rename w2 to down_proj
-            new_key = key.replace('.feed_forward.w2.weight', '.feed_forward.down_proj.weight')
+            new_key = key.replace(
+                ".feed_forward.w2.weight", ".feed_forward.down_proj.weight"
+            )
             # CLONE to avoid aliasing
             vllm_compat_state_dict[new_key] = tensor.clone()
 
@@ -60,7 +67,9 @@ def torchtitan_to_vllm_compat(torchtitan_state_dict: Dict[str, torch.Tensor]) ->
     return vllm_compat_state_dict
 
 
-def vllm_compat_to_torchtitan(vllm_compat_state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+def vllm_compat_to_torchtitan(
+    vllm_compat_state_dict: Dict[str, torch.Tensor]
+) -> Dict[str, torch.Tensor]:
     """
     Convert vLLM-compatible state dict back to TorchTitan format.
 
@@ -72,7 +81,7 @@ def vllm_compat_to_torchtitan(vllm_compat_state_dict: Dict[str, torch.Tensor]) -
 
     for key, tensor in vllm_compat_state_dict.items():
         # Handle FFN weight splitting
-        if '.feed_forward.gate_up_proj.weight' in key:
+        if ".feed_forward.gate_up_proj.weight" in key:
             # Split into w1 (first half) and w3 (second half)
             hidden_dim = tensor.shape[0] // 2
             # CLONE to avoid aliasing - these are views into the original tensor
@@ -80,14 +89,20 @@ def vllm_compat_to_torchtitan(vllm_compat_state_dict: Dict[str, torch.Tensor]) -
             w3_weight = tensor[hidden_dim:].clone()
 
             # Save with new keys
-            w1_key = key.replace('.feed_forward.gate_up_proj.weight', '.feed_forward.w1.weight')
-            w3_key = key.replace('.feed_forward.gate_up_proj.weight', '.feed_forward.w3.weight')
+            w1_key = key.replace(
+                ".feed_forward.gate_up_proj.weight", ".feed_forward.w1.weight"
+            )
+            w3_key = key.replace(
+                ".feed_forward.gate_up_proj.weight", ".feed_forward.w3.weight"
+            )
             torchtitan_state_dict[w1_key] = w1_weight
             torchtitan_state_dict[w3_key] = w3_weight
 
-        elif '.feed_forward.down_proj.weight' in key:
+        elif ".feed_forward.down_proj.weight" in key:
             # Rename down_proj to w2
-            new_key = key.replace('.feed_forward.down_proj.weight', '.feed_forward.w2.weight')
+            new_key = key.replace(
+                ".feed_forward.down_proj.weight", ".feed_forward.w2.weight"
+            )
             # CLONE to avoid aliasing
             torchtitan_state_dict[new_key] = tensor.clone()
 

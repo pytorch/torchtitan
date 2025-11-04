@@ -11,10 +11,10 @@ Test batch_invariant_backward module to ensure it works correctly.
 import torch
 
 from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
-    enable_batch_invariant_backward_mode,
     disable_batch_invariant_backward_mode,
-    mm_batch_invariant_backward,
+    enable_batch_invariant_backward_mode,
     linear_batch_invariant_backward,
+    mm_batch_invariant_backward,
 )
 
 
@@ -26,6 +26,7 @@ def test_mm_backward():
 
     # Enable mode
     from vllm.model_executor.layers.batch_invariant import disable_batch_invariant_mode
+
     disable_batch_invariant_mode()
     enable_batch_invariant_backward_mode()
 
@@ -35,14 +36,14 @@ def test_mm_backward():
 
     # Forward pass
     c = mm_batch_invariant_backward(a, b)
-    print(f"Forward pass: a @ b = c")
+    print("Forward pass: a @ b = c")
     print(f"  a shape: {a.shape}, b shape: {b.shape}, c shape: {c.shape}")
 
     # Backward pass
     loss = c.sum()
     loss.backward()
 
-    print(f"Backward pass successful!")
+    print("Backward pass successful!")
     print(f"  grad_a shape: {a.grad.shape if a.grad is not None else None}")
     print(f"  grad_b shape: {b.grad.shape if b.grad is not None else None}")
 
@@ -61,17 +62,22 @@ def test_linear_backward():
 
     # Enable mode
     from vllm.model_executor.layers.batch_invariant import disable_batch_invariant_mode
+
     disable_batch_invariant_mode()
     enable_batch_invariant_backward_mode()
 
     # Create test tensors (3D input for realistic case)
-    input = torch.randn(2, 10, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    weight = torch.randn(128, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    input = torch.randn(
+        2, 10, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    weight = torch.randn(
+        128, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
     bias = torch.randn(128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
 
     # Forward pass
     output = linear_batch_invariant_backward(input, weight, bias)
-    print(f"Forward pass: linear(input, weight, bias) = output")
+    print("Forward pass: linear(input, weight, bias) = output")
     print(f"  input shape: {input.shape}")
     print(f"  weight shape: {weight.shape}")
     print(f"  output shape: {output.shape}")
@@ -80,9 +86,11 @@ def test_linear_backward():
     loss = output.sum()
     loss.backward()
 
-    print(f"Backward pass successful!")
+    print("Backward pass successful!")
     print(f"  grad_input shape: {input.grad.shape if input.grad is not None else None}")
-    print(f"  grad_weight shape: {weight.grad.shape if weight.grad is not None else None}")
+    print(
+        f"  grad_weight shape: {weight.grad.shape if weight.grad is not None else None}"
+    )
     print(f"  grad_bias shape: {bias.grad.shape if bias.grad is not None else None}")
 
     assert input.grad is not None, "grad_input should not be None"
@@ -101,6 +109,7 @@ def test_deterministic_forward():
 
     # Enable mode
     from vllm.model_executor.layers.batch_invariant import disable_batch_invariant_mode
+
     disable_batch_invariant_mode()
     enable_batch_invariant_backward_mode()
 
@@ -146,6 +155,7 @@ def main():
     except Exception as e:
         print(f"\n❌ Test failed with error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 
