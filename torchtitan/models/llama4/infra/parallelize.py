@@ -37,6 +37,7 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
+    ExpertParallelDeepEP,
     ExpertTensorParallel,
     ReordererSequenceParallel,
     TensorParallel,
@@ -509,7 +510,8 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            # experts_plan = ExpertParallel()
+            experts_plan = ExpertParallelDeepEP()
         else:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel()
