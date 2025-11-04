@@ -64,45 +64,144 @@ class TensorParallel(ParallelStyle):
         )
 
 
+# class ExpertParallel(ParallelStyle):
+#     def __init__(self):
+#         super().__init__()
+#         self.input_splits = None
+#         self.output_splits = None
+#         self.input_shape = None
+#         self.permuted_indices = None
+
+#     # performing all-to-all dispatch on the input
+#     def _token_dispatch(self, mod, inputs, device_mesh):
+#         # annotate module input placements/sharding with input_layouts
+#         routed_input, num_tokens_per_expert = inputs
+#         ep_degree = device_mesh.shape[0]
+#         num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
+
+#         # generate the input splits and output splits for all-to-all
+#         with torch.no_grad():
+#             num_tokens_per_expert_group = all_to_all_single(
+#                 num_tokens_per_expert,
+#                 None,
+#                 None,
+#                 group=device_mesh.get_group(),
+#             )
+#             # Need to wait explicitly because it is used by a triton kernel later
+#             # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+#             num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+#                 num_tokens_per_expert_group
+#             )
+#             input_splits = (
+#                 num_tokens_per_expert.view(ep_degree, -1)
+#                 .sum(dim=1)
+#                 .to(torch.device("cpu"), non_blocking=True)
+#             )
+#             # NOTE: this would incur a device-to-host sync
+#             output_splits = (
+#                 num_tokens_per_expert_group.view(ep_degree, -1)
+#                 .sum(dim=1)
+#                 .to(torch.device("cpu"), non_blocking=False)
+#             )
+#             self.input_splits = input_splits.tolist()
+#             self.output_splits = output_splits.tolist()
+
+#         # perform all-to-all
+#         routed_input = all_to_all_single_autograd(
+#             routed_input,
+#             self.output_splits,
+#             self.input_splits,
+#             device_mesh.get_group(),
+#         )
+
+#         # NOTE: After this all-to-all, the routed input is put on proper EP rank.
+#         # However, the num_tokens_per_expert_group is not of the final target format
+#         # [#tokens for local expert 0, #tokens for local expert 1, ...]
+#         # Rather, it is of the format
+#         # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
+#         #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
+#         # We need to perform another shuffle to get the correct layout, via the _permute function
+#         # below, which also does padding to make sure the number of tokens each expert gets locally
+#         # is a multiple of TOKEN_GROUP_ALIGN_SIZE_M.
+#         # Note that this will create side effects when wrapping the for-loop implementation
+#         # of GroupedExperts, as it does not need padding.
+
+#         (
+#             self.input_shape,
+#             routed_input,
+#             self.permuted_indices,
+#             num_tokens_per_expert_group,
+#         ) = _permute(
+#             routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+#         )
+
+#         return routed_input, num_tokens_per_expert_group
+
+#     @staticmethod
+#     def _partition_fn(name, mod, device_mesh):
+#         # shard on the expert dimension
+#         for name, param in mod.named_parameters(recurse=False):
+#             dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+#             mod.register_parameter(name, dist_param)
+
+#     # performing all-to-all combine on the output
+#     def _token_combine(self, mod, routed_output, device_mesh):
+#         routed_output = _unpermute(
+#             routed_output, self.input_shape, self.permuted_indices
+#         )
+
+#         routed_output = all_to_all_single_autograd(
+#             routed_output,
+#             self.input_splits,
+#             self.output_splits,
+#             device_mesh.get_group(),
+#         )
+#         return routed_output
+
+#     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+#         return distribute_module(
+#             module,
+#             device_mesh,
+#             partition_fn=ExpertParallel._partition_fn,
+#             input_fn=self._token_dispatch,
+#             output_fn=self._token_combine,
+#         )
+
+
 class ExpertParallel(ParallelStyle):
     def __init__(self):
         super().__init__()
         self.input_splits = None
         self.output_splits = None
-        self.input_shape = None
-        self.permuted_indices = None
 
     # performing all-to-all dispatch on the input
     def _token_dispatch(self, mod, inputs, device_mesh):
         # annotate module input placements/sharding with input_layouts
         routed_input, num_tokens_per_expert = inputs
-        ep_degree = device_mesh.shape[0]
-        num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
+        ep_size = device_mesh.shape[0]
 
         # generate the input splits and output splits for all-to-all
         with torch.no_grad():
-            num_tokens_per_expert_group = all_to_all_single(
+            num_tokens_per_expert_group = num_tokens_per_expert.new_empty(
+                num_tokens_per_expert.shape[0]
+            )
+            dist.all_to_all_single(
+                num_tokens_per_expert_group,
                 num_tokens_per_expert,
-                None,
-                None,
                 group=device_mesh.get_group(),
             )
-            # Need to wait explicitly because it is used by a triton kernel later
-            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
-            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
-                num_tokens_per_expert_group
-            )
             input_splits = (
-                num_tokens_per_expert.view(ep_degree, -1)
+                num_tokens_per_expert.view(ep_size, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=True)
+            )
+            output_splits = (
+                num_tokens_per_expert_group.view(ep_size, -1)
                 .sum(dim=1)
                 .to(torch.device("cpu"), non_blocking=True)
             )
             # NOTE: this would incur a device-to-host sync
-            output_splits = (
-                num_tokens_per_expert_group.view(ep_degree, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=False)
-            )
+            torch.cuda.current_stream().synchronize()
             self.input_splits = input_splits.tolist()
             self.output_splits = output_splits.tolist()
 
@@ -120,20 +219,9 @@ class ExpertParallel(ParallelStyle):
         # Rather, it is of the format
         # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
         #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
-        # We need to perform another shuffle to get the correct layout, via the _permute function
-        # below, which also does padding to make sure the number of tokens each expert gets locally
-        # is a multiple of TOKEN_GROUP_ALIGN_SIZE_M.
-        # Note that this will create side effects when wrapping the for-loop implementation
-        # of GroupedExperts, as it does not need padding.
-
-        (
-            self.input_shape,
-            routed_input,
-            self.permuted_indices,
-            num_tokens_per_expert_group,
-        ) = _permute(
-            routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
-        )
+        # We need to perform another shuffle to get the correct format -- this is done via the function
+        # generate_permute_indices in moe.py, which also does padding to make sure the number of tokens
+        # each expert gets locally is a multiple of ALIGN_SIZE_M.
 
         return routed_input, num_tokens_per_expert_group
 
@@ -146,10 +234,6 @@ class ExpertParallel(ParallelStyle):
 
     # performing all-to-all combine on the output
     def _token_combine(self, mod, routed_output, device_mesh):
-        routed_output = _unpermute(
-            routed_output, self.input_shape, self.permuted_indices
-        )
-
         routed_output = all_to_all_single_autograd(
             routed_output,
             self.input_splits,
@@ -280,4 +364,41 @@ class ReordererSequenceParallel(ParallelStyle):
             partition_fn=None,
             input_fn=self._prepare_inputput_fn,
             output_fn=self._prepare_output_fn,
+        )
+
+
+class ExpertParallelDeepEP(ExpertParallel):
+    def __init__(self):
+        super().__init__()
+
+    # performing all-to-all dispatch on the input
+    def _token_dispatch(self, mod, inputs, device_mesh):
+        # annotate module input placements/sharding with input_layouts
+        routed_input, num_tokens_per_expert = inputs
+
+        routed_input, routed_prob = mod.deepep_dispatcher.token_dispatch(routed_input, group=device_mesh.get_group())
+        routed_input, num_tokens_per_expert, routed_prob = mod.deepep_dispatcher.dispatch_postprocess(routed_input, None)
+
+        return routed_input, num_tokens_per_expert, routed_prob
+
+    @staticmethod
+    def _partition_fn(name, mod, device_mesh):
+        # shard on the expert dimension
+        for name, param in mod.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            mod.register_parameter(name, dist_param)
+
+    # performing all-to-all combine on the output
+    def _token_combine(self, mod, routed_output, device_mesh):
+        routed_output = mod.deepep_dispatcher.combine_preprocess(routed_output)
+        routed_output = mod.deepep_dispatcher.token_combine(routed_output, group=device_mesh.get_group())
+        return routed_output
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=ExpertParallel._partition_fn,
+            input_fn=self._token_dispatch,
+            output_fn=self._token_combine,
         )

@@ -13,7 +13,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from .utils import indices_padding_wrapper
-
+from torchtitan.distributed.deepep.utils import PrimusTurboFlexTokenDispatcher
 
 def moe_init_std(dim_in: int, n_layers: int) -> float:
     return (2 / (dim_in * n_layers)) ** 0.5
@@ -136,6 +136,8 @@ class GroupedExperts(nn.Module):
         hidden_dim: int,
         num_experts: int,
         use_grouped_mm: bool,
+        deepep_dispatcher: PrimusTurboFlexTokenDispatcher = None,
+        score_before_experts: bool = True,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -143,12 +145,34 @@ class GroupedExperts(nn.Module):
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
+        self.deepep_dispatcher = deepep_dispatcher
+        # NOTE(phuc): claudecode added this parameter to fix compatibility with ExpertParallelDeepEP
+        # When DeepEP is used, it passes routed_prob to forward() which needs to be multiplied
+        # with the input/output. This flag controls whether to apply the scaling before or after
+        # the expert computation. See torchtitan-amd implementation for reference.
+        self.score_before_experts = score_before_experts
 
     def forward(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
+        routed_prob: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # NOTE(phuc): claudecode added routed_prob parameter to fix ExpertParallelDeepEP compatibility
+        # When DeepEP is used, the _token_dispatch() method returns 3 values:
+        # (routed_input, num_tokens_per_expert, routed_prob), and distribute_module passes all of them
+        # to this forward() method. The routed_prob contains the routing scores that need to be
+        # multiplied with the tokens (either before or after expert computation).
+        # Without this parameter, we get: "GroupedExperts.forward() takes 3 positional arguments but 4 were given"
+
+        # Apply routing probability scaling BEFORE expert computation if score_before_experts=True
+        if routed_prob is not None and self.score_before_experts:
+            # Convert to float32 for numerical stability, multiply by routing scores, then convert back
+            x = (
+                x.to(torch.float32)
+                * routed_prob.reshape(-1, 1)
+            ).to(x.dtype)
+
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
@@ -171,9 +195,19 @@ class GroupedExperts(nn.Module):
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
             else:
                 run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+            out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
         else:
-            return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+            out = _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+
+        # Apply routing probability scaling AFTER expert computation if score_before_experts=False
+        if routed_prob is not None and not self.score_before_experts:
+            # Convert to float32 for numerical stability, multiply by routing scores, then convert back
+            out = (
+                out.to(torch.float32)
+                * routed_prob.reshape(-1, 1)
+            ).to(out.dtype)
+
+        return out
 
     def init_weights(self, init_std: float, n_layers: int):
         std_in = moe_init_std(self.w1.shape[-1], n_layers)
@@ -373,11 +407,24 @@ class MoE(nn.Module):
         super().__init__()
 
         num_experts = moe_args.num_experts
+
+        self.use_deepep = True
+        if self.use_deepep:
+            self.deepep_dispatcher = PrimusTurboFlexTokenDispatcher(
+                moe_router_topk=moe_args.top_k,
+                num_moe_experts=num_experts,
+            )
+            
         self.experts = GroupedExperts(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             use_grouped_mm=moe_args.use_grouped_mm,
+            deepep_dispatcher=self.deepep_dispatcher,
+            # NOTE(phuc): claudecode added this parameter to fix ExpertParallelDeepEP compatibility
+            # This ensures that GroupedExperts knows whether to apply routing scores before or after
+            # expert computation when routed_prob is passed to forward()
+            score_before_experts=moe_args.score_before_experts,
         )
         self.router = TokenChoiceTopKRouter(
             dim=dim,
@@ -413,14 +460,6 @@ class MoE(nn.Module):
             )
         else:
             self.expert_bias = None
-
-        self.use_deepep = True
-        if self.use_deepep:
-            from torchtitan.distributed.deepep.utils import PrimusTurboFlexTokenDispatcher
-            self.deepep_dispatcher = PrimusTurboFlexTokenDispatcher(
-                moe_router_topk=moe_args.top_k,
-                num_moe_experts=num_experts,
-            )
         
         # tokens_per_expert will be used to track expert usage and to update the expert bias for load balancing
         self.register_buffer(
@@ -429,6 +468,109 @@ class MoE(nn.Module):
             persistent=False,
         )
     
+    # def forward(self, x: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Args:
+    #         x (torch.Tensor): Input tensor with shape ``(bs, slen, dim)``.
+
+    #     Returns:
+    #         out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
+    #     """
+    #     # import pydevd
+    #     # pydevd.settrace(suspend=False, trace_only_current_thread=True)
+
+    #     print(f"running moe class")
+
+    #     bs, slen, dim = x.shape
+    #     x = x.view(-1, dim)
+
+    #     # top_scores and selected_experts_indices shape (bs*slen*top_k,)
+    #     # num_tokens_per_expert shape (num_experts,)
+    #     (
+    #         top_scores,
+    #         selected_experts_indices,
+    #         num_tokens_per_expert,
+    #     ) = self.router(x, self.expert_bias)
+
+    #     # tokens_per_expert will be used to update the expert bias for load balancing.
+    #     # and also to count the expert usage
+    #     # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
+    #     #       first in the forward pass, and then in the backward pass. However, this has no
+    #     #       effect on the expert bias update thanks to the torch.sign() operator.
+    #     with torch.no_grad():
+    #         self.tokens_per_expert.add_(num_tokens_per_expert)
+
+
+    #     if self.use_deepep:
+    #         top_scores = top_scores.float()
+    #         # self.experts.deepep_dispatcher.dispatch_preprocess(top_scores, selected_experts_indices)
+    #         self.deepep_dispatcher.dispatch_preprocess(top_scores, selected_experts_indices)
+    #         # shape (bs*slen*top_k, dim)
+    #         routed_output = self.experts(x, num_tokens_per_expert)
+    #         # shared expert
+    #         if self.shared_experts is not None:
+    #             out = self.shared_experts(x)
+    #         else:
+    #             out = torch.zeros_like(x)
+    #         out = routed_output + out
+    #     else:
+    #         # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
+    #         # num_tokens_per_expert shape (num_experts,)
+    #         # NOTE: the reason we need to compute num_tokens_per_expert again is:
+    #         #       1st computation in router is to update self.tokens_per_expert
+    #         #       which would be the same across all TP ranks.
+    #         #       2nd computation in reorderer is for the actual routing and experts computation
+    #         #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
+    #         #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
+    #         (
+    #             top_scores_experts_sorted,
+    #             token_indices_experts_sorted,
+    #             num_tokens_per_expert,
+    #         ) = self.reorderer(top_scores, selected_experts_indices)
+
+    #         # shape (bs*slen*top_k, dim)
+    #         token_indices_experts_sorted = token_indices_experts_sorted.reshape(
+    #             -1, 1
+    #         ).expand(-1, dim)
+
+    #         # shape (bs*slen*top_k, dim)
+    #         routed_input = torch.gather(x, dim=0, index=token_indices_experts_sorted)
+
+    #         if self.score_before_experts:
+    #             routed_input = (
+    #                 routed_input.to(torch.float32)
+    #                 * top_scores_experts_sorted.reshape(-1, 1)
+    #             ).to(x.dtype)
+
+    #         # shape (bs*slen*top_k, dim)
+    #         routed_output = self.experts(routed_input, num_tokens_per_expert)
+
+    #         # shared expert
+    #         # Note: we execute the shared expert before scoring the output of the routed expert
+    #         # to "implicitly" overlap the shared expert compute with token combine communication
+    #         flat_x = x.view(-1, x.shape[-1])
+    #         if self.shared_experts is not None:
+    #             shared_out = self.shared_experts(flat_x)
+    #             if self.shared_gate is not None:
+    #                 shared_gate_val = F.sigmoid(self.shared_gate(flat_x))
+    #                 out = shared_out * shared_gate_val
+    #             else:
+    #                 out = shared_out
+    #         else:
+    #             out = torch.zeros_like(flat_x)
+
+    #         if not self.score_before_experts:
+    #             routed_output = (
+    #                 routed_output.to(torch.float32)
+    #                 * top_scores_experts_sorted.reshape(-1, 1)
+    #             ).to(x.dtype)
+
+    #         out = out.scatter_add(
+    #             dim=0, index=token_indices_experts_sorted, src=routed_output
+    #         )
+    #         out = out.reshape(bs, slen, dim)
+    #         return out
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
@@ -437,11 +579,6 @@ class MoE(nn.Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        # import pydevd
-        # pydevd.settrace(suspend=False, trace_only_current_thread=True)
-
-        print(f"running moe class")
-
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
@@ -464,8 +601,7 @@ class MoE(nn.Module):
 
         if self.use_deepep:
             top_scores = top_scores.float()
-            # self.experts.deepep_dispatcher.dispatch_preprocess(top_scores, selected_experts_indices)
-            self.deepep_dispatcher.dispatch_preprocess(top_scores, selected_experts_indices)
+            self.experts.deepep_dispatcher.dispatch_preprocess(top_scores, selected_experts_indices)
             # shape (bs*slen*top_k, dim)
             routed_output = self.experts(x, num_tokens_per_expert)
             # shared expert
@@ -509,16 +645,10 @@ class MoE(nn.Module):
             # shared expert
             # Note: we execute the shared expert before scoring the output of the routed expert
             # to "implicitly" overlap the shared expert compute with token combine communication
-            flat_x = x.view(-1, x.shape[-1])
             if self.shared_experts is not None:
-                shared_out = self.shared_experts(flat_x)
-                if self.shared_gate is not None:
-                    shared_gate_val = F.sigmoid(self.shared_gate(flat_x))
-                    out = shared_out * shared_gate_val
-                else:
-                    out = shared_out
+                out = self.shared_experts(x)
             else:
-                out = torch.zeros_like(flat_x)
+                out = torch.zeros_like(x)
 
             if not self.score_before_experts:
                 routed_output = (
