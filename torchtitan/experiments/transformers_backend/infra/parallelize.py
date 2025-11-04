@@ -4,15 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections import defaultdict
-from typing import Optional
-
 import torch
 import torch.nn as nn
-from torch.distributed._composable.replicate import replicate
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper as ptd_checkpoint_wrapper,
-)
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Partial, Replicate, Shard
@@ -26,7 +19,6 @@ from torch.distributed.tensor.parallel import (
 )
 from torchtitan.experiments.transformers_backend.job_config import JobConfig
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 
 from torchtitan.distributed.expert_parallel import (
@@ -113,7 +105,7 @@ def parallelize_hf_transformers(
     if model_compile_enabled:
         # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
         torch._dynamo.config.capture_scalar_outputs = True
-        apply_compile(model)
+        apply_compile(model, job_config.compile)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
