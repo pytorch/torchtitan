@@ -140,8 +140,11 @@ class FusedDispatch(torch.autograd.Function):
         #     tokens_per_expert = num_recv_tokens_per_expert_list  # Already CUDA tensor from DeepEP
         #
         # MODIFIED CODE (phuc, workaround for local DeepEP):
+        # NOTE(phuc): claudecode fixed device placement issue - both branches now use device=x.device
+        # Previously the first branch created CPU tensor which caused:
+        # "RuntimeError: Expected all tensors to be on the same device, but got offs is on cpu"
         if not use_cuda_num_token_per_expert:
-            tokens_per_expert = torch.tensor(num_recv_tokens_per_expert_list)  # list -> CPU tensor (same as original)
+            tokens_per_expert = torch.tensor(num_recv_tokens_per_expert_list, device=x.device)  # list -> CUDA tensor (FIXED)
         else:
             # Manual conversion: list -> CUDA tensor (workaround since DeepEP doesn't do it)
             # TODO(deepep-fork, phuc): Restore original `tokens_per_expert = num_recv_tokens_per_expert_list`
