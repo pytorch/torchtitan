@@ -54,7 +54,6 @@ def parallelize_deepseekv3(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
@@ -125,16 +124,16 @@ def parallelize_deepseekv3(
     ):
         if parallel_dims.dp_replicate_enabled:
             if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+                dp_mesh_dim_names = ["dp_replicate", "dp_shard_cp"]
                 dp_mode = "hybrid_shard"
             else:
-                dp_mesh_dim_names = ("dp_replicate",)
+                dp_mesh_dim_names = ["dp_replicate"]
                 dp_mode = "replicate"
         else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+            dp_mesh_dim_names = ["dp_shard_cp"]
             dp_mode = "fully_shard"
 
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
         dp_mod_ep_mesh_dim_names = []
 
@@ -142,7 +141,7 @@ def parallelize_deepseekv3(
             if parallel_dims.dp_replicate_enabled:
                 dp_mod_ep_mesh_dim_names.append("dp_replicate")
             dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
-        dp_mod_ep_mesh = world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
+        dp_mod_ep_mesh = parallel_dims.get_mesh(dp_mod_ep_mesh_dim_names)
 
         for _, transformer_block in model.layers.items():
             if transformer_block.moe_enabled and parallel_dims.ep_enabled:

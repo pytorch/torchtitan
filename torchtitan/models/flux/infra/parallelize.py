@@ -29,13 +29,13 @@ def parallelize_flux(
 
     if parallel_dims.fsdp_enabled:
         if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+            dp_mesh_dim_names = ["dp_replicate", "dp_shard_cp"]
         else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+            dp_mesh_dim_names = ["dp_shard_cp"]
 
         apply_fsdp(
             model,
-            parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
+            parallel_dims.get_mesh(dp_mesh_dim_names),
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             cpu_offload=job_config.training.enable_cpu_offload,
@@ -131,16 +131,16 @@ def parallelize_encoders(
 ):
     if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP
         if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard")
+            dp_mesh_dim_names = ["dp_replicate", "dp_shard"]
         else:
-            dp_mesh_dim_names = ("dp_shard",)
+            dp_mesh_dim_names = ["dp_shard"]
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
         fsdp_config = {
-            "mesh": parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
+            "mesh": parallel_dims.get_mesh(dp_mesh_dim_names),
             "mp_policy": mp_policy,
         }
         if job_config.training.enable_cpu_offload:
