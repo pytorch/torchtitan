@@ -95,6 +95,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
+
         self.parallel_dims = parallel_dims = self._create_parallel_dims(
             parallelism_config, world_size
         )
@@ -395,6 +396,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
+
+            # print(f"input_dict: {input_dict["input"]}")
+            # print(f"labels: {labels}")
             ntokens_batch = labels.numel()
             self.ntokens_seen += ntokens_batch
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
@@ -429,6 +433,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
+
+        if getattr(self.model_args, "use_varlen_attn", False):
+            extra_kwargs["cu_seq_q"] = extra_inputs.pop("cu_seq_q", None)
+            extra_kwargs["cu_seq_k"] = extra_inputs.pop("cu_seq_k", None)
+            extra_kwargs["max_q"] = extra_inputs.pop("max_q", None)
+            extra_kwargs["max_k"] = extra_inputs.pop("max_k", None)
 
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
