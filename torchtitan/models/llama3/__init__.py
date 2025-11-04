@@ -39,6 +39,14 @@ llama3_args = {
         use_flex_attn=True,
         attn_mask_type="block_causal",
     ),
+    "debugmodel_varlen_attn": TransformerModelArgs(
+        dim=256,
+        n_layers=6,
+        n_heads=16,
+        vocab_size=2048,
+        rope_theta=500000,
+        use_varlen_attn=True,
+    ),
     "8B": TransformerModelArgs(
         dim=4096,
         n_layers=32,
