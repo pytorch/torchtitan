@@ -19,7 +19,8 @@ enable_wandb = false
 
 [model]
 name = "llama3"
-flavor = "debugmodel"
+flavor = "debugmodel_varlen_attn"
+# flavor = "debugmodel_flex_attn"
 # test folder with tokenizer.json, for debug purpose only
 hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
@@ -78,3 +79,6 @@ enable = false
 dataset = "c4_validation"
 freq = 5
 steps = 10
+
+[debug]
+seed = 42

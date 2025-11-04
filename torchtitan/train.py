@@ -12,9 +12,9 @@ from typing import Any, Generator, Iterable
 
 import torch
 
-from torch.distributed.elastic.multiprocessing.errors import record
-
 import torchtitan.protocols.train_spec as train_spec_module
+
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
@@ -396,6 +396,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
+
+            # print(f"input_dict: {input_dict["input"]}")
+            # print(f"labels: {labels}")
             ntokens_batch = labels.numel()
             self.ntokens_seen += ntokens_batch
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
@@ -460,6 +463,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
+
+        if getattr(self.model_args, "use_varlen_attn", False):
+            extra_kwargs["cu_seq_q"] = extra_inputs.pop("cu_seq_q", None)
+            extra_kwargs["cu_seq_k"] = extra_inputs.pop("cu_seq_k", None)
+            extra_kwargs["max_q"] = extra_inputs.pop("max_q", None)
+            extra_kwargs["max_k"] = extra_inputs.pop("max_k", None)
 
         return inputs, labels, extra_inputs, extra_kwargs
 

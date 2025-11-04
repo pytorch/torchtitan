@@ -44,6 +44,7 @@ class TransformerModelArgs(BaseModelArgs):
     depth_init: bool = True
 
     use_flex_attn: bool = False
+    use_varlen_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
