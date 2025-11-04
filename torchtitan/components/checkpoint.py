@@ -19,10 +19,7 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torch.distributed.checkpoint import (
-    HuggingFaceStorageReader,
-    HuggingFaceStorageWriter,
-)
+from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
@@ -190,10 +187,22 @@ class CheckpointManager:
         ft_manager: FTManager | None = None,
     ) -> None:
         self.enable = checkpoint_config.enable
+        self.load_only = checkpoint_config.load_only
 
         self.ft_manager = (
-            ft_manager.manager if ft_manager and ft_manager.enabled else None
+            ft_manager.manager
+            if ft_manager
+            and ft_manager.enabled
+            and checkpoint_config.enable_ft_dataloader_checkpoints
+            else None
         )
+
+        if ft_manager and ft_manager.enabled and not self.ft_manager:
+            logger.warn(
+                "Fault tolerance is enabled but enable_ft_dataloader_checkpoints is False. "
+                "This means replicas can retrain over the same data multiple times, which can result in overfitting."
+            )
+
         if self.ft_manager:
             optimizers.init_cache_state_dict()
 
@@ -248,6 +257,9 @@ class CheckpointManager:
         self.initial_load_model_only = checkpoint_config.initial_load_model_only
         self.initial_load_in_hf = checkpoint_config.initial_load_in_hf
         self.initial_load_path = checkpoint_config.initial_load_path
+        self.initial_load_in_hf_quantized = (
+            checkpoint_config.initial_load_in_hf_quantized
+        )
         self.last_save_model_only = checkpoint_config.last_save_model_only
         self.last_save_in_hf = checkpoint_config.last_save_in_hf
         if self.last_save_in_hf:
@@ -417,6 +429,7 @@ class CheckpointManager:
         state_dict: dict[str, Any],
         checkpoint_id: str,
         from_hf: bool,
+        from_quantized: bool,
     ) -> None:
         """Load the checkpoint with dcp.
         Args:
@@ -431,10 +444,13 @@ class CheckpointManager:
                 self.sd_adapter is not None
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
+            hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
+                checkpoint_id, from_quantized
+            )
 
             dcp.load(
                 hf_state_dict,
-                storage_reader=HuggingFaceStorageReader(path=checkpoint_id),
+                storage_reader=hf_storage_reader,
             )
 
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
@@ -494,6 +510,7 @@ class CheckpointManager:
                 )
                 self.save_future = result.upload_completion
                 self.staging_future = result.staging_completion
+                self.staging = True
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 self.save_future = self.dcp_save(
@@ -542,13 +559,21 @@ class CheckpointManager:
 
         model_only = False
         from_hf = False
+        from_quantized = False
         if not os.path.exists(self.folder):
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
+            from_quantized = self.initial_load_in_hf_quantized
             if from_hf:
                 assert (
                     model_only
                 ), "Only model can be loaded when loading from HF's safetensors checkpoint."
+
+            if from_quantized:
+                assert (
+                    from_hf
+                ), "Quantized checkpoint can only be loaded from HuggingFace format."
+
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
                 if not os.path.isdir(checkpoint_id):
@@ -600,6 +625,7 @@ class CheckpointManager:
             states,
             checkpoint_id=checkpoint_id,
             from_hf=from_hf,
+            from_quantized=from_quantized,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -615,6 +641,7 @@ class CheckpointManager:
         """
         if self.enable_staging and self.staging:
             self.staging_future.result()
+            self.staging = False
 
     def _find_load_step(self, folder: str = "") -> int:
         """Find the step to load the checkpoint for.
@@ -676,6 +703,7 @@ class CheckpointManager:
             checkpoint_id=checkpoint_id,
             # FT checkpoints are always DCP because FT checkpoint currently only save/load dataloader.
             from_hf=False,
+            from_quantized=False,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -759,7 +787,7 @@ class CheckpointManager:
         )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
-        if not self.enable:
+        if not self.enable or self.load_only:
             return False
 
         if curr_step == 1 and self.enable_first_step_checkpoint:

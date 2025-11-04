@@ -23,6 +23,7 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
@@ -30,7 +31,7 @@ from torchtitan.tools.logging import logger
 
 
 # for selective op activation checkpointing
-_save_list = {
+_op_sac_save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
@@ -72,7 +73,7 @@ def parallelize_llama(
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.float8.recipe_name in (
+        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
@@ -100,12 +101,13 @@ def parallelize_llama(
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
-            save_list=_save_list,
+            op_sac_save_list=_op_sac_save_list,
+            base_folder=job_config.job.dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model)
+        apply_compile(model, job_config.compile)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -135,7 +137,7 @@ def parallelize_llama(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh_dim_names = ("dp_replicate", "dp_shard")
+        dp_mesh_dim_names = ("dp_replicate",)
         apply_replicate(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
@@ -204,8 +206,8 @@ def apply_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None),
-                desired_input_layouts=(Replicate(), None),
+                input_layouts=(Shard(1), None, None),
+                desired_input_layouts=(Replicate(), None, None),
             ),
             "attention.wq": colwise_parallel(),
             "attention.wk": colwise_parallel(),
@@ -233,13 +235,15 @@ def apply_tp(
     )
 
 
-def apply_compile(model: nn.Module):
+def apply_compile(model: nn.Module, compile_config: CompileConfig):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block = torch.compile(transformer_block, fullgraph=True)
+        transformer_block = torch.compile(
+            transformer_block, backend=compile_config.backend, fullgraph=True
+        )
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
@@ -320,7 +324,7 @@ def apply_replicate(
     reduce_dtype: torch.dtype,
 ):
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    replicate_config = {"device_mesh": dp_mesh, "mp_policy": mp_policy}
+    replicate_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
 
     if model.tok_embeddings is not None:
         replicate(
@@ -340,4 +344,4 @@ def apply_replicate(
         )
     replicate(model, **replicate_config)
 
-    logger.info("Applied DDP to the model")
+    logger.info("Applied replicate to the model")

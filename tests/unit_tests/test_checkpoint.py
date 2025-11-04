@@ -75,8 +75,20 @@ class DummyFuture:
         self.result = mock.Mock()
 
 
+class DummyAsyncResult:
+    """Mock object that mimics the return value of dcp.async_save with pinned memory"""
+
+    def __init__(self):
+        self.upload_completion = DummyFuture()
+        self.staging_completion = DummyFuture()
+
+
 def fake_async_save(*args, **kwargs):
-    return DummyFuture()
+    # Check if this is async_with_pinned_mem mode by looking for async_stager parameter
+    if "async_stager" in kwargs:
+        return DummyAsyncResult()
+    else:
+        return DummyFuture()
 
 
 class DummyJobConfig:
@@ -410,6 +422,62 @@ class TestCheckpointManager(unittest.TestCase):
         manager1.close()
         manager2.close()
 
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torch.cuda.Stream")
+    @mock.patch("torchtitan.components.checkpoint.DefaultStager")
+    @mock.patch("torchtitan.components.checkpoint.dist.new_group")
+    @mock.patch(
+        "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
+    )
+    def test_async_save_with_pinned_mem_sets_staging_flag(
+        self,
+        mock_async_save,
+        mock_new_group,
+        mock_default_stager,
+        mock_cuda_stream,
+        mock_rank,
+    ):
+        """
+        Test that AsyncMode.ASYNC_WITH_PINNED_MEM correctly sets staging flag.
+
+        This test verifies the bug fix where self.staging was not being set to True
+        when using ASYNC_WITH_PINNED_MEM mode, which caused maybe_wait_for_staging()
+        to not wait properly for staging completion.
+        """
+        # Configure async mode with pinned memory
+        job_config = DummyJobConfig(job=self.job_config.job)
+        checkpoint_config = job_config.checkpoint
+        checkpoint_config.async_mode = "async_with_pinned_mem"
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            checkpoint_config=checkpoint_config,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
+        )
+
+        # Initially staging should be False
+        self.assertFalse(manager.staging)
+
+        # After save, staging should be set to True
+        manager.save(curr_step=1, last_step=False)
+        self.assertTrue(manager.staging)
+
+        # Verify that staging_future exists
+        self.assertIsNotNone(manager.staging_future)
+
+        # Verify that maybe_wait_for_staging actually waits when staging is True
+        manager.maybe_wait_for_staging()
+        # After waiting, staging should be set back to False
+        self.assertFalse(manager.staging)
+
+        manager.close()
+
     @mock.patch("torchtitan.components.checkpoint.dist.new_group")
     @mock.patch(
         "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
@@ -606,6 +674,64 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertIn("other_param", saved_data)
 
         manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    def test_load_only_prevents_saving(self, mock_save, mock_rank):
+        """
+        Test that load_only=True prevents checkpoint saving.
+        """
+        mock_save.side_effect = self.fake_save
+
+        # Configure load_only=True
+        cfg = self.job_config.checkpoint
+        cfg.load_only = True
+        cfg.interval = 1  # Set low interval to ensure saves would normally trigger
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
+        )
+
+        # Test various save conditions that would normally trigger saves
+        manager.save(curr_step=1)  # Regular step save
+        self.assertEqual(mock_save.call_count, 0)
+
+        manager.save(curr_step=5)  # Interval-based save
+        self.assertEqual(mock_save.call_count, 0)
+
+        manager.save(curr_step=10, last_step=True)  # Last step save
+        self.assertEqual(mock_save.call_count, 0)
+
+        manager.close()
+
+        # Verify that saves work normally when load_only=False
+        mock_save.reset_mock()
+        cfg.load_only = False
+
+        manager2 = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            checkpoint_config=self.job_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
+        )
+
+        manager2.save(curr_step=1)  # Should trigger save now
+        self.assertEqual(mock_save.call_count, 1)
+
+        manager2.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torchtitan.components.checkpoint.dcp.load")

@@ -1,7 +1,7 @@
 [job]
 dump_folder = "./outputs"
 description = "DeepSeek-V3 debug training"
-print_args = false
+print_config = false
 
 [profiling]
 enable_profiling = false
@@ -70,8 +70,10 @@ selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac ba
 enable=false
 components = ["model", "loss"]
 
-[float8]
+[quantize.linear.float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
-moe_fqns_prototype = ["experts"]
+
+[quantize.grouped_mm.float8]
+fqns = ["experts"]

@@ -1,7 +1,7 @@
 [job]
 dump_folder = "./outputs"
 description = "DeepSeek-V3 16B model training"
-print_args = false
+print_config = false
 
 [profiling]
 enable_profiling = false
@@ -35,7 +35,7 @@ decay_type = "cosine"
 min_lr_factor = 0.1
 
 [training]
-local_batch_size = 8
+local_batch_size = 4
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
 steps = 1000
@@ -68,8 +68,10 @@ selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac ba
 enable=true
 components = ["loss"] # ["model", "loss"]
 
-[float8]
+[quantize.linear.float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output", "router.gate"]
-moe_fqns_prototype = ["experts"]
+
+[quantize.grouped_mm.float8]
+fqns = ["experts"]

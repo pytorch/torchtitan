@@ -44,7 +44,7 @@ class Trainer(ForgeEngine):
     def __init__(self, job_config: JobConfig):
         logger.info(f"Starting job: {job_config.job.description}")
 
-        if job_config.job.print_args:
+        if job_config.job.print_config:
             logger.info(f"Running with args: {job_config.to_dict()}")
 
         if job_config.experimental.custom_import:
@@ -66,7 +66,7 @@ class Trainer(ForgeEngine):
 
         model_args = self.model_args
         logger.info(
-            f"Built {self.train_spec.name} {job_config.model.flavor} with {model_args}"
+            f"Built {job_config.model.name} {job_config.model.flavor} with {model_args}"
         )
 
         # metrics logging
@@ -78,7 +78,7 @@ class Trainer(ForgeEngine):
         self.metrics_processor.num_flops_per_token = self.num_flops_per_token
 
         logger.info(
-            f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
+            f"{color.blue}Model {job_config.model.name} {job_config.model.flavor} "
             f"{color.red}size: {self.model_param_count:,} total parameters{color.reset}"
         )
 
@@ -107,7 +107,7 @@ class Trainer(ForgeEngine):
                 dp_rank=self.dp_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=self.parallel_dims,
-                loss_fn=self.train_spec.build_loss_fn(job_config),
+                loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
             )
@@ -157,15 +157,14 @@ class Trainer(ForgeEngine):
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        # apply context parallelism if cp is enabled
-        # ensure CP handles the separate freqs_cis buffer for each pp stage
         inputs = input_dict["input"]
-        # Create the FlexAttention mask according to the input
+        extra_kwargs = {}
+
         if getattr(self.model_args, "use_flex_attn", False):
-            cp_mesh = (
-                parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
+            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
             )
-            init_attention_mask(inputs, self.tokenizer.eos_id, cp_mesh)
 
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
@@ -187,17 +186,25 @@ class Trainer(ForgeEngine):
                 )
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
-                        inputs, target=targets, losses=losses, input_batch=inputs
+                        inputs,
+                        **extra_kwargs,
+                        target=targets,
+                        losses=losses,
                     )
                 else:
                     self.pp_schedule.step(
-                        target=targets, losses=losses, input_batch=inputs
+                        **extra_kwargs,
+                        target=targets,
+                        losses=losses,
                     )
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             loss = (
-                torch.mean(torch.stack(losses)).to(self.device)
+                # using sum instead of mean because we already rescale the
+                # loss_fn down by a factor of n_microbatches in
+                # torchtitan/distributed/pipeline_parallel.py
+                torch.sum(torch.stack(losses)).to(self.device)
                 if self.pp_has_last_stage
                 else torch.tensor([-1.0], device=self.device)
             )
@@ -206,7 +213,7 @@ class Trainer(ForgeEngine):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs)
+                    pred = model_parts[0](inputs, **extra_kwargs)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
@@ -301,7 +308,8 @@ class Trainer(ForgeEngine):
                     self.job_config.validation.enable
                     and self.validator.should_validate(self.step)
                 ):
-                    self.validator.validate(self.model_parts, self.step)
+                    with self.loss_fn.no_rescale():
+                        self.validator.validate(self.model_parts, self.step)
 
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)

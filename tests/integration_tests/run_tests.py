@@ -84,6 +84,9 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
 
+        if test_flavor.disabled:
+            continue
+
         # Check if we have enough GPUs
         if args.ngpu < test_flavor.ngpu:
             logger.info(
@@ -103,7 +106,7 @@ def main():
         "--test_suite",
         default="features",
         choices=["features", "models", "h100"],
-        help="Which test suite to run. If not specified, torchtitan composibility tests will be run",
+        help="Which test suite to run. If not specified, torchtitan composability tests will be run",
     )
     parser.add_argument(
         "--config_path",
