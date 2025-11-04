@@ -145,6 +145,74 @@ class FlashAttn3Function(Function):
         return grad_q, grad_k, grad_v, None, None, None, None, None, None, None, None, None, None, None
 
 
+class SiluAndMulFunction(Function):
+    """
+    Autograd function for vLLM's SiluAndMul activation.
+
+    Forward: splits input into [gate, up], returns silu(gate) * up
+    where silu(x) = x * sigmoid(x)
+    """
+
+    @staticmethod
+    def forward(ctx, x):
+        """
+        Forward pass using vLLM's SiluAndMul.
+
+        Args:
+            x: Input tensor [..., hidden_dim * 2] where first half is gate, second half is up
+
+        Returns:
+            output: silu(gate) * up, shape [..., hidden_dim]
+        """
+        from vllm.model_executor.layers.activation import SiluAndMul as VLLMSiluAndMul
+
+        # Use vLLM's implementation for forward
+        vllm_silu_and_mul = VLLMSiluAndMul()
+        output = vllm_silu_and_mul(x)
+
+        # Save for backward
+        ctx.save_for_backward(x)
+
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        Backward pass for SiluAndMul.
+
+        Let gate = x[:d], up = x[d:] where d = hidden_dim
+        Forward: out = silu(gate) * up = (gate * sigmoid(gate)) * up
+
+        Gradients:
+        - grad_gate = grad_out * up * d_silu(gate)
+        - grad_up = grad_out * silu(gate)
+
+        where d_silu(x) = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+        """
+        x, = ctx.saved_tensors
+
+        # Split input into gate and up
+        d = x.shape[-1] // 2
+        gate = x[..., :d]
+        up = x[..., d:]
+
+        # Compute sigmoid and silu for backward
+        sigmoid_gate = torch.sigmoid(gate)
+        silu_gate = gate * sigmoid_gate
+
+        # Gradient of silu: d_silu(x) = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+        d_silu_gate = sigmoid_gate * (1 + gate * (1 - sigmoid_gate))
+
+        # Compute gradients
+        grad_gate = grad_output * up * d_silu_gate
+        grad_up = grad_output * silu_gate
+
+        # Concatenate gradients
+        grad_x = torch.cat([grad_gate, grad_up], dim=-1)
+
+        return grad_x
+
+
 class RMSNormFunction(Function):
     """
     Autograd function for RMS normalization using vLLM's Triton kernel in forward
@@ -477,3 +545,19 @@ def rms_norm_with_gradients(input: torch.Tensor, weight: torch.Tensor, eps: floa
         output: Normalized and scaled tensor [*, hidden_size]
     """
     return RMSNormFunction.apply(input, weight, eps)
+
+
+def silu_and_mul_with_gradients(x: torch.Tensor) -> torch.Tensor:
+    """
+    SiluAndMul activation with gradient support.
+
+    Uses vLLM's implementation for forward pass (deterministic) and
+    implements proper backward pass for training.
+
+    Args:
+        x: Input tensor [..., hidden_dim * 2] where first half is gate, second half is up
+
+    Returns:
+        output: silu(gate) * up, shape [..., hidden_dim]
+    """
+    return SiluAndMulFunction.apply(x)

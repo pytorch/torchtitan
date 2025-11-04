@@ -17,11 +17,11 @@ from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
-# Import vLLM's exact operations for bitwise determinism
-from vllm.model_executor.layers.activation import SiluAndMul as VLLMSiluAndMul
-
 # Import gradient-enabled operations from experiment utilities
-from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import rms_norm_with_gradients
+from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
+    rms_norm_with_gradients,
+    silu_and_mul_with_gradients,
+)
 
 # Import from local experiment's models
 from ..attention import VLLMCompatibleFlashAttention
@@ -81,10 +81,6 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
-# Use vLLM's exact SiluAndMul kernel for bitwise determinism
-SiluAndMul = VLLMSiluAndMul
-
-
 class VLLMRMSNorm(nn.Module):
     """
     RMSNorm using vLLM's exact Triton kernel for bitwise determinism.
@@ -126,14 +122,11 @@ class FeedForwardVLLMCompat(nn.Module):
         # Down projection (like vLLM's down_proj)
         self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
 
-        # vLLM's activation
-        self.act_fn = SiluAndMul()
-
     def forward(self, x):
         # Project to gate and up in one go
         gate_up = self.gate_up_proj(x)
-        # Apply SiluAndMul activation
-        activated = self.act_fn(gate_up)
+        # Apply SiluAndMul activation with gradient support
+        activated = silu_and_mul_with_gradients(gate_up)
         # Project down
         output = self.down_proj(activated)
         return output
