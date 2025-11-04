@@ -39,6 +39,7 @@ from torchtitan.tools.logging import logger
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.llama3.infra.parallelize import apply_compile
 
 
 def parallelize_hf_transformers(
@@ -565,19 +566,3 @@ def apply_moe_ep_tp(
                 device_mesh=experts_mesh,
                 parallelize_plan=experts_plan,
             )
-
-
-def apply_compile(model: nn.Module):
-    """
-    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
-    repeated structure. Alternatively one can compile the whole model (after applying DP).
-    """
-    for layer_id, transformer_block in model.layers.named_children():
-        # TODO: remove when torch.compile supports fullgraph=True for MoE
-        fullgraph = True
-        if transformer_block.moe_enabled:
-            fullgraph = False
-        transformer_block = torch.compile(transformer_block, fullgraph=fullgraph)
-        model.layers.register_module(layer_id, transformer_block)
-
-    logger.info("Compiling each TransformerBlock with torch.compile")
