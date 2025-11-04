@@ -226,6 +226,10 @@ deterministic_vllm_rl/
 │   └── qwen3/
 │       ├── __init__.py
 │       └── model_vllm_compat.py       # vLLM-compatible Qwen3 model
+├── weights/
+│   ├── __init__.py
+│   ├── converter.py                   # Weight conversion script
+│   └── README.md                      # Weight conversion documentation
 └── tests/
     ├── __init__.py
     ├── test_batch_invariant_backward.py  # Test backward passes
