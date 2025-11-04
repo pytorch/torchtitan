@@ -33,6 +33,11 @@ echo ""
 
 # Unit tests
 if [ "$SKIP_UNIT" -eq 0 ]; then
+    echo "Running helper function tests..."
+    python -m unittest tests.unit_tests.deepep.test_primus_turbo_flex_token_dispatcher.TestHelperFunctions -v
+    [ $? -eq 0 ] && echo "✓ Helper function tests passed" || exit $?
+    echo ""
+
     echo "Running unit tests..."
     python -m unittest tests.unit_tests.deepep.test_primus_turbo_flex_token_dispatcher.TestUnit -v
     [ $? -eq 0 ] && echo "✓ Unit tests passed" || exit $?

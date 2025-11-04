@@ -45,7 +45,11 @@ def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
         or _buffer.num_nvl_bytes < num_nvl_bytes
         or _buffer.num_rdma_bytes < num_rdma_bytes
     ):
-        _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes, use_default_stream_as_comm_stream=True)
+        # NOTE: Original code from torchtitan-amd used primus_turbo.pytorch.deep_ep.Buffer
+        # which has use_default_stream_as_comm_stream parameter. However, the standard
+        # deep_ep.Buffer API does not have this parameter. Removing it to match the
+        # deep_ep API. The default behavior should be equivalent.
+        _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes)
     return _buffer
 
 
@@ -88,6 +92,10 @@ class FusedDispatch(torch.autograd.Function):
         # Do MoE dispatch
         # NOTES: the CPU will wait for GPU's signal to arrive,
         # so this is not compatible with CUDA graph
+        # TODO(deepep-fork, phuc): The local DeepEP does not support num_recv_tokens_per_expert_as_cuda parameter
+        # which exists in torchtitan-amd's forked DeepEP. When we fork DeepEP, we should add this parameter
+        # back to avoid the tensor conversion overhead below. The parameter allows DeepEP to return a CUDA
+        # tensor directly instead of a Python list for num_recv_tokens_per_expert_list.
         (
             recv_x,
             recv_token_indices,
@@ -106,7 +114,7 @@ class FusedDispatch(torch.autograd.Function):
             previous_event=event,  # wait in deepep::intra/inter_dispatch
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
-            num_recv_tokens_per_expert_as_cuda=use_cuda_num_token_per_expert,
+            # num_recv_tokens_per_expert_as_cuda=use_cuda_num_token_per_expert,  # (phuc) Not supported in local DeepEP
             num_worst_tokens=num_worst_tokens,
         )
 
@@ -120,10 +128,25 @@ class FusedDispatch(torch.autograd.Function):
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
 
+        # WORKAROUND (phuc): for local DeepEP without num_recv_tokens_per_expert_as_cuda support:
+        # The local DeepEP always returns num_recv_tokens_per_expert_list as a Python list.
+        # The forked DeepEP in torchtitan-amd has num_recv_tokens_per_expert_as_cuda parameter
+        # which when True, returns a CUDA tensor directly instead of a Python list.
+        #
+        # ORIGINAL CODE (from torchtitan-amd with forked DeepEP):
+        # if not use_cuda_num_token_per_expert:
+        #     tokens_per_expert = torch.tensor(num_recv_tokens_per_expert_list)  # list -> CPU tensor
+        # else:
+        #     tokens_per_expert = num_recv_tokens_per_expert_list  # Already CUDA tensor from DeepEP
+        #
+        # MODIFIED CODE (phuc, workaround for local DeepEP):
         if not use_cuda_num_token_per_expert:
-            tokens_per_expert = torch.tensor(num_recv_tokens_per_expert_list)
+            tokens_per_expert = torch.tensor(num_recv_tokens_per_expert_list)  # list -> CPU tensor (same as original)
         else:
-            tokens_per_expert = num_recv_tokens_per_expert_list
+            # Manual conversion: list -> CUDA tensor (workaround since DeepEP doesn't do it)
+            # TODO(deepep-fork, phuc): Restore original `tokens_per_expert = num_recv_tokens_per_expert_list`
+            # when we fork DeepEP and add num_recv_tokens_per_expert_as_cuda support
+            tokens_per_expert = torch.tensor(num_recv_tokens_per_expert_list, device=x.device)
 
         return (recv_x, recv_token_indices, recv_token_probs, tokens_per_expert, handle)
 
