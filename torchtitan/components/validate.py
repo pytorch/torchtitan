@@ -113,7 +113,7 @@ class Validator(BaseValidator):
 
             optional_context_parallel_ctx = (
                 dist_utils.create_context_parallel_ctx(
-                    cp_mesh=parallel_dims.world_mesh["cp"],
+                    cp_mesh=parallel_dims.get_mesh("cp"),
                     cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                     cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                     cp_no_restore_buffers={inputs, labels},
@@ -167,7 +167,7 @@ class Validator(BaseValidator):
         loss /= num_steps
         if parallel_dims.dp_cp_enabled:
             global_avg_loss = dist_utils.dist_mean(
-                loss, parallel_dims.world_mesh["dp_cp"]
+                loss, parallel_dims.get_mesh("dp_cp")
             )
         else:
             global_avg_loss = loss.item()

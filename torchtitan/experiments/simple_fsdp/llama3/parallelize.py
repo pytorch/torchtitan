@@ -97,7 +97,7 @@ def parallelize_llama(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
-        tp_mesh = parallel_dims.world_mesh["tp"]
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_tp(
             model,
             tp_mesh,

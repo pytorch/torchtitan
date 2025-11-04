@@ -149,7 +149,7 @@ def set_determinism(
     ]
     distinct_seed_meshes = [mesh for mesh in distinct_seed_meshes if mesh is not None]
 
-    if distinct_dims_in_mesh:
+    if distinct_seed_meshes:
         # Each dimension contributes: local_rank * (product of all previous dimension sizes)
         # This guarantees uniqueness like multi-dimensional array indexing
         seed_offset = 0
@@ -166,17 +166,19 @@ def set_determinism(
         seed %= 2**64
 
         logger.debug(
-            f"Distinct dims {distinct_dims_in_mesh}, Global rank {c10d.get_rank()} using seed: {seed}"
+            f"Distinct dims {distinct_seed_mesh_dims}, Global rank {c10d.get_rank()} using seed: {seed}"
         )
 
         # Filter out all distinct dimensions to get duplicate_seed_mesh
         duplicate_seed_mesh_dims = [
             v
             for k, v in parallel_dims.get_all_meshes()
-            if k not in distinct_dims_in_mesh
+            if k not in distinct_seed_mesh_dims
         ]
         duplicate_seed_mesh = (
-            world_mesh[duplicate_seed_mesh_dims] if duplicate_seed_mesh_dims else None
+            parallel_dims.world_mesh[duplicate_seed_mesh_dims]
+            if duplicate_seed_mesh_dims
+            else None
         )
     else:
         duplicate_seed_meshes = [parallel_dims.world_mesh]
