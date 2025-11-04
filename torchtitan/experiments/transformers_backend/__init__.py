@@ -12,9 +12,9 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.protocols.train_spec import TrainSpec
 
-from .infra.parallelize_hf_transformers import parallelize_hf_transformers
+from .infra.parallelize import parallelize_hf_transformers
 
-from .infra.pipeline_hf import pipeline_hf_transformers
+from .infra.pipeline import pipeline_hf_transformers
 from .model.args import HFTransformerModelArgs
 from .model.model import HFTransformerModel
 
