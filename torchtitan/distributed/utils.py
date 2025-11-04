@@ -27,7 +27,7 @@ from torchtitan.tools.utils import device_module, device_type
 def _dist_reduce(
     x: torch.Tensor,
     reduceOp: str,
-    mesh: DeviceMesh,
+    mesh: DeviceMesh | None,
     extra_pg: dist.ProcessGroup | None,
 ) -> float:
     """Perform distributed reduction on a tensor.
@@ -35,7 +35,8 @@ def _dist_reduce(
     Args:
         x (torch.Tensor): Input tensor.
         reduceOp (str): Reduce operation to perform.
-        mesh (DeviceMesh): Device mesh to use for reduction.
+        mesh (DeviceMesh | None): Device mesh to use for reduction.
+            If None, no reduction is performed but simply convert the tensor to a float.
         extra_pg (dist.ProcessGroup, optional): Extra process group to use for reduction.
             Defaults to None. If provided, this all_reduce will be called for the extra
             process group, and then the result will be all_reduced for the mesh.
@@ -47,6 +48,9 @@ def _dist_reduce(
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
 
+    if mesh is None:
+        return x.item()
+
     assert x.numel() == 1  # required by `.item()`
     return funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item()
 
@@ -56,9 +60,6 @@ def dist_max(
     mesh: DeviceMesh | None = None,
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
-    if mesh is None:
-        assert not isinstance(x, DTensor), "mesh is required for DTensor input"
-        return x.item()
     return _dist_reduce(
         x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh, extra_pg=extra_pg
     )
@@ -69,9 +70,6 @@ def dist_sum(
     mesh: DeviceMesh | None = None,
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
-    if mesh is None:
-        assert not isinstance(x, DTensor), "mesh is required for DTensor input"
-        return x.item()
     return _dist_reduce(
         x, reduceOp=c10d.ReduceOp.SUM.name, mesh=mesh, extra_pg=extra_pg
     )
@@ -82,9 +80,6 @@ def dist_mean(
     mesh: DeviceMesh | None = None,
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
-    if mesh is None:
-        assert not isinstance(x, DTensor), "mesh is required for DTensor input"
-        return x.item()
     return _dist_reduce(
         x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh, extra_pg=extra_pg
     )
