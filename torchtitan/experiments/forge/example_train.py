@@ -169,7 +169,7 @@ class Trainer(ForgeEngine):
 
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
-                cp_mesh=parallel_dims.world_mesh["cp"],
+                cp_mesh=parallel_dims.get_mesh("cp"),
                 cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                 cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                 cp_no_restore_buffers={inputs, labels},
@@ -244,7 +244,7 @@ class Trainer(ForgeEngine):
             self.job_config.training.max_norm,
             foreach=True,
             pp_mesh=(
-                parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
+                parallel_dims.get_mesh("pp") if parallel_dims.pp_enabled else None
             ),
             ep_enabled=parallel_dims.ep_enabled,
         )
@@ -262,8 +262,8 @@ class Trainer(ForgeEngine):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             global_avg_loss, global_max_loss = (
-                dist_utils.dist_mean(loss, parallel_dims.world_mesh["dp_cp"]),
-                dist_utils.dist_max(loss, parallel_dims.world_mesh["dp_cp"]),
+                dist_utils.dist_mean(loss, parallel_dims.get_mesh("dp_cp")),
+                dist_utils.dist_max(loss, parallel_dims.get_mesh("dp_cp")),
             )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
@@ -329,7 +329,7 @@ class Trainer(ForgeEngine):
                         timeout=timedelta(
                             seconds=job_config.comm.train_timeout_seconds
                         ),
-                        world_mesh=self.parallel_dims.world_mesh,
+                        parallel_dims=self.parallel_dims,
                     )
 
         if torch.distributed.get_rank() == 0:
