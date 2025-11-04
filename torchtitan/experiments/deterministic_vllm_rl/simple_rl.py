@@ -592,6 +592,7 @@ def rl_update_step(
     max_new_tokens: int = 20,
     temperature: float = 1.0,
     use_vllm_compat: bool = True,
+    step: int = 0,
 ) -> dict:
     """
     Perform one RL update step using vLLM for rollouts.
@@ -606,6 +607,8 @@ def rl_update_step(
         group_size: Number of samples per prompt for GRPO
         max_new_tokens: Max tokens to generate
         temperature: Sampling temperature
+        use_vllm_compat: Whether to use vLLM-compatible model
+        step: Current training step (for gradient reporting)
 
     Returns:
         metrics: Dict of training metrics
@@ -648,6 +651,27 @@ def rl_update_step(
     )
     loss.backward()
 
+    # Check which parameters have gradients
+    params_with_grad = 0
+    params_without_grad = 0
+    params_without_grad_names = []
+    total_grad_norm = 0.0
+
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if param.grad is not None:
+                params_with_grad += 1
+                total_grad_norm += param.grad.norm().item() ** 2
+            else:
+                params_without_grad += 1
+                params_without_grad_names.append(name)
+
+    total_grad_norm = total_grad_norm ** 0.5
+
+    # Print detailed gradient report on first step (before optimizer clears gradients)
+    if step == 0:
+        print_gradient_report(model, step)
+
     # Gradient clipping
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
@@ -661,10 +685,79 @@ def rl_update_step(
         "advantage_mean": advantages.mean().item(),
         "advantage_std": advantages.std().item(),
         "sample_completions": completions[:2],  # First 2 for inspection
+        "params_with_grad": params_with_grad,
+        "params_without_grad": params_without_grad,
+        "params_without_grad_names": params_without_grad_names,
+        "total_grad_norm": total_grad_norm,
         **loss_metrics,  # Include all loss metrics (pg_loss, kl_div, entropy, ratio stats, logprob comparisons)
     }
 
     return metrics
+
+
+def print_gradient_report(model: torch.nn.Module, step: int = 0):
+    """
+    Print a detailed report of which parameters have gradients.
+
+    Args:
+        model: The model to inspect
+        step: Current training step (for logging)
+    """
+    print("\n" + "=" * 80)
+    print(f"GRADIENT REPORT (Step {step})")
+    print("=" * 80)
+
+    params_by_module = {}
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        # Get module name (everything before the last dot)
+        module_name = '.'.join(name.split('.')[:-1]) if '.' in name else 'root'
+
+        if module_name not in params_by_module:
+            params_by_module[module_name] = {'with_grad': [], 'without_grad': []}
+
+        if param.grad is not None:
+            grad_norm = param.grad.norm().item()
+            params_by_module[module_name]['with_grad'].append((name, grad_norm))
+        else:
+            params_by_module[module_name]['without_grad'].append(name)
+
+    # Print summary by module
+    total_with = 0
+    total_without = 0
+
+    for module_name in sorted(params_by_module.keys()):
+        info = params_by_module[module_name]
+        n_with = len(info['with_grad'])
+        n_without = len(info['without_grad'])
+        total_with += n_with
+        total_without += n_without
+
+        if n_without > 0:
+            status = "⚠ MISSING GRADS"
+        else:
+            status = "✓"
+
+        print(f"\n{status} {module_name}:")
+        print(f"  Params with grad: {n_with}, without grad: {n_without}")
+
+        if n_without > 0:
+            print(f"  Missing gradients for:")
+            for pname in info['without_grad']:
+                print(f"    - {pname}")
+
+        # Show top 5 params by gradient norm
+        if n_with > 0:
+            top_grads = sorted(info['with_grad'], key=lambda x: x[1], reverse=True)[:5]
+            print(f"  Top gradient norms:")
+            for pname, gnorm in top_grads:
+                print(f"    - {pname}: {gnorm:.6e}")
+
+    print("\n" + "=" * 80)
+    print(f"TOTAL: {total_with} params with grad, {total_without} params without grad")
+    print("=" * 80 + "\n")
 
 
 def compute_weight_deltas(model: torch.nn.Module, initial_state: dict) -> dict:
@@ -810,6 +903,7 @@ def main():
             max_new_tokens=20,
             temperature=1.0,
             use_vllm_compat=use_vllm_compat,
+            step=step,
         )
 
         # Compute weight deltas from initial state
@@ -826,6 +920,9 @@ def main():
         writer.add_scalar('rl/reward_std', metrics['reward_std'], step)
         writer.add_scalar('rl/advantage_mean', metrics['advantage_mean'], step)
         writer.add_scalar('rl/advantage_std', metrics['advantage_std'], step)
+        writer.add_scalar('rl/total_grad_norm', metrics['total_grad_norm'], step)
+        writer.add_scalar('rl/params_with_grad', metrics['params_with_grad'], step)
+        writer.add_scalar('rl/params_without_grad', metrics['params_without_grad'], step)
 
         # Log weight deltas
         for key, value in weight_deltas.items():
@@ -834,6 +931,11 @@ def main():
         print(f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
               f"Reward: {metrics['reward_mean']:+.3f}±{metrics['reward_std']:.3f} | "
               f"Advantage: {metrics['advantage_mean']:+.3f}±{metrics['advantage_std']:.3f}")
+        print(f"  Grad: {metrics['params_with_grad']} params with grad, "
+              f"{metrics['params_without_grad']} without | "
+              f"Grad norm: {metrics['total_grad_norm']:.4f}")
+        if metrics['params_without_grad'] > 0:
+            print(f"  ⚠ Params without gradients: {metrics['params_without_grad_names'][:5]}")
         print(f"  Sample: {metrics['sample_completions'][0][:60]}...")
 
     print("\n" + "=" * 80)
