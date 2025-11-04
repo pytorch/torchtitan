@@ -78,13 +78,13 @@ init_batch_invariance()
 import torch
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from torchtitan.experiments.deterministic_vllm_rl import (
-    patch_batch_invariant_with_gradients,
+    enable_batch_invariant_backward_mode,
     Qwen3VLLMCompatModel,
 )
 
 # 1. Enable deterministic mode
 init_batch_invariance()
-patch_batch_invariant_with_gradients()
+enable_batch_invariant_backward_mode()
 
 # 2. Load model
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs

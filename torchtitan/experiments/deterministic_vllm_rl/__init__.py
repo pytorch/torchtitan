@@ -18,7 +18,7 @@ Key components:
 """
 
 from .batch_invariant_backward import (
-    patch_batch_invariant_with_gradients,
+    enable_batch_invariant_backward_mode,
     rms_norm_with_gradients,
     silu_and_mul_with_gradients,
 )
@@ -28,7 +28,7 @@ from .models.qwen3 import Qwen3VLLMCompatModel
 __all__ = [
     "VLLMCompatibleFlashAttention",
     "Qwen3VLLMCompatModel",
-    "patch_batch_invariant_with_gradients",
+    "enable_batch_invariant_backward_mode",
     "rms_norm_with_gradients",
     "silu_and_mul_with_gradients",
 ]

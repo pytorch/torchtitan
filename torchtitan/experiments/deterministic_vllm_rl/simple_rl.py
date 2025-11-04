@@ -34,7 +34,6 @@ from torchtitan.experiments.deterministic_vllm_rl.weights.converter import (
 )
 from torchtitan.experiments.deterministic_vllm_rl.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
-    vllm_compat_to_torchtitan,
 )
 
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
@@ -103,9 +102,8 @@ class VLLMRolloutEngine:
         Args:
             vllm_compat_state: vLLM-compat model state dict (with gate_up_proj/down_proj)
         """
-        # Convert vLLM-compat -> TorchTitan -> vLLM
-        titan_state = vllm_compat_to_torchtitan(vllm_compat_state)
-        vllm_state = torchtitan_to_vllm(titan_state)
+        # Convert vLLM-compat -> vLLM (torchtitan_to_vllm handles both formats)
+        vllm_state = torchtitan_to_vllm(vllm_compat_state)
 
         # Save to temp model directory
         checkpoint_path = os.path.join(self.temp_model_dir, "model.safetensors")
@@ -826,10 +824,10 @@ def main():
         # Add backward pass support to vLLM's batch_invariant mode
         print("Adding gradient support to vLLM's batch_invariant mode...")
         from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
-            patch_batch_invariant_with_gradients,
+            enable_batch_invariant_backward_mode,
         )
 
-        patch_batch_invariant_with_gradients()
+        enable_batch_invariant_backward_mode()
     else:
         print("Batch invariance NOT detected - using standard model")
 

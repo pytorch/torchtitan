@@ -19,13 +19,13 @@ and training (forward + backward) produce identical results.
 
 Usage:
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
-    from batch_invariant_backward import patch_batch_invariant_with_gradients
+    from batch_invariant_backward import enable_batch_invariant_backward_mode
 
     # Initialize vLLM's deterministic mode first
     init_batch_invariance()
 
-    # Then patch in gradient support
-    patch_batch_invariant_with_gradients()
+    # Then enable gradient support
+    enable_batch_invariant_backward_mode()
 
     # Now all operations are deterministic AND support gradients
     model = MyModel()
@@ -330,8 +330,8 @@ _batch_invariant_backward_mode = False
 _batch_invariant_backward_lib = None
 
 
-def patch_batch_invariant_with_gradients():
-    """Patch vLLM's batch_invariant mode to support gradients.
+def enable_batch_invariant_backward_mode():
+    """Enable batch invariant backward mode to support gradients.
 
     This function adds backward pass support to vLLM's existing batch_invariant
     implementations by registering the backward operations. vLLM handles all the
@@ -366,11 +366,6 @@ def patch_batch_invariant_with_gradients():
     )
 
     _batch_invariant_backward_mode = True
-
-
-def enable_batch_invariant_backward_mode():
-    """Legacy name for patch_batch_invariant_with_gradients()."""
-    patch_batch_invariant_with_gradients()
 
 
 def disable_batch_invariant_backward_mode():
