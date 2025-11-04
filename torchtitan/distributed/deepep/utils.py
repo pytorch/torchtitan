@@ -15,6 +15,41 @@ from .fused_a2a import fused_dispatch, fused_combine, set_deepep_num_sms
 from .fused_indices_converter import fused_indices_to_multihot
 
 
+# Recommended DeepEP dispatch configs for different world sizes
+# These are tuned performance configs from the DeepEP library
+# Format: (param1, param2, param3, param4) to be used with Config(num_sms, *config)
+DEEPEP_DISPATCH_CONFIGS = {
+    2: (24, 256, 6, 128),
+    4: (6, 256, 6, 128),
+    8: (6, 256, 6, 128),
+    16: (36, 288, 20, 128),
+    24: (32, 288, 8, 128),
+    32: (32, 288, 8, 128),
+    48: (32, 288, 8, 128),
+    64: (32, 288, 8, 128),
+    96: (20, 480, 12, 128),
+    128: (20, 560, 12, 128),
+    144: (32, 720, 12, 128),
+    160: (28, 720, 12, 128),
+}
+
+# Recommended DeepEP combine configs for different world sizes
+DEEPEP_COMBINE_CONFIGS = {
+    2: (10, 256, 6, 128),
+    4: (9, 256, 6, 128),
+    8: (4, 256, 6, 128),
+    16: (4, 288, 12, 128),
+    24: (1, 288, 8, 128),
+    32: (1, 288, 8, 128),
+    48: (1, 288, 8, 128),
+    64: (1, 288, 8, 128),
+    96: (1, 480, 8, 128),
+    128: (1, 560, 8, 128),
+    144: (2, 720, 8, 128),
+    160: (2, 720, 8, 128),
+}
+
+
 def permute(
     tokens,
     routing_map,
@@ -100,8 +135,36 @@ class PrimusTurboDeepepManager:
         self.use_cuda_num_token_per_expert = use_cuda_num_token_per_expert
         self.sync_free_moe = sync_free_moe
 
-        def _get_deepep_config(config: tuple) -> pt.deep_ep.Config:
-            return pt.deep_ep.Config(deep_num_cus, *config)
+        def _get_deepep_config(config: tuple) -> Config:
+            """
+            Create a DeepEP Config from a tuned config tuple.
+
+            The Config takes 5 parameters: Config(num_sms, param1, param2, param3, param4)
+
+            Args:
+                config: A tuple of 4 integers (param1, param2, param3, param4) that will be
+                       unpacked after num_sms to create the full Config.
+
+            Example tuned configs from DeepEP library (based on world size):
+
+            Dispatch configs:
+              2 ranks:  (24, 256, 6, 128)
+              4 ranks:  (6, 256, 6, 128)
+              8 ranks:  (6, 256, 6, 128)
+              16 ranks: (36, 288, 20, 128)
+              32 ranks: (32, 288, 8, 128)
+
+            Combine configs:
+              2 ranks:  (10, 256, 6, 128)
+              4 ranks:  (9, 256, 6, 128)
+              8 ranks:  (4, 256, 6, 128)
+              16 ranks: (4, 288, 12, 128)
+              32 ranks: (1, 288, 8, 128)
+
+            Returns:
+                Config object initialized with num_sms and the unpacked config tuple.
+            """
+            return Config(deep_num_cus, *config)
 
         if dispatch_tuned_config is not None:
             self.dispatch_config = _get_deepep_config(dispatch_tuned_config)
