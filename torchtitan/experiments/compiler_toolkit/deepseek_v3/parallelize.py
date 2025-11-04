@@ -30,20 +30,29 @@ from torchtitan.experiments.simple_fsdp.deepseek_v3.parallelize import (
 from torchtitan.tools.logging import logger
 
 
-def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> torch.fx.GraphModule:
-    logger.info("fwd_gm:")
+def compiler(name: str, gm: torch.fx.GraphModule, example_inputs):
+    logger.info(f"{name} before compiler:")
+    logger.info(gm.print_readable(print_output=False))
+
+    # TODO: regional_inductor should work with deepseek_v3
+    # gm = regional_inductor(gm, example_inputs)
+
+    logger.info(f"{name} after compiler:")
     logger.info(gm.print_readable(print_output=False))
     return gm
 
 
-def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> torch.fx.GraphModule:
-    logger.info("bwd_gm:")
-    logger.info(gm.print_readable(print_output=False))
-    return gm
+def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
+    return compiler("fwd_gm", gm, example_inputs)
+
+
+def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
+    return compiler("bwd_gm", gm, example_inputs)
 
 
 def annotate_deepseekv3() -> None:
     from torchtitan.distributed.expert_parallel import ExpertParallel
+    from torchtitan.models.attention import FlexAttentionWrapper
     from torchtitan.models.moe.moe import MoE
 
     # annotate the MoE with dispatch, compute and combine
@@ -55,6 +64,11 @@ def annotate_deepseekv3() -> None:
     )
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
+    # annotate flex_attention with compile_with_inductor
+    FlexAttentionWrapper.forward = annotate_fn(
+        {"compile_with_inductor": "flex_attention"}
+    )(FlexAttentionWrapper.forward)
+
 
 def parallelize_deepseekv3(
     model: torch.nn.Module,
@@ -64,8 +78,7 @@ def parallelize_deepseekv3(
 
     annotate_deepseekv3()
 
-    if job_config.model.flavor.endswith("flex_attn"):
-        register_blockmask_pytree_node()
+    register_blockmask_pytree_node()
 
     # Disable torch.compile over the model in the compiler toolkit style workflow
     with disable_compile(job_config):
