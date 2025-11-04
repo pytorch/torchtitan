@@ -8,11 +8,13 @@ import contextlib
 import os
 import pickle
 import time
+import json
 
 import torch
 
 from torchtitan.config import Profiling as ProfilingConfig
 from torchtitan.tools.logging import logger
+from torch.profiler._utils import map_recorded_events_to_aten_ops_with_stack_trace
 
 # how much memory allocation/free ops to record in memory snapshots
 MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
@@ -52,6 +54,20 @@ def maybe_enable_profiling(
             prof.export_chrome_trace(output_file)
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
+            )
+
+            with open(output_file) as f:
+                trace_data = json.load(f)
+
+            begin = time.monotonic()
+            map_recorded_events_to_aten_ops_with_stack_trace(
+                trace_data
+            )
+            output_file = os.path.join(curr_trace_dir, f"rank{rank}_trace_augmented.json")
+
+            json.dump(trace_data, open(output_file, 'w'))
+            logger.info(
+                f"Augmented dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
             )
 
         logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
