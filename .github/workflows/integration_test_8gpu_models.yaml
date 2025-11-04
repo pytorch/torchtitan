@@ -6,6 +6,7 @@ on:
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
+    branches: [ main ]
     paths-ignore:
       - 'torchtitan/experiments/**'
   schedule:

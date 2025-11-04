@@ -1,7 +1,7 @@
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 debug training"
-print_args = false
+print_config = false
 
 [profiling]
 enable_profiling = false
@@ -49,6 +49,7 @@ fsdp_reshard_after_forward = "default" # default / never / always
 tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
+pipeline_parallel_schedule = "Interleaved1F1B"
 context_parallel_degree = 1
 
 [checkpoint]
@@ -67,7 +68,7 @@ selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac bas
 enable=false
 components = ["model", "loss"]
 
-[float8]
+[quantize.linear.float8]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output"]

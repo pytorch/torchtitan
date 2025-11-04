@@ -1,12 +1,10 @@
 # torchtitan Config.toml
 
-[experimental]
-custom_args_module = "torchtitan.experiments.vlm.assets.job_config"
-
 [job]
 dump_folder = "./outputs"
 description = "Llama 3 Siglip2 VLM debug training"
-print_args = false
+print_config = false
+custom_config_module = "torchtitan.experiments.vlm.job_config"
 
 [profiling]
 enable_profiling = false
@@ -23,7 +21,7 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
-name = "llama3-siglip2"
+name = "vlm"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
 hf_assets_path = "tests/assets/tokenizer"

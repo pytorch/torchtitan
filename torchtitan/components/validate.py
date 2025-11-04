@@ -137,17 +137,17 @@ class Validator(BaseValidator):
                             inputs,
                             target=targets,
                             losses=losses,
-                            input_batch=inputs,
                         )
                     else:
-                        self.pp_schedule.eval(
-                            target=targets, losses=losses, input_batch=inputs
-                        )
+                        self.pp_schedule.eval(target=targets, losses=losses)
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
                 loss = (
-                    torch.mean(torch.stack(losses)).to(device_type)
+                    # using sum instead of mean because we already rescale the
+                    # loss_fn down by a factor of n_microbatches in
+                    # torchtitan/distributed/pipeline_parallel.py
+                    torch.sum(torch.stack(losses)).to(device_type)
                     if self.pp_has_last_stage
                     else torch.tensor([-1.0], device=device_type)
                 )

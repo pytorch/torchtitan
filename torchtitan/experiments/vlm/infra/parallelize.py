@@ -18,7 +18,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.models.llama3.infra.parallelize import (
-    _save_list as sac_save_list,
+    _op_sac_save_list,
     apply_compile,
     apply_ddp,
 )
@@ -64,14 +64,14 @@ def parallelize_vlm(
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
             use_flex_attn=use_flex_attn,
-            save_list=sac_save_list,
+            op_sac_save_list=_op_sac_save_list,
         )
         apply_ac(model.encoder, job_config.activation_checkpoint)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if job_config.compile.enable:
-        apply_compile(model)
-        apply_compile(model.encoder)
+        apply_compile(model, job_config.compile)
+        apply_compile(model.encoder, job_config.compile)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
