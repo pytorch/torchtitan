@@ -482,13 +482,37 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
+                from torch.utils._debug_mode import DebugMode, default_hash_fn
+                from torch.utils._pytree import tree_map
+
+                def input_hash_hook(func, types, args, kwargs, output):
+                    with torch._C._DisablePythonDispatcher():
+                        out = tree_map(
+                            lambda x: default_hash_fn(x, use_scalar=True) if isinstance(x, torch.Tensor) else None,
+                            (args, kwargs),
+                        )
+                    return {"input_hash": out}
+
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                    loss = self.loss_fn(pred, labels)
+                    if self.step == 1:
+                        with DebugMode() as debug_mode, DebugMode.log_tensor_hashes(hash_inputs=True):
+                            pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                            loss = self.loss_fn(pred, labels)
+                        print("$$$$$$ DEBUG MODE FORWARD $$$$$$")
+                        print(debug_mode.debug_string())
+                    else:
+                        pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                        loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
                 del pred
-                loss.backward()
+                if self.step == 1:
+                    with DebugMode() as debug_mode, DebugMode.log_tensor_hashes(hash_inputs=True):
+                        loss.backward()
+                    print("$$$$$$ DEBUG MODE BACKWARD $$$$$$")
+                    print(debug_mode.debug_string())
+                else:
+                    loss.backward()
 
         return loss
 
@@ -511,18 +535,53 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for m in self.model_parts for p in m.parameters()],
-            self.job_config.training.max_norm,
-            foreach=True,
-            pp_mesh=(
-                parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
-            ),
-            ep_enabled=parallel_dims.ep_enabled,
-        )
-        self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
-        self.lr_schedulers.step()
+        from torch.utils._debug_mode import DebugMode, default_hash_fn
+        from torch.utils._pytree import tree_map
+
+        def input_hash_hook(func, types, args, kwargs, output):
+            with torch._C._DisablePythonDispatcher():
+                out = tree_map(
+                    lambda x: default_hash_fn(x, use_scalar=True) if isinstance(x, torch.Tensor) else None,
+                    (args, kwargs),
+                )
+            return {"input_hash": out}
+
+        if self.step == 1:
+            for m in self.model_parts:
+                for name, param in m.named_parameters():
+                    grad = param.grad
+                    if grad is not None:
+                        print("$$$ HASH PARAM GRAD", name, grad.shape, default_hash_fn(grad, use_scalar=True))
+
+            with DebugMode() as debug_mode, DebugMode.log_tensor_hashes(hash_inputs=True):
+                grad_norm = dist_utils.clip_grad_norm_(
+                    [p for m in self.model_parts for p in m.parameters()],
+                    self.job_config.training.max_norm,
+                    foreach=True,
+                    pp_mesh=(
+                        parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
+                    ),
+                    ep_enabled=parallel_dims.ep_enabled,
+                )
+                self.checkpointer.maybe_wait_for_staging()
+                self.optimizers.step()
+                self.lr_schedulers.step()
+
+                print("$$$$$$ DEBUG MODE OPTIMIZER $$$$$$")
+                print(debug_mode.debug_string())
+        else:
+            grad_norm = dist_utils.clip_grad_norm_(
+                [p for m in self.model_parts for p in m.parameters()],
+                self.job_config.training.max_norm,
+                foreach=True,
+                pp_mesh=(
+                    parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
+                ),
+                ep_enabled=parallel_dims.ep_enabled,
+            )
+            self.checkpointer.maybe_wait_for_staging()
+            self.optimizers.step()
+            self.lr_schedulers.step()
 
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))

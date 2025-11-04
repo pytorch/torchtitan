@@ -58,8 +58,6 @@ def get_compile_backend(job_config: JobConfig) -> Union[str, callable]:
             manual_overlap_bucketing,
         )
 
-        torch._inductor.config.test_configs.aten_fx_overlap_preserving_bucketing = True
-        torch._inductor.config.test_configs.aten_fx_overlap_insert_overlap_deps = False
         torch._inductor.config.allow_buffer_reuse = False
         manual_overlap_bucketing = partial(
             manual_overlap_bucketing,

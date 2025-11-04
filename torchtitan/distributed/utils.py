@@ -390,6 +390,15 @@ def clip_grad_norm_(
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
             total_norm **= 1.0 / norm_type
 
+    # print("total norm:", total_norm, "max norm:", max_norm, "for each:", foreach)
+    # from torch.utils._debug_mode import default_hash_fn
+
+    # print("$$$$$$ DEVICE GRADS HASHES $$$$$$")
+    # for p in parameters:
+    #     if p.grad is None:
+    #         continue
+    #     grad = p.grad
+    #     print(grad.shape, grad.dtype, p.device, default_hash_fn(grad, use_scalar=True))
     torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
     return total_norm
 

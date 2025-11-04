@@ -383,7 +383,8 @@ class MetricsProcessor:
         self.model_parts = None
 
     def should_log(self, step: int) -> bool:
-        return step == 1 or step % self.job_config.metrics.log_freq == 0
+        # return step == 1 or step % self.job_config.metrics.log_freq == 0
+        return True
 
     def log(
         self,
@@ -439,8 +440,8 @@ class MetricsProcessor:
         color = self.color
         logger.info(
             f"{color.red}step: {step:2}  "
-            f"{color.green}loss: {global_avg_loss:7.4f}  "
-            f"{color.orange}grad_norm: {grad_norm:7.4f}  "
+            f"{color.green}loss: {global_avg_loss:7.9f}  "
+            f"{color.orange}grad_norm: {grad_norm:7.9f}  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
