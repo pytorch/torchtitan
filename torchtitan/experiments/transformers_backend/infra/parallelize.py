@@ -57,9 +57,6 @@ def parallelize_hf_transformers(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    if job_config.parallelism.context_parallel_degree > 1:
-        logger.warning("CP support for FlexAttention is still in progress.")
-
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
@@ -80,64 +77,32 @@ def parallelize_hf_transformers(
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
-                world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
-            etp_enabled=parallel_dims.etp_enabled,
-        )
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
 
-    model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
-    )
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        # NOTE: needed for torch.compile to work with dynamic shapes in token-choice MoE
-        torch._dynamo.config.capture_scalar_outputs = True
         apply_compile(model, job_config.compile)
 
-    dp_mesh: DeviceMesh | None = None
-    if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
+    if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
         if parallel_dims.dp_replicate_enabled:
             dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
-
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh_dim_names = []
-        if parallel_dims.ep_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
 
         apply_fsdp(
             model,
-            dp_mesh,
+            world_mesh[tuple(dp_mesh_dim_names)],
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=(
-                world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
-                if parallel_dims.ep_enabled
-                else None
-            ),
-            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -154,12 +119,10 @@ def parallelize_hf_transformers(
     elif parallel_dims.dp_replicate_enabled:
         if world_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
-        dp_mesh = world_mesh
         apply_ddp(
             model,
-            dp_mesh,
+            world_mesh,
             enable_compile=model_compile_enabled,
-            enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
     return model
