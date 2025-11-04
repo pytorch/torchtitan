@@ -24,7 +24,8 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.experiments.transformers_backend.job_config import JobConfig
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 

@@ -17,7 +17,8 @@ hf_assets_path = "./tests/assets/tokenizer"
 +model = "Qwen/Qwen3-4B-Instruct-2507"
 ...
 ```
-- Train: `LOG_RANK=7 CONFIG_FILE=<YOUR_PATHQ/torchtitan/experiments/transformers_backend/configs/qwen3_fsdp2_tp2_pp2.toml ./run_train.sh`
+- Train: `LOG_RANK=7 CONFIG_FILE=<YOUR_PATHQ/torchtitan/experiments/transformers_backend/configs/qwen3_fsdp2_tp2_pp2.toml ./run_train.sh --job.custom_config_module=torchtitan.experiments.transformers_backend.job_config --compile.enable`
+    - Make sure you have created the tokenizers beforehand 
 <img width="1334" height="453" alt="image" src="https://github.com/user-attachments/assets/da459448-027b-4af9-8176-6a3e433a272c" />
 
 ## Supported Features

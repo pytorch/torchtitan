@@ -132,12 +132,6 @@ class Model:
 
 
 @dataclass
-class HFTransformers:
-    model: str = ""
-    """HuggingFace model ID (e.g., 'Qwen/Qwen3-4B-Instruct-2507')"""
-
-
-@dataclass
 class Optimizer:
     name: str = "AdamW"
     """Optimizer to use"""
@@ -903,7 +897,6 @@ class JobConfig:
     profiling: Profiling = field(default_factory=Profiling)
     metrics: Metrics = field(default_factory=Metrics)
     model: Model = field(default_factory=Model)
-    hf_transformers: HFTransformers = field(default_factory=HFTransformers)
     optimizer: Optimizer = field(default_factory=Optimizer)
     lr_scheduler: LRScheduler = field(default_factory=LRScheduler)
     training: Training = field(default_factory=Training)

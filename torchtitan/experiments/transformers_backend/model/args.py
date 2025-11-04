@@ -7,7 +7,7 @@
 from dataclasses import dataclass
 
 from torch import nn
-from torchtitan.config import JobConfig
+from torchtitan.experiments.transformers_backend.job_config import JobConfig
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols import BaseModelArgs
 from transformers import AutoConfig
