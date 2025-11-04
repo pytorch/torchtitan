@@ -181,11 +181,11 @@ def set_determinism(
         # Filter out all distinct dimensions to get duplicate_seed_mesh
         duplicate_seed_mesh_dims = [
             v
-            for k, v in parallel_dims.get_all_meshes()
+            for k, v in parallel_dims.get_all_meshes().items()
             if k not in distinct_seed_mesh_dims
         ]
         duplicate_seed_mesh = (
-            parallel_dims.world_mesh[duplicate_seed_mesh_dims]
+            parallel_dims.get_mesh(duplicate_seed_mesh_dims)
             if duplicate_seed_mesh_dims
             else None
         )
