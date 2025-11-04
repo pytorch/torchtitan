@@ -357,7 +357,7 @@ def build_optimizers_with_moe_load_balancing(
         parallel_dims: ParallelDims,
     ):
         dp_cp_mesh = (
-            parallel_dims.world_mesh["dp_cp"] if parallel_dims.dp_cp_enabled else None
+            parallel_dims.get_mesh("dp_cp") if parallel_dims.dp_cp_enabled else None
         )
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.

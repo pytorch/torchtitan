@@ -24,10 +24,12 @@ def disable_compile(job_config: JobConfig):
         job_config.compile.enable = original_value
 
 
-def parallelize_inputs(world_mesh, args, kwargs):
+def parallelize_inputs(parallel_dims, args, kwargs):
     def to_dtensor(tensor):
         if isinstance(tensor, torch.Tensor):
-            return DTensor.from_local(tensor, world_mesh["tp"], [Replicate()])
+            return DTensor.from_local(
+                tensor, parallel_dims.get_mesh("tp"), [Replicate()]
+            )
         return tensor
 
     dt_args = tree_map(to_dtensor, args)

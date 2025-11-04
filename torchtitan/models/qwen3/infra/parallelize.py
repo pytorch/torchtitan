@@ -86,7 +86,7 @@ def parallelize_qwen3(
 
         apply_non_moe_tp(
             model,
-            world_mesh["tp"],
+            parallel_dims.get_mesh("tp"),
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
@@ -95,10 +95,10 @@ def parallelize_qwen3(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
+            tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
+            ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
             ep_tp_mesh=(
-                world_mesh["ep", "tp"]
+                parallel_dims.get_mesh("ep_etp")
                 if parallel_dims.tp_enabled
                 and parallel_dims.ep_enabled
                 and parallel_dims.etp_enabled
