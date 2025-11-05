@@ -99,7 +99,6 @@ def parallelize_deepseekv3(
                 and parallel_dims.etp_enabled
                 else None
             ),
-            etp_enabled=parallel_dims.etp_enabled,
         )
 
     model_compile_enabled = (
