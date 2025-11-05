@@ -1,0 +1,58 @@
+[job]
+dump_folder = "./outputs"
+description = "DeepSeek-V3 16B model training"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 10
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 5
+
+[model]
+name = "deepseek_v3"
+flavor = "16B"
+hf_assets_path = "./assets/hf/deepseek-moe-16b-base"
+converters = []
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+eps = 1e-8
+implementation = "fused"
+early_step_in_backward = true
+
+[lr_scheduler]
+warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
+decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
+decay_type = "cosine"
+min_lr_factor = 0.1
+
+[training]
+local_batch_size = 1
+seq_len = 131072
+max_norm = 1.0
+steps = 1000
+dataset = "c4"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = 8
+expert_parallel_degree = 1
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+expert_tensor_parallel_degree = 1
+
+[activation_checkpoint]
+mode = "full"  # ["none", "selective", "full"]
+selective_ac_option = "op"  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[compile]
+enable=true
+components = ["model", "loss"]
+
+[checkpoint]
+enable = false

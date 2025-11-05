@@ -1,0 +1,59 @@
+[job]
+dump_folder = "./outputs"
+description = "Llama 3 70B training"
+
+[metrics]
+log_freq = 2
+enable_tensorboard = false
+save_tb_folder = "tb"
+
+[model]
+name = "llama3"
+flavor = "70B"
+hf_assets_path = "./assets/hf/Llama-3.1-70B"
+converters = []
+
+[training]
+local_batch_size = 1
+seq_len = 32768
+max_norm = 1.0  # grad norm clipping
+steps = 1000
+dataset = "c4"
+dtype = "bfloat16"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = 8
+tensor_parallel_degree = 1
+pipeline_parallel_degree = 1
+context_parallel_degree = 1
+
+[activation_checkpoint]
+mode = "full"  # ["none", "selective", "full"]
+selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+eps = 1e-8
+implementation = "fused"
+early_step_in_backward = true
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 15
+
+[compile]
+enable = true
+components = ["model", "loss"]
+
+[validation]
+enable = false
+
+[checkpoint]
+enable = false
+
+[lr_scheduler]
+warmup_steps = 200  # lr scheduler warm up
+

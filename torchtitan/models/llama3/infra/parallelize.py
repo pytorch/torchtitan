@@ -72,7 +72,7 @@ def parallelize_llama(
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
-        enable_float8_linear = "float8" in job_config.model.converters
+        enable_float8_linear = any("float8" in c for c in job_config.model.converters)
         float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
@@ -209,9 +209,7 @@ def apply_tp(
                 input_layouts=(Shard(1), None, None),
                 desired_input_layouts=(Replicate(), None, None),
             ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
+            "attention.wqkv": colwise_parallel(),
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
             "feed_forward": prepare_module_input(
@@ -228,6 +226,9 @@ def apply_tp(
             device_mesh=tp_mesh,
             parallelize_plan=layer_plan,
         )
+
+        transformer_block.attention.local_n_heads //= tp_mesh.size()
+        transformer_block.attention.local_n_kv_heads //= tp_mesh.size()
 
     logger.info(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"

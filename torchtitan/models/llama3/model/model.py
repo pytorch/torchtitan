@@ -179,14 +179,18 @@ class Attention(nn.Module):
             if model_args.n_kv_heads is None
             else model_args.n_kv_heads
         )
+
+        self.local_n_heads = self.n_heads
+        self.local_n_kv_heads = self.n_kv_heads
+
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
 
-        self.wq = nn.Linear(
-            model_args.dim, model_args.n_heads * self.head_dim, bias=False
+        self.wqkv = nn.Linear(
+            model_args.dim,
+            (self.n_heads + 2 * self.n_kv_heads) * self.head_dim,
+            bias=False,
         )
-        self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
@@ -198,8 +202,7 @@ class Attention(nn.Module):
             self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def init_weights(self, init_std: float):
-        for linear in (self.wq, self.wk, self.wv):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wqkv.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
     def forward(
@@ -221,7 +224,16 @@ class Attention(nn.Module):
         """
 
         bs, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+
+        qkv = self.wqkv(x)
+        xq, xk, xv = qkv.split(
+            [
+                self.head_dim * self.local_n_heads,
+                self.head_dim * self.local_n_kv_heads,
+                self.head_dim * self.local_n_kv_heads,
+            ],
+            dim=-1,
+        )
 
         # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
         # local heads from sizes of xq, xk, and xv as TP may have sharded them
