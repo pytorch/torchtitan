@@ -275,53 +275,6 @@ def linear_backward_impl(grad_output, input, weight, output_mask):
     return grad_input, grad_weight, grad_bias
 
 
-def rms_norm_backward_impl(grad_output, input, weight, eps):
-    """
-    Backward pass for RMS normalization.
-
-    Forward: y = x / sqrt(mean(x^2) + eps) * weight
-
-    Let:
-        variance = mean(x^2)
-        rms = sqrt(variance + eps)
-        x_norm = x / rms
-        y = x_norm * weight
-
-    Gradients:
-        grad_weight = sum(grad_output * x_norm) over all dims except last
-        grad_x_norm = grad_output * weight
-        grad_x = (grad_x_norm - mean(grad_x_norm * x_norm) * x_norm) / rms
-
-    Args:
-        grad_output: Gradient from downstream [*, hidden_size]
-        input: Input tensor [*, hidden_size]
-        weight: Weight tensor [hidden_size]
-        eps: Epsilon for numerical stability
-
-    Returns:
-        (grad_input, grad_weight)
-    """
-    # Compute forward pass values needed for backward
-    # variance = mean(x^2) along last dim
-    variance = (input * input).mean(dim=-1, keepdim=True)
-    rms = torch.sqrt(variance + eps)
-    x_norm = input / rms
-
-    # Gradient w.r.t. weight
-    # grad_weight = sum(grad_output * x_norm) over all dims except last
-    grad_weight = (grad_output * x_norm).sum(dim=tuple(range(grad_output.ndim - 1)))
-
-    # Gradient w.r.t. input
-    # grad_x_norm = grad_output * weight
-    grad_x_norm = grad_output * weight
-
-    # grad_x = (grad_x_norm - mean(grad_x_norm * x_norm) * x_norm) / rms
-    mean_term = (grad_x_norm * x_norm).mean(dim=-1, keepdim=True)
-    grad_input = (grad_x_norm - mean_term * x_norm) / rms
-
-    return grad_input, grad_weight
-
-
 # ============================================================================
 # Registration
 # ============================================================================
