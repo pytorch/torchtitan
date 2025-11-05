@@ -164,7 +164,7 @@ def parallelize_qwen3(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh_dim_names = ("dp_replicate", "dp_shard")
+        dp_mesh_dim_names = ("dp_replicate",)
         apply_replicate(
             model,
             world_mesh[tuple(dp_mesh_dim_names)],
