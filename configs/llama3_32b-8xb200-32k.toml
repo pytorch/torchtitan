@@ -3,18 +3,18 @@ dump_folder = "./outputs"
 description = "Llama 3 8B training"
 
 [metrics]
-log_freq = 10
+log_freq = 2
 enable_tensorboard = false
 save_tb_folder = "tb"
 
 [model]
 name = "llama3"
-flavor = "8B"
+flavor = "32B"
 hf_assets_path = "./assets/hf/Llama-3.1-8B"
 converters = []
 
 [training]
-local_batch_size = 2
+local_batch_size = 1
 seq_len = 32768
 max_norm = 1.0  # grad norm clipping
 steps = 1000
