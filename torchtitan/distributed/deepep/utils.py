@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-from typing import List, Optional
+from typing import Optional
 
 import torch
 from deep_ep import Config
@@ -11,7 +11,7 @@ from deep_ep import Config
 # from .fused_indices_converter import fused_indices_to_multihot
 
 # from .deepep import fused_dispatch, fused_combine
-from .fused_a2a import fused_dispatch, fused_combine, set_deepep_num_sms
+from .fused_a2a import fused_combine, fused_dispatch, set_deepep_num_sms
 from .fused_indices_converter import fused_indices_to_multihot
 
 
@@ -63,7 +63,9 @@ def permute(
 
     # Create a dense expert-to-token mapping from the sparse token-to-expert mapping
     token_indices = (
-        torch.arange(num_tokens, device=routing_map.device).unsqueeze(0).expand(num_experts, -1)
+        torch.arange(num_tokens, device=routing_map.device)
+        .unsqueeze(0)
+        .expand(num_experts, -1)
     )
     sorted_indices = token_indices.masked_select(routing_map)
 
@@ -88,7 +90,9 @@ def unpermute(
         restore_shape, dtype=permuted_tokens.dtype, device=permuted_tokens.device
     )
     # Scatter add the permuted_input back to the original positions
-    output_tokens.scatter_add_(0, sorted_indices.unsqueeze(1).expand(-1, hidden), permuted_tokens)
+    output_tokens.scatter_add_(
+        0, sorted_indices.unsqueeze(1).expand(-1, hidden), permuted_tokens
+    )
     return output_tokens.to(dtype=input_dtype)
 
 
@@ -176,7 +180,7 @@ class PrimusTurboDeepepManager:
         else:
             self.combine_config = None
 
-        if self.use_cuda_num_token_per_expert and not self.sync_free_moe:
+        if not self.sync_free_moe:
             if PrimusTurboDeepepManager.cuda_dtoh_stream is None:
                 PrimusTurboDeepepManager.cuda_dtoh_stream = torch.cuda.Stream()
 
@@ -194,30 +198,40 @@ class PrimusTurboDeepepManager:
             mask = self.token_probs == 0
             self.token_indices = self.token_indices.masked_fill(mask, -1)
 
-    def dispatch(self, 
-                 hidden_states: torch.Tensor, 
-                 group: torch.distributed.ProcessGroup,
-                 async_finish: bool = False, 
-                 allocate_on_comm_stream: bool = False) -> torch.Tensor:
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        group: torch.distributed.ProcessGroup,
+        async_finish: bool = False,
+        allocate_on_comm_stream: bool = False,
+    ) -> torch.Tensor:
         # DeepEP only supports float32 probs
-        self.num_local_experts = self.num_experts // torch.distributed.get_world_size(group)
+        self.num_local_experts = self.num_experts // torch.distributed.get_world_size(
+            group
+        )
         if self.token_probs.dtype != torch.float32:
             if self.token_probs.dtype in [torch.bfloat16, torch.float16]:
-                print("DeepEP only supports float32 probs, please set --moe-router-dtype=fp32")
-            
+                print(
+                    "DeepEP only supports float32 probs, please set --moe-router-dtype=fp32"
+                )
+
             self.token_probs = self.token_probs.float()  # downcast or upcast
-        hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, handle = (
-            fused_dispatch(
-                hidden_states,
-                self.token_indices,
-                self.token_probs,
-                self.num_experts,
-                group,
-                async_finish=async_finish,
-                allocate_on_comm_stream=allocate_on_comm_stream,
-                use_cuda_num_token_per_expert=self.use_cuda_num_token_per_expert,
-                num_worst_tokens=self.num_worst_tokens,
-            )
+        (
+            hidden_states,
+            dispatched_indices,
+            dispatched_probs,
+            num_tokens_per_expert,
+            handle,
+        ) = fused_dispatch(
+            hidden_states,
+            self.token_indices,
+            self.token_probs,
+            self.num_experts,
+            group,
+            async_finish=async_finish,
+            allocate_on_comm_stream=allocate_on_comm_stream,
+            use_cuda_num_token_per_expert=self.use_cuda_num_token_per_expert,
+            num_worst_tokens=self.num_worst_tokens,
         )
 
         # use_cuda_num_token_per_expert not support on internode deepep for now!
@@ -243,18 +257,23 @@ class PrimusTurboDeepepManager:
                 num_recv_tokens.record_stream(self.cuda_dtoh_stream)
                 with self.cuda_dtoh_stream:
                     self.num_recv_tokens = torch.empty_like(
-                        num_recv_tokens, dtype=num_recv_tokens.dtype, device="cpu", pin_memory=True
+                        num_recv_tokens,
+                        dtype=num_recv_tokens.dtype,
+                        device="cpu",
+                        pin_memory=True,
                     )
                     self.num_recv_tokens.copy_(num_recv_tokens, non_blocking=True)
             else:
                 self.num_recv_tokens = num_recv_tokens
         return hidden_states
 
-    def combine(self,
-                hidden_states: torch.Tensor,
-                group: torch.distributed.ProcessGroup,
-                async_finish: bool = False,
-                allocate_on_comm_stream: bool = False) -> torch.Tensor:
+    def combine(
+        self,
+        hidden_states: torch.Tensor,
+        group: torch.distributed.ProcessGroup,
+        async_finish: bool = False,
+        allocate_on_comm_stream: bool = False,
+    ) -> torch.Tensor:
         hidden_states, event = fused_combine(
             hidden_states,
             group,
@@ -266,7 +285,9 @@ class PrimusTurboDeepepManager:
         self.handle = None
         return hidden_states
 
-    def get_restored_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def get_restored_hidden_states_by_experts(
+        self, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
         hidden_states = unpermute(
             hidden_states,
             self.reversed_mapping_for_combine,
@@ -274,18 +295,28 @@ class PrimusTurboDeepepManager:
         )
         return hidden_states
 
-    def get_permuted_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def get_permuted_hidden_states_by_experts(
+        self, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
         # if self.permute_fusion:
         if True:
-            self.dispatched_routing_map, self.dispatched_probs = fused_indices_to_multihot(
+            (
+                self.dispatched_routing_map,
+                self.dispatched_probs,
+            ) = fused_indices_to_multihot(
                 self.dispatched_indices, self.dispatched_probs, self.num_local_experts
             )
         else:
-            self.dispatched_routing_map, self.dispatched_probs = self._indices_to_multihot(
+            (
+                self.dispatched_routing_map,
+                self.dispatched_probs,
+            ) = self._indices_to_multihot(
                 self.dispatched_indices, self.dispatched_probs
             )
         self.hidden_shape_before_permute = hidden_states.shape
-        assert self.dispatched_probs.dtype == torch.float32, "DeepEP only supports float32 probs"
+        assert (
+            self.dispatched_probs.dtype == torch.float32
+        ), "DeepEP only supports float32 probs"
 
         hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
             hidden_states,
@@ -339,12 +370,10 @@ class PrimusTurboFlexTokenDispatcher:
             combine_tuned_config=self.turbo_deepep_combine_tuned_config,
         )
 
-
     def dispatch_preprocess(
         self, top_scores: torch.Tensor, selected_indices: torch.Tensor
     ):
         self._comm_manager.setup_metadata(top_scores, selected_indices)
-
 
     def token_dispatch(
         self,
@@ -355,19 +384,24 @@ class PrimusTurboFlexTokenDispatcher:
         allocate_on_comm_stream: bool = True,
     ):
         return (
-            self._comm_manager.dispatch(hidden_states, group, async_finish, allocate_on_comm_stream),
+            self._comm_manager.dispatch(
+                hidden_states, group, async_finish, allocate_on_comm_stream
+            ),
             self._comm_manager.dispatched_probs,
         )
 
     def dispatch_postprocess(self, hidden_states: torch.Tensor, probs: torch.Tensor):
-        global_input_tokens, permuted_probs = (
-            self._comm_manager.get_permuted_hidden_states_by_experts(hidden_states)
-        )
+        (
+            global_input_tokens,
+            permuted_probs,
+        ) = self._comm_manager.get_permuted_hidden_states_by_experts(hidden_states)
         tokens_per_expert = self._comm_manager.tokens_per_expert
         return global_input_tokens, tokens_per_expert, permuted_probs
 
     def combine_preprocess(self, hidden_states: torch.Tensor):
-        hidden_states = self._comm_manager.get_restored_hidden_states_by_experts(hidden_states)
+        hidden_states = self._comm_manager.get_restored_hidden_states_by_experts(
+            hidden_states
+        )
         return hidden_states
 
     def token_combine(
@@ -377,8 +411,9 @@ class PrimusTurboFlexTokenDispatcher:
         async_finish: bool = True,
         allocate_on_comm_stream: bool = True,
     ):
-        return self._comm_manager.combine(hidden_states, group, async_finish, allocate_on_comm_stream)
+        return self._comm_manager.combine(
+            hidden_states, group, async_finish, allocate_on_comm_stream
+        )
 
     def combine_postprocess(self, hidden_states: torch.Tensor):
         return hidden_states.view(self.hidden_shape)
-    
