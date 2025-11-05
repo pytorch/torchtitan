@@ -123,13 +123,13 @@ def parallelize_deepseekv3(
     ):
         if parallel_dims.dp_replicate_enabled:
             if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                dp_mesh_dim_names = ["dp_replicate", "dp_shard_cp"]
+                dp_mesh_dim_names = ["dp_replicate", "fsdp"]
                 dp_mode = "hybrid_shard"
             else:
                 dp_mesh_dim_names = ["dp_replicate"]
                 dp_mode = "replicate"
         else:
-            dp_mesh_dim_names = ["dp_shard_cp"]
+            dp_mesh_dim_names = ["fsdp"]
             dp_mode = "fully_shard"
 
         dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
