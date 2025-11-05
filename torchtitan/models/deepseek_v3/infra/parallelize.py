@@ -121,11 +121,10 @@ def parallelize_deepseekv3(
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ["dp_replicate", "dp_shard_cp"]
-        else:
-            dp_mesh_dim_names = ["dp_shard_cp"]
-        dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
         dp_mod_ep_mesh_dim_names = []

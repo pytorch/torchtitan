@@ -74,14 +74,13 @@ def parallelize_vlm(
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ["dp_replicate", "dp_shard_cp"]
-        else:
-            dp_mesh_dim_names = ["dp_shard_cp"]
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
 
         apply_fsdp(
             model,
-            parallel_dims.get_mesh(dp_mesh_dim_names),
+            parallel_dims.get_mesh(names),
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
