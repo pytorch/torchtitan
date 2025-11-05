@@ -72,9 +72,9 @@ class ModelConvertersContainer(ModelConverter):
         if self.print_after_conversion:
             logger.info(f"Model definion after conversion:\n\n{model}\n\n")
 
-    def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]):
+    def post_optimizer_hook(self, opt, *args, **kwargs):
         for mh in self.converters:
-            mh.post_optimizer_hook(model)
+            mh.post_optimizer_hook(opt, *args, **kwargs)
 
 
 def build_model_converters(

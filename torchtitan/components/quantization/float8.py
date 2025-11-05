@@ -158,19 +158,65 @@ class Float8LinearConverter(QuantizationConverter):
             f"{self.config.enable_fsdp_float8_all_gather}"
         )
 
-    def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
+    def post_optimizer_hook(self, opt, *args, **kwargs):
         if not self.enabled:
             return
 
         if not self.precompute_scale:
             return
 
-        from torchao.float8 import precompute_float8_dynamic_scale_for_fsdp
+        precompute_float8_dynamic_scale_for_fsdp(opt, *args, **kwargs)
 
-        models = [model] if isinstance(model, nn.Module) else model
-        for m in models:
-            precompute_float8_dynamic_scale_for_fsdp(m)
 
+@torch.no_grad()
+def precompute_float8_dynamic_scale_for_fsdp(opt: torch.optim.Optimizer, *args, **kwargs) -> None:
+    """
+    Calculate scale dynamically for all float8 parameters.
+    This should be run after the optimizer step. It performs a single all-reduce to compute the
+    scales for all float8 weights.
+    Example usage:
+        model(input).sum().backward()
+        optim.step()
+        precompute_float8_dynamic_scale_for_fsdp(model)
+    """
+    from torch.distributed._tensor import DTensor
+
+    from torchao.float8.fsdp_utils import WeightWithDynamicFloat8CastTensor
+    import math
+
+    weights = []
+    for param_group in opt.param_groups:
+        for param in param_group["params"]:
+            if isinstance(param, DTensor) and isinstance(param._local_tensor, WeightWithDynamicFloat8CastTensor):
+                weights.append(param)
+
+    target_dtypes = {
+        w.dtype
+        for w in weights
+    }
+
+    if not weights:
+        return
+
+    (target_dtype,) = target_dtypes
+
+    # inf-norm is equivalent to max(abs(w))
+    max_weights = torch._foreach_norm(weights, ord=math.inf)  # Partial
+    amax_tensor = torch.stack(max_weights)  # Partial
+    # clamp is dispatched through DTensor
+    # it will issue a single all-reduce
+    amax_tensor = torch.clamp(amax_tensor, 1e-12)  # Replicate
+    # keep consistent with float8_utils.amax_to_scale
+    # torch.compile and eager show different numerics for 1.0 / float32,
+    # upcast to float64 to ensure same numeric between compile and eager
+    origin_dtype = amax_tensor.dtype
+    amax_tensor = amax_tensor.to(torch.float64)
+    scale_tensor = torch.finfo(target_dtype).max / amax_tensor  # Replicate
+    if origin_dtype is torch.float16:
+        scale_tensor = torch.clamp(scale_tensor, max=torch.finfo(torch.float16).max)
+    local_scale_tensor = scale_tensor.to_local().to(torch.float32)
+    for i, w in enumerate(weights):
+        w._local_tensor._precomputed_scale = local_scale_tensor[i]
 
 class Float8GroupedMMConverter(QuantizationConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):

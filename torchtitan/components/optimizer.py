@@ -169,6 +169,10 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         )
         self._post_init(all_params, optimizer_kwargs)
 
+    def register_step_post_hook(self, hook):
+        for opt in self.optimizers:
+            opt.register_step_post_hook(hook)
+
     def step(self) -> None:
         pass
 
