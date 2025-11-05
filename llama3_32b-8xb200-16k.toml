@@ -3,7 +3,7 @@ dump_folder = "./outputs"
 description = "Llama 3 8B training"
 
 [metrics]
-log_freq = 10
+log_freq = 2
 enable_tensorboard = false
 save_tb_folder = "tb"
 
