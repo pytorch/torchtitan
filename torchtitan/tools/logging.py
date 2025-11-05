@@ -26,6 +26,8 @@ def init_logger() -> None:
     # suppress verbose torch.profiler logging
     os.environ["KINETO_LOG_LEVEL"] = "5"
 
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+
 
 _logged: set[str] = set()
 

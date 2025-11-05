@@ -32,11 +32,13 @@ decay_type = "cosine"
 min_lr_factor = 0.1
 
 [training]
-local_batch_size = 8
+local_batch_size = 12
 seq_len = 8192
 max_norm = 1.0
 steps = 1000
 dataset = "c4"
+dtype = "bfloat16"
+mixed_precision_reduce = "bfloat16"
 
 [parallelism]
 data_parallel_replicate_degree = 1
