@@ -37,6 +37,8 @@ seq_len = 32768
 max_norm = 1.0
 steps = 1000
 dataset = "c4"
+dtype = "bfloat16"
+mixed_precision_reduce = "bfloat16"
 
 [parallelism]
 data_parallel_replicate_degree = 1
