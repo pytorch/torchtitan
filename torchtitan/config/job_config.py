@@ -857,37 +857,11 @@ class Experimental:
     needs to ensure that the path can be imported.
     """
 
-    # "none", "all", "only_fsdp"
-    bucket_all_gathers_fx: str = "none"
-
-    # "none", "all"
-    bucket_reduce_scatters_fx: str = "none"
-
-    reorder_for_compute_comm_overlap: bool = False
-    """
-    Whether to enable inductor comm reordering passes
-    """
-
-    reorder_for_compute_comm_overlap_passes: list[str] = field(
-        default_factory=lambda: [
-            "sink_waits_iterative",
-            "reorder_communication_preserving_peak_memory",
-        ]
-    )
-    """
-    Sequence of reordering passes (names of functions inside _inductor.comms) to call,
-    if reorder_for_compute_comm_overlap is enabled.
-    """
-
-    reorder_prefetch_limit: int | None = None
-    """
-    How many ops to allow moving any individual collective, if 'reorder_communication_preserving_peak_memory'
-    pass is enabled. default of None means unlimited
-    """
+    # "aten" (default), "inductor", "none"
+    comms_bucket_reorder_strategy: str = "aten"
 
     autop_force_bf16: bool = False
 
-    enable_simplefsdp_passes: bool = False
 
 @dataclass
 class Validation:
