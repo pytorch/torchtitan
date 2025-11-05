@@ -137,18 +137,17 @@ def parallelize_deepseekv3(
 
         dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh_dim_names = []
 
-        if parallel_dims.ep_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
-        dp_mod_ep_mesh = parallel_dims.get_mesh(dp_mod_ep_mesh_dim_names)
+        if parallel_dims.dp_replicate_enabled:
+            dp_mesh_dim_names = ["dp_replicate", "efsdp"]
+        else:
+            dp_mesh_dim_names = ["efsdp"]
+        edp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
 
         for _, transformer_block in model.layers.items():
             if transformer_block.moe_enabled and parallel_dims.ep_enabled:
                 experts_shard_dim = 0
-                assert dp_mod_ep_mesh is not None
+                assert edp_mesh is not None
                 assert hasattr(transformer_block, "moe")
                 if (
                     dp_mod_ep_mesh.size() * parallel_dims.ep
@@ -165,7 +164,7 @@ def parallelize_deepseekv3(
                 # https://github.com/pytorch/torchtitan/pull/1803#discussion_r2415190883
                 transformer_block.moe.experts = data_parallel(
                     transformer_block.moe.experts,
-                    dp_mod_ep_mesh,
+                    edp_mesh,
                     dp_mode,
                     mp_policy=mp_policy,
                     shard_dim=experts_shard_dim,
