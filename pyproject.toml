@@ -37,12 +37,17 @@ dev = [
     "pre-commit",
     "pytest",
     "pytest-cov",
-    "wandb"
+    "wandb",
+    "tomli_w", # test_job_config
+    "expecttest", # test_tokenizer
 ]
 
 [tool.setuptools.dynamic]
 version = {file = "assets/version.txt"}
 
+[tool.codespell]
+skip = ["*.json"]
+ignore-words-list = ["assertin", "datas" ,"indx", "inpt", "nd", "socio-economic"]
 
 # ---- Explicit project build information ---- #
 [build-system]
@@ -55,3 +60,4 @@ include = ["torchtitan*"]
 
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks
+testpaths = ["tests"]

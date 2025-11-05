@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable, Optional
 
 import torch
+
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
@@ -78,9 +79,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if job_config.experimental.custom_import:
             importlib.import_module(job_config.experimental.custom_import)
 
-        if job_config.job.print_config:
-            logger.info(f"Running with args: {job_config.to_dict()}")
-
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
@@ -92,6 +90,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             enable_cpu_backend=job_config.training.enable_cpu_offload,
             base_folder=job_config.job.dump_folder,
         )
+
+        job_config.maybe_log()
+
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
         self.parallel_dims = parallel_dims = self._create_parallel_dims(
@@ -118,8 +119,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         dist_utils.set_determinism(
             world_mesh,
             self.device,
-            job_config.training.seed,
-            job_config.training.deterministic,
+            job_config.debug,
+            distinct_seed_mesh_dims=["pp"],
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
@@ -320,10 +321,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         loss_parallel_enabled = (
             parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(
-            loss_parallel_enabled,
-            parallelism_config.enable_compiled_autograd,
-        )
+        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
             parallel_dims,
             job_config.training.mixed_precision_param,
@@ -434,7 +432,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
-        cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],
@@ -460,12 +457,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        return_outputs=False,
                     )
                 else:
                     self.pp_schedule.step(
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        return_outputs=False,
                     )
 
             # accumulate losses across pipeline microbatches

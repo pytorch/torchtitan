@@ -5,9 +5,11 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/vlm/**'
+      - '.github/workflows/integration_test_8gpu_vlm.yaml'
   pull_request:
     paths:
       - 'torchtitan/experiments/vlm/**'
+      - '.github/workflows/integration_test_8gpu_vlm.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -51,3 +53,4 @@ jobs:
 
         mkdir artifacts-to-be-uploaded
         python -m torchtitan.experiments.vlm.tests.integration_tests artifacts-to-be-uploaded --ngpu 4
+        rm -rf artifacts-to-be-uploaded/*/checkpoint

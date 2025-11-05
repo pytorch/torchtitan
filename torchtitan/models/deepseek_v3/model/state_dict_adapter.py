@@ -171,7 +171,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 if titan_abstract_key not in expert_weights_by_layer[layer_num]:
                     expert_weights_by_layer[layer_num][titan_abstract_key] = {}
                 expert_weights_by_layer[layer_num][titan_abstract_key][
-                    expert_num
+                    int(expert_num)
                 ] = value
 
                 if isinstance(value, DTensor):
