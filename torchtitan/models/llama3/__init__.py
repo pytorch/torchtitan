@@ -57,6 +57,15 @@ llama3_args = {
         multiple_of=4096,
         rope_theta=500000,
     ),
+    "coreweave": TransformerModelArgs(
+        dim=6144,
+        n_layers=60,
+        n_heads=48,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.3125,
+        multiple_of=128,
+        rope_theta=500000,
+    ),
     "70B": TransformerModelArgs(
         dim=8192,
         n_layers=80,
