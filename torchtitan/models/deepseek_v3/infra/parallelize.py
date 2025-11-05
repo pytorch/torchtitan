@@ -92,6 +92,9 @@ def parallelize_deepseekv3(
             model,
             tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
             ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
+            etp_mesh=parallel_dims.get_mesh("etp")
+            if parallel_dims.etp_enabled
+            else None,
             ep_etp_mesh=(
                 parallel_dims.get_mesh("ep_etp")
                 if parallel_dims.tp_enabled

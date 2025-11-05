@@ -61,9 +61,7 @@ class FakeParallelDims:
 
     def get_all_meshes(self):
         """Return a dict of all meshes."""
-        return {
-            dim: self.get_mesh(dim) for dim in self.mesh_dim_names
-        }
+        return {dim: self.get_mesh(dim) for dim in self.mesh_dim_names}
 
     def __getitem__(self, key):
         """Return a submesh for the given dimension(s) - for backward compatibility."""
@@ -177,7 +175,9 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
 
                     # Create fake mesh for this rank
                     rank_coords = (dp_shard_rank, dp_replicate_rank, tp_rank)
-                    fake_mesh = FakeParallelDims(mesh_dim_names, mesh_sizes, rank_coords)
+                    fake_mesh = FakeParallelDims(
+                        mesh_dim_names, mesh_sizes, rank_coords
+                    )
 
                     # Call set_determinism with distinct seeds on dp_shard and dp_replicate only
                     debug_config = DebugConfig(seed=base_seed, deterministic=False)
