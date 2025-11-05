@@ -22,6 +22,8 @@ from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
 
+import torchao
+
 __all__ = [
     "OptimizersContainer",
     "build_optimizers",
@@ -309,10 +311,16 @@ def build_optimizers(
     optimizer_classes = {
         "Adam": torch.optim.Adam,
         "AdamW": torch.optim.AdamW,
+        "AdamWFp8": torchao.optim.AdamWFp8,
+        "AdamW8bit": torchao.optim.AdamW8bit,
     }
     if name not in optimizer_classes:
         raise NotImplementedError(f"Optimizer {name} not added.")
     optimizer_cls = optimizer_classes[name]
+
+    if "torchao" in optimizer_cls.__module__:
+        optimizer_kwargs.pop("fused")
+        optimizer_kwargs.pop("foreach")
 
     if optim_in_bwd:
         return OptimizersInBackwardContainer(
