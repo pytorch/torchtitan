@@ -14,9 +14,11 @@ This demonstrates:
 4. Computing rewards (trivial/random for now)
 5. Computing advantages using GRPO-style group ranking
 6. Performing a policy gradient update on TorchTitan model
+7. Optional real dataset support (GSM8K math dataset)
 """
 
 import os
+import re
 
 import torch
 import torch.nn.functional as F
@@ -359,6 +361,124 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
     return model
 
 
+def extract_numeric_answer(text: str) -> str | None:
+    """
+    Extract numeric answer from model completion.
+
+    Looks for patterns like "#### 123" or final numbers in the text.
+
+    Args:
+        text: Completion text
+
+    Returns:
+        Extracted answer as string, or None if not found
+    """
+    # GSM8K uses #### to denote the final answer
+    match = re.search(r"####\s*(-?\d+(?:,\d+)*(?:\.\d+)?)", text)
+    if match:
+        # Remove commas from numbers
+        return match.group(1).replace(",", "")
+
+    # Fallback: look for last number in text
+    numbers = re.findall(r"-?\d+(?:,\d+)*(?:\.\d+)?", text)
+    if numbers:
+        return numbers[-1].replace(",", "")
+
+    return None
+
+
+def math_reward_function(
+    completions: list[str],
+    expected_answers: list[str],
+    group_size: int = 4,
+) -> torch.Tensor:
+    """
+    Reward function for math problems (e.g., GSM8K).
+
+    Gives high reward for correct answers, low for incorrect.
+
+    Args:
+        completions: List of completion strings
+        expected_answers: List of expected answers (one per prompt, repeated for group_size)
+        group_size: Number of samples per prompt
+
+    Returns:
+        rewards: [batch]
+    """
+    rewards = []
+
+    for idx, completion in enumerate(completions):
+        # Map completion index to prompt index
+        prompt_idx = idx // group_size
+        expected = expected_answers[prompt_idx].strip().lower()
+
+        # Extract answer from completion
+        predicted = extract_numeric_answer(completion)
+
+        if predicted is None:
+            # No valid answer found
+            reward = 0.0
+        elif predicted.lower() == expected:
+            # Correct answer
+            reward = 1.0
+        else:
+            # Wrong answer
+            reward = 0.0
+
+        rewards.append(reward)
+
+    return torch.tensor(rewards, dtype=torch.float32)
+
+
+def load_gsm8k_dataset(split: str = "train", num_samples: int = 100):
+    """
+    Load GSM8K dataset from HuggingFace.
+
+    Args:
+        split: Dataset split ("train" or "test")
+        num_samples: Number of samples to load
+
+    Returns:
+        prompts: List of problem prompts
+        answers: List of expected answers (numeric strings)
+    """
+    try:
+        from datasets import load_dataset
+
+        dataset = load_dataset("openai/gsm8k", "main", split=split)
+
+        prompts = []
+        answers = []
+
+        for i, item in enumerate(dataset):
+            if i >= num_samples:
+                break
+
+            question = item["question"]
+            answer = item["answer"]
+
+            # Extract the final numeric answer from the answer field
+            # GSM8K answers are like "some explanation\n#### 42"
+            answer_num = extract_numeric_answer(answer)
+            if answer_num is None:
+                continue
+
+            # Format prompt for the model
+            prompt = f"Question: {question}\nAnswer:"
+
+            prompts.append(prompt)
+            answers.append(answer_num)
+
+        return prompts, answers
+
+    except ImportError:
+        print("⚠ datasets library not installed. Install with: pip install datasets")
+        return None, None
+    except Exception as e:
+        print(f"⚠ Failed to load GSM8K dataset: {e}")
+        return None, None
+
+
 def trivial_reward_function(
     completions: list[str],
     tokenizer=None,
@@ -431,12 +551,60 @@ def trivial_reward_function(
     return rewards
 
 
-def compute_grpo_advantages(rewards: torch.Tensor, group_size: int = 4) -> torch.Tensor:
+def compute_grpo_advantages(
+    rewards: torch.Tensor, group_size: int = 4, beta: float = 0.1
+) -> torch.Tensor:
     """
-    Compute advantages using GRPO-style group ranking.
+    Compute advantages using GRPO-style exponential weighting.
 
-    GRPO groups samples from the same prompt and ranks them by reward.
+    GRPO uses exponential advantages within groups which can be numerically
+    unstable without bitwise determinism. Small differences in reward computation
+    can lead to drastically different exp(reward/beta) values.
+
+    This implementation uses the proper GRPO formulation:
+    advantage_i = exp(reward_i / beta) / Z - 1
+    where Z = mean(exp(reward_j / beta)) for j in group
+
+    Args:
+        rewards: [batch]
+        group_size: Number of samples per prompt (batch must be divisible by this)
+        beta: Temperature parameter for exponential weighting (lower = more unstable)
+
+    Returns:
+        advantages: [batch]
+    """
+    batch_size = rewards.shape[0]
+    assert (
+        batch_size % group_size == 0
+    ), f"Batch size {batch_size} must be divisible by group_size {group_size}"
+
+    num_groups = batch_size // group_size
+    rewards_grouped = rewards.view(num_groups, group_size)
+
+    # GRPO exponential advantages: exp(reward / beta)
+    # This is numerically unstable and will explode without bitwise invariance!
+    exp_rewards = torch.exp(rewards_grouped / beta)
+
+    # Normalize by group mean (this is where instability shows up)
+    group_mean_exp = exp_rewards.mean(dim=1, keepdim=True)
+
+    # Advantage = normalized_exp - 1
+    advantages_grouped = exp_rewards / group_mean_exp - 1.0
+
+    # Flatten back
+    advantages = advantages_grouped.view(-1)
+
+    return advantages
+
+
+def compute_grpo_advantages_stable(
+    rewards: torch.Tensor, group_size: int = 4
+) -> torch.Tensor:
+    """
+    Compute advantages using simple mean-centering (stable fallback).
+
     This is a simplified version that just uses mean-centering within groups.
+    Use this if you want stable training without bitwise invariance.
 
     Args:
         rewards: [batch]
@@ -657,6 +825,10 @@ def rl_update_step(
     max_new_tokens: int = 20,
     temperature: float = 1.0,
     use_vllm_compat: bool = True,
+    num_rollout_batches: int = 1,
+    reward_fn=None,
+    grpo_beta: float = 0.1,
+    use_stable_grpo: bool = False,
 ) -> dict:
     """
     Perform one RL update step using vLLM for rollouts.
@@ -672,72 +844,116 @@ def rl_update_step(
         max_new_tokens: Max tokens to generate
         temperature: Sampling temperature
         use_vllm_compat: Whether to use vLLM-compatible model
+        num_rollout_batches: Number of rollout batches per update (more rollouts = more samples)
+        reward_fn: Reward function (defaults to trivial_reward_function)
+        grpo_beta: Beta parameter for GRPO exponential weighting (lower = more unstable)
+        use_stable_grpo: If True, use stable GRPO (mean-centering) instead of exponential
 
     Returns:
         metrics: Dict of training metrics
     """
-    # Update vLLM weights from current policy
+    # Default reward function
+    if reward_fn is None:
+        reward_fn = trivial_reward_function
+
+    # Update vLLM weights from current policy (only once per update)
     titan_state = model.state_dict()
     vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
     vllm_engine.update_weights(vllm_compat_state)
 
-    # Generate samples using vLLM
-    (
-        completions,
-        vllm_log_probs,
-        vllm_token_ids,
-        vllm_token_log_probs,
-        prompt_token_ids,
-    ) = vllm_engine.generate(
-        prompt_texts,
-        max_new_tokens,
-        temperature,
-        n_samples_per_prompt=group_size,
-    )
-
-    # Compute rewards
-    rewards = trivial_reward_function(
-        completions, tokenizer, expected_answers, group_size
-    )
-
-    # Normalize rewards for stability (mean=0, std=1)
-    reward_mean = rewards.mean()
-    reward_std = rewards.std()
-    if reward_std > 1e-8:
-        rewards_normalized = (rewards - reward_mean) / reward_std
-    else:
-        rewards_normalized = rewards - reward_mean
-
-    # Compute advantages using GRPO (on normalized rewards)
-    advantages = compute_grpo_advantages(rewards_normalized, group_size)
-
-    # Compute loss and update using current policy
+    # Accumulate gradients over multiple rollout batches
     optimizer.zero_grad()
 
-    loss, loss_metrics = compute_policy_gradient_loss_vllm(
-        model,
-        vllm_token_ids,
-        vllm_token_log_probs,
-        prompt_token_ids,
-        advantages,
-        kl_coef=0.1,
-    )
-    loss.backward()
+    all_completions = []
+    all_rewards = []
+    all_advantages = []
+    total_loss = 0.0
+    batch_metrics = []
+
+    for batch_idx in range(num_rollout_batches):
+        # Generate samples using vLLM
+        (
+            completions,
+            vllm_log_probs,
+            vllm_token_ids,
+            vllm_token_log_probs,
+            prompt_token_ids,
+        ) = vllm_engine.generate(
+            prompt_texts,
+            max_new_tokens,
+            temperature,
+            n_samples_per_prompt=group_size,
+        )
+
+        # Compute rewards using provided reward function
+        if reward_fn == trivial_reward_function:
+            rewards = reward_fn(completions, tokenizer, expected_answers, group_size)
+        elif reward_fn == math_reward_function:
+            rewards = reward_fn(completions, expected_answers, group_size)
+        else:
+            rewards = reward_fn(completions, expected_answers, group_size)
+
+        # Normalize rewards for stability (mean=0, std=1)
+        reward_mean = rewards.mean()
+        reward_std = rewards.std()
+        if reward_std > 1e-8:
+            rewards_normalized = (rewards - reward_mean) / reward_std
+        else:
+            rewards_normalized = rewards - reward_mean
+
+        # Compute advantages using GRPO
+        if use_stable_grpo:
+            advantages = compute_grpo_advantages_stable(rewards_normalized, group_size)
+        else:
+            advantages = compute_grpo_advantages(
+                rewards_normalized, group_size, beta=grpo_beta
+            )
+
+        # Compute loss using current policy
+        loss, loss_metrics = compute_policy_gradient_loss_vllm(
+            model,
+            vllm_token_ids,
+            vllm_token_log_probs,
+            prompt_token_ids,
+            advantages,
+            kl_coef=0.1,
+        )
+
+        # Accumulate loss (will be averaged later)
+        loss = loss / num_rollout_batches
+        loss.backward()
+        total_loss += loss.item()
+
+        # Track metrics
+        all_completions.extend(completions[:2])  # Sample 2 from each batch
+        all_rewards.append(reward_mean.item())
+        all_advantages.append(advantages.mean().item())
+        batch_metrics.append(loss_metrics)
 
     # Gradient clipping
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
+    # Update weights
     optimizer.step()
 
-    # Return metrics - merge all loss_metrics into the main metrics dict
+    # Aggregate metrics across batches
+    avg_reward = sum(all_rewards) / len(all_rewards)
+    avg_advantage = sum(all_advantages) / len(all_advantages)
+
+    # Use metrics from last batch for detailed stats
+    final_metrics = batch_metrics[-1]
+
+    # Return aggregated metrics
     metrics = {
-        "loss": loss.item(),
-        "reward_mean": reward_mean.item(),
-        "reward_std": reward_std.item(),
-        "advantage_mean": advantages.mean().item(),
-        "advantage_std": advantages.std().item(),
-        "sample_completions": completions[:2],  # First 2 for inspection
-        **loss_metrics,  # Include all loss metrics (pg_loss, kl_div, entropy, ratio stats, logprob comparisons)
+        "loss": total_loss,
+        "reward_mean": avg_reward,
+        "reward_std": batch_metrics[-1].get("reward_std", 0.0),
+        "advantage_mean": avg_advantage,
+        "advantage_std": batch_metrics[-1].get("advantage_std", 0.0),
+        "sample_completions": all_completions[:2],  # First 2 for inspection
+        "num_rollout_batches": num_rollout_batches,
+        "total_samples": len(prompt_texts) * group_size * num_rollout_batches,
+        **final_metrics,  # Include final batch metrics
     }
 
     return metrics
@@ -805,14 +1021,28 @@ def compute_weight_deltas(model: torch.nn.Module, initial_state: dict) -> dict:
 def main():
     """Simple RL training loop using vLLM for fast rollouts."""
 
-    # Config
+    # ========== Config ==========
     model_name = "Qwen/Qwen3-1.7B"  # HuggingFace model name
     cache_dir = "./models"
     output_dir = "./converted"
 
-    group_size = 4  # For GRPO - samples per prompt
+    # Training config
+    group_size = 8  # Samples per prompt for GRPO (increased from 4)
+    num_rollout_batches = 2  # Multiple rollout batches per update (NEW!)
     num_steps = 100
     learning_rate = 1e-5
+
+    # GRPO config
+    use_stable_grpo = (
+        False  # Set to True for stable training, False to test bitwise invariance
+    )
+    grpo_beta = 0.1  # Lower = more unstable (will explode without bitwise invariance!)
+
+    # Dataset config
+    use_real_dataset = (
+        True  # Set to True to use GSM8K dataset (requires: pip install datasets)
+    )
+    num_dataset_samples = 10  # Number of prompts from dataset
 
     # Check if batch invariance is enabled
     from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
@@ -820,16 +1050,20 @@ def main():
     use_vllm_compat = vllm_is_batch_invariant()
 
     if use_vllm_compat:
-        print("Batch invariance detected - using vLLM-compatible model")
+        print("✓ Batch invariance detected - using vLLM-compatible model")
         # Add backward pass support to vLLM's batch_invariant mode
-        print("Adding gradient support to vLLM's batch_invariant mode...")
+        print("  Adding gradient support to vLLM's batch_invariant mode...")
         from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
             enable_batch_invariant_backward_mode,
         )
 
         enable_batch_invariant_backward_mode()
     else:
-        print("Batch invariance NOT detected - using standard model")
+        print("⚠ Batch invariance NOT detected - using standard model")
+        if not use_stable_grpo:
+            print(
+                "  WARNING: Exponential GRPO may be unstable without bitwise invariance!"
+            )
 
     # Download and convert model
     print("=" * 80)
@@ -861,29 +1095,61 @@ def main():
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-    # Create prompts with verifiable answers (prompt, expected_answer)
-    prompts_with_answers = [
-        ("The capital of France is", "paris"),
-        ("What is 7 times 8?", "56"),
-        ("The first president of the United States was", "washington"),
-        ("The chemical symbol for water is", "h2o"),
-        ("The largest planet in our solar system is", "jupiter"),
-    ]
+    # Load dataset
+    print("\n" + "=" * 80)
+    print("Dataset Configuration")
+    print("=" * 80)
 
-    prompt_texts = [p[0] for p in prompts_with_answers]
-    expected_answers = [p[1] for p in prompts_with_answers]
+    if use_real_dataset:
+        print(f"Attempting to load GSM8K dataset ({num_dataset_samples} samples)...")
+        prompt_texts, expected_answers = load_gsm8k_dataset(
+            split="train", num_samples=num_dataset_samples
+        )
+
+        if prompt_texts is None or len(prompt_texts) == 0:
+            print("⚠ Failed to load dataset, falling back to default prompts")
+            use_real_dataset = False
+
+    if not use_real_dataset:
+        # Fallback: simple prompts with verifiable answers
+        print("Using default prompts (factual questions)")
+        prompts_with_answers = [
+            ("The capital of France is", "paris"),
+            ("What is 7 times 8?", "56"),
+            ("The first president of the United States was", "washington"),
+            ("The chemical symbol for water is", "h2o"),
+            ("The largest planet in our solar system is", "jupiter"),
+        ]
+        prompt_texts = [p[0] for p in prompts_with_answers]
+        expected_answers = [p[1] for p in prompts_with_answers]
+
+    # Select reward function
+    reward_fn = math_reward_function if use_real_dataset else trivial_reward_function
+
+    print(f"Loaded {len(prompt_texts)} prompts")
+    print(f"Reward function: {reward_fn.__name__}")
+    print(f"First prompt: {prompt_texts[0][:80]}...")
 
     # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
     # TensorBoard writer
     writer = SummaryWriter("./outputs/rl_training")
-    print("\nTensorBoard logging enabled at: ./outputs/rl_training")
+    print("\n" + "=" * 80)
+    print("TensorBoard logging enabled at: ./outputs/rl_training")
+    print("=" * 80)
 
     # Training loop
     print(f"\nStarting RL training for {num_steps} steps...")
-    print(f"Prompts: {len(prompt_texts)}, Samples per prompt: {group_size}")
-    print(f"Total samples per step: {len(prompt_texts) * group_size}")
+    print(f"  Prompts: {len(prompt_texts)}")
+    print(f"  Samples per prompt: {group_size}")
+    print(f"  Rollout batches per update: {num_rollout_batches}")
+    print(
+        f"  Total samples per update: {len(prompt_texts) * group_size * num_rollout_batches}"
+    )
+    print(
+        f"  GRPO mode: {'Stable (mean-centering)' if use_stable_grpo else f'Exponential (beta={grpo_beta})'}"
+    )
     print("=" * 80)
 
     for step in range(num_steps):
@@ -895,9 +1161,13 @@ def main():
             optimizer,
             expected_answers=expected_answers,
             group_size=group_size,
-            max_new_tokens=20,
+            max_new_tokens=20 if not use_real_dataset else 50,
             temperature=1.0,
             use_vllm_compat=use_vllm_compat,
+            num_rollout_batches=num_rollout_batches,
+            reward_fn=reward_fn,
+            grpo_beta=grpo_beta,
+            use_stable_grpo=use_stable_grpo,
         )
 
         # Compute weight deltas from initial state
@@ -911,9 +1181,10 @@ def main():
         writer.add_scalar("rl/ratio_mean", metrics["ratio_mean"], step)
         writer.add_scalar("rl/ratio_clipped_frac", metrics["ratio_clipped_frac"], step)
         writer.add_scalar("rl/reward_mean", metrics["reward_mean"], step)
-        writer.add_scalar("rl/reward_std", metrics["reward_std"], step)
+        writer.add_scalar("rl/reward_std", metrics.get("reward_std", 0.0), step)
         writer.add_scalar("rl/advantage_mean", metrics["advantage_mean"], step)
-        writer.add_scalar("rl/advantage_std", metrics["advantage_std"], step)
+        writer.add_scalar("rl/advantage_std", metrics.get("advantage_std", 0.0), step)
+        writer.add_scalar("rl/total_samples", metrics["total_samples"], step)
 
         # Log weight deltas
         for key, value in weight_deltas.items():
@@ -921,14 +1192,26 @@ def main():
 
         print(
             f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
-            f"Reward: {metrics['reward_mean']:+.3f}±{metrics['reward_std']:.3f} | "
-            f"Advantage: {metrics['advantage_mean']:+.3f}±{metrics['advantage_std']:.3f}"
+            f"Reward: {metrics['reward_mean']:+.3f} | "
+            f"Samples: {metrics['total_samples']}"
         )
-        print(f"  Sample: {metrics['sample_completions'][0][:60]}...")
+        print(f"  Sample: {metrics['sample_completions'][0][:80]}...")
+
+        # Check for NaN/Inf (sign of instability)
+        if not torch.isfinite(torch.tensor(metrics["loss"])):
+            print("\n" + "!" * 80)
+            print("ERROR: Loss is NaN/Inf! Training diverged.")
+            print(
+                "This likely means the exponential GRPO is unstable without bitwise invariance."
+            )
+            print("Try setting use_stable_grpo=True or enabling batch invariance mode.")
+            print("!" * 80)
+            break
 
     print("\n" + "=" * 80)
     print("Training complete!")
     print("View TensorBoard: tensorboard --logdir=./outputs/rl_training")
+    print("=" * 80)
 
     # Cleanup
     writer.close()
