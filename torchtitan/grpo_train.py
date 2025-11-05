@@ -555,11 +555,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         dynamic_scale = batch_dict["dynamic_scale"]
         dynamic_grad_accum_size = batch_dict["dynamic_grad_accum_size"]
         total_masked_tokens = batch_dict["total_masked_tokens"]
-        logp = batch_dict["logp"]
-        ref_logp = batch_dict["ref_logp"]
         curr_len = -1
         input_ids, labels, masks, inf_logps, rewards = batch
-        dynamic_batch = list()
         # if tp_rank == 0:
         device_type = utils.device_type
         input_ids = torch.from_numpy(input_ids).to(device_type)
@@ -622,48 +619,50 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # Get pre-computed logps from batch_dict (only for off-policy)
                 old_logp = batch_dict["logp"]
                 old_ref_logp = batch_dict["ref_logp"]
-
-                # Compute fresh predictions and logps
-                pred, logp = compute_logp_from_model(
-                    self.model_parts[0],
-                    input_ids,
-                    labels,
-                    self.loss_fn,
-                    job_config.grpo.temperature,
-                )
-
-                # Use the comprehensive helper with old_logp for microbatching
-                mb_loss, metrics, _ = compute_grpo_loss_from_predictions(
-                    pred=pred,
-                    labels=labels,
-                    reward=reward,
-                    mask=mask,
-                    loss_fn=self.loss_fn,
-                    entropy_loss_fn=self.entropy_loss_fn,
-                    job_config=job_config,
-                    device=self.device,
-                    old_logp=old_logp,  # Pre-computed logp
-                    old_ref_logp=old_ref_logp,
-                    ref_pred=None,
-                    ref_model=self.ref_model_parts[0] if self.use_ref_model else None,
-                    input_ids=input_ids,
-                    use_ref_model=self.use_ref_model,
-                    inf_logps=inf_logps,
-                )
-                if not job_config.grpo.grpo_by_token:
-                    mb_loss = (mb_loss * mask).sum(-1) / mask.sum(-1)
-                    mb_loss = mb_loss.mean()
-                    mb_loss = (
-                        dynamic_scale
-                        * mb_loss
-                        / (dynamic_grad_accum_size + total_offp_accum)
+                with self.maybe_enable_amp:
+                    # Compute fresh predictions and logps
+                    pred, logp = compute_logp_from_model(
+                        self.model_parts[0],
+                        input_ids,
+                        labels,
+                        self.loss_fn,
+                        job_config.grpo.temperature,
                     )
-                else:
-                    mb_loss = (mb_loss * mask).sum() / (
-                        total_masked_tokens + total_offp_accum
+
+                    # Use the comprehensive helper with old_logp for microbatching
+                    mb_loss, metrics, _ = compute_grpo_loss_from_predictions(
+                        pred=pred,
+                        labels=labels,
+                        reward=reward,
+                        mask=mask,
+                        loss_fn=self.loss_fn,
+                        entropy_loss_fn=self.entropy_loss_fn,
+                        job_config=job_config,
+                        device=self.device,
+                        old_logp=old_logp,  # Pre-computed logp
+                        old_ref_logp=old_ref_logp,
+                        ref_pred=None,
+                        ref_model=self.ref_model_parts[0]
+                        if self.use_ref_model
+                        else None,
+                        input_ids=input_ids,
+                        use_ref_model=self.use_ref_model,
+                        inf_logps=inf_logps,
                     )
-                # pred.shape=(bs, seq_len, vocab_size)
-                # need to free to before bwd to avoid peaking memory
+                    if not job_config.grpo.grpo_by_token:
+                        mb_loss = (mb_loss * mask).sum(-1) / mask.sum(-1)
+                        mb_loss = mb_loss.mean()
+                        mb_loss = (
+                            dynamic_scale
+                            * mb_loss
+                            / (dynamic_grad_accum_size + total_offp_accum)
+                        )
+                    else:
+                        mb_loss = (mb_loss * mask).sum() / (
+                            total_masked_tokens + total_offp_accum
+                        )
+                    # pred.shape=(bs, seq_len, vocab_size)
+                    # need to free to before bwd to avoid peaking memory
                 del pred
                 mb_loss.backward()
                 loss = mb_loss.detach()
@@ -865,28 +864,30 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 with torch.no_grad():
                     if (job_config.grpo.num_microbatches > 1) and (microbatch_idx > 0):
                         with self.train_context(optional_context_parallel_ctx):
-                            pred, logp = compute_logp_from_model(
-                                self.model_parts[0],
-                                input_ids,
-                                labels,
-                                self.loss_fn,
-                                job_config.grpo.temperature,
-                            )
-                            del pred
-                            logp = logp.detach()
+                            with self.maybe_enable_amp:
+                                pred, logp = compute_logp_from_model(
+                                    self.model_parts[0],
+                                    input_ids,
+                                    labels,
+                                    self.loss_fn,
+                                    job_config.grpo.temperature,
+                                )
+                                del pred
+                                logp = logp.detach()
                     else:
                         logp = None
                     if self.use_ref_model:
                         with self.train_context(optional_context_parallel_ctx):
-                            ref_pred, ref_logp = compute_logp_from_model(
-                                self.ref_model_parts[0],
-                                input_ids,
-                                labels,
-                                self.loss_fn,
-                                job_config.grpo.temperature,
-                            )
-                            del ref_pred
-                            ref_logp = ref_logp.detach()
+                            with self.maybe_enable_amp:
+                                ref_pred, ref_logp = compute_logp_from_model(
+                                    self.ref_model_parts[0],
+                                    input_ids,
+                                    labels,
+                                    self.loss_fn,
+                                    job_config.grpo.temperature,
+                                )
+                                del ref_pred
+                                ref_logp = ref_logp.detach()
                     else:
                         ref_logp = None
                 microbatch.append(
