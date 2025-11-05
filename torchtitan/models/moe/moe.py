@@ -12,8 +12,10 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from .utils import indices_padding_wrapper
 from torchtitan.distributed.deepep.utils import PrimusTurboFlexTokenDispatcher
+
+from .utils import indices_padding_wrapper
+
 
 def moe_init_std(dim_in: int, n_layers: int) -> float:
     return (2 / (dim_in * n_layers)) ** 0.5
@@ -168,10 +170,7 @@ class GroupedExperts(nn.Module):
         # Apply routing probability scaling BEFORE expert computation if score_before_experts=True
         if routed_prob is not None and self.score_before_experts:
             # Convert to float32 for numerical stability, multiply by routing scores, then convert back
-            x = (
-                x.to(torch.float32)
-                * routed_prob.reshape(-1, 1)
-            ).to(x.dtype)
+            x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
 
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
@@ -202,10 +201,7 @@ class GroupedExperts(nn.Module):
         # Apply routing probability scaling AFTER expert computation if score_before_experts=False
         if routed_prob is not None and not self.score_before_experts:
             # Convert to float32 for numerical stability, multiply by routing scores, then convert back
-            out = (
-                out.to(torch.float32)
-                * routed_prob.reshape(-1, 1)
-            ).to(out.dtype)
+            out = (out.to(torch.float32) * routed_prob.reshape(-1, 1)).to(out.dtype)
 
         return out
 
@@ -334,6 +330,8 @@ class TokenChoiceTopKRouter(nn.Module):
         temp_weight = torch.empty_like(self.gate.weight)
         nn.init.normal_(temp_weight, mean=0.0, std=1.0)
 
+        # TODO(phuc): change to torch.linalg.norm
+        # due to TOR101 Use of deprecated function torch.norm
         row_norms = torch.norm(temp_weight, dim=1, keepdim=True)
         temp_weight = temp_weight / row_norms.clamp(min=1e-6)  # avoid divide by 0
 
@@ -414,7 +412,7 @@ class MoE(nn.Module):
                 moe_router_topk=moe_args.top_k,
                 num_moe_experts=num_experts,
             )
-            
+
         self.experts = GroupedExperts(
             dim=dim,
             hidden_dim=hidden_dim,
@@ -460,14 +458,14 @@ class MoE(nn.Module):
             )
         else:
             self.expert_bias = None
-        
+
         # tokens_per_expert will be used to track expert usage and to update the expert bias for load balancing
         self.register_buffer(
             "tokens_per_expert",
             torch.zeros(num_experts, dtype=torch.float32),
             persistent=False,
         )
-    
+
     # def forward(self, x: torch.Tensor) -> torch.Tensor:
     #     """
     #     Args:
@@ -499,7 +497,6 @@ class MoE(nn.Module):
     #     #       effect on the expert bias update thanks to the torch.sign() operator.
     #     with torch.no_grad():
     #         self.tokens_per_expert.add_(num_tokens_per_expert)
-
 
     #     if self.use_deepep:
     #         top_scores = top_scores.float()
@@ -598,10 +595,11 @@ class MoE(nn.Module):
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
-
         if self.use_deepep:
             top_scores = top_scores.float()
-            self.experts.deepep_dispatcher.dispatch_preprocess(top_scores, selected_experts_indices)
+            self.experts.deepep_dispatcher.dispatch_preprocess(
+                top_scores, selected_experts_indices
+            )
             # shape (bs*slen*top_k, dim)
             routed_output = self.experts(x, num_tokens_per_expert)
             # shared expert
@@ -610,6 +608,8 @@ class MoE(nn.Module):
             else:
                 out = torch.zeros_like(x)
             out = routed_output + out
+            out = out.reshape(bs, slen, dim)
+            return out
         else:
             # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
             # num_tokens_per_expert shape (num_experts,)

@@ -346,7 +346,16 @@ class TransformerBlock(nn.Module):
         x = x + self.attention(self.attention_norm(x), rope_cache, attention_masks)
 
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x))
+            moe_output = self.moe(self.ffn_norm(x))
+
+            # import torch.distributed as dist
+            # if dist.get_rank() == 0:
+            #     print(f"------- moe_output ------")
+            #     print(moe_output)
+            #     print(f"------- x ------")
+            #     print(x)
+
+            x = x + moe_output
         else:
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
