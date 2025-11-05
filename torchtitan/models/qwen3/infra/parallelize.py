@@ -96,7 +96,7 @@ def parallelize_qwen3(
             model,
             tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
             ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
+            ep_etp_mesh=(
                 parallel_dims.get_mesh("ep_etp")
                 if parallel_dims.tp_enabled
                 and parallel_dims.ep_enabled

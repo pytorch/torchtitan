@@ -95,7 +95,7 @@ def parallelize_gptoss(
             model,
             tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
             ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
+            ep_etp_mesh=(
                 parallel_dims.get_mesh("ep_etp")
                 if parallel_dims.tp_enabled
                 and parallel_dims.ep_enabled
@@ -254,7 +254,7 @@ def apply_moe_ep_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
-    ep_tp_mesh: DeviceMesh | None,
+    ep_etp_mesh: DeviceMesh | None,
     etp_enabled: bool,
 ):
     assert ep_mesh is not None or tp_mesh is not None
@@ -299,7 +299,7 @@ def apply_moe_ep_tp(
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
         else:
-            experts_mesh = ep_tp_mesh
+            experts_mesh = ep_etp_mesh
             experts_plan = GptossExpertTensorParallel()
 
         parallelize_module(
