@@ -25,12 +25,17 @@ def disable_compile(job_config: JobConfig):
 
 
 def parallelize_inputs(world_mesh, args, kwargs):
-    def to_dtensor(tensor):
-        if isinstance(tensor, torch.Tensor):
-            return DTensor.from_local(tensor, world_mesh["tp"], [Replicate()])
-        return tensor
+    if "tp" in world_mesh.mesh_dim_names:
 
-    dt_args = tree_map(to_dtensor, args)
+        def to_dtensor(tensor):
+            if isinstance(tensor, torch.Tensor):
+                return DTensor.from_local(tensor, world_mesh["tp"], [Replicate()])
+            return tensor
+
+        dt_args = tree_map(to_dtensor, args)
+    else:
+        # TODO: When there is no TP (SimpleFSDP only), it currently only supports plain tensor inputs
+        dt_args = args
 
     # TODO: When using flex_attention, BlockMask would show up in kwargs,
     # and it's unclear how to convert it to DTensor. If I use to_dtensor,
