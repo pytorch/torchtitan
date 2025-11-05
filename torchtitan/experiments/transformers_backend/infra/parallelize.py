@@ -8,12 +8,11 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Partial, Replicate, Shard
+from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
-    PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -21,18 +20,12 @@ from torchtitan.experiments.transformers_backend.job_config import JobConfig
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
 
-from torchtitan.distributed.expert_parallel import (
-    ExpertParallel,
-    ExpertTensorParallel,
-    ReordererSequenceParallel,
-)
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama3.infra.parallelize import apply_compile
-
 
 def parallelize_hf_transformers(
     model: nn.Module,
@@ -230,13 +223,10 @@ def apply_non_moe_tp(
         layer_plan[f"self_attn.{o_proj_name}"] = rowwise_parallel(
             output_layouts=Shard(1)
         )
-
-        # For Qwen3 RMSNorm on Q and K
-        # TODO(3outeille): we should probably shard(1) then replicate => then use SequenceParallel but for now I am fed up
-        if hasattr(transformer_block.self_attn, "q_norm"):
-            layer_plan["self_attn.q_norm"] = NoParallel()
-        if hasattr(transformer_block.self_attn, "k_norm"):
-            layer_plan["self_attn.k_norm"] = NoParallel()
+        #For model that uses RMSNorm on Q and K (i.e. Qwen3)
+        if hasattr(transformer_block.self_attn, "q_norm") and hasattr(transformer_block.self_attn, "k_norm"):
+            layer_plan["self_attn.q_norm"] = SequenceParallel(sequence_dim=2, use_local_output=True)
+            layer_plan["self_attn.k_norm"] = SequenceParallel(sequence_dim=2, use_local_output=True)
 
         if not transformer_block.moe_enabled:
             mlp_plan = {
