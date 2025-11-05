@@ -150,8 +150,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             if hasattr(self, key) and value is not None:
                 setattr(self, key, value)
 
-        if hasattr(job_config.training, 'seq_len') and job_config.training.seq_len != self.max_seq_len:
-            self.max_seq_len = job_config.training.seq_len
+        self.max_seq_len = job_config.training.seq_len
 
         # Configure HF-specific settings to match TorchTitan settings
         self.attention_bias = False
