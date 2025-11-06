@@ -163,8 +163,6 @@ def parallelize_gptoss(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
         dp_mesh_dim_names = ("dp_replicate",)
         apply_replicate(
             model,
