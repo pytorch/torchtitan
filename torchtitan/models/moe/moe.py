@@ -167,10 +167,11 @@ class GroupedExperts(nn.Module):
         # multiplied with the tokens (either before or after expert computation).
         # Without this parameter, we get: "GroupedExperts.forward() takes 3 positional arguments but 4 were given"
 
+        # NOTE(phuc): phuc added additional from amd
         # Apply routing probability scaling BEFORE expert computation if score_before_experts=True
-        if routed_prob is not None and self.score_before_experts:
-            # Convert to float32 for numerical stability, multiply by routing scores, then convert back
-            x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
+        # if routed_prob is not None and self.score_before_experts:
+        #     # Convert to float32 for numerical stability, multiply by routing scores, then convert back
+        #     x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
 
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
@@ -198,10 +199,11 @@ class GroupedExperts(nn.Module):
         else:
             out = _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
-        # Apply routing probability scaling AFTER expert computation if score_before_experts=False
-        if routed_prob is not None and not self.score_before_experts:
-            # Convert to float32 for numerical stability, multiply by routing scores, then convert back
-            out = (out.to(torch.float32) * routed_prob.reshape(-1, 1)).to(out.dtype)
+        # NOTE(phuc): phuc added additional from amd
+        # # Apply routing probability scaling AFTER expert computation if score_before_experts=False
+        # if routed_prob is not None and not self.score_before_experts:
+        #     # Convert to float32 for numerical stability, multiply by routing scores, then convert back
+        #     out = (out.to(torch.float32) * routed_prob.reshape(-1, 1)).to(out.dtype)
 
         return out
 
