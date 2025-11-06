@@ -9,7 +9,7 @@
 
 import torch
 import torch.nn as nn
-from torch.distributed._composable.replicate import replicate
+from torch.distributed._composable.replicate_with_fsdp import replicate
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
@@ -137,12 +137,12 @@ def parallelize_llama(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        dp_mesh_dim_names = ("dp_replicate",)
+        apply_replicate(
             model,
-            world_mesh,
-            enable_compile=model_compile_enabled,
+            world_mesh[tuple(dp_mesh_dim_names)],
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
 
     return model
@@ -317,14 +317,31 @@ def apply_fsdp(
     fully_shard(model, **fsdp_config)
 
 
-def apply_ddp(
+def apply_replicate(
     model: nn.Module,
     dp_mesh: DeviceMesh,
-    enable_compile: bool,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
 ):
-    if enable_compile:
-        torch._dynamo.config.optimize_ddp = "ddp_optimizer"
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    replicate_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
 
-    replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
+    if model.tok_embeddings is not None:
+        replicate(
+            model.tok_embeddings,
+            **replicate_config,
+        )
+    for layer_id, transformer_block in model.layers.items():
+        replicate(
+            transformer_block,
+            **replicate_config,
+        )
 
-    logger.info("Applied DDP to the model")
+    if model.norm is not None and model.output is not None:
+        replicate(
+            [model.norm, model.output],
+            **replicate_config,
+        )
+    replicate(model, **replicate_config)
+
+    logger.info("Applied replicate to the model")
