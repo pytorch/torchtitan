@@ -1,6 +1,6 @@
 import torch
 from deep_ep import Buffer
-from deep_ep.utils import EventOverlap, EventHandle
+from deep_ep.utils import EventHandle, EventOverlap
 
 _buffer = None
 
@@ -71,6 +71,8 @@ class FusedDispatch(torch.autograd.Function):
     ):
         """Forward pass of fused dispatch."""
         previous_event = None
+
+        # print(f"executing deep_ep")
         if async_finish:
             previous_event = EventOverlap(EventHandle())
         # Calculate layout before actual dispatch
@@ -144,18 +146,27 @@ class FusedDispatch(torch.autograd.Function):
         # Previously the first branch created CPU tensor which caused:
         # "RuntimeError: Expected all tensors to be on the same device, but got offs is on cpu"
         if not use_cuda_num_token_per_expert:
-            tokens_per_expert = torch.tensor(num_recv_tokens_per_expert_list, device=x.device)  # list -> CUDA tensor (FIXED)
+            tokens_per_expert = torch.tensor(
+                num_recv_tokens_per_expert_list, device=x.device
+            )  # list -> CUDA tensor (FIXED)
         else:
             # Manual conversion: list -> CUDA tensor (workaround since DeepEP doesn't do it)
             # TODO(deepep-fork, phuc): Restore original `tokens_per_expert = num_recv_tokens_per_expert_list`
             # when we fork DeepEP and add num_recv_tokens_per_expert_as_cuda support
-            tokens_per_expert = torch.tensor(num_recv_tokens_per_expert_list, device=x.device)
+            tokens_per_expert = torch.tensor(
+                num_recv_tokens_per_expert_list, device=x.device
+            )
 
         return (recv_x, recv_token_indices, recv_token_probs, tokens_per_expert, handle)
 
     @staticmethod
     def backward(
-        ctx, grad_output, grad_token_indices, grad_token_probs, grad_tokens_per_expert, grad_handle
+        ctx,
+        grad_output,
+        grad_token_indices,
+        grad_token_probs,
+        grad_tokens_per_expert,
+        grad_handle,
     ):
         """Backward pass of fused dispatch."""
         buffer = get_buffer(ctx.group, get_hidden_bytes(grad_output))
@@ -181,7 +192,9 @@ class FusedCombine(torch.autograd.Function):
     """Fused combine operation for MoE output combining computation and communication."""
 
     @staticmethod
-    def forward(ctx, x, group, handle, async_finish=False, allocate_on_comm_stream=False):
+    def forward(
+        ctx, x, group, handle, async_finish=False, allocate_on_comm_stream=False
+    ):
         """Forward pass of fused combine."""
         previous_event = None
         if async_finish:
@@ -224,7 +237,6 @@ class FusedCombine(torch.autograd.Function):
         return grad_x, None, None, None, None
 
 
-
 def fused_dispatch(
     x,
     token_indices,
@@ -259,6 +271,7 @@ def fused_dispatch(
         num_worst_tokens,
     )
 
+
 def fused_combine(x, group, handle, async_finish=False, allocate_on_comm_stream=False):
     """Perform fused combine operation if deep_ep is available.
     Args:
@@ -270,6 +283,7 @@ def fused_combine(x, group, handle, async_finish=False, allocate_on_comm_stream=
         Result of FusedCombine
     """
     return FusedCombine.apply(x, group, handle, async_finish, allocate_on_comm_stream)
+
 
 def set_deepep_num_sms(num_sms):
     """Sets the number of SMs to use for DeepEP"""

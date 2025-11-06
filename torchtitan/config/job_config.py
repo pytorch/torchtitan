@@ -44,6 +44,12 @@ class Profiling:
     enable_profiling: bool = False
     """Whether to enable pytorch profile"""
 
+    with_stack: bool = True
+    """Record source information (file and line number) for the ops"""
+
+    with_modules: bool = True
+    """Record module hierarchy (including function names) corresponding to the callstack of the op"""
+
     save_traces_folder: str = "profile_traces"
     """Trace files location"""
 

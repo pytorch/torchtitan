@@ -15,41 +15,6 @@ from .fused_a2a import fused_combine, fused_dispatch, set_deepep_num_sms
 from .fused_indices_converter import fused_indices_to_multihot
 
 
-# Recommended DeepEP dispatch configs for different world sizes
-# These are tuned performance configs from the DeepEP library
-# Format: (param1, param2, param3, param4) to be used with Config(num_sms, *config)
-DEEPEP_DISPATCH_CONFIGS = {
-    2: (24, 256, 6, 128),
-    4: (6, 256, 6, 128),
-    8: (6, 256, 6, 128),
-    16: (36, 288, 20, 128),
-    24: (32, 288, 8, 128),
-    32: (32, 288, 8, 128),
-    48: (32, 288, 8, 128),
-    64: (32, 288, 8, 128),
-    96: (20, 480, 12, 128),
-    128: (20, 560, 12, 128),
-    144: (32, 720, 12, 128),
-    160: (28, 720, 12, 128),
-}
-
-# Recommended DeepEP combine configs for different world sizes
-DEEPEP_COMBINE_CONFIGS = {
-    2: (10, 256, 6, 128),
-    4: (9, 256, 6, 128),
-    8: (4, 256, 6, 128),
-    16: (4, 288, 12, 128),
-    24: (1, 288, 8, 128),
-    32: (1, 288, 8, 128),
-    48: (1, 288, 8, 128),
-    64: (1, 288, 8, 128),
-    96: (1, 480, 8, 128),
-    128: (1, 560, 8, 128),
-    144: (2, 720, 8, 128),
-    160: (2, 720, 8, 128),
-}
-
-
 def permute(
     tokens,
     routing_map,
