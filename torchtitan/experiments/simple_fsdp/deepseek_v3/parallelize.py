@@ -95,18 +95,10 @@ def parallelize_deepseekv3(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
-            tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
-            ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
-            etp_mesh=parallel_dims.get_mesh("etp")
-            if parallel_dims.etp_enabled
-            else None,
-            ep_etp_mesh=(
-                parallel_dims.get_mesh("ep_etp")
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
+            tp_mesh=parallel_dims.get_mesh("tp"),
+            ep_mesh=parallel_dims.get_mesh("ep"),
+            etp_mesh=parallel_dims.get_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_mesh(["ep", "etp"]),
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -150,13 +142,13 @@ def parallelize_deepseekv3(
                 assert edp_mesh is not None
                 assert hasattr(transformer_block, "moe")
                 if (
-                    dp_mod_ep_mesh.size() * parallel_dims.ep
+                    edp_mesh.size() * parallel_dims.ep
                     > transformer_block.moe.experts.num_experts
                 ):
                     experts_shard_dim = 1
 
                 # when EP is enable, the routed experts' gradient reduction is done over
-                # dp_mod_ep_mesh instead of whole dp_mesh.
+                # edp_mesh instead of whole dp_mesh.
                 # we add a `fsdp_gradient_divide_factor` to scale gradient over dp_mesh
                 # to be consistent with data.
                 # TODO (ruisizhang123): update the logic following the link below instead
