@@ -58,6 +58,11 @@ class ParallelDims:
         if ep > 1:
             assert etp == tp or etp == 1, "Currently we only support ETP=TP or ETP=1"
 
+    def _mesh_exist(self, name: str, degree: int) -> bool:
+        if name == "efsdp":
+            return True if self.ep > 1 else False
+        return degree > 1
+
     def build_mesh(self) -> DeviceMesh:
         """
         Build the device mesh with the required mesh dimensions.
@@ -102,7 +107,7 @@ class ParallelDims:
             """
             backend_override = {}
             for name, degree in zip(dim_names, dim_degrees, strict=True):
-                if degree == 1 or name == "batch":
+                if self._mesh_exist(name, degree) or name == "batch":
                     backend_override[name] = "fake"
 
             return world_mesh._unflatten(
@@ -213,8 +218,10 @@ class ParallelDims:
                  'cp', 'tp', 'ep', 'etp', 'efsdp'
 
         Returns:
-            DeviceMesh for the requested dimension(s), or None if any of
-            dimension(s) has size 1 (i.e., parallelism is disabled for that dimension).
+            DeviceMesh for the requested dimension(s). The DeviceMesh exists if
+            1) dimension size is larger than 1 (the parallelism is enabled)
+            2) efsdp is enabled even if size is 1 if ep is > 1.
+            The return value if None otherwise.
 
         Raises:
             ValueError: If the requested dimension name(s) is not valid.
@@ -232,7 +239,7 @@ class ParallelDims:
                 f"Valid dimensions are: {list(self._meshes.keys())}"
             )
 
-        if any(self._meshes[dim].size() == 1 for dim in dims):
+        if any(self._mesh_exist(dim, self._meshes[dim].size()) for dim in dims):
             return None
 
         return self._meshes[mesh_name]
