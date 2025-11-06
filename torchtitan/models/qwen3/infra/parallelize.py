@@ -94,15 +94,10 @@ def parallelize_qwen3(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
-            tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
-            ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
-            ep_etp_mesh=(
-                parallel_dims.get_mesh("ep_etp")
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
+            tp_mesh=parallel_dims.get_mesh("tp"),
+            ep_mesh=parallel_dims.get_mesh("ep"),
+            etp_mesh=parallel_dims.get_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_mesh(["ep", "etp"]),
         )
 
     if job_config.activation_checkpoint.mode != "none":
