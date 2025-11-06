@@ -1,17 +1,18 @@
-name: 8 GPU Model Tests
+name: Compiler Toolkit 8 GPU Integration Tests
 
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - 'torchtitan/experiments/**'
+    paths:
+      - 'torchtitan/experiments/compiler_toolkit/**'
+      - '.github/workflows/integration_test_8gpu_compiler_toolkit.yaml'
   pull_request:
-    branches: [ main ]
-    paths-ignore:
-      - 'torchtitan/experiments/**'
+    paths:
+      - 'torchtitan/experiments/compiler_toolkit/**'
+      - '.github/workflows/integration_test_8gpu_compiler_toolkit.yaml'
   schedule:
-    # Runs every 6 hours
-    - cron: '0 */6 * * *'
+    # Runs every 12 hours
+    - cron: '0 */12 * * *'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -23,7 +24,7 @@ defaults:
 
 jobs:
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
     with:
       runner: linux.g5.48xlarge.nvidia.gpu
       gpu-arch-type: cuda
@@ -48,9 +49,5 @@ jobs:
 
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
 
-        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
-
         mkdir artifacts-to-be-uploaded
-        python -m tests.integration_tests.run_tests --test_suite models artifacts-to-be-uploaded --ngpu 8
-        python -m tests.integration_tests.flux artifacts-to-be-uploaded/flux --ngpu 8
-        rm -rf artifacts-to-be-uploaded/*/checkpoint
+        python -m torchtitan.experiments.compiler_toolkit.tests.integration_tests artifacts-to-be-uploaded --ngpu 4

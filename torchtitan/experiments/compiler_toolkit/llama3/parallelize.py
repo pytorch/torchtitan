@@ -87,8 +87,7 @@ def parallelize_llama(
 
     annotate_llama()
 
-    if job_config.model.flavor.endswith("flex_attn"):
-        register_blockmask_pytree_node()
+    register_blockmask_pytree_node()
 
     # Disable torch.compile over the model in the compiler toolkit style workflow
     with disable_compile(job_config):

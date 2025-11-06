@@ -54,3 +54,4 @@ jobs:
 
         # Run the numerics unit tests of SimpleFSDP
         torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/simple_fsdp/tests/test_numerics.py -v
+        rm -rf artifacts-to-be-uploaded/*/checkpoint
