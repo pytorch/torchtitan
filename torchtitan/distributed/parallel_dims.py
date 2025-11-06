@@ -107,7 +107,7 @@ class ParallelDims:
             """
             backend_override = {}
             for name, degree in zip(dim_names, dim_degrees, strict=True):
-                if self._mesh_exist(name, degree) or name == "batch":
+                if (not self._mesh_exist(name, degree)) or name == "batch":
                     backend_override[name] = "fake"
 
             return world_mesh._unflatten(
@@ -239,7 +239,7 @@ class ParallelDims:
                 f"Valid dimensions are: {list(self._meshes.keys())}"
             )
 
-        if any(self._mesh_exist(dim, self._meshes[dim].size()) for dim in dims):
+        if any(not self._mesh_exist(dim, self._meshes[dim].size()) for dim in dims):
             return None
 
         return self._meshes[mesh_name]
