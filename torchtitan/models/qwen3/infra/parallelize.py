@@ -105,6 +105,7 @@ def parallelize_qwen3(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            use_deepep=model.model_args.moe_args.use_deepep,
         )
 
     if job_config.activation_checkpoint.mode != "none":

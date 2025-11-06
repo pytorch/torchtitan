@@ -454,6 +454,7 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
+    use_deepep: bool,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -510,8 +511,13 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            # experts_plan = ExpertParallel()
-            experts_plan = ExpertParallelDeepEP()
+            experts_plan = (
+                ExpertParallelDeepEP() if use_deepep is True else ExpertParallel()
+            )
+            if use_deepep is True:
+                logger.info(
+                    f"Enabling deep_ep and fused all-to-all communication for expert parallelism"
+                )
         else:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel()

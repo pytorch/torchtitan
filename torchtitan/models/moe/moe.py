@@ -39,6 +39,9 @@ class MoEArgs:
     load_balance_coeff: float | None = 1e-3
 
     _debug_force_load_balance: bool = False
+
+    # use deepep and fused all-to-all communication
+    use_deepep: bool = False
     # if True, we force each experts get same amount of token via round-robin
 
 
@@ -139,7 +142,7 @@ class GroupedExperts(nn.Module):
         num_experts: int,
         use_grouped_mm: bool,
         deepep_dispatcher: PrimusTurboFlexTokenDispatcher = None,
-        score_before_experts: bool = True,
+        score_before_experts: bool = False,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -408,7 +411,7 @@ class MoE(nn.Module):
 
         num_experts = moe_args.num_experts
 
-        self.use_deepep = True
+        self.use_deepep = moe_args.use_deepep
         if self.use_deepep:
             self.deepep_dispatcher = PrimusTurboFlexTokenDispatcher(
                 moe_router_topk=moe_args.top_k,
@@ -420,7 +423,9 @@ class MoE(nn.Module):
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             use_grouped_mm=moe_args.use_grouped_mm,
-            deepep_dispatcher=self.deepep_dispatcher,
+            deepep_dispatcher=self.deepep_dispatcher
+            if self.use_deepep is True
+            else None,
             # NOTE(phuc): claudecode added this parameter to fix ExpertParallelDeepEP compatibility
             # This ensures that GroupedExperts knows whether to apply routing scores before or after
             # expert computation when routed_prob is passed to forward()
