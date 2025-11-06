@@ -25,7 +25,7 @@ This step will download the autoencoder model from HuggingFace and save it to th
 
 Run the following command to train the model on a single GPU:
 ```bash
-./torchtitan/experiments/flux/run_train.sh
+./torchtitan/models/flux/run_train.sh
 
 ```
 
