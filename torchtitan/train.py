@@ -84,20 +84,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
-        # init distributed and build meshes
-        dist_utils.init_distributed(
-            job_config.comm,
-            enable_cpu_backend=job_config.training.enable_cpu_offload,
-            base_folder=job_config.job.dump_folder,
-        )
-
         job_config.maybe_log()
 
-        world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = job_config.parallelism
-        self.parallel_dims = parallel_dims = self._create_parallel_dims(
-            parallelism_config, world_size
-        )
+        # init distributed and build meshes
+        self.parallel_dims = parallel_dims = self._init_distributed_env(job_config)
 
         world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
@@ -367,7 +357,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
-    def _create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
+    def _init_distributed_env(self, job_config: JobConfig) -> ParallelDims:
+        dist_utils.init_distributed(
+            job_config.comm,
+            enable_cpu_backend=job_config.training.enable_cpu_offload,
+            base_folder=job_config.job.dump_folder,
+        )
+
+        world_size = int(os.environ["WORLD_SIZE"])
+        parallelism_config = job_config.parallelism
+
         return ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
