@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.config import JobConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.train import main, Trainer
 
 from .parallel_dims import TorchCommsParallelDims
