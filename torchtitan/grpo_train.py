@@ -478,21 +478,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 "Please set the environment variable to point to the "
                 "LOGDIR directory where the log files are stored."
             )
-        if torch.distributed.get_rank() == 0:
-            # only do this one on rank
-            sglang_json = {
-                "dp_shard_degree": self.dp_shard_degree,
-                "tp_degree": self.tp_degree,
-                "param_mappings": {},
-            }
-            for param_name, param in sorted(
-                self.model_parts[0].named_parameters(), key=lambda item: item[0]
-            ):  # type: str, DTensor
+        self.param_name_to_send_list = []
+        # only do this one on rank
+        sglang_json = {
+            "dp_shard_degree": self.dp_shard_degree,
+            "tp_degree": self.tp_degree,
+            "param_mappings": {},
+        }
+        for param_name, param in sorted(
+            self.model_parts[0].named_parameters(), key=lambda item: item[0]
+        ):  # type: str, DTensor
+            if param.requires_grad:
                 new_name, needs_permute = param_to_sglang_data(param_name)
+                self.param_name_to_send_list.append(param_name)
                 local_shape = list(param.to_local().shape)
-                local_shape[0] = (
-                    local_shape[0] // self.dp_shard_degree
-                )  # need to apply FSDP sharding to dim 0
                 sglang_json["param_mappings"][param_name] = {
                     "sglang_name": new_name,
                     "needs_permute": needs_permute,
@@ -500,7 +499,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     if param.placements[-1].is_shard()
                     else 0,
                     "local_shape": local_shape,
+                    "shape": param.shape,
+                    "dtype": str(param.dtype).split(".")[-1],
                 }
+            self.param_name_to_send_list.sort()
+        if torch.distributed.get_rank() == 0:
             with open(os.path.join(slurm_logdir, "sglang_json.json"), "w") as f:
                 json.dump(sglang_json, f, indent=2)
             self.data_handler.register_atropos(job_config, self.step, global_batch_size)
@@ -697,7 +700,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             dynamic_grad_acc_size,
             data_lens,
         ) = self.data_handler.data_handling(
-            self.sglang_gloo_group,
+            self.sglang_nccl_group,
             self.cp_degree,
             self.dp_degree,
             self.dp_replicate_rank,
@@ -1144,6 +1147,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         self.total_group_size,
                         self.sglang_gloo_group,
                         self.sglang_nccl_group,
+                        self.param_name_to_send_list.index(name),
                     )
         # To account for fun with updating sglang...
         torch.distributed.barrier()
