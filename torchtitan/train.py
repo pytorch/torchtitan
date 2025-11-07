@@ -8,7 +8,7 @@ import importlib
 import os
 import time
 from datetime import timedelta
-from typing import Any, Generator, Iterable, Optional
+from typing import Any, Generator, Iterable
 
 import torch
 
@@ -410,26 +410,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             yield input_dict, labels
 
+    def post_dataloading_process(
+        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+        """Post processing after data loading."""
+        inputs = input_dict["input"]
+        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+        # For arguments, like attention_masks, we have to put them in a separate
+        # dict as extra_inputs are not forwarded to other stages in PP, but
+        # extra_kwargs are.
+        extra_kwargs: dict[str, Any] = {}
+
+        if getattr(self.model_args, "use_flex_attn", False):
+            extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
+                extra_inputs=extra_inputs,
+            )
+
+        return inputs, labels, extra_inputs, extra_kwargs
+
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs = input_dict["input"]
-        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        # For arguments, like attention_masks, we have to put them in a separate
-        # dict as extra_inputs are not forwarded to other stages in PP, but
-        # extra_kwargs are.
-        extra_kwargs = {}
-
-        if getattr(self.model_args, "use_flex_attn", False):
-            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
-            )
-
+        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
+            input_dict, labels
+        )
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         optional_context_parallel_ctx = (
@@ -662,14 +671,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.metrics_processor.close()
 
 
-if __name__ == "__main__":
+def main(trainer_class: type[Trainer]) -> None:
+    """Main entry point for training with a specified trainer class.
+
+    Args:
+        trainer_class: The trainer class to instantiate (e.g., Trainer, FluxTrainer, TorchCommsTrainer)
+    """
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
-    trainer: Optional[Trainer] = None
+    trainer: Trainer | None = None
 
     try:
-        trainer = Trainer(config)
+        trainer = trainer_class(config)
 
         if config.checkpoint.create_seed_checkpoint:
             assert (
@@ -690,3 +704,7 @@ if __name__ == "__main__":
         trainer.close()
         torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
+
+
+if __name__ == "__main__":
+    main(Trainer)
