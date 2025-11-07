@@ -686,8 +686,13 @@ def compute_policy_gradient_loss_vllm(
     advantages = advantages.to(device)
 
     # Compute reference log probs from per-token values
-    ref_log_probs = torch.tensor(
-        [sum(lps) for lps in vllm_token_log_probs], dtype=torch.float32, device=device
+    # Use PyTorch's sum() to match the reduction order used for total_log_probs
+    # This ensures exactly zero KL divergence with batch invariance
+    ref_log_probs = torch.stack(
+        [
+            torch.tensor(lps, dtype=torch.float32, device=device).sum()
+            for lps in vllm_token_log_probs
+        ]
     )
 
     # Compute log probs under current policy (WITH GRADIENTS)
@@ -1161,7 +1166,7 @@ def main():
             optimizer,
             expected_answers=expected_answers,
             group_size=group_size,
-            max_new_tokens=20 if not use_real_dataset else 50,
+            max_new_tokens=20 if not use_real_dataset else 100,
             temperature=1.0,
             use_vllm_compat=use_vllm_compat,
             num_rollout_batches=num_rollout_batches,
