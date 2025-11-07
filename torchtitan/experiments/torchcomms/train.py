@@ -28,7 +28,7 @@ class TorchCommsTrainer(Trainer):
     def close(self) -> None:
         # Call finalize on all comms after training and before destroying process group.
         if hasattr(self, "parallel_dims"):
-            for comm in trainer.parallel_dims.comms:
+            for comm in self.parallel_dims.comms:
                 comm.finalize()
         super().close()
 
