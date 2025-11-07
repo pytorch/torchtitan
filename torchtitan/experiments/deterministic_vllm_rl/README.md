@@ -236,6 +236,12 @@ deterministic_vllm_rl/
     └── test_exact_determinism.py         # Test determinism
 ```
 
+## TODO
+
+- `FlashAttnWithBackward` will need to become more composable and should not live exclusively within this directory.
+- vLLM integration will need to become more generic with a provided Attention operator that is KV-cache compatible.
+- vLLM parallelism will need to add generic parallelism initialization to support Monarch managed TP/DP.
+
 ## Contributing
 
 This experiment is part of TorchTitan. To contribute:
