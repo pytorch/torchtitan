@@ -26,7 +26,7 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-from torchtitan.train import main as train_main
+from torchtitan.train import main
 
 from .engine import ForgeEngine
 
@@ -351,4 +351,4 @@ class Trainer(ForgeEngine):
 
 
 if __name__ == "__main__":
-    train_main(Trainer)
+    main(Trainer)
