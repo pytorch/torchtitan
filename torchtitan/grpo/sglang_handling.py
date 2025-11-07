@@ -255,6 +255,7 @@ def send_param(
     total_group_size,
     sglang_gloo_group,
     sglang_nccl_group,
+    param_indx,
 ):
     if torch.distributed.get_rank() == 0:
         object_list = [
@@ -269,15 +270,14 @@ def send_param(
         object_list = [
             None,
         ]
-    device = torch.device("cpu")
     desired_dtype = (
         weight_dtypes[name]
         if isinstance(weight_dtypes[name], torch.dtype)
         else getattr(torch, weight_dtypes[name])
     )
-    torch.distributed.broadcast_object_list(
-        object_list, group_src=0, group=sglang_gloo_group, device=device
-    )
+    print(f"Attempting to send {object_list}")
+    obj_indx = torch.LongTensor([param_indx]).to(device=local_param.device)
+    torch.distributed.broadcast(obj_indx, group_src=0, group=sglang_nccl_group)
     # setup tensor list
     tensor_list = [
         torch.zeros(
@@ -293,10 +293,7 @@ def send_param(
 
 
 @env_fix_wrapper
-def send_wait(sglang_gloo_group):
+def send_wait(sglang_nccl_group, device):
     logger.debug("Sending wait signal to sglang...")
-    if torch.distributed.get_rank() == 0:
-        object_list = [{"name": "none"}]
-    else:
-        object_list = [None]
-    torch.distributed.broadcast_object_list(object_list, 0, group=sglang_gloo_group)
+    indx_tensor = torch.LongTensor([-1]).to(device=device)
+    torch.distributed.broadcast(indx_tensor, 0, group=sglang_nccl_group)
