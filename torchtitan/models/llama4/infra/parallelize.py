@@ -514,6 +514,8 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
     # but it is experimental.
     torch._dynamo.config.capture_scalar_outputs = True
+    # Workaround for https://github.com/pytorch/pytorch/issues/166926
+    torch._C._dynamo.eval_frame._set_lru_cache(False)
     for layer_id, transformer_block in model.layers.named_children():
         if transformer_block.moe_enabled:
             # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
