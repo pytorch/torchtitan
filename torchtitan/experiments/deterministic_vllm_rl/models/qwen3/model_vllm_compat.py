@@ -348,7 +348,7 @@ class Qwen3VLLMCompatModel(nn.Module, ModelProtocol):
         input_batch: torch.Tensor,
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
-    ) -> AttentionMasksType:
+    ) -> AttentionMasksType | None:
         # vLLM compat mode: no flex attention masks
         return None
 
