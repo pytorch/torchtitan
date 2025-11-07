@@ -27,7 +27,9 @@ def create_loss_fn():
     return loss_fn
 
 
-def compute_logp_from_model(model, input_ids, labels, loss_fn, temperature=1.0):
+def compute_logp_from_model(
+    model, input_ids, labels, loss_fn, temperature=1.0, **kwargs
+):
     """
     Compute log probabilities for on-policy training.
 
@@ -41,7 +43,7 @@ def compute_logp_from_model(model, input_ids, labels, loss_fn, temperature=1.0):
         pred: Model predictions
         logp: Log probabilities (negative of loss)
     """
-    pred = model(input_ids)
+    pred = model(input_ids, **kwargs)
     logger.debug(f"pred shape: {pred.shape}")
     if temperature != 1.0:
         # Apply temperature scaling to the logits
