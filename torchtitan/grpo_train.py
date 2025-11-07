@@ -46,7 +46,6 @@ from torchtitan.grpo.sglang_handling import (
     wait_for_sglang,
 )
 from torchtitan.grpo.utils import VocabParallelEntropyFunction
-from torchtitan.models.attention import init_attention_mask
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -101,7 +100,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if job_config.experimental.custom_import:
             importlib.import_module(job_config.experimental.custom_import)
 
-        if job_config.job.print_args:
+        if job_config.job.print_config:
             logger.info(f"Running with args: {job_config.to_dict()}")
 
         device_module, device_type = utils.device_module, utils.device_type
@@ -210,7 +209,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.model_args = model_args
 
         logger.info(
-            f"Building {self.train_spec.name} {job_config.model.flavor} with {model_args}"
+            f"Building {self.job_config.model.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
             model = self.train_spec.model_cls(model_args)
@@ -243,7 +242,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
-            f"{color.blue}Model {self.train_spec.name} {job_config.model.flavor} "
+            f"{color.blue}Model {self.job_config.model.name} {job_config.model.flavor} "
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
         )
 
@@ -296,7 +295,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
                 raise RuntimeError(
-                    f"Pipeline Parallel is enabled but {self.train_spec.name} "
+                    f"Pipeline Parallel is enabled but {self.job_config.model.name} "
                     f"does not support pipelining"
                 )
 
@@ -563,6 +562,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # if tp_rank == 0:
         device_type = utils.device_type
         input_ids = torch.from_numpy(input_ids).to(device_type)
+        extra_inputs = {}
         labels = torch.from_numpy(labels).to(device_type)
         mask = torch.from_numpy(masks).to(device_type)
         reward = torch.from_numpy(rewards).to(device_type).reshape(-1, 1)
@@ -572,6 +572,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             reward, job_config.grpo.pos_scaler, job_config.grpo.neg_scaler
         )
         ntokens_since_last_log = labels.numel()
+        # For arguments, like attention_masks, we have to put them in a separate
+        # dict as extra_inputs are not forwarded to other stages in PP, but
+        # extra_kwargs are.
+        extra_kwargs = {}
         # convert mask and reward to DTensor
         if self.tp_group is not None:
             mask = DTensor.from_local(mask, device_mesh=self.tp_mesh)
@@ -585,12 +589,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             cp_mesh = (
                 parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
             )
-
-            init_attention_mask(
-                input_ids,
-                self.tokenizer.eos_id,
-                cp_mesh,
-                sequence_lengths=sequence_lengths,
+            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
+                input_batch=input_ids,
+                tokenizer=self.tokenizer,
+                extra_inputs=extra_inputs,
             )
         elif sequence_lengths is not None:
             raise RuntimeError("`sequence_lengths` only supported with FlexAttention")
@@ -630,6 +632,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         labels,
                         self.loss_fn,
                         job_config.grpo.temperature,
+                        **extra_inputs,
+                        **extra_kwargs,
                     )
 
                     # Use the comprehensive helper with old_logp for microbatching
@@ -865,6 +869,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     else None
                 )
                 with torch.no_grad():
+                    extra_inputs = {}
+                    extra_kwargs = {}
+                    if getattr(self.model_args, "use_flex_attn", False):
+                        cp_mesh = (
+                            self.parallel_dims.world_mesh["cp"]
+                            if self.parallel_dims.cp_enabled
+                            else None
+                        )
+                        extra_kwargs["attention_masks"] = self.model_parts[
+                            0
+                        ].get_attention_masks(
+                            input_batch=input_ids,
+                            tokenizer=self.tokenizer,
+                            extra_inputs=extra_inputs,
+                        )
                     if (job_config.grpo.num_microbatches > 1) and (microbatch_idx > 0):
                         with self.train_context(optional_context_parallel_ctx):
                             with self.maybe_enable_amp:
@@ -874,6 +893,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                                     labels,
                                     self.loss_fn,
                                     job_config.grpo.temperature,
+                                    **extra_inputs,
+                                    **extra_kwargs,
                                 )
                                 del pred
                                 logp = logp.detach()
@@ -888,6 +909,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                                     labels,
                                     self.loss_fn,
                                     job_config.grpo.temperature,
+                                    **extra_inputs,
+                                    **extra_kwargs,
                                 )
                                 del ref_pred
                                 ref_logp = ref_logp.detach()
