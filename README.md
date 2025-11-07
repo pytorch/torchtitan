@@ -20,12 +20,11 @@
 
 
 ## Latest News
-- [2025/10] SkyPilot now supports TorchTitan! See the tutorial [here](https://docs.skypilot.co/en/latest/examples/training/torchtitan.html).
+- [2025/11] AMD released an [optimized fork](https://github.com/AMD-AGI/torchtitan-amd/tree/main) of `torchtitan` for AMD GPUs.
+- [2025/10] We released `torchtitan` [v0.2.0](https://github.com/pytorch/torchtitan/releases).
+- [2025/10] SkyPilot now supports `torchtitan`! See the tutorial [here](https://docs.skypilot.co/en/latest/examples/training/torchtitan.html).
 - [2025/07] We published [instructions](/torchtitan/models/README.md) on how to add a model to `torchtitan`.
-- [2025/07] We released `torchtitan` [v0.1.0](https://github.com/pytorch/torchtitan/releases), and also set up nightly builds.
 - [2025/04] Our paper was accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620).
-- [2025/04] Training the diffusion model [FLUX](torchtitan/models/flux/) with FSDP/HSDP is available as an experiment.
-- [2025/04] The frontend implementation of [SimpleFSDP](torchtitan/experiments/simple_fsdp/), a compiler-based FSDP framework, is available as an experiment.
 - [2024/12] GPU MODE [lecture](https://www.youtube.com/watch?v=VYWRjcUqW6w) on torchtitan.
 - [2024/07] [Presentation](https://pytorch2024.sched.com/event/1fHn3) at PyTorch Conference 2024.
 
