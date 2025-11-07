@@ -215,6 +215,7 @@ class ReplicateComputation(torch.nn.Module):
         mp_policy: MixedPrecisionPolicy | None,
         reshard_after_forward: bool,
         reduction_divide_factor: float | None,
+        full_dtensor: bool = False,
     ) -> None:
         super().__init__()
         self.device_mesh = device_mesh
@@ -233,6 +234,7 @@ class ReplicateComputation(torch.nn.Module):
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
         self.reshard_after_forward = reshard_after_forward
+        self.full_dtensor = full_dtensor
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -242,6 +244,10 @@ class ReplicateComputation(torch.nn.Module):
         non_dp_mesh_dims = x._spec.mesh.ndim - self.device_mesh.ndim
         assert non_dp_mesh_dims <= 2, "Only DP + EP/TP/EP+TP is supported"
         if non_dp_mesh_dims > 0:
+            if self.full_dtensor:
+                raise NotImplementedError(
+                    "full_dtensor not implemented for nD parallelisms"
+                )
             dp_mesh = self.device_mesh
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
             sharded_local_tensor = x.to_local()
@@ -277,7 +283,10 @@ class ReplicateComputation(torch.nn.Module):
                 placements=self.compute_placements,
                 forward_dtype=self.param_dtype,
                 backward_dtype=self.reduce_dtype,
-            ).to_local(grad_placements=self.grad_placements)
+            )
+
+            if not self.full_dtensor:
+                output = output.to_local(grad_placements=self.grad_placements)
         else:
             raise AssertionError(
                 f"Unsupported replicate compute on placement {x._spec.placements} for DTensor {x}"
@@ -322,6 +331,7 @@ def data_parallel(
     reshard_after_forward: bool = True,
     shard_dim: int = 0,
     reduction_divide_factor: float | None = None,
+    full_dtensor: bool = False,
 ) -> nn.Module:
     param_sharding: tuple[Placement, ...]
     if mode == "replicate":
@@ -387,6 +397,7 @@ def data_parallel(
                 mp_policy=mp_policy,
                 reshard_after_forward=reshard_after_forward,
                 reduction_divide_factor=reduction_divide_factor,
+                full_dtensor=full_dtensor,
             ),
         )
     return model
