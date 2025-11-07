@@ -6,7 +6,6 @@
 
 import os
 
-from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.train import main, Trainer
 
@@ -16,7 +15,8 @@ from .parallel_dims import TorchCommsParallelDims
 class TorchCommsTrainer(Trainer):
     parallel_dims: TorchCommsParallelDims
 
-    def init_distributed_env(self, job_config: JobConfig) -> ParallelDims:
+    def init_distributed(self) -> ParallelDims:
+        job_config = self.job_config
         dist_utils.init_distributed(
             job_config.comm,
             enable_cpu_backend=job_config.training.enable_cpu_offload,

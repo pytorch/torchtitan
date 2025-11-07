@@ -87,7 +87,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         job_config.maybe_log()
 
         # init distributed and build meshes
-        self.parallel_dims = parallel_dims = self.init_distributed_env(job_config)
+        self.parallel_dims = parallel_dims = self.init_distributed(job_config)
 
         world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
@@ -358,7 +358,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
-    def init_distributed_env(self, job_config: JobConfig) -> ParallelDims:
+    def init_distributed(self) -> ParallelDims:
+        job_config = self.job_config
         dist_utils.init_distributed(
             job_config.comm,
             enable_cpu_backend=job_config.training.enable_cpu_offload,
