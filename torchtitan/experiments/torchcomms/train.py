@@ -15,7 +15,7 @@ from .parallel_dims import TorchCommsParallelDims
 class TorchCommsTrainer(Trainer):
     parallel_dims: TorchCommsParallelDims
 
-    def _init_distributed_env(self, job_config: JobConfig) -> ParallelDims:
+    def init_distributed_env(self, job_config: JobConfig) -> ParallelDims:
         dist_utils.init_distributed(
             job_config.comm,
             enable_cpu_backend=job_config.training.enable_cpu_offload,
