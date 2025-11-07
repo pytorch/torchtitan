@@ -410,11 +410,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             yield input_dict, labels
 
-    def post_dataloading_processing(
-        self, input_dict: dict[str, torch.Tensor], label: torch.Tensor
-    ) -> tuple[
-        dict[str, torch.Tensor], torch.Tensor, dict[str, torch.Tensor], dict[str, Any]
-    ]:
+    def post_dataloading_process(
+        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
         """Post processing after data loading."""
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
@@ -430,7 +428,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 extra_inputs=extra_inputs,
             )
 
-        return inputs, label, extra_inputs, extra_kwargs
+        return inputs, labels, extra_inputs, extra_kwargs
 
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
@@ -438,7 +436,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs, label, extra_inputs, extra_kwargs = self.post_dataloading_processing(
+        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
             input_dict, labels
         )
         # apply context parallelism if cp is enabled

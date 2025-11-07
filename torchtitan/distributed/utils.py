@@ -145,7 +145,9 @@ def set_determinism(
     # and choose a unique seed for each rank on the PP mesh.
     # We support multiple distinct dimensions by adding each distinct dimension's local rank to the seed.
     distinct_dims_in_mesh = [
-        dim for dim in distinct_seed_mesh_dims if dim in world_mesh.mesh_dim_names
+        dim
+        for dim in distinct_seed_mesh_dims
+        if world_mesh.mesh_dim_names and dim in world_mesh.mesh_dim_names
     ]
 
     if c10d.get_world_size() > 1 and distinct_dims_in_mesh:
