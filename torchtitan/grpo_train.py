@@ -1105,7 +1105,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         all_weights = list()
         grad_norms = list()
         logger.debug(f"Microbatches in this step: {len(microbatches)}")
-        ptx_loss = 0.0
+        total_ptx_loss = 0.0
         for mb_idx, microbatch in enumerate(microbatches):
             # For each PPO Microbatch (different from the microbatch in grad acc/dp)
             self.optimizers.zero_grad()
@@ -1133,7 +1133,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     ptx_labels=nanobatch["ptx_labels"],
                 )
                 if ptx_loss is not None:
-                    ptx_loss += ptx_loss / len(microbatches)
+                    total_ptx_loss += ptx_loss / len(microbatches)
                     self.ntokens_seen += ptx_tokens_seen
 
             grad_norm = dist_utils.clip_grad_norm_(
@@ -1167,8 +1167,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     ft_pg,
                 ),
             )
+            if data_iterator is not None:
+                global_ptx_loss = dist_utils.dist_mean(
+                    torch.tensor(
+                        total_ptx_loss, dtype=torch.float32, device=self.device
+                    ),
+                    parallel_dims.world_mesh["dp_cp"],
+                    ft_pg,
+                )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
+            global_ptx_loss = total_ptx_loss
             global_ntokens_seen = self.ntokens_seen
         # Yeah, maybe we should include a max here, but spikes will still be seen in the graph, it's hard to
         # not show a 1000 spike when it's usually below 1.0 after all.
@@ -1185,7 +1194,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if data_iterator is not None:
             extra_metrics.update(
                 {
-                    "loss_metrics/ptx_loss": ptx_loss,
+                    "loss_metrics/ptx_loss": global_ptx_loss,
                 }
             )
         self.metrics_processor.log(
