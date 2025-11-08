@@ -46,6 +46,21 @@ qwen2_configs = {
         use_qkv_bias=True,
         rope_theta=1000000,
     ),
+    "7B_flex_attention": TransformerModelArgs(
+        vocab_size=152064,
+        max_seq_len=131072,
+        head_dim=128,
+        dim=3584,
+        hidden_dim=18944,
+        n_layers=28,
+        norm_eps=1e-6,
+        n_heads=28,
+        n_kv_heads=4,
+        use_qkv_bias=True,
+        rope_theta=1000000,
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
+    ),
 }
 
 
