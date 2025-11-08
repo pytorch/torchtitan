@@ -771,7 +771,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
             mb_batches = batches[mb_start:mb_end]
             dynamic_batch = list()
-            start_len = mb_batches[0][0].shape[1]
+            print(mb_start, mb_end)
+            try:
+                start_len = mb_batches[0][0].shape[1]
+            except IndexError as e:
+                print(
+                    "failed to create this microbatch,"
+                    f"mb_start: {mb_start}, mb_end: {mb_end}, num in mb: {len(mb_batches)}"
+                )
+                raise e
             len_step = dynamic_batch_size
             curr_len = -1
 
