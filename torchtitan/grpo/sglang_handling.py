@@ -183,10 +183,23 @@ def get_hostname_url():
 
 def param_to_sglang_data(name):
     out_permute = False
-    if "attention.w" in name:
+    # check if name is weird
+    if "attention." in name and any(
+        [
+            ".wq" in name,
+            ".wk" in name,
+            ".wv" in name,
+        ]
+    ):
         # column parallel qkv, so...
         out_permute = (".wq" in name) or (".wk" in name)
         out_name = "model." + name.split("attention")[0] + "self_attn.qkv_proj"
+        if ".bias" in name:
+            out_name += ".bias"
+        else:
+            out_name += ".weight"
+    elif "attention." in name and ".wo" in name:
+        out_name = "model." + name.split("attention")[0] + "self_attn.o_proj"
         if ".bias" in name:
             out_name += ".bias"
         else:
@@ -275,7 +288,7 @@ def send_param(
         if isinstance(weight_dtypes[name], torch.dtype)
         else getattr(torch, weight_dtypes[name])
     )
-    print(f"Attempting to send {object_list}")
+    logger.debug(f"Attempting to send {object_list}")
     obj_indx = torch.LongTensor([param_indx]).to(device=local_param.device)
     torch.distributed.broadcast(obj_indx, group_src=0, group=sglang_nccl_group)
     # setup tensor list

@@ -18,7 +18,7 @@ enable_wandb = true
 
 [model]
 name = "qwen2"
-flavor = "7B"
+flavor = "7B_flex_attention"
 tokenizer_path = "Qwen/Qwen2.5-7B"
 # converters = "float8"
 
@@ -40,9 +40,9 @@ local_batch_size = 1
 seq_len = 32768
 global_batch_size = 256
 
-max_norm = 0.25  # grad norm clipping
+max_norm = 1.0  # grad norm clipping
 steps = 1000
-dataset = "c4"
+dataset = "pretrain_mixin"
 seed = 42
 
 [compile]
@@ -78,6 +78,7 @@ onpolicy_logp_threshold = 0.0
 rollout_is_level = "sequence"
 rollout_is_mode = "truncate"
 rollout_is_threshold = 4.0
+ptx_mixin_batchsize = 32
 
 [checkpoint]
 enable = true

@@ -9,7 +9,7 @@ import json
 import os
 import time
 from datetime import timedelta
-from typing import Any, Generator, Optional, Tuple
+from typing import Any, Generator, Iterable, Optional, Tuple
 
 import numpy as np
 import torch
@@ -531,6 +531,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.sglang_nccl_group, self.sglang_gloo_group = setup_group(
                 hostname, job_config.grpo.sglang_port, self.total_group_size, local_rank
             )
+        if job_config.grpo.ptx_mixin_batchsize > 0:
+            self.dataloader = self.train_spec.build_dataloader_fn(
+                dp_world_size=dp_degree,
+                dp_rank=dp_rank,
+                tokenizer=self.tokenizer,
+                job_config=job_config,
+            )
+            ptx_per_grad_accum = job_config.training.local_batch_size * dp_degree
+            assert (
+                job_config.grpo.ptx_mixin_batchsize % ptx_per_grad_accum == 0
+            ), "The ptx.mixin_batchsize must be divisible by the product of local_batch_size and dp_degree!"
+            self.num_ptx_steps = (
+                job_config.grpo.ptx_mixin_batchsize // ptx_per_grad_accum
+            )
+        else:
+            self.dataloader = None
 
         logger.info(
             "Trainer is initialized with "
@@ -734,6 +750,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         max_token_len,
         dynamic_batch_size,
         dynamic_grad_accum_size,
+        data_iterator: Optional[
+            Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+        ] = None,
     ):
         batch_prep_time_start = time.perf_counter()
         actual_grad_accum = 0
@@ -916,6 +935,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                                 ref_logp = ref_logp.detach()
                     else:
                         ref_logp = None
+                if data_iterator is not None:
+                    ptx_inputs = list()
+                    ptx_labels = list()
+                    for _ in range(self.num_ptx_steps):
+                        input_dict, labels = next(data_iterator)
+                        ptx_inputs.append(input_dict)
+                        ptx_labels.append(labels)
+                else:
+                    ptx_inputs = None
+                    ptx_labels = None
                 microbatch.append(
                     {
                         "batch": batch,
@@ -925,6 +954,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         "total_masked_tokens": total_masked_tokens,
                         "logp": logp,
                         "ref_logp": ref_logp,
+                        "ptx_inputs": ptx_inputs,
+                        "ptx_labels": ptx_labels,
                     }
                 )
             microbatches.append(microbatch)
@@ -934,7 +965,107 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             time.perf_counter() - batch_prep_time_start,
         )
 
-    def train_step(self):
+    def forward_backwards_step_ptx(self, ptx_inputs, ptx_labels):
+        total_loss = 0
+        n_tokens_seen = 0
+        if ptx_inputs is None:
+            return None, None
+        else:
+            for input_dict, labels in zip(ptx_inputs, ptx_labels):
+                n_tokens_seen += labels.numel()
+                model_parts = self.model_parts
+                parallel_dims = self.parallel_dims
+
+                inputs = input_dict["input"]
+                extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+                # For arguments, like attention_masks, we have to put them in a separate
+                # dict as extra_inputs are not forwarded to other stages in PP, but
+                # extra_kwargs are.
+                extra_kwargs = {}
+
+                if getattr(self.model_args, "use_flex_attn", False):
+                    extra_kwargs["attention_masks"] = model_parts[
+                        0
+                    ].get_attention_masks(
+                        input_batch=inputs,
+                        tokenizer=self.tokenizer,
+                        extra_inputs=extra_inputs,
+                    )
+
+                # apply context parallelism if cp is enabled
+                # ensure CP handles the separate freqs_cis buffer for each pp stage
+                cp_mesh = (
+                    parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
+                )
+                optional_context_parallel_ctx = (
+                    dist_utils.create_context_parallel_ctx(
+                        cp_mesh=parallel_dims.world_mesh["cp"],
+                        cp_buffers=list(input_dict.values())
+                        + [labels]
+                        + [m.freqs_cis for m in model_parts],
+                        cp_seq_dims=[1] * len(input_dict)
+                        + [1]
+                        + [0 for _ in model_parts],
+                        cp_no_restore_buffers=set(input_dict.values()).union([labels]),
+                        cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+                    )
+                    if parallel_dims.cp_enabled
+                    else None
+                )
+
+                if parallel_dims.pp_enabled:
+                    # Pipeline Parallel forward / backward inside step() call
+                    with self.train_context(optional_context_parallel_ctx):
+                        targets, losses = (
+                            (labels, []) if self.pp_has_last_stage else (None, None)
+                        )
+                        if self.pp_has_first_stage:
+                            self.pp_schedule.step(
+                                inputs,
+                                **extra_inputs,
+                                **extra_kwargs,
+                                target=targets,
+                                losses=losses,
+                            )
+                        else:
+                            self.pp_schedule.step(
+                                **extra_kwargs,
+                                target=targets,
+                                losses=losses,
+                            )
+
+                    # accumulate losses across pipeline microbatches
+                    # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
+                    loss = (
+                        # using sum instead of mean because we already rescale the
+                        # loss_fn down by a factor of n_microbatches in
+                        # torchtitan/distributed/pipeline_parallel.py
+                        torch.sum(torch.stack(losses)).to(self.device)
+                        if self.pp_has_last_stage
+                        else torch.tensor([-1.0], device=self.device)
+                    )
+                else:
+                    # Non-PP forward / backward
+                    with self.train_context(optional_context_parallel_ctx):
+                        assert len(model_parts) == 1
+                        with self.maybe_enable_amp:
+                            pred = model_parts[0](
+                                inputs, **extra_inputs, **extra_kwargs
+                            )
+                            loss = self.loss_fn(pred, labels).mean() / len(ptx_inputs)
+                        # need to free pred before bwd to avoid peaking memory
+                        del pred
+                        loss.backward()
+                        total_loss += loss.detach().item()
+
+        return total_loss, n_tokens_seen
+
+    def train_step(
+        self,
+        data_iterator: Optional[
+            Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+        ] = None,
+    ):
         logger.debug("prepping training step...")
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
@@ -957,6 +1088,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 max_token_len=max_token_len,
                 dynamic_batch_size=dynamic_batch_size,
                 dynamic_grad_accum_size=dynamic_grad_acc_size,
+                data_iterator=data_iterator,
             )
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
@@ -973,6 +1105,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         all_weights = list()
         grad_norms = list()
         logger.debug(f"Microbatches in this step: {len(microbatches)}")
+        ptx_loss = 0.0
         for mb_idx, microbatch in enumerate(microbatches):
             # For each PPO Microbatch (different from the microbatch in grad acc/dp)
             self.optimizers.zero_grad()
@@ -994,6 +1127,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.ntokens_seen += n_tokens_seen
                 # Accumulate tokens for MFU/throughput computation
                 self.metrics_processor.ntokens_since_last_log += n_tokens_seen
+                # PTX loss, if applicable
+                ptx_loss, ptx_tokens_seen = self.forward_backwards_step_ptx(
+                    ptx_inputs=nanobatch["ptx_inputs"],
+                    ptx_labels=nanobatch["ptx_labels"],
+                )
+                if ptx_loss is not None:
+                    ptx_loss += ptx_loss / len(microbatches)
+                    self.ntokens_seen += ptx_tokens_seen
 
             grad_norm = dist_utils.clip_grad_norm_(
                 [p for m in self.model_parts for p in m.parameters()],
@@ -1041,6 +1182,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 "time_metrics/batch_prep_s": batch_prep_time,
             }
         )
+        if data_iterator is not None:
+            extra_metrics.update(
+                {
+                    "loss_metrics/ptx_loss": ptx_loss,
+                }
+            )
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -1175,6 +1322,35 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # To account for fun with updating sglang...
         torch.distributed.barrier()
 
+    def batch_generator(
+        self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        """Returns an iterator that processes batches from the data iterator."""
+        device_type = utils.device_type
+        data_iterator = iter(data_iterable)
+
+        while True:
+            data_load_start = time.perf_counter()
+            try:
+                batch = next(data_iterator)
+            except StopIteration as ex:
+                # If data runs out during gradient accumulation, that
+                # entire step will not be executed.
+                raise DataloaderExhaustedError() from ex
+            input_dict, labels = batch
+
+            # Move tensors to the appropriate device
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(device_type)
+                elif isinstance(v, list):
+                    input_dict[k] = [
+                        x.to(device_type) for x in v if isinstance(x, torch.Tensor)
+                    ]
+            labels = labels.to(device_type)
+
+            yield input_dict, labels
+
     @record
     def train(self):
         job_config = self.job_config
@@ -1217,11 +1393,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 ),
             ),
         ):
+            if self.dataloader is not None:
+                data_iterator = self.batch_generator(self.dataloader)
+            else:
+                data_iterator = None
             while self.step < job_config.training.steps:
                 self.step += 1
                 self.gc_handler.run(self.step)
                 try:
-                    self.train_step()
+                    self.train_step(data_iterator)
                 except DataloaderExhaustedError:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
