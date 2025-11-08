@@ -24,6 +24,8 @@ from torchtitan.experiments.compiler_toolkit.common_utils import (
 from torchtitan.experiments.compiler_toolkit.graph_utils import (
     CompiledModule,
     joint_graph_builder,
+    get_inductor_lite_fw_compiler,
+    get_inductor_lite_bw_compiler,
 )
 from torchtitan.experiments.simple_fsdp.llama3.parallelize import (
     parallelize_llama as simple_fsdp_parallelize_llama,
@@ -53,12 +55,12 @@ def compiler(name: str, gm: torch.fx.GraphModule, example_inputs):
 
 
 def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
-    return compiler("fwd_gm", gm, example_inputs)
-
+    gm = compiler("fwd_gm", gm, example_inputs)
+    return get_inductor_lite_fw_compiler()(gm, example_inputs)
 
 def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
-    return compiler("bwd_gm", gm, example_inputs)
-
+    gm = compiler("bwd_gm", gm, example_inputs)
+    return get_inductor_lite_bw_compiler()(gm, example_inputs)
 
 def validate_flex_attention_annotation(joint_with_descriptors):
     """Verify user annotations show up in the graph."""
