@@ -87,7 +87,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         job_config.maybe_log()
 
         # init distributed and build meshes
-        self.parallel_dims = parallel_dims = self.init_distributed(job_config)
+        self.parallel_dims = parallel_dims = self.init_distributed()
 
         world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
