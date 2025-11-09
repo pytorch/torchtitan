@@ -20,7 +20,7 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
-    ScheduleDualPipeV,
+    # ScheduleDualPipeV,  # Not available in PyTorch 2.8.0+rocm6.4
     ScheduleZBVZeroBubble,
 )
 
@@ -435,7 +435,7 @@ def pipeline_module_split(
 
     schedule_class = get_schedule_class(pp_schedule)
     style = (
-        "v" if schedule_class in (ScheduleZBVZeroBubble, ScheduleDualPipeV) else "loop"
+        "v" if schedule_class == ScheduleZBVZeroBubble else "loop"  # Removed ScheduleDualPipeV - not available in PyTorch 2.8.0
     )
 
     def _get_stage_indices() -> tuple[int]:

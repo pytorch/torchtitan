@@ -45,9 +45,19 @@ class FlexAttentionWrapper(torch.nn.Module):
         block_mask as a keyword argument to be compatible with _ContextParallel.
     """
 
-    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="max-autotune-no-cudagraphs"
-    )
+    _compiled_flex_attn: ClassVar[Callable | None] = None
+
+    @classmethod
+    def _get_compiled_flex_attn(cls) -> Callable:
+        if cls._compiled_flex_attn is None:
+            # Workaround for PyTorch 2.8.0+rocm6.4: skip compilation if dynamo is disabled
+            if hasattr(torch._dynamo.config, 'disable') and torch._dynamo.config.disable:
+                cls._compiled_flex_attn = flex_attention
+            else:
+                cls._compiled_flex_attn = torch.compile(
+                    flex_attention, mode="max-autotune-no-cudagraphs"
+                )
+        return cls._compiled_flex_attn
 
     def forward(
         self,
@@ -67,7 +77,7 @@ class FlexAttentionWrapper(torch.nn.Module):
         # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
         #    to convert `lse` to be DTensor.
 
-        return FlexAttentionWrapper._compiled_flex_attn(
+        return FlexAttentionWrapper._get_compiled_flex_attn()(
             q,
             k,
             v,
@@ -215,7 +225,19 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     return sliding_window_mod
 
 
-_compiled_create_block_mask = torch.compile(create_block_mask)
+_compiled_create_block_mask = None
+
+
+def _get_compiled_create_block_mask():
+    """Lazily compile create_block_mask on first use."""
+    global _compiled_create_block_mask
+    if _compiled_create_block_mask is None:
+        # Workaround for PyTorch 2.8.0+rocm6.4: skip compilation if dynamo is disabled
+        if hasattr(torch._dynamo.config, 'disable') and torch._dynamo.config.disable:
+            _compiled_create_block_mask = create_block_mask
+        else:
+            _compiled_create_block_mask = torch.compile(create_block_mask)
+    return _compiled_create_block_mask
 
 
 @functools.lru_cache(4)
@@ -225,4 +247,4 @@ def create_attention_mask(*args, **kwargs):
     This function is cached to avoid recreating BlockMasks for the same
     arguments.
     """
-    return _compiled_create_block_mask(*args, **kwargs)
+    return _get_compiled_create_block_mask()(*args, **kwargs)
