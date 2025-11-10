@@ -38,6 +38,14 @@ class Job:
     JobConfig dataclass. Users need to ensure that the path can be imported.
     """
 
+    dry_run: bool = False
+    """
+    Enable dry run mode for configuration validation without GPU allocation.
+    In dry run mode, the configuration is parsed and validated, model architecture
+    is constructed (on meta device), but GPU initialization, distributed setup,
+    and training are skipped. This provides fast feedback for config validation.
+    """
+
 
 @dataclass
 class Profiling:
