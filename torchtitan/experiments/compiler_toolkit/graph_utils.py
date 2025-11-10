@@ -15,7 +15,6 @@ from torch._functorch.aot_autograd import (
     JointWithDescriptors,
 )
 from torch._guards import tracing, TracingContext
-from torch.distributed.tensor import DTensor
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
@@ -93,8 +92,10 @@ def joint_graph_builder(
         joint_custom_pass: Optional custom pass to run on the joint graph
     """
     assert isinstance(model_args, tuple)
-    for arg in model_args:
-        assert isinstance(arg, DTensor)
+
+    # TODO: Enable this when we have full-DTensorize inputs support of SimpleFSDP
+    # for arg in model_args:
+    #     assert isinstance(arg, DTensor)
 
     # get joint graph
     (
