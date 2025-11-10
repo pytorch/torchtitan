@@ -79,7 +79,6 @@ def varlen_collate_fn(batch):
         Packed (input_dict, label) with collapsed batch dimension
     """
     if len(batch) == 1:
-        # Single sample - already packed
         input_dict, label = batch[0]
         return {
             "input": input_dict["input"].unsqueeze(0),  # [1, seq_len]
@@ -89,7 +88,6 @@ def varlen_collate_fn(batch):
             "max_k": input_dict["max_k"],
         }, label.unsqueeze(0)  # [1, seq_len]
 
-    # Multiple samples - pack them together
     inputs = []
     labels = []
     cu_seqlens_list = []
@@ -100,23 +98,18 @@ def varlen_collate_fn(batch):
         inputs.append(input_dict["input"])
         labels.append(label)
 
-        # Get cu_seqlens from this sample and adjust by offset
         cu_seqlens = input_dict["cu_seq_q"]
-        # Don't include the last boundary (we'll add it at the end)
+        # we need to use offset since the cu_seqlens are per sample
         cu_seqlens_adjusted = cu_seqlens[:-1] + offset
         cu_seqlens_list.append(cu_seqlens_adjusted)
 
-        # Track maximum sequence length across all samples
         max_seqlen = max(max_seqlen, input_dict["max_q"])
 
-        # Update offset for next sample
         offset += len(input_dict["input"])
 
-    # Concatenate all inputs and labels
-    packed_input = torch.cat(inputs, dim=0).unsqueeze(0)  # Shape: [total_tokens]
-    packed_label = torch.cat(labels, dim=0).unsqueeze(0)  # Shape: [total_tokens]
+    packed_input = torch.cat(inputs, dim=0).unsqueeze(0)  # Shape: [1, total_tokens]
+    packed_label = torch.cat(labels, dim=0).unsqueeze(0)  # Shape: [1, total_tokens]
 
-    # Combine all cu_seqlens and add final boundary
     packed_cu_seqlens = torch.cat(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32)]
     )
@@ -129,6 +122,24 @@ def varlen_collate_fn(batch):
         "max_k": max_seqlen,
     }, packed_label
 
+
+def flex_collate_fn(batch):
+    inputs = []
+    labels = []
+    cu_seqlens_list = []
+    max_seqlens_list = []
+
+    for input_dict, label in batch:
+        inputs.append(input_dict["input"])
+        labels.append(label)
+        cu_seqlens_list.append(input_dict["cu_seq_q"])
+        max_seqlens_list.append(input_dict["max_q"])
+
+    return {
+        "input": torch.stack(inputs),  # [batch_size, seq_len]
+        "cu_seq_q": cu_seqlens_list,  # List of tensors, one per batch element
+        "max_q": max_seqlens_list,
+    }, torch.stack(labels)
 
 
 class HuggingFaceTextDataset(IterableDataset, Stateful):
@@ -179,6 +190,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         max_buffer_token_len = 1 + self.seq_len
 
         while True:
+            printed = False
             for sample in self._get_data_iter():
                 # Use the dataset-specific text processor
                 sample_text = self._text_processor(sample)
@@ -189,7 +201,8 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 self._sample_idx += 1
 
                 # marks where this current document ends
-                if self.use_varlen_attn:
+                # if self.use_varlen_attn:
+                if self.use_varlen_attn or self.use_flex_attn:
                     self._boundary_buffer.append(len(self._token_buffer))
 
                 while len(self._token_buffer) >= max_buffer_token_len:
@@ -201,7 +214,8 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                     input = x[:-1]
                     label = x[1:]
 
-                    if self.use_varlen_attn:
+                    # if self.use_varlen_attn:
+                    if self.use_varlen_attn or self.use_flex_attn:
                         boundaries_in_window = [
                             b for b in self._boundary_buffer
                             if b <= max_buffer_token_len
@@ -224,6 +238,10 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
                         seq_lengths = torch.diff(cu_seqlens_input)
                         max_seqlen = seq_lengths.max().item() if len(seq_lengths) > 0 else self.seq_len
+
+                        if not printed:
+                            print(f"input: {input}")
+                            print(f"cu_seqlens_input: {cu_seqlens_input}")
 
                         yield {
                             "input": input,
@@ -290,6 +308,7 @@ def build_text_dataloader(
 
     model_args = train_spec.get_train_spec(job_config.model.name).model_args[job_config.model.flavor]
     use_varlen_attn = getattr(model_args, "use_varlen_attn", False)
+    use_flex_attn = getattr(model_args, "use_flex_attn", False)
 
     hf_ds = HuggingFaceTextDataset(
         dataset_name=dataset_name,
@@ -301,8 +320,14 @@ def build_text_dataloader(
         infinite=infinite,
     )
     hf_ds.use_varlen_attn = use_varlen_attn
+    hf_ds.use_flex_attn = use_flex_attn
 
-    collate_fn=varlen_collate_fn if use_varlen_attn else None
+    if use_varlen_attn:
+        collate_fn=varlen_collate_fn
+    # elif use_flex_attn:
+    #     collate_fn=flex_collate_fn
+    else:
+        collate_fn=None
 
     return ParallelAwareDataloader(
         dataset=hf_ds,

@@ -214,40 +214,57 @@ class Attention(nn.Module):
         freqs_cis: torch.Tensor,
         cu_seqlens: torch.Tensor,  # [num_sequences + 1]
     ):
-        xq = xq.squeeze(0)  # [total_tokens, n_heads, head_dim]
-        xk = xk.squeeze(0)
+        # xq = xq.squeeze(0)  # [total_tokens, n_heads, head_dim]
+        # xk = xk.squeeze(0)
+
+        bs = xq.shape[0]
+        # print(f"batch size: {bs}")
 
         xq_out_list = []
         xk_out_list = []
 
-        for i in range(len(cu_seqlens) - 1):
-            start_idx = cu_seqlens[i].item()
-            end_idx = cu_seqlens[i + 1].item()
-            seq_len = end_idx - start_idx
+        for b in range(bs):
+            xq_batch = xq[0]
+            xk_batch = xk[0]
 
-            # extract this sequence
-            xq_seq = xq[start_idx:end_idx]  # [seq_len, n_heads, head_dim]
-            xk_seq = xk[start_idx:end_idx]
+            xq_seq_list = []
+            xk_seq_list = []
 
-            # get freqs_cis for this sequence length (positions 0 to seq_len-1)
-            freqs_cis_seq = freqs_cis[:seq_len]  # [seq_len, head_dim/2]
+            # print(f"full_batch cu_seqlens: {cu_seqlens}")
 
-            # apply RoPE to this sequence
-            xq_seq_rope, xk_seq_rope = apply_rotary_emb(
-                xq_seq.unsqueeze(0),  # add batch dim back
-                xk_seq.unsqueeze(0),
-                freqs_cis=freqs_cis_seq
-            )
+            # current_cu_seqlens = cu_seqlens[b] if bs > 1 else cu_seqlens
+            current_cu_seqlens = cu_seqlens[b]
+            # print(f"current_cu_seqlens: {current_cu_seqlens}")
+            for i in range(len(current_cu_seqlens) - 1):
+                start_idx = current_cu_seqlens[i].item()
+                end_idx = current_cu_seqlens[i + 1].item()
+                seq_len = end_idx - start_idx
 
-            xq_out_list.append(xq_seq_rope.squeeze(0))
-            xk_out_list.append(xk_seq_rope.squeeze(0))
+                xq_seq = xq_batch[start_idx:end_idx]  # [seq_len, n_heads, head_dim]
+                xk_seq = xk_batch[start_idx:end_idx]
+
+                # get freqs_cis for this sequence length (positions 0 to seq_len-1)
+                freqs_cis_seq = freqs_cis[:seq_len]  # [seq_len, head_dim/2]
+
+                xq_seq_rope, xk_seq_rope = apply_rotary_emb(
+                    xq_seq.unsqueeze(0),  # add batch dim back
+                    xk_seq.unsqueeze(0),
+                    freqs_cis=freqs_cis_seq
+                )
+                # print("ropes: ", xq_seq_rope, xk_seq_rope)
+                xq_seq_list.append(xq_seq_rope.squeeze(0))
+                xk_seq_list.append(xk_seq_rope.squeeze(0))
+
+            xq_out_list.append(torch.cat(xq_seq_list, dim=0))
+            xk_out_list.append(torch.cat(xk_seq_list, dim=0))
 
         # concatenate all sequences back together
-        xq_out = torch.cat(xq_out_list, dim=0)  # [total_tokens, n_heads, head_dim]
-        xk_out = torch.cat(xk_out_list, dim=0)
+        # xq_out = torch.cat(xq_out_list, dim=0)  # [total_tokens, n_heads, head_dim]
+        # xk_out = torch.cat(xk_out_list, dim=0)
 
         # add batch dimension back
-        return xq_out.unsqueeze(0), xk_out.unsqueeze(0)
+        # return xq_out.unsqueeze(0), xk_out.unsqueeze(0)
+        return torch.stack(xq_out_list), torch.stack(xk_out_list)
 
     def forward(
         self,
@@ -278,11 +295,13 @@ class Attention(nn.Module):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        if self.use_varlen_attn:
+        if self.use_varlen_attn or self.use_flex_attn:
+        # if self.use_varlen_attn:
             cu_seq_q = kwargs.get("cu_seq_q")
             assert(cu_seq_q is not None)
             xq, xk = self._apply_rotary_per_sequence(xq, xk, freqs_cis, cu_seq_q)
         else:
+            # print(f"batch size: {xq.shape[0]}")
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # repeat k/v heads if n_kv_heads < n_heads
