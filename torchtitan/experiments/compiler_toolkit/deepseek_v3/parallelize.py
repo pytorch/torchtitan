@@ -21,6 +21,8 @@ from torchtitan.experiments.compiler_toolkit.common_utils import (
 
 from torchtitan.experiments.compiler_toolkit.graph_utils import (
     CompiledModule,
+    get_inductor_lite_bw_compiler,
+    get_inductor_lite_fw_compiler,
     joint_graph_builder,
 )
 
@@ -43,11 +45,19 @@ def compiler(name: str, gm: torch.fx.GraphModule, example_inputs):
 
 
 def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
-    return compiler("fwd_gm", gm, example_inputs)
+    gm = compiler("fwd_gm", gm, example_inputs)
+
+    # TODO: fix inductor size assertion for all_reduce
+    extra_inductor_config = {"size_asserts": False}
+    return get_inductor_lite_fw_compiler(extra_inductor_config)(gm, example_inputs)
 
 
 def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
-    return compiler("bwd_gm", gm, example_inputs)
+    gm = compiler("bwd_gm", gm, example_inputs)
+
+    # TODO: fix inductor size assertion for all_reduce
+    extra_inductor_config = {"size_asserts": False}
+    return get_inductor_lite_bw_compiler(extra_inductor_config)(gm, example_inputs)
 
 
 def annotate_deepseekv3() -> None:
