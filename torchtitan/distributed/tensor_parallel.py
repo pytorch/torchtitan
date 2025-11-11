@@ -17,7 +17,9 @@ def maybe_enable_async_tp(job_config: JobConfig, tp_mesh: DeviceMesh):
         return
 
     if not (job_config.compile.enable and "model" in job_config.compile.components):
-        raise RuntimeError("Async TP requires --training.compile")
+        raise RuntimeError(
+            "Async TP requires 'model' in --compile.components and --compile.enable"
+        )
 
     from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
