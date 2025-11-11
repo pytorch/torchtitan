@@ -4,10 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -23,12 +22,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
-from torch.utils.checkpoint import (
-    checkpoint,
-    CheckpointPolicy,
-    create_selective_checkpoint_contexts,
-)
-
 
 _active_parametrization = True
 
@@ -184,36 +177,13 @@ def _register_parametrization(
     module.__class__ = module_cls
 
 
-def fsdp_policy() -> tuple[Callable[..., Any], Callable[..., Any]]:
-    def _fsdp_recomp_policy() -> Callable[..., CheckpointPolicy]:
-        def _custom_policy(
-            ctx: Any, func: Any, *args: Any, **kwargs: Any
-        ) -> CheckpointPolicy:
-            to_recompute = func in {
-                torch.ops._c10d_functional.all_gather_into_tensor.default,
-                torch.ops._c10d_functional.wait_tensor.default,
-                torch.ops.aten._to_copy.default,  # for dtype cast in FSDP
-            }
-            return (
-                CheckpointPolicy.MUST_RECOMPUTE
-                if to_recompute
-                else CheckpointPolicy.MUST_SAVE
-            )
-
-        return _custom_policy
-
-    return create_selective_checkpoint_contexts(_fsdp_recomp_policy())
-
-
 class ReplicateComputation(torch.nn.Module):
     def __init__(
         self,
         device_mesh: DeviceMesh,
         param_sharding: tuple[Placement, ...],
         mode: str,
-        regional_ac: bool,
         mp_policy: MixedPrecisionPolicy | None,
-        reshard_after_forward: bool,
         reduction_divide_factor: float | None,
     ) -> None:
         super().__init__()
@@ -228,11 +198,9 @@ class ReplicateComputation(torch.nn.Module):
             if reduction_divide_factor is not None
             else Partial(reduce_op="avg")
         ] * self.device_mesh.ndim
-        self.regional_ac = regional_ac
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
-        self.reshard_after_forward = reshard_after_forward
 
     def replicate_compute(self, x: DTensor) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
@@ -295,21 +263,7 @@ class ReplicateComputation(torch.nn.Module):
         if not _active_parametrization:
             return x
 
-        if (
-            self.regional_ac
-            and self.mode in ("fully_shard", "hybrid_shard")
-            and self.reshard_after_forward
-        ):
-            # apply checkpointing to implement reshard_after_forward
-            output = checkpoint(
-                self.replicate_compute,
-                x,
-                use_reentrant=False,
-                context_fn=fsdp_policy,
-            )
-        else:
-            output = self.replicate_compute(x)
-
+        output = self.replicate_compute(x)
         return output
 
 
@@ -317,9 +271,7 @@ def data_parallel(
     model: nn.Module,
     device_mesh: DeviceMesh,
     mode: str = "replicate",
-    ac_mode: str = "none",
     mp_policy: MixedPrecisionPolicy | None = None,
-    reshard_after_forward: bool = True,
     shard_dim: int = 0,
     reduction_divide_factor: float | None = None,
 ) -> nn.Module:
@@ -338,9 +290,6 @@ def data_parallel(
         raise ValueError(f"Unsupported mode {mode}")
 
     modules = list(model.modules())
-
-    # apply regional ac (with fsdp_policy) if no global ac is to be applied
-    regional_ac = ac_mode == "none"
 
     for mod in modules:
         params_dict = dict(mod.named_parameters(recurse=False))
@@ -370,7 +319,6 @@ def data_parallel(
                 #         device_mesh,
                 #         param_sharding,
                 #         mode,
-                #         regional_ac,
                 #         mp_policy=mp_policy,
                 #     ),
                 #     unsafe=True,
@@ -383,9 +331,7 @@ def data_parallel(
                 device_mesh,
                 param_sharding,
                 mode,
-                regional_ac,
                 mp_policy=mp_policy,
-                reshard_after_forward=reshard_after_forward,
                 reduction_divide_factor=reduction_divide_factor,
             ),
         )
