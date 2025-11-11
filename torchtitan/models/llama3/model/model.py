@@ -212,7 +212,7 @@ class Attention(nn.Module):
         xq: torch.Tensor,  # [bs, total_tokens, n_heads, head_dim]
         xk: torch.Tensor,
         freqs_cis: torch.Tensor,
-        cu_seqlens: torch.Tensor,  # [num_sequences + 1]
+        cu_seqlens: list,  # [num_sequences + 1]
     ):
         xq = xq.squeeze(0)  # [total_tokens, n_heads, head_dim]
         xk = xk.squeeze(0)
@@ -221,8 +221,8 @@ class Attention(nn.Module):
         xk_out_list = []
 
         for i in range(len(cu_seqlens) - 1):
-            start_idx = cu_seqlens[i].item()
-            end_idx = cu_seqlens[i + 1].item()
+            start_idx = cu_seqlens[i]
+            end_idx = cu_seqlens[i + 1]
             seq_len = end_idx - start_idx
 
             # extract this sequence
@@ -279,8 +279,9 @@ class Attention(nn.Module):
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         if self.use_varlen_attn:
-            cu_seq_q = kwargs.get("cu_seq_q")
+            cu_seq_q = kwargs.get("cu_seq_q_list")
             assert(cu_seq_q is not None)
+            assert(type(cu_seq_q) is list)
             xq, xk = self._apply_rotary_per_sequence(xq, xk, freqs_cis, cu_seq_q)
         else:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
@@ -313,7 +314,7 @@ class Attention(nn.Module):
             xv_packed = xv.transpose(1, 2).contiguous().view(-1, n_local_heads, self.head_dim)
 
 
-            output = self.inner_attention(xq_packed, xk_packed, xv_packed, cu_seq_q, cu_seq_k, max_q, max_k)
+            output = self.inner_attention(xq_packed, xk_packed, xv_packed, cu_seq_q, cu_seq_k, max_q, max_k, is_causal=True)
         else:
             assert attention_masks is None
             output = self.inner_attention(xq, xk, xv)

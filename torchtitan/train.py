@@ -397,8 +397,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
 
-            # print(f"input_dict: {input_dict["input"]}")
-            # print(f"labels: {labels}")
             ntokens_batch = labels.numel()
             self.ntokens_seen += ntokens_batch
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
@@ -407,11 +405,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
 
             # Move tensors to the appropriate device
-            for k, v in input_dict.items():
+            for k in list(input_dict.keys()):
+                v = input_dict[k]
+                if "cu_seq" in k:
+                    input_dict[k+"_list"] = v.tolist()
                 if isinstance(v, torch.Tensor):
                     input_dict[k] = v.to(device_type)
-            labels = labels.to(device_type)
 
+            labels = labels.to(device_type)
             yield input_dict, labels
 
     def post_dataloading_process(
@@ -465,10 +466,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
 
         if getattr(self.model_args, "use_varlen_attn", False):
-            extra_kwargs["cu_seq_q"] = extra_inputs.pop("cu_seq_q", None)
-            extra_kwargs["cu_seq_k"] = extra_inputs.pop("cu_seq_k", None)
+            extra_kwargs["cu_seq_q_cpu"] = extra_inputs.pop("cu_seq_q_cpu", None)
+            extra_kwargs["cu_seq_k_cpu"] = extra_inputs.pop("cu_seq_k_cpu", None)
             extra_kwargs["max_q"] = extra_inputs.pop("max_q", None)
             extra_kwargs["max_k"] = extra_inputs.pop("max_k", None)
+            # print("extra kwargs")
+            # print(extra_kwargs["cu_seq_q"].device)
 
         return inputs, labels, extra_inputs, extra_kwargs
 
@@ -530,6 +533,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # Non-PP forward / backward
+            # print("before transformers")
+            # print(extra_kwargs.get("cu_seq_q_cpu").device)
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
@@ -557,6 +562,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # entire step will not be executed.
         for _microbatch in range(self.gradient_accumulation_steps):
             input_dict, labels = next(data_iterator)
+            # print("in train step")
+            # print(input_dict["cu_seq_q"].device)
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 

@@ -130,7 +130,6 @@ def varlen_collate_fn(batch):
     }, packed_label
 
 
-
 class HuggingFaceTextDataset(IterableDataset, Stateful):
     def __init__(
         self,
@@ -190,6 +189,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
                 # marks where this current document ends
                 if self.use_varlen_attn:
+                # if self.use_varlen_attn or self.use_flex_attn:
                     self._boundary_buffer.append(len(self._token_buffer))
 
                 while len(self._token_buffer) >= max_buffer_token_len:
@@ -198,16 +198,19 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                     # update tokens to the remaining tokens
                     self._token_buffer = self._token_buffer[max_buffer_token_len:]
 
-                    input = x[:-1]
+                    input = x[:-1] # print device here
                     label = x[1:]
 
                     if self.use_varlen_attn:
+                    # if self.use_varlen_attn or self.use_flex_attn:
                         boundaries_in_window = [
                             b for b in self._boundary_buffer
                             if b <= max_buffer_token_len
                         ]
 
                         cu_seqlens = torch.tensor(boundaries_in_window, dtype=torch.int32)
+                        # print device here
+
 
                         self._boundary_buffer = [
                             b - max_buffer_token_len

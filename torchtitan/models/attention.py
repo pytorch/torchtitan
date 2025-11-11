@@ -20,16 +20,40 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
+from torch.nn.attention.varlen import varlen_attn
+
 
 __all__ = [
     "FlexAttentionWrapper",
     "ScaledDotProductAttentionWrapper",
+    "VarlenAttentionWrapper",
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_sliding_window_mask_mod",
     "get_fixed_block_mask_mod",
     "create_attention_mask",
 ]
+
+class VarlenAttentionWrapper(torch.nn.Module):
+    _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
+        varlen_attn, mode="max-autotune-no-cudagraphs"
+    )
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seq_q: torch.Tensor,
+        cu_seq_k: torch.Tensor,
+        max_q: int,
+        max_k: int,
+        is_causal: bool = True,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+
+        return VarlenAttentionWrapper._compiled_varlen_attn(
+            q, k, v, cu_seq_q, cu_seq_k, max_q, max_k, is_causal=True
+        )
 
 
 class FlexAttentionWrapper(torch.nn.Module):
