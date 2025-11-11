@@ -18,7 +18,6 @@ from torchtitan.tools.logging import logger
 MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
 
 
-@contextlib.contextmanager
 def maybe_enable_profiling(
     profiling_config: ProfilingConfig,
     *,
@@ -68,7 +67,7 @@ def maybe_enable_profiling(
             gpu_device_profiled = torch.profiler.ProfilerActivity.CUDA
         elif torch.xpu.is_available():
             gpu_device_profiled = torch.profiler.ProfilerActivity.XPU
-        with torch.profiler.profile(
+        torch_profiler = torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
                 gpu_device_profiled,
@@ -76,12 +75,12 @@ def maybe_enable_profiling(
             schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
             on_trace_ready=trace_handler,
             record_shapes=True,
-        ) as torch_profiler:
-            torch_profiler.step_num = global_step
-            yield torch_profiler
+        )
+        torch_profiler.step_num = global_step
+        torch_profiler.start()
+        return torch_profiler
     else:
-        torch_profiler = contextlib.nullcontext()
-        yield None
+        return None
 
 
 @contextlib.contextmanager
