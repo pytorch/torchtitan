@@ -21,19 +21,6 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 
-def _clear_traced_params_buffers(
-    traced_module: torch.fx.GraphModule, const_keys: list[str]
-) -> None:
-    """Remove all parameters and buffers from traced module before restoring."""
-    for key in const_keys:
-        assert key in traced_module._buffers.keys()
-        # We don't want constants to show up as a buffer in the state dict.
-        # Instead they should just be a direct attribute.
-        buffer = getattr(traced_module, key)
-        torch.fx.graph_module._del_attr(traced_module, key)
-        setattr(traced_module, key, buffer)
-
-
 def export_joint(
     model, args, kwargs=None
 ) -> tuple[JointWithDescriptors, TracingContext]:
