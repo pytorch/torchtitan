@@ -26,23 +26,32 @@ class DryRunTrainer(Trainer):
     """
     A lightweight trainer that validates configurations without GPU allocation.
 
-    This trainer performs the following validations:
-    - Configuration file parsing
-    - Model architecture construction (on meta device)
+    This trainer performs comprehensive validation of the training configuration
+    without allocating GPU resources or initializing distributed setup. It validates:
+
+    - Configuration file parsing and structure
+    - Model architecture (constructed on meta device)
     - Tokenizer initialization
     - Dataloader configuration
-    - Parallelism settings validation
+    - Parallelism settings
+    - Model converters (if specified)
 
-    No actual training, GPU allocation, or distributed setup is performed.
+    Unlike the regular Trainer, this does not:
+    - Allocate GPU memory
+    - Initialize distributed process groups
+    - Create optimizers or learning rate schedulers
+    - Set up checkpointing or metrics
+    - Run any actual training
+
+    Args:
+        job_config: JobConfig containing all training configuration parameters
+
+    Note:
+        Validation completes immediately after initialization. No training loop is executed.
+        All operations use CPU and meta devices for zero-cost validation.
     """
 
     def __init__(self, job_config: JobConfig):
-        """
-        Initialize dry run trainer with configuration validation only.
-
-        Args:
-            job_config: JobConfig containing all training configuration parameters
-        """
         torch._C._log_api_usage_once("torchtitan.dry_run")
 
         self.job_config = job_config
@@ -109,7 +118,9 @@ class DryRunTrainer(Trainer):
             logger.info("Dataloader configuration validated successfully")
         except Exception as e:
             logger.warning(f"Dataloader validation encountered issue: {e}")
-            logger.info("Note: Some dataloader issues may only appear with actual data paths")
+            logger.info(
+                "Note: Some dataloader issues may only appear with actual data paths"
+            )
 
         # Validate model converters if specified
         if job_config.model.converters:
