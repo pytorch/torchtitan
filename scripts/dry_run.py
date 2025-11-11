@@ -13,6 +13,12 @@ distributed initialization. Useful for rapid iteration on configuration files
 and CI/CD validation pipelines.
 """
 
+import os
+import sys
+
+# Add parent directory to path to import torchtitan
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 
 import torchtitan.protocols.train_spec as train_spec_module
