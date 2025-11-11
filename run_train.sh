@@ -22,8 +22,7 @@ TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 if [ "$DRY_RUN" = "1" ]; then
     # Dry run mode: validate configuration without GPU/distributed setup
     echo "Running in DRY RUN mode - configuration validation only"
-    export TORCHTITAN_DRY_RUN=1
-    python -m ${TRAIN_FILE} --job.config_file ${CONFIG_FILE} --job.dry_run "$@"
+    python -m torchtitan.dry_run --job.config_file ${CONFIG_FILE} "$@"
 else
     # Normal training with torchrun
     PYTORCH_ALLOC_CONF="expandable_segments:True" \

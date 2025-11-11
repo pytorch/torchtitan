@@ -76,15 +76,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         logger.info(f"Starting job: {job_config.job.description}")
 
-        # Import custom modules if specified (applies to both normal and dry run modes)
         if job_config.experimental.custom_import:
             importlib.import_module(job_config.experimental.custom_import)
-
-        # Check for dry run mode - skip GPU/distributed initialization
-        if job_config.job.dry_run:
-            logger.info("DRY RUN MODE - Configuration validation only")
-            self._init_dry_run(job_config)
-            return
 
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
@@ -364,97 +357,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"total steps {job_config.training.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
-
-    def _init_dry_run(self, job_config: JobConfig):
-        """
-        Lightweight initialization for dry run mode.
-        Validates configuration without GPU allocation or distributed setup.
-        """
-        # Use CPU device (no GPU required)
-        self.device = torch.device("cpu")
-
-        # Log and validate config
-        job_config.maybe_log()
-        logger.info("Configuration parsed successfully")
-
-        # Get train spec
-        self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
-        logger.info(f"Train spec loaded for model: {job_config.model.name}")
-
-        # Build tokenizer
-        self.tokenizer = (
-            self.train_spec.build_tokenizer_fn(job_config)
-            if self.train_spec.build_tokenizer_fn is not None
-            else None
-        )
-        if self.tokenizer:
-            logger.info("Tokenizer built successfully")
-
-        # Validate model configuration
-        model_args = self.train_spec.model_args[job_config.model.flavor]
-        model_args.update_from_config(job_config)
-        self.model_args = model_args
-
-        logger.info(
-            f"Model args validated: {job_config.model.name} {job_config.model.flavor}"
-        )
-
-        # Build model on meta device (validates architecture without memory allocation)
-        logger.info("Validating model architecture...")
-        with (
-            torch.device("meta"),
-            utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
-        ):
-            model = self.train_spec.model_cls(model_args)
-
-        # Calculate and log model size
-        model_param_count, _ = model_args.get_nparams_and_flops(
-            model, job_config.training.seq_len
-        )
-        logger.info(
-            f"Model architecture validated: {job_config.model.name} "
-            f"with {model_param_count:,} parameters"
-        )
-
-        # Validate dataloader configuration (build with minimal params)
-        logger.info("Validating dataloader configuration...")
-        try:
-            # Use dp_world_size=1 and dp_rank=0 for dry run
-            dataloader = self.train_spec.build_dataloader_fn(
-                dp_world_size=1,
-                dp_rank=0,
-                tokenizer=self.tokenizer,
-                job_config=job_config,
-            )
-            logger.info("Dataloader configuration validated successfully")
-        except Exception as e:
-            logger.warning(f"Dataloader validation encountered issue: {e}")
-            logger.info(
-                "Note: Some dataloader issues may only appear with actual data paths"
-            )
-
-        # Validate model converters if specified
-        if job_config.model.converters:
-            logger.info(f"Model converters specified: {job_config.model.converters}")
-
-        # Validate parallelism configuration
-        parallelism_config = job_config.parallelism
-        logger.info(
-            f"Parallelism config: "
-            f"DP-shard={parallelism_config.data_parallel_shard_degree}, "
-            f"DP-replicate={parallelism_config.data_parallel_replicate_degree}, "
-            f"TP={parallelism_config.tensor_parallel_degree}, "
-            f"PP={parallelism_config.pipeline_parallel_degree}, "
-            f"CP={parallelism_config.context_parallel_degree}"
-        )
-
-        # Summary
-        logger.info("=" * 80)
-        logger.info("DRY RUN VALIDATION COMPLETE")
-        logger.info("=" * 80)
-        logger.info("All configurations validated successfully!")
-        logger.info("Configuration is ready for training execution.")
-        logger.info("=" * 80)
 
     def init_distributed(self) -> ParallelDims:
         job_config = self.job_config
@@ -815,11 +717,6 @@ def main(trainer_class: type[Trainer]) -> None:
 
     try:
         trainer = trainer_class(config)
-
-        # Skip training for dry run mode - validation already completed in __init__
-        if config.job.dry_run:
-            logger.info("Dry run completed successfully - exiting")
-            return
 
         if config.checkpoint.create_seed_checkpoint:
             assert (
