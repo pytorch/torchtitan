@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import torch
 from torch._dynamo.functional_export import dynamo_graph_capture_for_export
@@ -16,6 +16,7 @@ from torch._functorch.aot_autograd import (
 )
 from torch._guards import tracing, TracingContext
 from torch.distributed.tensor import DTensor
+from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
@@ -180,3 +181,88 @@ class CompiledModule(torch.nn.Module):
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
         return self.joint_graph_module(args, kwargs)
+
+
+# Default compiler pass configuration - no passes by default
+DEFAULT_COMPILER_PASSES = []
+
+
+def compiler(
+    name: str,
+    gm: torch.fx.GraphModule,
+    example_inputs,
+    passes: List[Callable] = None,
+):
+    """
+    Compile a graph module by applying a sequence of compiler passes.
+
+    Args:
+        name: Name for logging purposes
+        gm: The graph module to compile
+        example_inputs: Example inputs for the graph module
+        passes: List of compiler pass functions to apply. Each function should take
+                (gm, example_inputs) and return a transformed gm. If None, uses
+                DEFAULT_COMPILER_PASSES.
+    """
+    if passes is None:
+        passes = DEFAULT_COMPILER_PASSES
+
+    logger.info(f"{name} before compiler:")
+    logger.info(gm.print_readable(print_output=False))
+
+    for pass_fn in passes:
+        logger.info(f"Applying pass: {pass_fn.__name__}")
+        gm = pass_fn(gm, example_inputs)
+
+    logger.info(f"{name} after compiler:")
+    logger.info(gm.print_readable(print_output=False))
+    return gm
+
+
+def make_compiler_with_passes(passes: List[Callable] = None):
+    """
+    Create forward and backward compilers with specified passes.
+
+    Args:
+        passes: List of compiler pass functions to apply. If None, uses DEFAULT_COMPILER_PASSES.
+
+    Returns:
+        Tuple of (fw_compiler, bw_compiler) functions
+    """
+
+    def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
+        return compiler("fwd_gm", gm, example_inputs, passes=passes)
+
+    def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
+        return compiler("bwd_gm", gm, example_inputs, passes=passes)
+
+    return fw_compiler, bw_compiler
+
+
+def get_compiler_passes_from_config(job_config: JobConfig):
+    """
+    Extract and validate compiler passes from job config.
+
+    Args:
+        job_config: Job configuration containing compile.passes
+
+    Returns:
+        List of compiler pass functions
+    """
+    from torchtitan.experiments.compiler_toolkit.passes import AVAILABLE_PASSES
+
+    pass_names = getattr(job_config.compile, "passes", [])
+    compiler_passes = []
+
+    for pass_name in pass_names:
+        if pass_name not in AVAILABLE_PASSES:
+            raise ValueError(
+                f"Unknown compiler pass: {pass_name}. "
+                f"Available passes: {list(AVAILABLE_PASSES.keys())}"
+            )
+        compiler_passes.append(AVAILABLE_PASSES[pass_name])
+
+    if pass_names:
+        logger.info(f"Using compiler passes from config: {pass_names}")
+
+    return compiler_passes

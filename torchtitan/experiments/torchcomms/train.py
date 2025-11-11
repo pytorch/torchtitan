@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.distributed import ParallelDims
+import os
+
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.train import main, Trainer
 
 from .parallel_dims import TorchCommsParallelDims
@@ -13,7 +15,17 @@ from .parallel_dims import TorchCommsParallelDims
 class TorchCommsTrainer(Trainer):
     parallel_dims: TorchCommsParallelDims
 
-    def _create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
+    def init_distributed(self) -> ParallelDims:
+        job_config = self.job_config
+        dist_utils.init_distributed(
+            job_config.comm,
+            enable_cpu_backend=job_config.training.enable_cpu_offload,
+            base_folder=job_config.job.dump_folder,
+        )
+
+        world_size = int(os.environ["WORLD_SIZE"])
+        parallelism_config = job_config.parallelism
+
         return TorchCommsParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,

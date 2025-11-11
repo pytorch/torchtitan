@@ -53,3 +53,13 @@ def register_blockmask_pytree_node():
             flatten_with_keys_fn=BlockMask._flatten_with_keys,
             serialized_type_name="torch.nn.attention.flex_attention.BlockMask",
         )
+
+
+def validate_flex_attention_annotation(joint_with_descriptors):
+    """Verify user annotations show up in the graph."""
+    for node in joint_with_descriptors.graph_module.graph.nodes:
+        if node.target in {
+            torch.ops.higher_order.flex_attention,
+            torch.ops.higher_order.flex_attention_backward,
+        }:
+            assert "compile_with_inductor" in node.meta.get("custom", {})
