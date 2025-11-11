@@ -692,7 +692,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 if self.step == 1:
                     dist_utils.set_pg_timeouts(
                         timeout=timedelta(
-                            seconds=job_config.comm.train_timeout_seconds
+                            milliseconds=job_config.comm.train_timeout_seconds
                         ),
                         world_mesh=self.parallel_dims.world_mesh,
                     )
