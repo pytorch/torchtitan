@@ -28,9 +28,14 @@ class Llama3StateDictAdapter(StateDictAdapter):
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
+            "model.layers.{}.self_attn.q_proj.bias": "layers.{}.attention.wq.bias",
             "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
+            "model.layers.{}.self_attn.k_proj.bias": "layers.{}.attention.wk.bias",
             "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
+            "model.layers.{}.self_attn.v_proj.bias": "layers.{}.attention.wv.bias",
             "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
+            "model.layers.{}.self_attn.q_norm.weight": "layers.{}.attention.q_norm.weight",
+            "model.layers.{}.self_attn.k_norm.weight": "layers.{}.attention.k_norm.weight",
             "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
             "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
             "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
@@ -40,6 +45,28 @@ class Llama3StateDictAdapter(StateDictAdapter):
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }
+        if model_args.use_qkv_bias:
+            self.from_hf_map.update(
+                {
+                    "model.layers.{}.self_attn.q_proj.bias": "layers.{}.attention.wq.bias",
+                    "model.layers.{}.self_attn.k_proj.bias": "layers.{}.attention.wk.bias",
+                    "model.layers.{}.self_attn.v_proj.bias": "layers.{}.attention.wv.bias",
+                }
+            )
+        if model_args.attention_out_bias:
+            self.from_hf_map.update(
+                {
+                    "model.layers.{}.self_attn.o_proj.bias": "layers.{}.attention.wo.bias",
+                }
+            )
+        if model_args.mlp_bias:
+            self.from_hf_map.update(
+                {
+                    "model.layers.{}.mlp.gate_proj.bias": "layers.{}.feed_forward.w1.bias",
+                    "model.layers.{}.mlp.up_proj.bias": "layers.{}.feed_forward.w3.bias",
+                    "model.layers.{}.mlp.down_proj.bias": "layers.{}.feed_forward.w2.bias",
+                }
+            )
 
     # HuggingFace permutation function (exact copy from their conversion script)
     def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
@@ -51,6 +78,24 @@ class Llama3StateDictAdapter(StateDictAdapter):
             w.view(n_heads_arg, dim1 // n_heads_arg // 2, 2, dim2)
             .transpose(1, 2)
             .reshape(dim1, dim2)
+            .clone()
+        )
+
+    def _permute_1d(self, w, n_heads_arg):
+        dim = w.shape[0]
+        return (
+            w.view(n_heads_arg, dim // n_heads_arg // 2, 2)
+            .transpose(1, 2)
+            .reshape(-1)
+            .clone()
+        )
+
+    def _reverse_permute_1d(self, w, n_heads_arg):
+        dim = w.shape[0]
+        return (
+            w.view(n_heads_arg, 2, dim // n_heads_arg // 2)
+            .transpose(1, 2)
+            .reshape(-1)
             .clone()
         )
 
@@ -75,7 +120,11 @@ class Llama3StateDictAdapter(StateDictAdapter):
             else n_heads
         )
         dim = self.model_args.dim
-        head_dim = dim // n_heads
+        head_dim = (
+            dim // n_heads
+            if self.model_args.head_dim is None
+            else self.model_args.head_dim
+        )
         hf_state_dict = {}
 
         for key, value in state_dict.items():
@@ -87,10 +136,17 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 # the native Llama and huggingface RoPE implementation.
                 if abstract_key == "layers.{}.attention.wq.weight":
                     value = self._permute(value, n_heads)
-                if abstract_key == "layers.{}.attention.wk.weight":
+                elif abstract_key == "layers.{}.attention.wk.weight":
                     key_value_dim = head_dim * n_kv_heads
                     value = self._permute(value, n_kv_heads, key_value_dim, dim)
-
+                elif abstract_key == "layers.{}.attention.wq.bias":
+                    value = self._permute_1d(value, n_heads)
+                elif abstract_key == "layers.{}.attention.wk.bias":
+                    value = self._permute_1d(value, n_kv_heads)
+                elif abstract_key == "layers.{}.attention.q_norm.weight":
+                    value = self._permute_1d(value, n_heads)
+                elif abstract_key == "layers.{}.attention.k_norm.weight":
+                    value = self._permute_1d(value, n_kv_heads)
                 if new_key is None:
                     continue
                 new_key = new_key.format(layer_num)
@@ -109,7 +165,11 @@ class Llama3StateDictAdapter(StateDictAdapter):
             else n_heads
         )
         dim = self.model_args.dim
-        head_dim = dim // n_heads
+        head_dim = (
+            dim // n_heads
+            if self.model_args.head_dim is None
+            else self.model_args.head_dim
+        )
         state_dict = {}
 
         for key, value in hf_state_dict.items():
@@ -125,6 +185,14 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 if abstract_key == "model.layers.{}.self_attn.k_proj.weight":
                     key_value_dim = head_dim * n_kv_heads
                     value = self._reverse_permute(value, n_kv_heads, key_value_dim, dim)
+                elif abstract_key == "model.layers.{}.self_attn.q_proj.bias":
+                    value = self._reverse_permute_1d(value, n_heads)
+                elif abstract_key == "model.layers.{}.self_attn.k_proj.bias":
+                    value = self._reverse_permute_1d(value, n_kv_heads)
+                elif abstract_key == "model.layers.{}.self_attn.q_norm.weight":
+                    value = self._reverse_permute_1d(value, n_heads)
+                elif abstract_key == "model.layers.{}.self_attn.k_norm.weight":
+                    value = self._reverse_permute_1d(value, n_kv_heads)
 
                 if new_key is None:
                     continue

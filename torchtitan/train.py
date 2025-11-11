@@ -208,6 +208,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.loss_fn, self.gradient_accumulation_steps
         )
 
+        if job_config.training.epochs is not None:
+            steps_per_epoch = len(self.dataloader) // max(
+                self.gradient_accumulation_steps, 1
+            )
+            self.job_config.training.steps = (
+                steps_per_epoch * job_config.training.epochs
+            )
+            logger.info(
+                f"Set total training steps to {self.job_config.training.steps} ({job_config.training.epochs} "
+                f"epochs at {steps_per_epoch} steps/epoch)"
+            )
+        if job_config.checkpoint.interval == "epoch":
+            steps_per_epoch = len(self.dataloader) // max(
+                self.gradient_accumulation_steps, 1
+            )
+            self.job_config.checkpoint.interval = steps_per_epoch
+            logger.info(
+                f"Set checkpoint interval to {self.job_config.checkpoint.interval}"
+            )
+
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
@@ -407,6 +427,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             for k, v in input_dict.items():
                 if isinstance(v, torch.Tensor):
                     input_dict[k] = v.to(device_type)
+                elif isinstance(v, list):
+                    input_dict[k] = [
+                        x.to(device_type) for x in v if isinstance(x, torch.Tensor)
+                    ]
             labels = labels.to(device_type)
 
             yield input_dict, labels
@@ -477,9 +501,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],
-                cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
-                cp_seq_dims=[1, 1] + [0 for _ in model_parts],
-                cp_no_restore_buffers={inputs, labels},
+                cp_buffers=list(input_dict.values())
+                + [labels]
+                + [m.freqs_cis for m in model_parts],
+                cp_seq_dims=[1] * len(input_dict) + [1] + [0 for _ in model_parts],
+                cp_no_restore_buffers=set(input_dict.values()).union([labels]),
                 cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
             )
             if parallel_dims.cp_enabled

@@ -11,7 +11,7 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
+from torchtitan.hf_datasets.dataloader import build_dataloader
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
@@ -142,6 +142,29 @@ qwen3_args = {
             score_before_experts=False,
         ),
     ),
+    "10B-A1B": Qwen3ModelArgs(
+        vocab_size=151936,
+        max_seq_len=8192,
+        head_dim=128,
+        dim=1536,
+        n_layers=32,
+        n_heads=24,
+        n_kv_heads=4,
+        qk_norm=True,
+        hidden_dim=4096,
+        rope_theta=50000,
+        moe_enabled=True,
+        moe_inter_dim=512,
+        moe_args=MoEArgs(
+            num_experts=128,
+            num_shared_experts=0,
+            top_k=8,
+            score_func="softmax",
+            route_norm=True,
+            route_scale=1.0,
+            score_before_experts=False,
+        ),
+    ),
     "30B-A3B": Qwen3ModelArgs(
         vocab_size=151936,
         max_seq_len=262144,
@@ -199,7 +222,7 @@ def get_train_spec() -> TrainSpec:
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_text_dataloader,
+        build_dataloader_fn=build_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
