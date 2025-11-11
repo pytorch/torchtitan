@@ -133,7 +133,13 @@ class TensorBoardLogger(BaseLogger):
 class WandBLogger(BaseLogger):
     """Logger implementation for Weights & Biases."""
 
-    def __init__(self, log_dir: str, job_config: JobConfig, tag: str | None = None):
+    def __init__(
+        self,
+        log_dir: str,
+        job_config: JobConfig,
+        tag: str | None = None,
+        group: str | None = None,
+    ):
         # Import wandb here to avoid startup import
         import wandb
 
@@ -142,6 +148,8 @@ class WandBLogger(BaseLogger):
 
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
+        if group is None:
+            group = wandb.sdk.lib.runid.generate_id()
 
         self.wandb.init(
             entity=os.getenv("WANDB_TEAM", None),
@@ -149,6 +157,7 @@ class WandBLogger(BaseLogger):
             name=os.getenv("WANDB_RUN_NAME", None),
             dir=log_dir,
             config=job_config.to_dict(),
+            group=group,
         )
         logger.info("WandB logging enabled")
 

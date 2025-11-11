@@ -8,7 +8,7 @@ import json
 
 import os
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+from typing import Any, List, Literal
 
 import torch
 
@@ -209,6 +209,18 @@ class Training:
     loaded from this path instead of downloaded.
     """
 
+    dataset_type: Literal["huggingface", "nanoset", "preprocessed"] = "huggingface"
+    """Type of dataset to use ['huggingface', 'nanoset', 'preprocessed']"""
+
+    dataset_folders: list[str] = field(default_factory=list)
+    """List of folders containing tokenized datasets for Nanoset"""
+
+    dataset_weights: list[float] | None = None
+    """Optional list of weights for weighted sampling from datasets"""
+
+    dataset_random_seed: int = 1234
+    """Random seed for dataset shuffling"""
+
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""
 
@@ -225,6 +237,9 @@ class Training:
 
     steps: int = 10000
     """How many train steps to run"""
+
+    epochs: int | None = None
+    """Override steps to instead train by epochs of the dataset. Requires a deterministic length dataset"""
 
     enable_cpu_offload: bool = False
     """
@@ -450,7 +465,7 @@ class Checkpoint:
     When enable is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
     """
 
-    interval: int = 500
+    interval: int | Literal["epoch"] = 500
     """Checkpointing interval in steps."""
 
     initial_load_path: str | None = None
@@ -477,6 +492,11 @@ class Checkpoint:
     checkpoint, including optimizer, lr scheduler, training states, etc.
     The default setting for this option is True. Note that you will have to use
     `--checkpoint.no_initial_load_model_only` to override the default setting.
+    """
+
+    initial_load_legacy: bool = False
+    """
+    From model checkpoint paths converted in our old branch
     """
 
     initial_load_in_hf: bool = False
@@ -899,6 +919,99 @@ class Validation:
 
 
 @dataclass
+class GRPO:
+    kl_beta: float = 0.0
+    """KL beta for GRPO"""
+
+    kl_estimator_type: Literal["k3", "mse", "abs"] = "k3"
+    """KL estimator type for GRPO"""
+
+    sglang_slurm_num_nodes: int = -1
+    """Number of nodes for sglang when using slurm, -1 means not using slurm"""
+
+    sglang_urls: List[str] = field(default_factory=list)
+    """List of urls for sglang"""
+
+    sglang_port: int = 29500
+    """Port for sglang weight updates"""
+
+    sglang_tp: int = 1
+    """sglang tensor parallelism"""
+
+    pos_scaler: float = 1.0
+    """Positive reward scaling factor for GRPO"""
+
+    neg_scaler: float = 1.0
+    """Negative reward scaling factor for GRPO"""
+
+    temperature: float = 1.0
+    """Temperature for GRPO"""
+
+    grpo_by_token: bool = False
+    """Whether to use GRPO by token or by sequence, defaults to sequence"""
+
+    num_microbatches: int = 1
+    """Number of microbatches for GRPO"""
+
+    onpolicy_logp_threshold: float = 0.0
+    """Threshold for on-policy logp, 0.0 or 1.0 disables this feature. if you're between 0, 1, this gets converted
+       from probability to log probability."""
+
+    clip_ratio_upper_bound: float = 0.25
+    """Upper bound for clipping ratio in GRPO"""
+
+    clip_ratio_lower_bound: float = 0.25
+    """Lower bound for clipping ratio in GRPO"""
+
+    logit_loss_weight: float = 0.0
+    """Weight for L2 regularization on logits"""
+
+    entropy_loss_weight: float = 0.0
+    """Weight for entropy loss"""
+
+    ref_model_ema: float = 0.0
+    """Ref model EMA from policy weight, 1.0/0.0 disables this feature"""
+
+    scale_adv_by_len: bool = False
+    """Whether to scale advantages by sequence length, defaults to False"""
+
+    policy_ratio_type: Literal["token", "sequence"] = "token"
+    """
+    Policy ratio type. Switches between token level (e.g. GRPO) and sequence level (e.g. GSPO)
+    """
+
+    rollout_is_level: Literal["token", "sequence", "geometric"] = "sequence"
+    """
+    Level of IS aggregation:
+        - "token": Per-token ratios (biased)
+        - "sequence": Product of ratios (unbiased)
+        - "geometric": Geometric mean of ratios (experimental)
+    """
+
+    rollout_is_mode: Literal["truncate", "mask"] = "mask"
+    """
+    rollout_is_mode: How to handle weights exceeding threshold:
+        - "truncate": Cap weights at upper_threshold only (TIS)
+        - "mask": Zero out weights outside [lower_threshold, upper_threshold] (MIS)
+    """
+
+    rollout_is_threshold: float | None = None
+    """
+    Upper threshold for rollout IS, defaults to None. (No Importance Sampling)
+    """
+
+    rollout_is_threshold_lower: float | None = None
+    """
+    Lower threshold for IS weights (mask mode only; if None, defaults to 1/upper)
+    """
+
+    rollout_is_veto_threshold: float = 1e-4
+    """
+    Per-token veto threshold. If any token ratio < this, zero entire sequence.
+        If None, veto mechanism is disabled.
+    """
+
+
 class Debug:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
@@ -938,6 +1051,7 @@ class JobConfig:
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
     experimental: Experimental = field(default_factory=Experimental)
     validation: Validation = field(default_factory=Validation)
+    grpo: GRPO = field(default_factory=GRPO)
     debug: Debug = field(default_factory=Debug)
 
     def to_dict(self) -> dict[str, Any]:
