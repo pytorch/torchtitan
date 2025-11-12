@@ -42,3 +42,6 @@ Sessionx.vim
 
 # env files
 .env
+
+# Vibe coding
+.claude
