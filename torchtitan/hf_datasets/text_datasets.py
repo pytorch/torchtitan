@@ -18,8 +18,8 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.tools.logging import logger
 from torchtitan.protocols import train_spec
+from torchtitan.tools.logging import logger
 
 
 def _load_c4_dataset(dataset_path: str, split: str):
@@ -67,16 +67,17 @@ def _validate_dataset(
     logger.info(f"Preparing {dataset_name} dataset from {path}")
     return path, config.loader, config.sample_processor
 
+
 def varlen_collate_fn(batch):
     """
-    Custom collate function for varlen attention.
-    Collapses batch dimension by packing all samples into a single sequence.
+    Custom collate function for variable length attention
+    Collapses batch dimension by packing all samples into one sequence
 
     Args:
         batch: List of (input_dict, label) tuples
 
     Returns:
-        Packed (input_dict, label) with collapsed batch dimension
+        packed (input_dict, label) with collapsed batch dimension
     """
     if len(batch) == 1:
         input_dict, label = batch[0]
@@ -86,7 +87,9 @@ def varlen_collate_fn(batch):
             "cu_seq_k": input_dict["cu_seq_k"],
             "max_q": input_dict["max_q"],
             "max_k": input_dict["max_k"],
-        }, label.unsqueeze(0)  # [1, seq_len]
+        }, label.unsqueeze(
+            0
+        )  # [1, seq_len]
 
     inputs = []
     labels = []
@@ -179,7 +182,6 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 self._token_buffer.extend(sample_tokens)
                 self._sample_idx += 1
 
-                # marks where this current document ends
                 if self.use_varlen_attn:
                     self._boundary_buffer.append(len(self._token_buffer))
 
@@ -194,11 +196,14 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
                     if self.use_varlen_attn:
                         boundaries_in_window = [
-                            b for b in self._boundary_buffer
+                            b
+                            for b in self._boundary_buffer
                             if b <= max_buffer_token_len
                         ]
 
-                        cu_seqlens = torch.tensor(boundaries_in_window, dtype=torch.int32)
+                        cu_seqlens = torch.tensor(
+                            boundaries_in_window, dtype=torch.int32
+                        )
 
                         self._boundary_buffer = [
                             b - max_buffer_token_len
@@ -211,10 +216,19 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
                         cu_seqlens_input = cu_seqlens[cu_seqlens <= len(input)]
                         if cu_seqlens_input[-1] != len(input):
-                            cu_seqlens_input = torch.cat([cu_seqlens_input, torch.tensor([len(input)], dtype=torch.int32)])
+                            cu_seqlens_input = torch.cat(
+                                [
+                                    cu_seqlens_input,
+                                    torch.tensor([len(input)], dtype=torch.int32),
+                                ]
+                            )
 
                         seq_lengths = torch.diff(cu_seqlens_input)
-                        max_seqlen = seq_lengths.max().item() if len(seq_lengths) > 0 else self.seq_len
+                        max_seqlen = (
+                            seq_lengths.max().item()
+                            if len(seq_lengths) > 0
+                            else self.seq_len
+                        )
 
                         yield {
                             "input": input,
@@ -279,7 +293,9 @@ def build_text_dataloader(
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
 
-    model_args = train_spec.get_train_spec(job_config.model.name).model_args[job_config.model.flavor]
+    model_args = train_spec.get_train_spec(job_config.model.name).model_args[
+        job_config.model.flavor
+    ]
     use_varlen_attn = getattr(model_args, "use_varlen_attn", False)
 
     hf_ds = HuggingFaceTextDataset(
@@ -293,7 +309,7 @@ def build_text_dataloader(
     )
     hf_ds.use_varlen_attn = use_varlen_attn
 
-    collate_fn=varlen_collate_fn if use_varlen_attn else None
+    collate_fn = varlen_collate_fn if use_varlen_attn else None
 
     return ParallelAwareDataloader(
         dataset=hf_ds,

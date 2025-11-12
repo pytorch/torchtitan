@@ -13,6 +13,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
+from torch.nn.attention.varlen import varlen_attn
+
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
@@ -23,8 +25,6 @@ from torchtitan.models.attention import (
 )
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
-
-from torch.nn.attention.varlen import varlen_attn
 
 from .args import RoPEScalingArgs, TransformerModelArgs
 
@@ -134,10 +134,8 @@ def apply_rotary_emb(
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
     """
-
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
@@ -209,54 +207,12 @@ class Attention(nn.Module):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
-    def _apply_rotary_per_sequence(
-        self,
-        xq: torch.Tensor,  # [bs, total_tokens, n_heads, head_dim]
-        xk: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        cu_seqlens: list,  # [num_sequences + 1]
-    ):
-        xq = xq.squeeze(0)  # [total_tokens, n_heads, head_dim]
-        xk = xk.squeeze(0)
-
-        xq_out_list = []
-        xk_out_list = []
-
-        for i in range(len(cu_seqlens) - 1):
-            start_idx = cu_seqlens[i]
-            end_idx = cu_seqlens[i + 1]
-            seq_len = end_idx - start_idx
-
-            # extract this sequence
-            xq_seq = xq[start_idx:end_idx]  # [seq_len, n_heads, head_dim]
-            xk_seq = xk[start_idx:end_idx]
-
-            # get freqs_cis for this sequence length (positions 0 to seq_len-1)
-            freqs_cis_seq = freqs_cis[:seq_len]  # [seq_len, head_dim/2]
-
-            # apply RoPE to this sequence
-            xq_seq_rope, xk_seq_rope = apply_rotary_emb(
-                xq_seq.unsqueeze(0),  # add batch dim back
-                xk_seq.unsqueeze(0),
-                freqs_cis=freqs_cis_seq
-            )
-
-            xq_out_list.append(xq_seq_rope.squeeze(0))
-            xk_out_list.append(xk_seq_rope.squeeze(0))
-
-        # concatenate all sequences back together
-        xq_out = torch.cat(xq_out_list, dim=0)  # [total_tokens, n_heads, head_dim]
-        xk_out = torch.cat(xk_out_list, dim=0)
-
-        # add batch dimension back
-        return xq_out.unsqueeze(0), xk_out.unsqueeze(0)
-
     def forward(
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
-        **kwargs
+        **kwargs,
     ):
         """
         Forward pass of the attention module.
@@ -281,10 +237,6 @@ class Attention(nn.Module):
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
         if self.use_varlen_attn:
-            cu_seq_q = kwargs.get("cu_seq_q_list")
-            assert(cu_seq_q is not None)
-            assert(type(cu_seq_q) is list)
-
             true_seq_len = freqs_cis.shape[0]
             total_tokens = xq.shape[1]
 
@@ -321,13 +273,26 @@ class Attention(nn.Module):
             max_k = kwargs.get("max_k")
 
             n_local_heads = xq.shape[1]
+            xq_packed = (
+                xq.transpose(1, 2).contiguous().view(-1, n_local_heads, self.head_dim)
+            )
+            xk_packed = (
+                xk.transpose(1, 2).contiguous().view(-1, n_local_heads, self.head_dim)
+            )
+            xv_packed = (
+                xv.transpose(1, 2).contiguous().view(-1, n_local_heads, self.head_dim)
+            )
 
-            xq_packed = xq.transpose(1, 2).contiguous().view(-1, n_local_heads, self.head_dim)
-            xk_packed = xk.transpose(1, 2).contiguous().view(-1, n_local_heads, self.head_dim)
-            xv_packed = xv.transpose(1, 2).contiguous().view(-1, n_local_heads, self.head_dim)
-
-
-            output = self.inner_attention(xq_packed, xk_packed, xv_packed, cu_seq_q, cu_seq_k, max_q, max_k, is_causal=True)
+            output = self.inner_attention(
+                xq_packed,
+                xk_packed,
+                xv_packed,
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                is_causal=True,
+            )
         else:
             assert attention_masks is None
             output = self.inner_attention(xq, xk, xv)
@@ -427,7 +392,7 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
-        **kwargs
+        **kwargs,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -440,7 +405,9 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks, **kwargs)
+        h = x + self.attention(
+            self.attention_norm(x), freqs_cis, attention_masks, **kwargs
+        )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -560,7 +527,7 @@ class Transformer(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
-        **kwargs
+        **kwargs,
     ):
         """
         Perform a forward pass through the Transformer model.

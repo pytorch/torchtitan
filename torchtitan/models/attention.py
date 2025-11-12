@@ -34,6 +34,7 @@ __all__ = [
     "create_attention_mask",
 ]
 
+
 class VarlenAttentionWrapper(torch.nn.Module):
     _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
         varlen_attn, mode="max-autotune-no-cudagraphs"
