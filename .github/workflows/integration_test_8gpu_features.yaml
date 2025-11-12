@@ -26,6 +26,10 @@ permissions:
 
 jobs:
   build-test:
+    if: |
+      matrix.gpu-arch-type == 'cuda' ||
+      (matrix.gpu-arch-type == 'rocm' &&
+       (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'schedule'))
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false

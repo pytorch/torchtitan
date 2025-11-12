@@ -111,7 +111,7 @@ def main():
         "--gpu_arch_type",
         default="cuda",
         choices=["cuda", "rocm"],
-        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'."
+        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
     )
     parser.add_argument(
         "--test_suite",
