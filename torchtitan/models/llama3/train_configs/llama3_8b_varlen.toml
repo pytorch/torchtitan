@@ -6,7 +6,7 @@ description = "Llama 3 8B training"
 
 [profiling]
 enable_profiling = true
-save_traces_folder = "profile_trace"
+save_traces_folder = "varlen_profile_trace"
 profile_freq = 100
 
 [metrics]
@@ -68,3 +68,6 @@ enable = false
 dataset = "c4_validation"
 freq = 500
 steps = 1200 # Recommend value for c4_validation with world-size=8 and seq_len=8192
+
+[debug]
+seed = 42
