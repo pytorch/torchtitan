@@ -79,7 +79,6 @@ def varlen_collate_fn(batch):
         Packed (input_dict, label) with collapsed batch dimension
     """
     if len(batch) == 1:
-        # Single sample - already packed
         input_dict, label = batch[0]
         return {
             "input": input_dict["input"].unsqueeze(0),  # [1, seq_len]
@@ -89,7 +88,6 @@ def varlen_collate_fn(batch):
             "max_k": input_dict["max_k"],
         }, label.unsqueeze(0)  # [1, seq_len]
 
-    # Multiple samples - pack them together
     inputs = []
     labels = []
     cu_seqlens_list = []
@@ -100,23 +98,17 @@ def varlen_collate_fn(batch):
         inputs.append(input_dict["input"])
         labels.append(label)
 
-        # Get cu_seqlens from this sample and adjust by offset
         cu_seqlens = input_dict["cu_seq_q"]
-        # Don't include the last boundary (we'll add it at the end)
         cu_seqlens_adjusted = cu_seqlens[:-1] + offset
         cu_seqlens_list.append(cu_seqlens_adjusted)
 
-        # Track maximum sequence length across all samples
         max_seqlen = max(max_seqlen, input_dict["max_q"])
 
-        # Update offset for next sample
         offset += len(input_dict["input"])
 
-    # Concatenate all inputs and labels
-    packed_input = torch.cat(inputs, dim=0).unsqueeze(0)  # Shape: [total_tokens]
-    packed_label = torch.cat(labels, dim=0).unsqueeze(0)  # Shape: [total_tokens]
+    packed_input = torch.cat(inputs, dim=0).unsqueeze(0)  # shape: [1, total_tokens]
+    packed_label = torch.cat(labels, dim=0).unsqueeze(0)  # shape: [1, total_tokens]
 
-    # Combine all cu_seqlens and add final boundary
     packed_cu_seqlens = torch.cat(
         cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32)]
     )
@@ -189,7 +181,6 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
                 # marks where this current document ends
                 if self.use_varlen_attn:
-                # if self.use_varlen_attn or self.use_flex_attn:
                     self._boundary_buffer.append(len(self._token_buffer))
 
                 while len(self._token_buffer) >= max_buffer_token_len:
@@ -198,19 +189,16 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                     # update tokens to the remaining tokens
                     self._token_buffer = self._token_buffer[max_buffer_token_len:]
 
-                    input = x[:-1] # print device here
+                    input = x[:-1]
                     label = x[1:]
 
                     if self.use_varlen_attn:
-                    # if self.use_varlen_attn or self.use_flex_attn:
                         boundaries_in_window = [
                             b for b in self._boundary_buffer
                             if b <= max_buffer_token_len
                         ]
 
                         cu_seqlens = torch.tensor(boundaries_in_window, dtype=torch.int32)
-                        # print device here
-
 
                         self._boundary_buffer = [
                             b - max_buffer_token_len
