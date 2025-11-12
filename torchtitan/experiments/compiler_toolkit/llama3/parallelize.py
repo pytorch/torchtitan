@@ -64,12 +64,12 @@ def parallelize_llama(
         model = simple_fsdp_parallelize_llama(model, parallel_dims, job_config)
 
     # Get compiler passes from config
-    compiler_passes = get_compiler_passes_from_config(
-        job_config, dump_folder=job_config.job.dump_folder
-    )
+    compiler_passes = get_compiler_passes_from_config(job_config)
 
     # Create compilers with specified passes (defaults to no passes)
-    fw_compiler, bw_compiler = make_compiler_with_passes(compiler_passes)
+    fw_compiler, bw_compiler = make_compiler_with_passes(
+        compiler_passes, dump_folder=job_config.job.dump_folder
+    )
 
     # Create custom joint_graph_builder with llama-specific compilers and validation
     llama_joint_graph_builder = functools.partial(
