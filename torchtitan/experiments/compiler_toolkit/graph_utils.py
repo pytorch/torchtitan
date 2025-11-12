@@ -6,7 +6,7 @@
 
 import contextlib
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 import torch
 from torch._dynamo.functional_export import dynamo_graph_capture_for_export
@@ -167,6 +167,18 @@ class CompiledModule(torch.nn.Module):
             del self._overrides[name]
         else:
             super().__delattr__(name)
+
+    def state_dict(self, *args, **kwargs) -> Any:
+        return self.inner.state_dict(*args, **kwargs)
+
+    def load_state_dict(self, *args, **kwargs) -> Any:
+        return self.inner.load_state_dict(*args, **kwargs)
+
+    def name_parameters(self, *args, **kwargs) -> Any:
+        return self.inner.named_parameters(*args, **kwargs)
+
+    def parameters(self, *args, **kwargs) -> Any:
+        return self.inner.parameters(*args, **kwargs)
 
     def forward(self, *args, **kwargs):
         assert "forward" not in self._overrides, "forward cannot be overridden"
