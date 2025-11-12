@@ -34,6 +34,8 @@ llama4_args = {
         vocab_size=2048,
         rope_theta=500000,
         rope_scaling_args=RoPEScalingArgs(),
+        moe_args=MoEArgs(num_experts=8, use_grouped_mm=False),
+        interleave_moe_layer_step=2,
     ),
     "17bx16e": TransformerModelArgs(
         dim=5120,

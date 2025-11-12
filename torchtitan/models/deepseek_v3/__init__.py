@@ -42,6 +42,7 @@ deepseekv3_args = {
             score_func="softmax",
             route_norm=False,
             score_before_experts=False,
+            use_grouped_mm=False,  # Disable for CPU/ONNX compatibility
         ),
         q_lora_rank=0,
         kv_lora_rank=512,

@@ -34,11 +34,11 @@ def precompute_freqs_cis(
     scaling_args: RoPEScalingArgs = RoPEScalingArgs(),
 ) -> torch.Tensor:
     """
-    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
+    Precompute the frequency tensor for rotary position embeddings using real-valued representation.
 
-    This function calculates a frequency tensor with complex exponentials using the given dimension 'dim'
+    This function calculates a frequency tensor for RoPE using the given dimension 'dim'
     and the end index 'end'. The 'theta' parameter scales the frequencies.
-    The returned tensor contains complex values in complex64 data type.
+    The returned tensor contains real values representing cos and sin concatenated.
 
     Args:
         dim (int): Dimension of the frequency tensor.
@@ -54,7 +54,8 @@ def precompute_freqs_cis(
             original_max_position_embeddings (int): Maximum position embeddings
                 for original model. Defaults to 8192.
     Returns:
-        torch.Tensor: Precomputed frequency tensor with complex exponentials.
+        torch.Tensor: Precomputed frequency tensor with cos and sin values concatenated.
+                     Shape: (end, dim * 2) where first half is cos, second half is sin.
     """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
@@ -80,23 +81,34 @@ def precompute_freqs_cis(
     freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
 
     t = torch.arange(end, device=freqs.device)
-    freqs = torch.outer(t, freqs).float()
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    idx_theta = torch.outer(t, freqs).float()
+
+    # Duplicate idx_theta to match head_dim
+    freqs = torch.cat([idx_theta, idx_theta], dim=-1)
+    # Concatenate cos and sin: shape becomes (end, dim * 2)
+    freqs_cis = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
     return freqs_cis
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """
-    Reshape frequency tensor for broadcasting it with another tensor.
+    Reshape frequency tensor (represented by cos and sin) for broadcasting it with another tensor.
 
     This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
     for the purpose of broadcasting the frequency tensor during element-wise operations.
 
-    The input freqs_cis tensor is assumed to be of shape (max_seqlen, dim),
+    The input freqs_cis tensor is assumed to be of shape (max_seqlen, head_dim * 2),
     and the first seqlen elements will be sliced, but dim must match x.
 
     Args:
-        freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
+        freqs_cis (torch.Tensor): Frequency tensor (cos and sin) to be reshaped.
         x (torch.Tensor): Target tensor for broadcasting compatibility.
 
     Returns:
@@ -104,10 +116,10 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Ten
     """
     ndim = x.ndim
     assert ndim > 1
-    seqlen = x.shape[1]
+    _, seqlen, _, head_dim = x.shape
     freqs_cis = freqs_cis[0:seqlen]
-    assert freqs_cis.shape == (seqlen, x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    assert freqs_cis.shape == (seqlen, head_dim * 2)
+    shape = [-1, seqlen, 1, head_dim * 2]
     return freqs_cis.view(*shape)
 
 
@@ -120,23 +132,33 @@ def apply_rotary_emb(
     Apply rotary embeddings to input tensors using the given frequency tensor.
 
     This function applies rotary embeddings to the given query 'xq' and key 'xk' tensors using the provided
-    frequency tensor 'freqs_cis'. The input tensors are reshaped as complex numbers, and the frequency tensor
-    is reshaped for broadcasting compatibility. The resulting tensors contain rotary embeddings and are
-    returned as real tensors.
+    frequency tensor 'freqs_cis'. The computation is done using real-valued arithmetic, which is
+    ONNX-compatible and equivalent to complex multiplication.
 
     Args:
         xq (torch.Tensor): Query tensor to apply rotary embeddings.
+                          Shape: [bsz, seq_len, num_heads, head_dim]
         xk (torch.Tensor): Key tensor to apply rotary embeddings.
-        freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
+                          Shape: [bsz, seq_len, num_kv_heads, head_dim]
+        freqs_cis (torch.Tensor): Precomputed frequency tensor with cos and sin.
+                                  Shape: [max_seq_len, head_dim * 2]
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
     """
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+    head_dim = xq.shape[-1]
+
+    # Reshape for broadcast
+    freqs_cis = reshape_for_broadcast(freqs_cis, xq)
+
+    # Split into cos and sin components: [bsz, seq_len, 1, head_dim]
+    cos = freqs_cis[..., :head_dim].to(dtype=xq.dtype, device=xq.device)
+    sin = freqs_cis[..., head_dim:].to(dtype=xq.dtype, device=xq.device)
+
+    # Apply rotary embeddings: equivalent to complex multiplication
+    # (a + bi) * (cos + i*sin) = (a*cos - b*sin) + i*(a*sin + b*cos)
+    xq_out = (xq * cos) + (rotate_half(xq) * sin)
+    xk_out = (xk * cos) + (rotate_half(xk) * sin)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 

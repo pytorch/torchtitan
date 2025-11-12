@@ -109,7 +109,7 @@ def _run_experts_grouped_mm(
     w2: torch.Tensor,
     w3: torch.Tensor,
     x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor | None,
 ) -> torch.Tensor:
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
@@ -280,12 +280,12 @@ class TokenChoiceTopKRouter(nn.Module):
         top_scores = top_scores * self.route_scale
 
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
+        # Use one-hot encoding for ONNX compatibility (torch.histc not ONNX-compatible)
+        one_hot = torch.nn.functional.one_hot(
             selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+            num_classes=self.num_experts
         )
+        num_tokens_per_expert = one_hot.sum(dim=0)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
@@ -331,17 +331,18 @@ class TokenReorderer(nn.Module):
                 - num_tokens_per_expert: Number of tokens assigned to each expert
         """
         # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
+        # Use one-hot encoding for ONNX compatibility (torch.histc not ONNX-compatible)
+        one_hot = torch.nn.functional.one_hot(
             selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+            num_classes=self.num_experts
         )
+        num_tokens_per_expert = one_hot.sum(dim=0)
 
         # Reorder the token indices to match the order of the experts
         # token_indices_experts_sorted shape (bs*slen*top_k,)
-        token_indices_experts_sorted = torch.argsort(
-            selected_experts_indices.view(-1), stable=True
+        # Use torch.sort instead of torch.argsort for ONNX compatibility
+        _, token_indices_experts_sorted = torch.sort(
+            selected_experts_indices.view(-1)
         )
 
         top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]

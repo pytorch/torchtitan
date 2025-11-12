@@ -29,13 +29,17 @@ from .args import DeepSeekV3ModelArgs
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
 def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     """
-    Precomputes frequency-based complex exponential values for rotary positional embeddings.
+    Precomputes frequency tensor for rotary positional embeddings using real-valued representation.
+
+    This function calculates a frequency tensor for RoPE using the model's configuration.
+    The returned tensor contains real values representing cos and sin concatenated.
 
     Args:
         args (DeepSeekV3ModelArgs): Model arguments containing positional embedding parameters.
 
     Returns:
-        torch.Tensor: Precomputed complex exponential values for positional embeddings.
+        torch.Tensor: Precomputed frequency tensor with cos and sin values concatenated.
+                     Shape: (max_seq_len, qk_rope_head_dim * 2) where first half is cos, second half is sin.
     """
     dim = args.qk_rope_head_dim
     seqlen = args.max_seq_len
@@ -119,28 +123,52 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     t = torch.arange(seqlen)
 
     # Outer product: [positions] × [frequencies]
-    freqs = torch.outer(t, freqs)
+    idx_theta = torch.outer(t, freqs)
 
-    # Convert to complex exponentials: e^(i*freq*pos)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
+    # Duplicate idx_theta to match head_dim
+    freqs = torch.cat([idx_theta, idx_theta], dim=-1)
+    # Concatenate cos and sin: shape becomes (seqlen, dim * 2)
+    freqs_cis = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
     return freqs_cis
 
 
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
 def apply_rotary_emb(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """
-    Applies rotary positional embeddings to the input tensor.
+    Applies rotary positional embeddings to the input tensor using real-valued arithmetic.
+
+    This function applies rotary embeddings using real-valued operations, which is
+    ONNX-compatible and equivalent to complex multiplication.
 
     Args:
         x (torch.Tensor): Input tensor with positional embeddings to be applied.
-        freqs_cis (torch.Tensor): Precomputed complex exponential values for positional embeddings.
+                         Shape: [bsz, seq_len, n_heads, head_dim]
+        freqs_cis (torch.Tensor): Precomputed frequency tensor with cos and sin.
+                                  Shape: [max_seq_len, head_dim * 2]
 
     Returns:
         torch.Tensor: Tensor with rotary embeddings applied.
     """
     dtype = x.dtype
-    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
-    y = torch.view_as_real(x * freqs_cis).flatten(3)
+    head_dim = x.shape[-1]
+
+    # Reshape freqs_cis for broadcasting: [1, seq_len, 1, head_dim * 2]
+    freqs_cis = freqs_cis.view(1, freqs_cis.size(0), 1, freqs_cis.size(-1))
+    seq_len = x.size(1)
+    freqs_cis = freqs_cis[:, :seq_len, :, :]
+
+    # Split into cos and sin components: [1, seq_len, 1, head_dim]
+    cos = freqs_cis[..., :head_dim].to(dtype=x.dtype, device=x.device)
+    sin = freqs_cis[..., head_dim:].to(dtype=x.dtype, device=x.device)
+
+    # Apply rotary embeddings:
+    # (a + bi) * (cos + i*sin) = (a*cos - b*sin) + i*(a*sin + b*cos)
+    y = (x.float() * cos) + (rotate_half(x.float()) * sin)
     return y.to(dtype)
 
 
