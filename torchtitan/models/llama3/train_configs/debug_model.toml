@@ -19,7 +19,7 @@ enable_wandb = false
 
 [model]
 name = "llama3"
-flavor = "debugmodel_varlen_attn"
+flavor = "debugmodel_flex_attn"
 # flavor = "debugmodel_flex_attn"
 # test folder with tokenizer.json, for debug purpose only
 hf_assets_path = "./tests/assets/tokenizer"

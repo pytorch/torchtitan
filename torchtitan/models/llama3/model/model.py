@@ -134,8 +134,10 @@ def apply_rotary_emb(
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
     """
+
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+
     freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
@@ -282,7 +284,18 @@ class Attention(nn.Module):
             cu_seq_q = kwargs.get("cu_seq_q_list")
             assert(cu_seq_q is not None)
             assert(type(cu_seq_q) is list)
-            xq, xk = self._apply_rotary_per_sequence(xq, xk, freqs_cis, cu_seq_q)
+
+            true_seq_len = freqs_cis.shape[0]
+            total_tokens = xq.shape[1]
+
+            true_bs = total_tokens // true_seq_len
+            xq = xq.view(true_bs, true_seq_len, -1, self.head_dim)
+            xk = xk.view(true_bs, true_seq_len, -1, self.head_dim)
+
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+
+            xq = xq.view(1, total_tokens, -1, self.head_dim)
+            xk = xk.view(1, total_tokens, -1, self.head_dim)
         else:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
