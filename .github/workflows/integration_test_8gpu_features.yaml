@@ -26,10 +26,6 @@ permissions:
 
 jobs:
   build-test:
-    if: |
-      matrix.gpu-arch-type == 'cuda' ||
-      (matrix.gpu-arch-type == 'rocm' &&
-       (github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'schedule'))
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
@@ -77,7 +73,8 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        export TEST_WITH_ROCM=$([[ "${{ matrix.gpu-arch-type }}" == "rocm" ]] && echo 1 || echo 0)
+        python -m tests.integration_tests.run_tests --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
         rm -rf artifacts-to-be-uploaded/*/checkpoint
