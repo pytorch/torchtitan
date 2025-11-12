@@ -80,7 +80,9 @@ def parallelize_deepseekv3(
     compiler_passes = get_compiler_passes_from_config(job_config)
 
     # Create compilers with specified passes (defaults to no passes)
-    fw_compiler, bw_compiler = make_compiler_with_passes(compiler_passes)
+    fw_compiler, bw_compiler = make_compiler_with_passes(
+        compiler_passes, dump_folder=job_config.job.dump_folder
+    )
 
     # Create custom joint_graph_builder with deepseekv3-specific compilers
     deepseekv3_joint_graph_builder = functools.partial(
@@ -88,6 +90,7 @@ def parallelize_deepseekv3(
         fw_compiler=fw_compiler,
         bw_compiler=bw_compiler,
         joint_custom_pass=validate_flex_attention_annotation,
+        dump_folder=job_config.job.dump_folder,
     )
 
     # TODO: CompiledModule should take sample input as well, so that we can
