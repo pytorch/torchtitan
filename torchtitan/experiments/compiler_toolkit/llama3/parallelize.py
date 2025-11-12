@@ -64,7 +64,9 @@ def parallelize_llama(
         model = simple_fsdp_parallelize_llama(model, parallel_dims, job_config)
 
     # Get compiler passes from config
-    compiler_passes = get_compiler_passes_from_config(job_config)
+    compiler_passes = get_compiler_passes_from_config(
+        job_config, dump_folder=job_config.job.dump_folder
+    )
 
     # Create compilers with specified passes (defaults to no passes)
     fw_compiler, bw_compiler = make_compiler_with_passes(compiler_passes)
@@ -75,6 +77,7 @@ def parallelize_llama(
         fw_compiler=fw_compiler,
         bw_compiler=bw_compiler,
         joint_custom_pass=validate_flex_attention_annotation,
+        dump_folder=job_config.job.dump_folder,
     )
 
     # TODO: CompiledModule should take sample input as well, so that we can
