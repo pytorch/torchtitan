@@ -2,7 +2,7 @@
 
 # FLUX model in torchtitan
 
-[![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_flux.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_flux.yaml/badge.svg?branch=main)
+![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/flux_integration_test_8gpu.yaml/badge.svg?branch=main)
 
 </div>
 
