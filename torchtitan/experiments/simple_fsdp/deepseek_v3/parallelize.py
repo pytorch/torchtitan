@@ -10,16 +10,18 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+
+from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.deepseek_v3.infra.parallelize import (
-    apply_ac,
     apply_moe_ep_tp,
     apply_non_moe_tp,
 )
 from torchtitan.tools.logging import logger
 
-from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
+from ..backend import get_compile_backend
 
+from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
 
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
@@ -141,7 +143,6 @@ def parallelize_deepseekv3(
                     transformer_block.moe.experts,
                     dp_mod_ep_mesh,
                     dp_mode,
-                    ac_mode=job_config.activation_checkpoint.mode,
                     mp_policy=mp_policy,
                     shard_dim=experts_shard_dim,
                     reduction_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
@@ -151,7 +152,6 @@ def parallelize_deepseekv3(
             model,
             dp_mesh,
             dp_mode,
-            ac_mode=job_config.activation_checkpoint.mode,
             mp_policy=mp_policy,
         )
 
@@ -162,6 +162,29 @@ def parallelize_deepseekv3(
     if job_config.compile.enable:
         torch._inductor.config.reorder_for_peak_memory = False
         torch._dynamo.config.capture_scalar_outputs = True
-        model = torch.compile(model, backend=job_config.compile.backend, fullgraph=True)
+
+        match job_config.parallelism.fsdp_reshard_after_forward:
+            case "always":
+                fsdp_reshard_after_forward = True
+            case "never":
+                fsdp_reshard_after_forward = False
+            case "default":
+                # For PP, by default do not reshard after forward to avoid per-microbatch
+                # all-gathers, which can be expensive and non-overlapped
+                fsdp_reshard_after_forward = not parallel_dims.pp_enabled
+            case _:
+                raise ValueError(
+                    f"Invalid reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+                )
+
+        backend = (
+            getattr(job_config.compile, "model_backend_override", None)
+            or job_config.compile.backend
+        )
+        model = torch.compile(
+            model,
+            backend=get_compile_backend(backend, fsdp_reshard_after_forward),
+            fullgraph=True,
+        )
 
     return model

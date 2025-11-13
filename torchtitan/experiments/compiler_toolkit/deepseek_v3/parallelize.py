@@ -10,39 +10,31 @@ import functools
 import torch
 
 from torch.fx.traceback import annotate_fn
+
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.compiler_toolkit.common_utils import (
     disable_compile,
     parallelize_inputs,
     register_blockmask_pytree_node,
+    validate_flex_attention_annotation,
 )
 
 from torchtitan.experiments.compiler_toolkit.graph_utils import (
     CompiledModule,
+    get_compiler_passes_from_config,
     joint_graph_builder,
+    make_compiler_with_passes,
 )
 
 from torchtitan.experiments.simple_fsdp.deepseek_v3.parallelize import (
     parallelize_deepseekv3 as simple_fsdp_parallelize_deepseekv3,
 )
-from torchtitan.tools.logging import logger
-
-
-def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> torch.fx.GraphModule:
-    logger.info("fwd_gm:")
-    logger.info(gm.print_readable(print_output=False))
-    return gm
-
-
-def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> torch.fx.GraphModule:
-    logger.info("bwd_gm:")
-    logger.info(gm.print_readable(print_output=False))
-    return gm
 
 
 def annotate_deepseekv3() -> None:
     from torchtitan.distributed.expert_parallel import ExpertParallel
+    from torchtitan.models.attention import FlexAttentionWrapper
     from torchtitan.models.moe.moe import MoE
 
     # annotate the MoE with dispatch, compute and combine
@@ -54,27 +46,51 @@ def annotate_deepseekv3() -> None:
     )
     MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
+    # annotate flex_attention with compile_with_inductor
+    FlexAttentionWrapper.forward = annotate_fn(
+        {"compile_with_inductor": "flex_attention"}
+    )(FlexAttentionWrapper.forward)
+
 
 def parallelize_deepseekv3(
     model: torch.nn.Module,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ) -> CompiledModule:
+    """
+    Parallelize and compile a DeepSeek v3 model with optional custom compiler passes.
 
+    Args:
+        model: The model to parallelize
+        parallel_dims: Parallel dimensions configuration
+        job_config: Job configuration
+
+    Returns:
+        CompiledModule wrapping the parallelized and compiled model
+    """
     annotate_deepseekv3()
 
-    if job_config.model.flavor.endswith("flex_attn"):
-        register_blockmask_pytree_node()
+    register_blockmask_pytree_node()
 
     # Disable torch.compile over the model in the compiler toolkit style workflow
     with disable_compile(job_config):
         model = simple_fsdp_parallelize_deepseekv3(model, parallel_dims, job_config)
 
+    # Get compiler passes from config
+    compiler_passes = get_compiler_passes_from_config(job_config)
+
+    # Create compilers with specified passes (defaults to no passes)
+    fw_compiler, bw_compiler = make_compiler_with_passes(
+        compiler_passes, dump_folder=job_config.job.dump_folder
+    )
+
+    # Create custom joint_graph_builder with deepseekv3-specific compilers
     deepseekv3_joint_graph_builder = functools.partial(
         joint_graph_builder,
         fw_compiler=fw_compiler,
         bw_compiler=bw_compiler,
-        joint_custom_pass=None,
+        joint_custom_pass=validate_flex_attention_annotation,
+        dump_folder=job_config.job.dump_folder,
     )
 
     # TODO: CompiledModule should take sample input as well, so that we can

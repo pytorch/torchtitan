@@ -116,7 +116,6 @@ def parallelize_llama(
             model,
             parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
             mode=dp_mode,
-            ac_mode=job_config.activation_checkpoint.mode,
             mp_policy=mp_policy,
         )
         logger.info(
@@ -125,13 +124,28 @@ def parallelize_llama(
 
     if job_config.compile.enable and "model" in job_config.compile.components:
         torch._inductor.config.reorder_for_peak_memory = False
+
+        match job_config.parallelism.fsdp_reshard_after_forward:
+            case "always":
+                fsdp_reshard_after_forward = True
+            case "never":
+                fsdp_reshard_after_forward = False
+            case "default":
+                # For PP, by default do not reshard after forward to avoid per-microbatch
+                # all-gathers, which can be expensive and non-overlapped
+                fsdp_reshard_after_forward = not parallel_dims.pp_enabled
+            case _:
+                raise ValueError(
+                    f"Invalid fsdp_reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+                )
+
         backend = (
             getattr(job_config.compile, "model_backend_override", None)
             or job_config.compile.backend
         )
         model = torch.compile(
             model,
-            backend=get_compile_backend(backend),
+            backend=get_compile_backend(backend, fsdp_reshard_after_forward),
             fullgraph=True,
         )
 

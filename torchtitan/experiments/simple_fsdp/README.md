@@ -3,10 +3,12 @@
 [![integration and numerics tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_simple_fsdp.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_simple_fsdp.yaml?query=branch%3Amain)
 [![arXiv](https://img.shields.io/badge/arXiv-2411.00284-b31b1b.svg)](https://arxiv.org/abs/2411.00284)
 
-💡 **Note**: SimpleFSDP's composability with Mixed Precision Training and Tensor Parallel requires updates from latest PyTorch, which can be installed (e.g., for CUDA 12.6) via
+💡 **Note 1**: SimpleFSDP's composability with Mixed Precision Training and Tensor Parallel requires updates from latest PyTorch, which can be installed (e.g., for CUDA 12.6) via
 ```bash
 pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
 ```
+
+💡 **Note 2**: Some of SimpleFSDP's functionalities (e.g., reshard_after_forward) is implemented with torch.compile. It is always recommended to open compile (`--compile.enable`) to see desired correct functionality.
 
 This folder includes an experimental frontend implementation for [SimpleFSDP: Simpler Fully Sharded Data Parallel with torch.compile](https://arxiv.org/abs/2411.00284). SimpleFSDP is a compiler-based Fully Sharded Data Parallel (FSDP) framework, which has a simple implementation for maintenance and composability, allows full computation-communication graph tracing, and brings performance enhancement via compiler backend optimizations.
 
@@ -15,13 +17,13 @@ This folder includes an experimental frontend implementation for [SimpleFSDP: Si
 #### Training Llama3 models
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.name simple_fsdp.llama3 --compile.enable
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.name simple_fsdp.llama3 --compile.enable --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config
 ```
 
 #### Training DeepSeek_v3 models
 
 ```bash
-CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name simple_fsdp.deepseek_v3 --compile.enable
+CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name simple_fsdp.deepseek_v3 --compile.enable --activation_checkpoint.mode "none" --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config
 ```
 
 ### Composability Support
@@ -56,7 +58,7 @@ SimpleFSDP relies on compiler backend to perform optimizations (i.e., bucketing 
 users can specify the pass (e.g., "aot_eager_autobucketing") via additional configs:
 
 ```bash
---job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config  --compile.model_backend_override "aot_eager_autobucketing"
+--compile.model_backend_override "aot_eager_autobucketing"
 ```
 
 ### Citation
