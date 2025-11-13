@@ -10,7 +10,7 @@ set -ex
 # use envs as local overrides for convenience
 # e.g.
 # LOG_RANK=0,1 NGPU=4 ./torchtitan/experiments/flux/run_train.sh
-NGPU=${NGPU:-"4"}
+NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/flux/train_configs/debug_model.toml"}
 

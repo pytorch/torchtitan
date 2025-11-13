@@ -26,21 +26,17 @@ def inference(config: JobConfig):
     world_size = int(os.environ["WORLD_SIZE"])
     global_rank = int(os.environ["RANK"])
 
-    single_prompt_mode = config.inference.prompt is not None
+    original_prompts = open(config.inference.prompts_path).readlines()
+    logger.info(f"Reading prompts from: {config.inference.prompts_path}")
+    if len(original_prompts) < world_size:
+        raise ValueError(
+            f"Number of prompts ({len(prompts)}) must be >= number of ranks ({world_size}). "
+            f"FSDP all-gather will hang if some ranks have no prompts to process."
+        )
 
-    # Use single prompt if specified, otherwise read from file
-    if single_prompt_mode:
-        original_prompts = [config.inference.prompt]
-        logger.info(f"Using single prompt: {config.inference.prompt}")
-        bs = 1
-        # If only single prompt, each rank will generate an image with the same prompt
-        prompts = original_prompts
-    else:
-        original_prompts = open(config.inference.prompts_path).readlines()
-        logger.info(f"Reading prompts from: {config.inference.prompts_path}")
-        bs = config.inference.local_batch_size
-        # Distribute prompts across processes using round-robin assignment
-        prompts = original_prompts[global_rank::world_size]
+    bs = config.inference.local_batch_size
+    # Distribute prompts across processes using round-robin assignment
+    prompts = original_prompts[global_rank::world_size]
 
     total_prompts = len(original_prompts)
 
@@ -58,13 +54,7 @@ def inference(config: JobConfig):
             config.inference.save_img_folder,
         )
         # Create mapping from local indices to global prompt indices
-        if single_prompt_mode:
-            # In single prompt mode, all ranks process the same prompt (index 0)
-            # But each rank generates a different image (different seed/rank)
-            global_ids = [0] * len(prompts)
-        else:
-            # In multi-prompt mode, use round-robin distribution
-            global_ids = list(range(global_rank, total_prompts, world_size))
+        global_ids = list(range(global_rank, total_prompts, world_size))
 
         for i in range(0, len(prompts), bs):
             images = generate_image(
