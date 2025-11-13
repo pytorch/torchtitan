@@ -428,7 +428,9 @@ def pipeline_module_split(
             # Handle simple module attributes (e.g., "linear", "norm")
             elif module_name not in modules_to_keep:
                 # Replace with Identity or None based on configuration
-                replacement = nn.Identity() if use_identity_for_missing_modules else None
+                replacement = (
+                    nn.Identity() if use_identity_for_missing_modules else None
+                )
                 setattr(model, module_name, replacement)
 
         stage = PipelineStage(

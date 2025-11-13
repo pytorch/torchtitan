@@ -82,6 +82,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
         # Update passed_args
         self._titan_injected_model_args.update(titan_dense_args.__dict__)
+
     def _configure_hf_attention(self, attn_implementation: str):
         """Configure HuggingFace attention settings."""
         self._titan_injected_model_args["attn_implementation"] = attn_implementation
@@ -153,6 +154,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         self.max_seq_len = job_config.training.seq_len
 
         # Configure HF-specific settings to match TorchTitan settings
+        # TODO: false ?
         self.attention_bias = False
         self.mlp_bias = False
         self.use_cache = False
