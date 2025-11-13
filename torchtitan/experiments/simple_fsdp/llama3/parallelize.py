@@ -147,6 +147,7 @@ def parallelize_llama(
             model,
             backend=get_compile_backend(backend, fsdp_reshard_after_forward),
             fullgraph=True,
+            mode="light",
         )
 
     return model

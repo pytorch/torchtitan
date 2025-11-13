@@ -548,7 +548,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
                             moe,
                             attr_name,
                             torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
+                                submod, backend=compile_config.backend, fullgraph=True, mode="light",
                             ),
                         )
                 else:
@@ -556,7 +556,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
                         block,
                         attr_name,
                         torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=True
+                            submod, backend=compile_config.backend, fullgraph=True, mode="light",
                         ),
                     )
 
@@ -567,6 +567,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
                 transformer_block,
                 backend=compile_config.backend,
                 fullgraph=True,
+                mode="light",
             )
 
         model.layers.register_module(layer_id, transformer_block)
