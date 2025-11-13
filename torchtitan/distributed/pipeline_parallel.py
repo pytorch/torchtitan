@@ -45,49 +45,53 @@ lib = torch.library.Library("aten", "IMPL")
 def _override_torch_ops_for_zero_bubble():
     class MmSeparateWeightGrad(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, i, w):
+        def forward(ctx, i, w, real_output):
             ctx.save_for_backward(i)
-            grad_shape = (i.shape[0], w.shape[1])
+            grad_shape = real_output.shape
             return torch.empty(grad_shape, dtype=w.dtype, device=w.device, requires_grad=True)
 
         @staticmethod
         def backward(ctx, grad_output):
             (i,) = ctx.saved_tensors
             grad_weight = i.t().mm(grad_output)
-            return None, grad_weight
+            return None, grad_weight, None
 
     class MmSeparateInputGrad(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, i, w):
+        def forward(ctx, i, w, real_output):
             ctx.save_for_backward(w)
-            grad_shape = (i.shape[0], w.shape[1])
+            grad_shape = real_output.shape
             return torch.empty(grad_shape, dtype=w.dtype, device=w.device, requires_grad=True)
 
         @staticmethod
         def backward(ctx, grad_output):
             (w,) = ctx.saved_tensors
             grad_input = grad_output.mm(w.t())
-            return grad_input, None
+            return grad_input, None, None
 
     class MmPassThrough(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, x, y, fake_1, fake_2):
-            with torch._C._AutoDispatchBelowAutograd():
-                return torch.mm(x, y)
+        def forward(ctx, mm_output, fake_1, fake_2):
+            # we computed the mm earlier, so we could reuse its output shape in the separate input/weight functions
+            # but we need to keep this autograd function to connect the fake_* inputs to the autograd graph and pass 
+            # gradients back to them
+            return mm_output
 
         @staticmethod
         def backward(ctx, gO):
-            return None, None, gO, gO
+            return None, gO, gO
 
     def split_mm(i, w):
         # Apply the pass-through node. y is passed to this node so that it can be
         # saved for backward, but detach because we don't want to actually build
         # this edge of the graph
-        # logger.error(f"split_mm forward: {i.shape=}, {w.shape=}")
-        fake_1 = MmSeparateWeightGrad.apply(i.detach(), w)
-        fake_2 = MmSeparateInputGrad.apply(i, w.detach())
+        with torch._C._AutoDispatchBelowAutograd():
+            real_output = torch.mm(i, w)
 
-        return MmPassThrough.apply(i.detach(), w.detach(), fake_1, fake_2)
+        fake_1 = MmSeparateWeightGrad.apply(i.detach(), w, real_output.detach())
+        fake_2 = MmSeparateInputGrad.apply(i, w.detach(), real_output.detach())
+
+        return MmPassThrough.apply(real_output, fake_1, fake_2)
 
     # addmm operator: out = beta * input + alpha * (mat1 @ mat2)
     class AddmmSeparateMat2Grad(torch.autograd.Function):
