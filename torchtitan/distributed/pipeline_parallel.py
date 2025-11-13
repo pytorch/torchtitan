@@ -47,8 +47,7 @@ def _override_torch_ops_for_zero_bubble():
         @staticmethod
         def forward(ctx, i, w, real_output):
             ctx.save_for_backward(i)
-            grad_shape = real_output.shape
-            return torch.empty(grad_shape, dtype=w.dtype, device=w.device, requires_grad=True)
+            return real_output
 
         @staticmethod
         def backward(ctx, grad_output):
@@ -60,8 +59,7 @@ def _override_torch_ops_for_zero_bubble():
         @staticmethod
         def forward(ctx, i, w, real_output):
             ctx.save_for_backward(w)
-            grad_shape = real_output.shape
-            return torch.empty(grad_shape, dtype=w.dtype, device=w.device, requires_grad=True)
+            return real_output
 
         @staticmethod
         def backward(ctx, grad_output):
@@ -86,10 +84,10 @@ def _override_torch_ops_for_zero_bubble():
         # saved for backward, but detach because we don't want to actually build
         # this edge of the graph
         with torch._C._AutoDispatchBelowAutograd():
-            real_output = torch.mm(i, w)
+            real_output = torch.mm(i, w).detach()
 
-        fake_1 = MmSeparateWeightGrad.apply(i.detach(), w, real_output.detach())
-        fake_2 = MmSeparateInputGrad.apply(i, w.detach(), real_output.detach())
+        fake_1 = MmSeparateWeightGrad.apply(i.detach(), w, real_output)
+        fake_2 = MmSeparateInputGrad.apply(i, w.detach(), real_output)
 
         return MmPassThrough.apply(real_output, fake_1, fake_2)
 
@@ -217,15 +215,10 @@ def _override_torch_ops_for_zero_bubble():
     # _grouped_mm operator: Grouped matrix multiplication for MoE
     class GroupedMmSeparateMat2Grad(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, input, mat2, offs, bias, out_dtype):
+        def forward(ctx, input, mat2, offs, bias, out_dtype, real_output):
             ctx.save_for_backward(input)
             ctx.offs = offs
-            with FakeTensorMode(allow_non_fake_inputs=True), torch._C._AutoDispatchBelowAutograd(), torch.no_grad():
-                fake_output = torch.ops.aten._grouped_mm.default(
-                    input, mat2, offs=offs, bias=bias, out_dtype=out_dtype
-                )
-
-            return torch.empty((1,), dtype=input.dtype, device=input.device, requires_grad=True).expand_as(fake_output)
+            return real_output
 
         @staticmethod
         def backward(ctx, grad_output):
@@ -234,22 +227,14 @@ def _override_torch_ops_for_zero_bubble():
             grad_mat2 = torch.ops.aten._grouped_mm.default(
                 input.transpose(-1, -2), grad_output, offs=ctx.offs
             )
-            return None, grad_mat2, None, None, None
+            return None, grad_mat2, None, None, None, None
 
     class GroupedMmSeparateInputGrad(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, input, mat2, offs, bias, out_dtype):
+        def forward(ctx, input, mat2, offs, bias, out_dtype, real_output):
             ctx.save_for_backward(mat2)
             ctx.offs = offs
-            with FakeTensorMode(allow_non_fake_inputs=True), torch._C._AutoDispatchBelowAutograd(), torch.no_grad():
-                fake_output = torch.ops.aten._grouped_mm.default(
-                    input, mat2, offs=offs, bias=bias, out_dtype=out_dtype
-                )
-
-            # grad_shape = fake_output.shape
-            # print(f"Shape: {fake_output.shape=}")
-            return torch.empty((1,), dtype=input.dtype, device=input.device, requires_grad=True).expand_as(fake_output)
-            # return torch.empty(grad_shape, dtype=input.dtype, device=input.device, requires_grad=True)
+            return real_output
 
         @staticmethod
         def backward(ctx, grad_output):
@@ -258,28 +243,29 @@ def _override_torch_ops_for_zero_bubble():
             grad_input = torch.ops.aten._grouped_mm.default(
                 grad_output, mat2.transpose(-1, -2), offs=ctx.offs
             )
-            return grad_input, None, None, None, None
+            return grad_input, None, None, None, None, None
 
     class GroupedMmPassThrough(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, input, mat2, offs, bias, out_dtype, fake_1, fake_2):
-            with torch._C._AutoDispatchBelowAutograd():
-                return torch.ops.aten._grouped_mm.default(
-                    input, mat2, offs=offs, bias=bias, out_dtype=out_dtype
-                )
+        def forward(ctx, real_output, fake_1, fake_2):
+            return real_output
 
         @staticmethod
         def backward(ctx, gO):
-            return None, None, None, None, None, gO, gO
+            return None, gO, gO
 
     def split_grouped_mm(input, mat2, offs=None, bias=None, out_dtype=None):
+        with torch._C._AutoDispatchBelowAutograd():
+            real_output = torch.ops.aten._grouped_mm.default(
+                input, mat2, offs=offs, bias=bias, out_dtype=out_dtype
+            ).detach()
         fake_1 = GroupedMmSeparateMat2Grad.apply(
-            input.detach(), mat2, offs, bias, out_dtype
+            input.detach(), mat2, offs, bias, out_dtype, real_output
         )
         fake_2 = GroupedMmSeparateInputGrad.apply(
-            input, mat2.detach(), offs, bias, out_dtype
+            input, mat2.detach(), offs, bias, out_dtype, real_output
         )
-        return GroupedMmPassThrough.apply(input.detach(), mat2.detach(), offs, bias, out_dtype, fake_1, fake_2)
+        return GroupedMmPassThrough.apply(real_output, fake_1, fake_2)
 
     lib.impl("mm", split_mm, "Autograd")
     lib.impl("addmm", split_addmm, "Autograd")
