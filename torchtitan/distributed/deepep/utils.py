@@ -181,6 +181,7 @@ class PrimusTurboDeepepManager:
                 )
 
             self.token_probs = self.token_probs.float()  # downcast or upcast
+
         (
             hidden_states,
             dispatched_indices,
@@ -263,7 +264,6 @@ class PrimusTurboDeepepManager:
     def get_permuted_hidden_states_by_experts(
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
-        # if self.permute_fusion:
         if True:
             (
                 self.dispatched_routing_map,
@@ -272,12 +272,14 @@ class PrimusTurboDeepepManager:
                 self.dispatched_indices, self.dispatched_probs, self.num_local_experts
             )
         else:
+            raise RuntimeError("Please enable permute_fusion")
             (
                 self.dispatched_routing_map,
                 self.dispatched_probs,
             ) = self._indices_to_multihot(
                 self.dispatched_indices, self.dispatched_probs
             )
+
         self.hidden_shape_before_permute = hidden_states.shape
         assert (
             self.dispatched_probs.dtype == torch.float32
@@ -290,6 +292,7 @@ class PrimusTurboDeepepManager:
         )
         if self.router_dtype == "fp64":
             permuted_probs = permuted_probs.to(torch.float64)
+
         return hidden_states, permuted_probs
 
 

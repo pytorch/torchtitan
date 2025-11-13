@@ -75,6 +75,8 @@ class FusedDispatch(torch.autograd.Function):
         # print(f"executing deep_ep")
         if async_finish:
             previous_event = EventOverlap(EventHandle())
+
+        # print(f"get_buffer(group, get_hidden_bytes(x))")
         # Calculate layout before actual dispatch
         buffer = get_buffer(group, get_hidden_bytes(x))
         (
