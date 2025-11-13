@@ -388,93 +388,95 @@ class ReordererSequenceParallel(ParallelStyle):
         )
 
 
-class _BaseExpertParallelForDeepEp(ParallelStyle):
+# class _BaseExpertParallelForDeepEp(ParallelStyle):
+#     def __init__(self):
+#         super().__init__()
+#         self.input_splits = None
+#         self.output_splits = None
+
+# performing all-to-all dispatch on the input
+# def _token_dispatch(self, mod, inputs, device_mesh):
+#     # annotate module input placements/sharding with input_layouts
+#     routed_input, num_tokens_per_expert = inputs
+#     ep_size = device_mesh.shape[0]
+
+#     # generate the input splits and output splits for all-to-all
+#     with torch.no_grad():
+#         num_tokens_per_expert_group = num_tokens_per_expert.new_empty(
+#             num_tokens_per_expert.shape[0]
+#         )
+#         dist.all_to_all_single(
+#             num_tokens_per_expert_group,
+#             num_tokens_per_expert,
+#             group=device_mesh.get_group(),
+#         )
+#         input_splits = (
+#             num_tokens_per_expert.view(ep_size, -1)
+#             .sum(dim=1)
+#             .to(torch.device("cpu"), non_blocking=True)
+#         )
+#         output_splits = (
+#             num_tokens_per_expert_group.view(ep_size, -1)
+#             .sum(dim=1)
+#             .to(torch.device("cpu"), non_blocking=True)
+#         )
+#         # NOTE: this would incur a device-to-host sync
+#         torch.cuda.current_stream().synchronize()
+#         self.input_splits = input_splits.tolist()
+#         self.output_splits = output_splits.tolist()
+
+#     # perform all-to-all
+#     routed_input = all_to_all_single_autograd(
+#         routed_input,
+#         self.output_splits,
+#         self.input_splits,
+#         device_mesh.get_group(),
+#     )
+
+#     # NOTE: After this all-to-all, the routed input is put on proper EP rank.
+#     # However, the num_tokens_per_expert_group is not of the final target format
+#     # [#tokens for local expert 0, #tokens for local expert 1, ...]
+#     # Rather, it is of the format
+#     # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
+#     #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
+#     # We need to perform another shuffle to get the correct format -- this is done via the function
+#     # generate_permute_indices in moe.py, which also does padding to make sure the number of tokens
+#     # each expert gets locally is a multiple of ALIGN_SIZE_M.
+
+#     return routed_input, num_tokens_per_expert_group
+
+# @staticmethod
+# def _partition_fn(name, mod, device_mesh):
+#     # shard on the expert dimension
+#     for name, param in mod.named_parameters(recurse=False):
+#         dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+#         mod.register_parameter(name, dist_param)
+
+# # performing all-to-all combine on the output
+# def _token_combine(self, mod, routed_output, device_mesh):
+#     routed_output = all_to_all_single_autograd(
+#         routed_output,
+#         self.input_splits,
+#         self.output_splits,
+#         device_mesh.get_group(),
+#     )
+#     return routed_output
+
+# def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+#     return distribute_module(
+#         module,
+#         device_mesh,
+#         partition_fn=_BaseExpertParallelForDeepEp._partition_fn,
+#         input_fn=self._token_dispatch,
+#         output_fn=self._token_combine,
+#     )
+
+
+class ExpertParallelDeepEP(ParallelStyle):
     def __init__(self):
         super().__init__()
         self.input_splits = None
         self.output_splits = None
-
-    # performing all-to-all dispatch on the input
-    def _token_dispatch(self, mod, inputs, device_mesh):
-        # annotate module input placements/sharding with input_layouts
-        routed_input, num_tokens_per_expert = inputs
-        ep_size = device_mesh.shape[0]
-
-        # generate the input splits and output splits for all-to-all
-        with torch.no_grad():
-            num_tokens_per_expert_group = num_tokens_per_expert.new_empty(
-                num_tokens_per_expert.shape[0]
-            )
-            dist.all_to_all_single(
-                num_tokens_per_expert_group,
-                num_tokens_per_expert,
-                group=device_mesh.get_group(),
-            )
-            input_splits = (
-                num_tokens_per_expert.view(ep_size, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
-            )
-            output_splits = (
-                num_tokens_per_expert_group.view(ep_size, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
-            )
-            # NOTE: this would incur a device-to-host sync
-            torch.cuda.current_stream().synchronize()
-            self.input_splits = input_splits.tolist()
-            self.output_splits = output_splits.tolist()
-
-        # perform all-to-all
-        routed_input = all_to_all_single_autograd(
-            routed_input,
-            self.output_splits,
-            self.input_splits,
-            device_mesh.get_group(),
-        )
-
-        # NOTE: After this all-to-all, the routed input is put on proper EP rank.
-        # However, the num_tokens_per_expert_group is not of the final target format
-        # [#tokens for local expert 0, #tokens for local expert 1, ...]
-        # Rather, it is of the format
-        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
-        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
-        # We need to perform another shuffle to get the correct format -- this is done via the function
-        # generate_permute_indices in moe.py, which also does padding to make sure the number of tokens
-        # each expert gets locally is a multiple of ALIGN_SIZE_M.
-
-        return routed_input, num_tokens_per_expert_group
-
-    @staticmethod
-    def _partition_fn(name, mod, device_mesh):
-        # shard on the expert dimension
-        for name, param in mod.named_parameters(recurse=False):
-            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
-            mod.register_parameter(name, dist_param)
-
-    # performing all-to-all combine on the output
-    def _token_combine(self, mod, routed_output, device_mesh):
-        routed_output = all_to_all_single_autograd(
-            routed_output,
-            self.input_splits,
-            self.output_splits,
-            device_mesh.get_group(),
-        )
-        return routed_output
-
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        return distribute_module(
-            module,
-            device_mesh,
-            partition_fn=_BaseExpertParallelForDeepEp._partition_fn,
-            input_fn=self._token_dispatch,
-            output_fn=self._token_combine,
-        )
-
-
-class ExpertParallelDeepEP(_BaseExpertParallelForDeepEp):
-    def __init__(self):
-        super().__init__()
 
     # performing all-to-all dispatch on the input
     def _token_dispatch(self, mod, inputs, device_mesh):
@@ -505,13 +507,14 @@ class ExpertParallelDeepEP(_BaseExpertParallelForDeepEp):
         routed_output = mod.deepep_dispatcher.token_combine(
             routed_output, group=device_mesh.get_group()
         )
+        # TODO: combine post process?
         return routed_output
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
             module,
             device_mesh,
-            partition_fn=_BaseExpertParallelForDeepEp._partition_fn,
+            partition_fn=self._partition_fn,
             input_fn=self._token_dispatch,
             output_fn=self._token_combine,
         )
