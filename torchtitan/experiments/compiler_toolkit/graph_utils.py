@@ -206,6 +206,7 @@ def compiler(
         passes: List of compiler pass functions to apply. Each function should take
                 (gm, example_inputs) and return a transformed gm. If None, uses
                 DEFAULT_COMPILER_PASSES.
+        dump_folder: Optional folder to dump the graph to
     """
     if passes is None:
         passes = DEFAULT_COMPILER_PASSES
