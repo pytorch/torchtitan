@@ -151,6 +151,9 @@ class DryRunTrainer(Trainer):
         logger.info("Configuration is ready for training execution.")
         logger.info("=" * 80)
 
+    def train(self):
+        return
+
 
 if __name__ == "__main__":
     main(DryRunTrainer)
