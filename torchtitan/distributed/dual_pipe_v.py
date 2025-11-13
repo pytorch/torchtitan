@@ -309,6 +309,11 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
             # pyrefly: ignore [bad-index, unsupported-operation]
             kwarg_mbs[forward_mb_index],
         )
+        # TODO its error prone to have this logic scattered inside and outside the runtime file..
+        # this goes along with the patch to pytorch: https://github.com/pytorch/pytorch/pull/167002/
+        key = f"{forward_stage.stage_index}_{forward_mb_index}"
+        assert key not in schedule.ownership_tokens
+        schedule.ownership_tokens[key] = output.view_as(output).grad_fn
         schedule._maybe_compute_loss(
             forward_stage, output, ctx.target_mbs, forward_mb_index
         )
