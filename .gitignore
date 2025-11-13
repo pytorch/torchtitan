@@ -41,3 +41,5 @@ Sessionx.vim
 .DS_Store
 .venv/
 slurm-*
+scripts/deepep/torchtitan_deepep_tune/*/*.json
+scripts/deepep/torchtitan_deepep_tune/*.log
