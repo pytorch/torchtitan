@@ -40,6 +40,53 @@ __all__ = [
 ]
 
 
+def _override_torch_ops_for_zero_bubble():
+    class MmSeparateWeightGrad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, i, w):
+            ctx.save_for_backward(i)
+            return w
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            (i,) = ctx.saved_tensors
+            grad_weight = i.t().mm(grad_output)
+            return None, grad_weight
+
+    class MmSeparateInputGrad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, i, w):
+            ctx.save_for_backward(w)
+            return i
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            (w,) = ctx.saved_tensors
+            grad_input = grad_output.mm(w.t())
+            return grad_input, None
+
+    class MmPassThrough(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, y):
+            return torch.mm(x, y)
+
+        @staticmethod
+        def backward(ctx, gO):
+            return gO, gO
+
+    def split_mm(i, w):
+        print("split mul")
+        # Apply the pass-through node. y is passed to this node so that it can be
+        # saved for backward, but detach because we don't want to actually build
+        # this edge of the graph
+        w1 = MmSeparateWeightGrad.apply(i.detach(), w)
+        i1 = MmSeparateInputGrad.apply(i, w.detach())
+        return MmPassThrough.apply(i1, w1)
+
+    lib = torch.library.Library("aten", "IMPL")
+    lib.impl("mm", split_mm, "Autograd")
+
+
 def pipeline_llm(
     model: nn.Module,
     parallel_dims: ParallelDims,
@@ -50,6 +97,9 @@ def pipeline_llm(
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.world_mesh["pp"]
+
+    if True:
+        _override_torch_ops_for_zero_bubble()
 
     # Determine the number of virtual stages based on schedule type
     schedule_class = get_schedule_class(
