@@ -6,7 +6,7 @@ description = "Qwen 3 debug training"
 print_config = true
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 5
 enable_memory_snapshot = false
@@ -41,7 +41,6 @@ decay_type = "linear"
 min_lr_factor = 0.0
 
 [training]
-global_batch_size = 4
 local_batch_size = 2
 seq_len = 2048
 max_norm = 1.0  # grad norm clipping
