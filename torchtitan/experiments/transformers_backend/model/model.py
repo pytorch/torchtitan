@@ -171,7 +171,8 @@ class HFTransformerModel(nn.Module):
 
             if isinstance(module, layer_idx_classes):
                 if not hasattr(module, "layer_idx"):
-                    return
+                    raise ValueError(f"Module {module} does not have a layer_idx attribute")
+
                 layer_idx = module.layer_idx
 
                 if hasattr(config, "depth_init") and config.depth_init:
