@@ -49,7 +49,5 @@ jobs:
 
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
 
-        python -m pip install transformers==4.55.4
-
         mkdir artifacts-to-be-uploaded
         python -m torchtitan.experiments.transformers_backend.tests.integration_tests artifacts-to-be-uploaded --ngpu 8
