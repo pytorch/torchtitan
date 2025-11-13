@@ -184,6 +184,9 @@ def _count_moe_modules(model):
     return moe_count
 
 
+# import fbvscode
+# fbvscode.attach_debugger()
+
 device_type, device_module = get_device_info()
 
 
