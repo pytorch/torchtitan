@@ -22,7 +22,7 @@ def build_transformers_backend_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name meta-llama/Llama-3.2-1B",
-                    "--training.dataset wikitext2-test",
+                    "--training.dataset c4-test",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
