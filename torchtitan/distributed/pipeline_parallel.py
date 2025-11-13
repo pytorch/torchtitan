@@ -228,6 +228,7 @@ def generate_llm_fqn_per_model_part(
     num_layers: int,
     input_weight: int = 1,
     output_weight: int = 1,
+    include_rotary_emb: bool = False,
 ) -> list[list[str]]:
     """
     Programmatically generates module names model part, focused on LLMs models.
@@ -237,6 +238,7 @@ def generate_llm_fqn_per_model_part(
         num_layers: Total number of transformer layers in the model
         input_weight: Weight for input modules (tok_embeddings) in layer calculation
         output_weight: Weight for output modules (norm + output) in layer calculation
+        include_rotary_emb: Whether to include rotary_emb in each model part
 
     Returns:
         List of lists containing module names for each model part
@@ -251,7 +253,10 @@ def generate_llm_fqn_per_model_part(
     if num_stages == 1:
         # Single stage gets everything
         layer_names = [f"layers.{i}" for i in range(num_layers)]
-        return [["tok_embeddings"] + layer_names + ["norm", "output"]]
+        result = [["tok_embeddings"] + layer_names + ["norm", "output"]]
+        if include_rotary_emb:
+            result[0].append("rotary_emb")
+        return result
 
     # Calculate effective layers including weights
     num_effective_layers = num_layers + input_weight + output_weight
@@ -329,6 +334,8 @@ def generate_llm_fqn_per_model_part(
                     stage_modules.append(f"layers.{current_layer}")
                     current_layer += 1
 
+        if include_rotary_emb:
+            stage_modules.append("rotary_emb")
         module_names_per_stage.append(stage_modules)
 
     return module_names_per_stage
@@ -340,6 +347,7 @@ def pipeline_module_split(
     pp_schedule: str,
     device: torch.device,
     module_names_per_stage: list[list[str]],
+    use_identity_for_missing_modules: bool = False,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """
     This API creates pipeline stages based on specified module names for each stage.
@@ -361,6 +369,8 @@ def pipeline_module_split(
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
                                - "output" for the output projection layer
+        use_identity_for_missing_modules: If True, replace missing modules with nn.Identity(),
+                                         otherwise replace with None
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -417,8 +427,9 @@ def pipeline_module_split(
                         setattr(model, module_name, nn.ModuleList())
             # Handle simple module attributes (e.g., "linear", "norm")
             elif module_name not in modules_to_keep:
-                # Replace with None
-                setattr(model, module_name, None)
+                # Replace with Identity or None based on configuration
+                replacement = nn.Identity() if use_identity_for_missing_modules else None
+                setattr(model, module_name, replacement)
 
         stage = PipelineStage(
             model,
