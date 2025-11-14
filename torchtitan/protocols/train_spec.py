@@ -77,6 +77,10 @@ def get_train_spec(name: str) -> TrainSpec:
     from torchtitan.experiments import _supported_experiments
     from torchtitan.models import _supported_models
 
+    if "/" in name:
+        module = import_module("torchtitan.experiments.transformers_backend")
+        return module.get_train_spec()
+
     if name in _supported_models:
         module = import_module(f"torchtitan.models.{name}")
         return module.get_train_spec()

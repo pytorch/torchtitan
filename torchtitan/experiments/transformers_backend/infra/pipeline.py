@@ -20,7 +20,7 @@ from torchtitan.distributed.pipeline_parallel import (
     generate_llm_fqn_per_model_part,
     pipeline_module_split,
 )
-from torchtitan.experiments.transformers_backend.job_config import JobConfig
+from torchtitan.config.job_config import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
 
