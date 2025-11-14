@@ -36,7 +36,11 @@ def export_joint(
     ):
         gm = dynamo_graph_capture_for_export(model)(*args, **kwargs)
         logger.info("Dynamo gm:")
-        logger.info(gm.print_readable(print_output=False, include_stride=True, include_device=True))
+        logger.info(
+            gm.print_readable(
+                print_output=False, include_stride=True, include_device=True
+            )
+        )
         tracing_context = gm.meta["tracing_context"]
 
     with tracing(tracing_context):
@@ -195,14 +199,18 @@ def compiler(
         passes = DEFAULT_COMPILER_PASSES
 
     logger.info(f"{name} before compiler:")
-    logger.info(gm.print_readable(print_output=False, include_stride=True, include_device=True))
+    logger.info(
+        gm.print_readable(print_output=False, include_stride=True, include_device=True)
+    )
 
     for pass_fn in passes:
         logger.info(f"Applying pass: {pass_fn.__name__}")
         gm = pass_fn(gm, example_inputs)
 
     logger.info(f"{name} after compiler:")
-    logger.info(gm.print_readable(print_output=False, include_stride=True, include_device=True))
+    logger.info(
+        gm.print_readable(print_output=False, include_stride=True, include_device=True)
+    )
     return gm
 
 
