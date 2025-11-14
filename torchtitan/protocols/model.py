@@ -12,13 +12,14 @@ import torch
 import torch.nn as nn
 
 from torch.nn.attention.flex_attention import BlockMask
+from torch.nn.attention.varlen import VarlenMetadata
 
 from torchtitan.components.tokenizer import BaseTokenizer
 
 from torchtitan.config import JobConfig
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask
+AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
 @dataclass

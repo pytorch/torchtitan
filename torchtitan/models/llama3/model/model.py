@@ -13,11 +13,12 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torch.nn.attention.varlen import varlen_attn
+from torch.nn.attention.varlen import varlen_attn, VarlenMetadata
 
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
+    create_varlen_cu_seqs,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -236,20 +237,7 @@ class Attention(nn.Module):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        if self.use_varlen_attn:
-            true_seq_len = freqs_cis.shape[0]
-            total_tokens = xq.shape[1]
-
-            true_bs = total_tokens // true_seq_len
-            xq = xq.view(true_bs, true_seq_len, -1, self.head_dim)
-            xk = xk.view(true_bs, true_seq_len, -1, self.head_dim)
-
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
-
-            xq = xq.view(1, total_tokens, -1, self.head_dim)
-            xk = xk.view(1, total_tokens, -1, self.head_dim)
-        else:
-            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -259,18 +247,16 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        assert (
-            isinstance(attention_masks, BlockMask) or attention_masks is None
-        ), attention_masks
-
         if self.use_flex_attn:
             assert isinstance(attention_masks, BlockMask), attention_masks
             output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
         elif self.use_varlen_attn:
-            cu_seq_q = kwargs.get("cu_seq_q")
-            cu_seq_k = kwargs.get("cu_seq_k")
-            max_q = kwargs.get("max_q")
-            max_k = kwargs.get("max_k")
+            assert isinstance(attention_masks, VarlenMetadata), attention_masks
+
+            cu_seq_q = attention_masks.cu_seq_q
+            cu_seq_k = attention_masks.cu_seq_k
+            max_q = attention_masks.max_q
+            max_k = attention_masks.max_k
 
             n_local_heads = xq.shape[1]
             xq_packed = (
@@ -515,6 +501,8 @@ class Transformer(nn.Module, ModelProtocol):
             case "block_causal":
                 B = input_batch.shape[0]
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+            case "varlen_attn":
+                return create_varlen_cu_seqs(input_batch, tokenizer.eos_id)
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
