@@ -25,20 +25,18 @@ def inference(config: JobConfig):
     # Distributed processing setup: Each GPU/process handles a subset of prompts
     world_size = int(os.environ["WORLD_SIZE"])
     global_rank = int(os.environ["RANK"])
-
     original_prompts = open(config.inference.prompts_path).readlines()
-    logger.info(f"Reading prompts from: {config.inference.prompts_path}")
-    if len(original_prompts) < world_size:
+    total_prompts = len(original_prompts)
+
+    if total_prompts < world_size:
         raise ValueError(
-            f"Number of prompts ({len(prompts)}) must be >= number of ranks ({world_size}). "
+            f"Number of prompts ({total_prompts}) must be >= number of ranks ({world_size}). "
             f"FSDP all-gather will hang if some ranks have no prompts to process."
         )
 
     bs = config.inference.local_batch_size
     # Distribute prompts across processes using round-robin assignment
     prompts = original_prompts[global_rank::world_size]
-
-    total_prompts = len(original_prompts)
 
     trainer.checkpointer.load(step=config.checkpoint.load_step)
     t5_tokenizer, clip_tokenizer = build_flux_tokenizer(config)
