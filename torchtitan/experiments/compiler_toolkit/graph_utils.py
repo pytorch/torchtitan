@@ -36,7 +36,7 @@ def export_joint(
     ):
         gm = dynamo_graph_capture_for_export(model)(*args, **kwargs)
         logger.info("Dynamo gm:")
-        logger.info(gm.print_readable(print_output=False, include_stride=True, include_device=True)
+        logger.info(gm.print_readable(print_output=False, include_stride=True, include_device=True))
         tracing_context = gm.meta["tracing_context"]
 
     with tracing(tracing_context):
