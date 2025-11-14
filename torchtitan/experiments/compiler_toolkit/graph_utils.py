@@ -29,7 +29,9 @@ def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> No
 
     output_path = Path(dump_folder) / "compiler" / f"{name}.txt"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(gm.print_readable(print_output=False))
+    output_path.write_text(
+        gm.print_readable(print_output=False, include_stride=True, include_device=True)
+    )
 
 
 def export_joint(
