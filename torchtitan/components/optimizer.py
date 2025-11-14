@@ -21,6 +21,7 @@ from torch.optim import Optimizer
 from torchtitan.components.ft import FTManager, has_torchft
 from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments import distributed_scion
 
 __all__ = [
     "OptimizersContainer",
@@ -75,7 +76,12 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         self.optimizers = []
         self.model_parts = model_parts
         for model in self.model_parts:
-            params = [p for p in model.parameters() if p.requires_grad]
+            if issubclass(optimizer_cls, (distributed_scion.DistributedScion)):
+                params, optimizer_kwargs = distributed_scion.create_scion_param_groups(
+                    model, optimizer_kwargs
+                )
+            else:
+                params = [p for p in model.parameters() if p.requires_grad]
             self.optimizers.append(optimizer_cls(params, **optimizer_kwargs))
             all_params.extend(params)
         self._validate_length(len(self.model_parts))
@@ -302,9 +308,17 @@ def build_optimizers(
         "foreach": foreach,
     }
 
+    if name in ["DistributedScion"]:
+        optimizer_kwargs = (
+            distributed_scion.create_scion_optimizer_kwargs_from_optimizer_config(
+                optimizer_config, parallel_dims
+            )
+        )
+
     optimizer_classes = {
         "Adam": torch.optim.Adam,
         "AdamW": torch.optim.AdamW,
+        "DistributedScion": distributed_scion.DistributedScion,
     }
     if name not in optimizer_classes:
         raise NotImplementedError(f"Optimizer {name} not added.")
