@@ -20,7 +20,7 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
-from torch.nn.attention.varlen import varlen_attn
+from torch.nn.attention.varlen import varlen_attn, VarlenMetadata
 
 
 __all__ = [
@@ -251,3 +251,57 @@ def create_attention_mask(*args, **kwargs):
     arguments.
     """
     return _compiled_create_block_mask(*args, **kwargs)
+
+
+def create_varlen_cu_seqs(input_batch: torch.Tensor, eos_id: int) -> VarlenMetadata:
+    """
+    Creates cumulative sequence length indices needed for variable length attention
+
+    Args:
+        input_batch
+        eos_id: the EOS id marker
+
+    Returns:
+        VarlenMetadata containing cumulative sequence length indices for q, k, and max_seq_len
+    """
+    batch_size, seq_len = input_batch.shape
+    device = input_batch.device
+    cu_seqlens_list, all_seq_lengths = [], []
+    offset = 0
+    max_seqlen = 0
+
+    for b in range(batch_size):
+        tokens = input_batch[b]
+        eos_positions = (tokens == eos_id).nonzero(as_tuple=True)[0].to(torch.int32)
+        sample_cu_seqlens = torch.cat(
+            [
+                torch.tensor([0], dtype=torch.int32, device=device),
+                eos_positions + 1,
+                torch.tensor([seq_len], dtype=torch.int32, device=device),
+            ]
+        )
+        sample_cu_seqlens = torch.unique_consecutive(sample_cu_seqlens)
+
+        seq_lengths = torch.diff(sample_cu_seqlens)
+        all_seq_lengths.append(seq_lengths)
+
+        cu_seqlens_adjusted = sample_cu_seqlens[:-1] + offset
+        cu_seqlens_list.append(cu_seqlens_adjusted)
+
+        offset += seq_len
+
+    packed_cu_seqlens = torch.cat(
+        cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
+    )
+
+    max_seqlen = 0
+    if len(all_seq_lengths) > 0:
+        all_seq_lengths = torch.cat(all_seq_lengths)
+        max_seqlen = all_seq_lengths.max().item()
+
+    return VarlenMetadata(
+        cu_seq_q=packed_cu_seqlens,
+        cu_seq_k=packed_cu_seqlens,
+        max_q=max_seqlen,
+        max_k=max_seqlen,
+    )
