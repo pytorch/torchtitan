@@ -14,13 +14,13 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
+from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import (
     build_pipeline_schedule,
     generate_llm_fqn_per_model_part,
     pipeline_module_split,
 )
-from torchtitan.config.job_config import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
 

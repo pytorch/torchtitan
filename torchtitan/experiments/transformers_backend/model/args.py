@@ -174,4 +174,6 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         return self
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
-        return get_dense_model_nparams_and_flops(self, model, head_dims=self.head_dim, seq_len=seq_len)
+        return get_dense_model_nparams_and_flops(
+            self, model, head_dims=self.head_dim, seq_len=seq_len
+        )
