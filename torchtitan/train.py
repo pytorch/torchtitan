@@ -454,7 +454,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
-        if getattr(self.model_args, "use_flex_attn", False):
+        if getattr(self.model_args, "use_flex_attn", False) or getattr(
+            self.model_args, "use_varlen_attn", False
+        ):
             extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,

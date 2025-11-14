@@ -13,9 +13,12 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
+from torch.nn.attention.varlen import varlen_attn, VarlenMetadata
+
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
+    create_varlen_cu_seqs,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -192,8 +195,11 @@ class Attention(nn.Module):
         )
 
         self.use_flex_attn = model_args.use_flex_attn
+        self.use_varlen_attn = model_args.use_varlen_attn
         if self.use_flex_attn:
             self.inner_attention = FlexAttentionWrapper()
+        elif self.use_varlen_attn:
+            self.inner_attention = varlen_attn
         else:
             self.inner_attention = ScaledDotProductAttentionWrapper()
 
@@ -207,6 +213,7 @@ class Attention(nn.Module):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        **kwargs,
     ):
         """
         Forward pass of the attention module.
@@ -240,13 +247,38 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        assert (
-            isinstance(attention_masks, BlockMask) or attention_masks is None
-        ), attention_masks
-
         if self.use_flex_attn:
             assert isinstance(attention_masks, BlockMask), attention_masks
             output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+        elif self.use_varlen_attn:
+            assert isinstance(attention_masks, VarlenMetadata), attention_masks
+
+            cu_seq_q = attention_masks.cu_seq_q
+            cu_seq_k = attention_masks.cu_seq_k
+            max_q = attention_masks.max_q
+            max_k = attention_masks.max_k
+
+            n_local_heads = xq.shape[1]
+            xq_packed = (
+                xq.transpose(1, 2).contiguous().view(-1, n_local_heads, self.head_dim)
+            )
+            xk_packed = (
+                xk.transpose(1, 2).contiguous().view(-1, n_local_heads, self.head_dim)
+            )
+            xv_packed = (
+                xv.transpose(1, 2).contiguous().view(-1, n_local_heads, self.head_dim)
+            )
+
+            output = self.inner_attention(
+                xq_packed,
+                xk_packed,
+                xv_packed,
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                is_causal=True,
+            )
         else:
             assert attention_masks is None
             output = self.inner_attention(xq, xk, xv)
@@ -346,6 +378,7 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        **kwargs,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -358,7 +391,9 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
+        h = x + self.attention(
+            self.attention_norm(x), freqs_cis, attention_masks, **kwargs
+        )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -466,6 +501,8 @@ class Transformer(nn.Module, ModelProtocol):
             case "block_causal":
                 B = input_batch.shape[0]
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+            case "varlen_attn":
+                return create_varlen_cu_seqs(input_batch, tokenizer.eos_id)
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
@@ -478,6 +515,7 @@ class Transformer(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
+        **kwargs,
     ):
         """
         Perform a forward pass through the Transformer model.
@@ -496,7 +534,7 @@ class Transformer(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, attention_masks=attention_masks)
+            h = layer(h, self.freqs_cis, attention_masks=attention_masks, **kwargs)
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
