@@ -19,8 +19,48 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
-from torchtitan.config import Optimizer as OptimizerConfig
+from torchtitan.config import Optimizer as OptimizerConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+
+# Dion optimizer availability will be checked lazily when needed
+DION_AVAILABLE = None
+MUON_AVAILABLE = None
+
+
+def _check_dion_availability():
+    """Lazy check for Dion optimizer availability."""
+    global DION_AVAILABLE
+    if DION_AVAILABLE is None:
+        try:
+            from torchtitan.experiments.dion_optimizer.dion import (
+                Dion,
+                DionMixedPrecisionConfig,
+            )
+            from torchtitan.experiments.dion_optimizer.titan_dion import (
+                DionOptimizersContainer,
+            )
+
+            DION_AVAILABLE = True
+        except ImportError:
+            DION_AVAILABLE = False
+    return DION_AVAILABLE
+
+
+def _check_muon_availability():
+    """Lazy check for Muon optimizer availability."""
+    global MUON_AVAILABLE
+    if MUON_AVAILABLE is None:
+        try:
+            from torchtitan.experiments.dion_optimizer.muon import Muon
+            from torchtitan.experiments.dion_optimizer.titan_muon import (
+                MuonOptimizersContainer,
+            )
+
+            MUON_AVAILABLE = True
+        except ImportError:
+            MUON_AVAILABLE = False
+    return MUON_AVAILABLE
+
 
 __all__ = [
     "OptimizersContainer",
@@ -251,8 +291,8 @@ def build_optimizers(
 
     This function creates a ``OptimizersContainer`` for the given model parts.
     ``optimizer_config`` should define the correct optimizer name and parameters.
-    This function currently supports creating ``OptimizersContainer`` and
-    ``OptimizersInBackwardContainer``.
+    This function currently supports creating ``OptimizersContainer``,
+    ``OptimizersInBackwardContainer``, and ``DionOptimizersContainer``.
 
     **Note**
     Users who want to customize the optimizer behavior can create their own
@@ -266,6 +306,147 @@ def build_optimizers(
         parallel_dims (ParallelDims): Parallel dimensions for the model.
     """
     optim_in_bwd = optimizer_config.early_step_in_backward
+    name = optimizer_config.name
+
+    # Handle Dion optimizer
+    if name == "Dion":
+        if not _check_dion_availability():
+            raise ImportError(
+                "Dion optimizer is not available. Please ensure the dion optimizer files are present in "
+                "torchtitan/experiments/dion_optimizer/"
+            )
+
+        if optim_in_bwd:
+            raise NotImplementedError(
+                "Dion optimizer does not support early step in backward."
+            )
+
+        if ft_manager and ft_manager.enabled:
+            raise NotImplementedError(
+                "TorchFT is not yet supported with Dion optimizer."
+            )
+
+        # Import the DionOptimizerConfig and DionOptimizersContainer from titan_dion
+        from torchtitan.experiments.dion_optimizer.titan_dion import (
+            DionOptimizerConfig,
+            DionOptimizersContainer,
+        )
+
+        # Create DionOptimizerConfig from optimizer_config
+        dion_config = DionOptimizerConfig(
+            name="dion",
+            lr=optimizer_config.lr,
+            weight_decay=optimizer_config.weight_decay,
+            mu=optimizer_config.mu,
+            betas=(optimizer_config.beta1, optimizer_config.beta2),
+            epsilon=optimizer_config.eps,
+            rank_fraction=optimizer_config.rank_fraction,
+            rank_multiple_of=optimizer_config.rank_multiple_of,
+            power_iters=optimizer_config.power_iters,
+            qr_method=optimizer_config.qr_method,
+            cqr_warmup_steps=optimizer_config.cqr_warmup_steps,
+            rcqr_oversample=optimizer_config.rcqr_oversample,
+            algorithm=optimizer_config.algorithm,
+            replicate_mesh_grad_sync=optimizer_config.replicate_mesh_grad_sync,
+            # Parameter-specific optimizer selection
+            scalar_optimizer=getattr(optimizer_config, "scalar_optimizer", "adamw"),
+            embedding_optimizer=getattr(
+                optimizer_config, "embedding_optimizer", "adamw"
+            ),
+            head_optimizer=getattr(optimizer_config, "head_optimizer", "adamw"),
+            routing_optimizer=getattr(optimizer_config, "routing_optimizer", "adamw"),
+            expert_optimizer=getattr(optimizer_config, "expert_optimizer", None),
+            # Additional optimizer options
+            head_lr_scaling=getattr(optimizer_config, "head_lr_scaling", True),
+            # Learning rate scaling factors
+            scalar_lr_factor=getattr(optimizer_config, "scalar_lr_factor", 1.0),
+            embedding_lr_factor=getattr(optimizer_config, "embedding_lr_factor", 1.0),
+            head_lr_factor=getattr(optimizer_config, "head_lr_factor", 1.0),
+            routing_lr_factor=getattr(optimizer_config, "routing_lr_factor", 1.0),
+            expert_lr_factor=getattr(optimizer_config, "expert_lr_factor", 1.0),
+        )
+
+        # Set mixed precision dtypes if specified
+        if optimizer_config.momentum_dtype:
+            dion_config.momentum_dtype = TORCH_DTYPE_MAP[
+                optimizer_config.momentum_dtype
+            ]
+        if optimizer_config.Q_dtype:
+            dion_config.Q_dtype = TORCH_DTYPE_MAP[optimizer_config.Q_dtype]
+        if optimizer_config.variance_dtype:
+            dion_config.variance_dtype = TORCH_DTYPE_MAP[
+                optimizer_config.variance_dtype
+            ]
+
+        return DionOptimizersContainer(
+            model_parts=model_parts,
+            dion_config=dion_config,
+            parallel_dims=parallel_dims,
+        )
+
+    # Handle Muon optimizer
+    if name == "Muon":
+        if not _check_muon_availability():
+            raise ImportError(
+                "Muon optimizer is not available. Please ensure the muon optimizer files are present in "
+                "torchtitan/experiments/dion_optimizer/"
+            )
+
+        if optim_in_bwd:
+            raise NotImplementedError(
+                "Muon optimizer does not support early step in backward."
+            )
+
+        if ft_manager and ft_manager.enabled:
+            raise NotImplementedError(
+                "TorchFT is not yet supported with Muon optimizer."
+            )
+
+        # Import the MuonOptimizerConfig and MuonOptimizersContainer from titan_muon
+        from torchtitan.experiments.dion_optimizer.titan_muon import (
+            MuonOptimizerConfig,
+            MuonOptimizersContainer,
+        )
+
+        # Create MuonOptimizerConfig from optimizer_config
+        muon_config = MuonOptimizerConfig(
+            name="muon",
+            lr=optimizer_config.lr,
+            weight_decay=optimizer_config.weight_decay,
+            mu=optimizer_config.mu,
+            betas=(optimizer_config.beta1, optimizer_config.beta2),
+            epsilon=optimizer_config.eps,
+            nesterov=getattr(optimizer_config, "nesterov", False),
+            adjust_lr=getattr(optimizer_config, "adjust_lr", "spectral_norm"),
+            flatten=getattr(optimizer_config, "flatten", False),
+            use_triton=getattr(optimizer_config, "use_triton", False),
+            algorithm=optimizer_config.algorithm,
+            # Parameter-specific optimizer selection
+            scalar_optimizer=getattr(optimizer_config, "scalar_optimizer", "adamw"),
+            embedding_optimizer=getattr(
+                optimizer_config, "embedding_optimizer", "adamw"
+            ),
+            head_optimizer=getattr(optimizer_config, "head_optimizer", "adamw"),
+            routing_optimizer=getattr(optimizer_config, "routing_optimizer", "adamw"),
+            expert_optimizer=getattr(optimizer_config, "expert_optimizer", None),
+            # Additional optimizer options
+            head_lr_scaling=getattr(optimizer_config, "head_lr_scaling", True),
+            # Learning rate scaling factors
+            scalar_lr_factor=getattr(optimizer_config, "scalar_lr_factor", 1.0),
+            embedding_lr_factor=getattr(optimizer_config, "embedding_lr_factor", 1.0),
+            head_lr_factor=getattr(optimizer_config, "head_lr_factor", 1.0),
+            routing_lr_factor=getattr(optimizer_config, "routing_lr_factor", 1.0),
+            expert_lr_factor=getattr(optimizer_config, "expert_lr_factor", 1.0),
+        )
+
+        return MuonOptimizersContainer(
+            model_parts=model_parts,
+            muon_config=muon_config,
+            parallel_dims=parallel_dims,
+        )
+
+    # Handle standard optimizers (Adam, AdamW)
+
     if optim_in_bwd:
         if parallel_dims.ep_enabled:
             raise NotImplementedError(
@@ -280,7 +461,6 @@ def build_optimizers(
                 "TorchFT is not supported with optimizers in backward."
             )
 
-    name = optimizer_config.name
     lr = optimizer_config.lr
     beta1 = optimizer_config.beta1
     beta2 = optimizer_config.beta2

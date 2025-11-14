@@ -165,6 +165,92 @@ class Optimizer:
     register_post_accumulate_grad_hook after the optimizer is built.
     """
 
+    # Dion-specific parameters
+    mu: float = 0.95
+    """Momentum factor for Dion optimizer"""
+
+    rank_fraction: float = 1.0
+    """r/d fraction for low-rank approximation in Dion. Used to compute the low-rank dimension."""
+
+    rank_multiple_of: int = 1
+    """Round up the low-rank dimension to a multiple of this number in Dion."""
+
+    algorithm: str = "dion"
+    """Algorithm to use for Dion optimizer. Can be 'dion', 'adamw', or 'lion'."""
+
+    power_iters: int = 1
+    """Number of power iterations for low-rank approximation in Dion."""
+
+    qr_method: str = "rcqr"
+    """Method for computing QR decomposition in Dion."""
+
+    cqr_warmup_steps: int = 150
+    """Warmup steps for CQR method in Dion (currently ignored)."""
+
+    rcqr_oversample: float = 1.25
+    """Random sketch matrix oversampling for RCQR in Dion."""
+
+    replicate_mesh_grad_sync: bool = True
+    """Whether Dion optimizer handles data-parallel gradient sync."""
+
+    # Mixed precision options for Dion
+    momentum_dtype: str | None = None
+    """Dtype for momentum state in Dion. None means same as parameter dtype."""
+
+    Q_dtype: str | None = None
+    """Dtype for Q matrix in Dion. None means same as parameter dtype."""
+
+    variance_dtype: str | None = None
+    """Dtype for variance state in Dion (for AdamW algorithm). None means same as parameter dtype."""
+
+    # Parameter-specific optimizer selection for Dion
+    scalar_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for 1D scalar parameters (biases, layer norms, etc.) when using Dion."""
+
+    embedding_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for embedding layers when using Dion."""
+
+    head_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for model head/output layers when using Dion."""
+
+    expert_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for model expert layers when using Dion."""
+
+    routing_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for model router parameters when using Dion."""
+
+    head_lr_scaling: bool = True
+    """Whether to apply 1/sqrt(dim) learning rate scaling for head layers."""
+
+    # Learning rate scaling factors for different parameter types
+    scalar_lr_factor: float = 1.0
+    """Learning rate scaling factor for scalar parameters."""
+
+    embedding_lr_factor: float = 1.0
+    """Learning rate scaling factor for embedding parameters."""
+
+    head_lr_factor: float = 1.0
+    """Learning rate scaling factor for head parameters (applied after head_lr_scaling if enabled)."""
+
+    expert_lr_factor: float = 1.0
+    """Learning rate scaling factor for expert parameters."""
+
+    routing_lr_factor: float = 1.0
+    """Learning rate scaling factor for routing parameters."""
+
+    # Muon-specific parameters
+    nesterov: bool = False
+    """Whether to use Nesterov momentum in Muon optimizer."""
+
+    adjust_lr: str | None = "spectral_norm"
+    """How to adjust the learning rate for Muon updates. Options: 'spectral_norm', 'rms_norm', or None."""
+
+    flatten: bool = False
+    """Whether to flatten 3D+ tensors to 2D for Muon updates."""
+
+    use_triton: bool = False
+    """Whether to use Triton kernel for Newton-Schulz in Muon optimizer."""
+
 
 @dataclass
 class LRScheduler:
