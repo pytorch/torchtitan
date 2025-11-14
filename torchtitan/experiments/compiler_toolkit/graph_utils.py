@@ -234,7 +234,7 @@ def compiler(
     _dump_gm(dump_folder, gm, f"{name}_before_compiler")
 
     for pass_fn in passes:
-        logger.debug(f"Applying pass: {pass_fn.__name__}")
+        logger.info(f"Applying pass: {pass_fn.__name__}")
         gm = pass_fn(gm, example_inputs)
 
     logger.debug(f"{name} after compiler:")
@@ -295,6 +295,6 @@ def get_compiler_passes_from_config(job_config: JobConfig):
         compiler_passes.append(AVAILABLE_PASSES[pass_name])
 
     if pass_names:
-        logger.debug(f"Using compiler passes from config: {pass_names}")
+        logger.info(f"Using compiler passes from config: {pass_names}")
 
     return compiler_passes
