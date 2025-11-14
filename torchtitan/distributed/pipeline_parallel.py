@@ -11,9 +11,9 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
+from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
-from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
@@ -71,7 +71,7 @@ def _override_torch_ops_for_zero_bubble():
         @staticmethod
         def forward(ctx, mm_output, fake_1, fake_2):
             # we computed the mm earlier, so we could reuse its output shape in the separate input/weight functions
-            # but we need to keep this autograd function to connect the fake_* inputs to the autograd graph and pass 
+            # but we need to keep this autograd function to connect the fake_* inputs to the autograd graph and pass
             # gradients back to them
             return mm_output
 
@@ -84,7 +84,7 @@ def _override_torch_ops_for_zero_bubble():
         # saved for backward, but detach because we don't want to actually build
         # this edge of the graph
         with torch._C._AutoDispatchBelowAutograd():
-            real_output = torch.mm(i, w).detach()
+            real_output = torch.mm(i.detach(), w.detach()).detach()
 
         fake_1 = MmSeparateWeightGrad.apply(i.detach(), w, real_output)
         fake_2 = MmSeparateInputGrad.apply(i, w.detach(), real_output)
@@ -151,66 +151,77 @@ def _override_torch_ops_for_zero_bubble():
     # rms_norm operator: RMS normalization
     class RmsNormSeparateWeightGrad(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, input, normalized_shape, weight, eps):
-            ctx.save_for_backward(input)
-            ctx.normalized_shape = normalized_shape
-            ctx.eps = eps
-            return weight
+        def forward(ctx, input, normalized_shape, weight, eps, real_output, rstd):
+            ctx.save_for_backward(input, rstd)
+            return real_output
 
         @staticmethod
         def backward(ctx, grad_output):
-            (input,) = ctx.saved_tensors
-            # Compute normalized input for weight gradient
-            if grad_output is None:
-                return None, None, None, None
-            variance = input.pow(2).mean(-1, keepdim=True)
-            rstd = torch.rsqrt(variance + ctx.eps)
+            (input, rstd) = ctx.saved_tensors
             normalized = input * rstd
             # Gradient w.r.t. weight: sum over batch dimension
             grad_weight = (grad_output * normalized).sum(
                 dim=tuple(range(grad_output.ndim - 1))
             )
-            return None, None, grad_weight, None
+            return None, None, grad_weight, None, None
 
     class RmsNormSeparateInputGrad(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, input, normalized_shape, weight, eps):
-            (
-                ctx.save_for_backward(weight)
-                if weight is not None
-                else ctx.save_for_backward()
-            )
-            ctx.normalized_shape = normalized_shape
-            ctx.eps = eps
-            return input
+        def forward(ctx, input, normalized_shape, weight, eps, real_output, rstd):
+            ctx.save_for_backward(weight, rstd)
+            return real_output
 
         @staticmethod
         def backward(ctx, grad_output):
-            # This is a placeholder - the actual gradient computation happens in PassThrough
-            # Here we just pass through the grad_output weighted by weight
-            return grad_output, None, None, None
+            weight, rstd = ctx.saved_tensors
+
+            # Gradient w.r.t. input
+            if weight is not None:
+                grad_input_unnorm = grad_output * weight
+            else:
+                grad_input_unnorm = grad_output
+
+            mean = (grad_input_unnorm * input).mean(-1, keepdim=True)
+            grad_input = (grad_input_unnorm - input * mean * rstd.pow(2)) * rstd
+
+            return grad_input, None, None, None, None
 
     class RmsNormPassThrough(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, input, normalized_shape, weight, eps):
-            with torch._C._AutoDispatchBelowAutograd():
-                return torch.rms_norm(input, normalized_shape, weight, eps)
+        def forward(ctx, real_output, fake_1, fake_2):
+            return real_output
 
         @staticmethod
         def backward(ctx, gO):
-            return gO, None, gO, None
+            # Pass gradients to fake_1 and fake_2 to trigger their backward methods
+            # Return None for real_output since it's already detached
+            return None, gO, gO
 
     def split_rms_norm(input, normalized_shape, weight=None, eps=None):
+        # Compute the actual output first
+        with torch._C._AutoDispatchBelowAutograd():
+            real_output = torch.rms_norm(
+                input.detach(),
+                normalized_shape,
+                weight.detach() if weight is not None else None,
+                eps,
+            ).detach()
+            variance = input.pow(2).mean(-1, keepdim=True)
+            rstd = torch.rsqrt(variance + eps).detach()
+            rstd2 = rstd.clone().detach()
+
         weight_1 = RmsNormSeparateWeightGrad.apply(
-            input.detach(), normalized_shape, weight, eps
+            input.detach(), normalized_shape, weight, eps, real_output, rstd
         )
         input_1 = RmsNormSeparateInputGrad.apply(
             input,
             normalized_shape,
             weight.detach() if weight is not None else None,
             eps,
+            real_output,
+            rstd2
         )
-        return RmsNormPassThrough.apply(input_1, normalized_shape, weight_1, eps)
+        return RmsNormPassThrough.apply(real_output, weight_1, input_1)
 
     # _grouped_mm operator: Grouped matrix multiplication for MoE
     class GroupedMmSeparateMat2Grad(torch.autograd.Function):
@@ -271,7 +282,7 @@ def _override_torch_ops_for_zero_bubble():
     lib.impl("addmm", split_addmm, "Autograd")
     lib.impl("rms_norm", split_rms_norm, "Autograd")
     lib.impl("_grouped_mm", split_grouped_mm, "Autograd")
-
+    torch.autograd.set_detect_anomaly(True, check_nan=False)
 
 def pipeline_llm(
     model: nn.Module,
