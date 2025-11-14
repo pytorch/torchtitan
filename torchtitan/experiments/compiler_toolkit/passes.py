@@ -14,6 +14,7 @@ during compilation. Passes can be selected and configured via job config.
 import torch
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
+from torch.utils._ordered_set import OrderedSet
 
 
 def autobucketing_reordering_pass(
@@ -39,8 +40,100 @@ def regional_inductor_pass(
     return regional_inductor(gm, example_inputs)
 
 
+from typing import Callable, Optional
+
+_global_graph_pool = torch.cuda.graph_pool_handle()
+
+# TODO: make output and args weakref to allow reuse.
+
+
+class CUDAGraphWrapper:
+    def __init__(
+        self,
+        runnable: Callable,
+        graph_pool: Optional[torch.cuda._POOL_HANDLE] = None,
+        static_input_indices: Optional[tuple[int]] = None,
+    ):
+        self.runnable = runnable
+        self.graph_pool = _global_graph_pool  # graph_pool if graph_pool is not None else torch.cuda.graph_pool_handle()
+        self.static_input_indices = OrderedSet(
+            static_input_indices if static_input_indices is not None else []
+        )
+
+        self.cudagraph: Optional[torch.cuda.CUDAGraph] = None
+
+        # TODO: weak ref
+        self.output = None
+
+        self.has_warmup = False
+
+    def __call__(self, *args, **kwargs):
+        # assume that args and kwargs have been copied to
+        # static tensors
+
+        torch.cuda.synchronize()
+        print("a new run")
+
+        if not self.has_warmup:
+            self.has_warmup = True
+            return self.runnable(*args, **kwargs)
+
+        if self.cudagraph is None:
+            self.args = args
+            self.kwargs = kwargs
+            input_addresses = [
+                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+            ]
+            self.input_addresses = input_addresses
+
+            self.cudagraph = torch.cuda.CUDAGraph()
+
+            with torch.cuda.graph(self.cudagraph, pool=self.graph_pool):
+                # `output` is managed by pytorch's cudagraph pool
+                # TODO: use weak ref for output to reuse memory
+                self.output = self.runnable(*args, **kwargs)
+
+        # TODO: add debug address check.
+
+        if True:
+            # check if the input addresses are the same
+            new_input_addresses = [
+                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+            ]
+            assert new_input_addresses == self.input_addresses, (
+                f"Input addresses for cudagraphs are different "
+                f"during replay. Expected {self.input_addresses}, "
+                f"got {new_input_addresses}"
+            )
+
+        for iter in range(10):
+            print(f"before iter {iter}")
+            self.cudagraph.replay()
+            print(f"after iter {iter}")
+            torch.cuda.synchronize()
+
+        return self.output
+
+
+def cudagraph_wrapper(
+    fn, example_inputs
+):  # , num_partitions: int, partition_id: int) -> Callable:
+    """
+    Wrap a function with CUDAGraphWrapper.
+    @param fn: the function to be wrapped
+    @param metadata: the metadata of the function
+    @return: the wrapped function
+    """
+    gc_disable = False  # partition_id != 0
+    return CUDAGraphWrapper(fn, gc_disable)
+
+
 # Registry mapping pass names to pass functions
 AVAILABLE_PASSES = {
     "autobucketing_reordering": autobucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
+    "cudagraph_wrapper": cudagraph_wrapper,
 }
+
+
+# TODO: cleanup graph before nccl destroy group

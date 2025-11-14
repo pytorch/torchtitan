@@ -4,9 +4,9 @@ description = "Llama 3 debug training"
 print_config = false
 
 [profiling]
-enable_profiling = false
+enable_profiling = true
 save_traces_folder = "profile_trace"
-profile_freq = 10
+profile_freq = 5
 enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
