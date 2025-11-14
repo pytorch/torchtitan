@@ -7,7 +7,7 @@
 from dataclasses import dataclass
 
 from torch import nn
-from torchtitan.experiments.transformers_backend.job_config import JobConfig
+from torchtitan.config.job_config import JobConfig
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols import BaseModelArgs
 from transformers import AutoConfig
@@ -132,7 +132,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
     def update_from_config(self, job_config: JobConfig):
         # Load HF config (overwrites our HF attributes)
         hf_model_config = AutoConfig.from_pretrained(
-            job_config.hf_transformers.model,
+            job_config.model.name,
             attn_implementation=self.attn_implementation,
             trust_remote_code=True,
         )
@@ -174,4 +174,4 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         return self
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
-        return get_dense_model_nparams_and_flops(self, model, seq_len)
+        return get_dense_model_nparams_and_flops(self, model, head_dims=self.head_dim, seq_len=seq_len)
