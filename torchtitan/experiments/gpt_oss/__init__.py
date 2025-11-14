@@ -16,6 +16,7 @@ from torchtitan.protocols.train_spec import TrainSpec
 from .infra.parallelize import parallelize_gptoss
 from .model.args import GptOssModelArgs
 from .model.model import GptOssModel
+from .model.state_dict_adapter import GptOssStateDictAdapter
 
 __all__ = [
     "parallelize_gptoss",
@@ -84,4 +85,5 @@ def get_train_spec() -> TrainSpec:
         build_dataloader_fn=build_text_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        state_dict_adapter=GptOssStateDictAdapter,
     )
