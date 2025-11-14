@@ -2,7 +2,7 @@
 
 ## Quick start
 
-- Requirements `transformers==4.55.4`
+- Requirements `transformers==4.57.1`
 
 - Config: `torchtitan/torchtitan/experiments/transformers_backend/configs/qwen3_fsdp2_tp2_pp2.toml`
 ```diff
