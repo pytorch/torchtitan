@@ -177,7 +177,7 @@ class ExpertTensorParallel(ExpertParallel):
         #       The grad_placements on inputs is set to Partial so that necessary
         #       reductions are performed during backward.
         routed_input = DTensor.from_local(
-            routed_input, device_mesh["tp"], (Replicate(),)
+            routed_input, device_mesh["etp"], (Replicate(),)
         ).to_local(grad_placements=(Partial(),))
 
         inputs = (routed_input, num_tokens_per_expert)
