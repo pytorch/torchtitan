@@ -20,7 +20,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
-
+from torchtitan.experiments.compiler_toolkit.passes import AVAILABLE_PASSES
 
 def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> None:
     # TODO: make the dump rank configurable
@@ -239,11 +239,11 @@ def compiler(
         logger.info(f"Applying pass: {pass_fn.__name__}")
         gm = pass_fn(gm, example_inputs)
 
-    logger.debug(f"{name} after compiler:")
-    logger.debug(
-        gm.print_readable(print_output=False, include_stride=True, include_device=True)
-    )
-    _dump_gm(dump_folder, gm, f"{name}_after_compiler")
+    # logger.debug(f"{name} after compiler:")
+    # logger.debug(
+    #     gm.print_readable(print_output=False, include_stride=True, include_device=True)
+    # )
+    # _dump_gm(dump_folder, gm, f"{name}_after_compiler")
     return gm
 
 
@@ -259,15 +259,14 @@ def make_compiler_with_passes(
     Returns:
         Tuple of (fw_compiler, bw_compiler) functions
     """
-
     def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "fwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "fwd_gm", gm, example_inputs, passes=[AVAILABLE_PASSES["cudagraph_wrapper"]], dump_folder=dump_folder
         )
 
     def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "bwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "bwd_gm", gm, example_inputs, passes=[], dump_folder=dump_folder
         )
 
     return fw_compiler, bw_compiler

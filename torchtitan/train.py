@@ -645,6 +645,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ):
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():
+                print(f"start step:{self.step}")
                 self.step += 1
                 self.gc_handler.run(self.step)
                 try:
@@ -652,6 +653,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 except DataloaderExhaustedError:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
+                print(f"end step:{self.step}")
+
 
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)

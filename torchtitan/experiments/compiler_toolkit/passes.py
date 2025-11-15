@@ -74,43 +74,60 @@ class CUDAGraphWrapper:
         torch.cuda.synchronize()
         print("a new run")
 
-        if not self.has_warmup:
-            self.has_warmup = True
-            return self.runnable(*args, **kwargs)
+        self.runnable(*args, **kwargs)
 
-        if self.cudagraph is None:
-            self.args = args
-            self.kwargs = kwargs
-            input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            self.input_addresses = input_addresses
 
-            self.cudagraph = torch.cuda.CUDAGraph()
-
-            with torch.cuda.graph(self.cudagraph, pool=self.graph_pool):
-                # `output` is managed by pytorch's cudagraph pool
-                # TODO: use weak ref for output to reuse memory
-                self.output = self.runnable(*args, **kwargs)
-
-        # TODO: add debug address check.
-
-        if True:
-            # check if the input addresses are the same
-            new_input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            assert new_input_addresses == self.input_addresses, (
-                f"Input addresses for cudagraphs are different "
-                f"during replay. Expected {self.input_addresses}, "
-                f"got {new_input_addresses}"
-            )
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g, pool= torch.cuda.graph_pool_handle()):
+            # `output` is managed by pytorch's cudagraph pool
+            # TODO: use weak ref for output to reuse memory
+            self.output = self.runnable(*args, **kwargs)
 
         for iter in range(10):
             print(f"before iter {iter}")
-            self.cudagraph.replay()
+            g.replay()
             print(f"after iter {iter}")
-            torch.cuda.synchronize()
+
+        return self.runnable(*args, **kwargs)
+
+
+        # if not self.has_warmup:
+        #     self.has_warmup = True
+        #     return self.runnable(*args, **kwargs)
+
+        # if self.cudagraph is None:
+        #     self.args = args
+        #     self.kwargs = kwargs
+        #     input_addresses = [
+        #         x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+        #     ]
+        #     self.input_addresses = input_addresses
+
+        #     self.cudagraph = torch.cuda.CUDAGraph()
+
+        #     with torch.cuda.graph(self.cudagraph, pool=self.graph_pool):
+        #         # `output` is managed by pytorch's cudagraph pool
+        #         # TODO: use weak ref for output to reuse memory
+        #         self.output = self.runnable(*args, **kwargs)
+
+        # # TODO: add debug address check.
+
+        # if True:
+        #     # check if the input addresses are the same
+        #     new_input_addresses = [
+        #         x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+        #     ]
+        #     assert new_input_addresses == self.input_addresses, (
+        #         f"Input addresses for cudagraphs are different "
+        #         f"during replay. Expected {self.input_addresses}, "
+        #         f"got {new_input_addresses}"
+        #     )
+
+        # for iter in range(10):
+        #     print(f"before iter {iter}")
+        #     self.cudagraph.replay()
+        #     print(f"after iter {iter}")
+        #     torch.cuda.synchronize()
 
         return self.output
 

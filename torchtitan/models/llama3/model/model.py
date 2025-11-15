@@ -358,8 +358,11 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
-        out = h + self.feed_forward(self.ffn_norm(h))
+        # h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
+
+        h = x
+        # out = h + self.feed_forward(self.ffn_norm(h))
+        out = h
         return out
 
     def init_weights(self):
@@ -494,7 +497,6 @@ class Transformer(nn.Module, ModelProtocol):
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
-        # h = torch.ones([8, 2048, 1024], device="cuda")
 
         # for layer in self.layers.values():
         #     h = layer(h, self.freqs_cis, attention_masks=attention_masks)
