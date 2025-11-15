@@ -143,6 +143,10 @@ class GroupedExperts(nn.Module):
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
+        input_shape,
+        permuted_indices,
+        input_splits,
+        output_splits,
     ) -> torch.Tensor:
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
@@ -166,9 +170,11 @@ class GroupedExperts(nn.Module):
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
             else:
                 run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+            out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
         else:
-            return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+            out = _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+
+        return (out, input_shape, permuted_indices, input_splits, output_splits)
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
