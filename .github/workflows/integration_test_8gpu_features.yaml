@@ -76,5 +76,11 @@ jobs:
         export TEST_WITH_ROCM=$([[ "${{ matrix.gpu-arch-type }}" == "rocm" ]] && echo 1 || echo 0)
         python -m tests.integration_tests.run_tests --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
+        # Verify the accuracy.
+        export baseline_options="--parallelism.data_parallel_replicate_degree=1"
+        export test_options="--parallelism.data_parallel_replicate_degree=4"
+        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --steps=10 --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs"
+
+        # Cleanup the checkpoints so that we don't waste network bandwidth and time.
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
         rm -rf artifacts-to-be-uploaded/*/checkpoint
