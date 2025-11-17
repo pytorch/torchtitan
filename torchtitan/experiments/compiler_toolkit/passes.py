@@ -134,5 +134,3 @@ AVAILABLE_PASSES = {
     "cudagraph": cudagraph_pass,
 }
 
-
-# TODO: cleanup graph before nccl destroy group

@@ -744,7 +744,6 @@ def main(trainer_class: type[Trainer]) -> None:
     else:
         trainer.close()
         if torch.distributed.is_initialized():
-
             torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
 

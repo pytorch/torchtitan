@@ -19,14 +19,18 @@ DRY_RUN=${DRY_RUN:-0}
 
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 
+# need to turn off expandable segments when using cudagraph, since
+# it does not work with cg and nccl yet.
+# https://github.com/pytorch/pytorch/issues/158029
+USE_EXPANDABLE_SEGMENTS=${USE_EXPANDABLE_SEGMENTS:-True}
+
 if [ "$DRY_RUN" = "1" ]; then
     # Dry run mode: validate configuration without GPU/distributed setup
     echo "Running in DRY RUN mode - configuration validation only"
     python scripts/dry_run.py --job.config_file ${CONFIG_FILE} "$@"
 else
     # Normal training with torchrun
-    # expandable_segments does not work with cg and nccl.
-    # https://github.com/pytorch/pytorch/issues/158029
+    PYTORCH_ALLOC_CONF="expandable_segments:${USE_EXPANDABLE_SEGMENTS}" \
     TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
     torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
