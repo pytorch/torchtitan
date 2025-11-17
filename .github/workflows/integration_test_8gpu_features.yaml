@@ -79,7 +79,7 @@ jobs:
         # Verify the accuracy.
         export baseline_options="--parallelism.data_parallel_replicate_degree=1 --job.dump_folder=${RUNNER_TEMP}/artifacts/accuracy_comparison_outputs"
         export test_options="--parallelism.data_parallel_replicate_degree=4 --job.dump_folder=${RUNNER_TEMP}/artifacts/accuracy_comparison_outputs"
-        python3 scripts/loss_compare.py . . --baseline-options=${baseline_options} --test-options=${test_options} --steps=10
+        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --steps=10
 
         # Cleanup the checkpoints so that we don't waste network bandwidth and time.
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
