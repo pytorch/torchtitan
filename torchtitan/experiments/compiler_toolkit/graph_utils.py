@@ -245,7 +245,7 @@ def compiler(
         # forward and backward pass. so we explicitly pass the info.
         _cg_pass = functools.partial(cg_pass, is_forward=is_forward)
 
-        # keep the function name to
+        # keep the function name for debug log
         passes[-1] = functools.wraps(cg_pass)(_cg_pass)
 
     for pass_fn in passes:
