@@ -8,7 +8,7 @@
 
 import functools
 from collections.abc import Callable
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -20,19 +20,32 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
-from torch.nn.attention.varlen import varlen_attn, VarlenMetadata
+from torch.nn.attention.varlen import varlen_attn
 
 
 __all__ = [
     "FlexAttentionWrapper",
     "ScaledDotProductAttentionWrapper",
     "VarlenAttentionWrapper",
+    "VarlenMetadata",
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_sliding_window_mask_mod",
     "get_fixed_block_mask_mod",
     "create_attention_mask",
 ]
+
+
+class VarlenMetadata(NamedTuple):
+    """
+    Cumulative sequence positions for queries and keys/values.
+
+    """
+
+    cu_seq_q: torch.Tensor
+    cu_seq_k: torch.Tensor
+    max_q: int
+    max_k: int
 
 
 class VarlenAttentionWrapper(torch.nn.Module):

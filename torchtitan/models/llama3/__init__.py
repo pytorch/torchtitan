@@ -46,7 +46,6 @@ llama3_args = {
         vocab_size=2048,
         rope_theta=500000,
         use_varlen_attn=True,
-        attn_mask_type="varlen_attn",
     ),
     "8B": TransformerModelArgs(
         dim=4096,
@@ -77,7 +76,6 @@ llama3_args = {
         multiple_of=1024,
         rope_theta=500000,
         use_varlen_attn=True,
-        attn_mask_type="varlen_attn",
     ),
     "70B": TransformerModelArgs(
         dim=8192,

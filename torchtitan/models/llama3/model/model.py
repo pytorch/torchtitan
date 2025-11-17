@@ -13,8 +13,6 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torch.nn.attention.varlen import varlen_attn, VarlenMetadata
-
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
@@ -23,6 +21,7 @@ from torchtitan.models.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
+    VarlenAttentionWrapper,
 )
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
@@ -199,7 +198,7 @@ class Attention(nn.Module):
         if self.use_flex_attn:
             self.inner_attention = FlexAttentionWrapper()
         elif self.use_varlen_attn:
-            self.inner_attention = varlen_attn
+            self.inner_attention = VarlenAttentionWrapper()
         else:
             self.inner_attention = ScaledDotProductAttentionWrapper()
 
@@ -251,8 +250,6 @@ class Attention(nn.Module):
             assert isinstance(attention_masks, BlockMask), attention_masks
             output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
         elif self.use_varlen_attn:
-            assert isinstance(attention_masks, VarlenMetadata), attention_masks
-
             cu_seq_q = attention_masks.cu_seq_q
             cu_seq_k = attention_masks.cu_seq_k
             max_q = attention_masks.max_q
@@ -495,14 +492,14 @@ class Transformer(nn.Module, ModelProtocol):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
+        if self.model_args.use_varlen_attn:
+            return create_varlen_cu_seqs(input_batch, tokenizer.eos_id)
         match self.model_args.attn_mask_type:
             case "causal":
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
-            case "varlen_attn":
-                return create_varlen_cu_seqs(input_batch, tokenizer.eos_id)
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
