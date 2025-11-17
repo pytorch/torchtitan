@@ -112,7 +112,7 @@ class CUDAGraphWrapper:
 
 
 def cudagraph_wrapper(
-    fn, example_inputs
+    gm: torch.fx.GraphModule, example_inputs
 ):  # , num_partitions: int, partition_id: int) -> Callable:
     """
     Wrap a function with CUDAGraphWrapper.
@@ -120,7 +120,8 @@ def cudagraph_wrapper(
     @param metadata: the metadata of the function
     @return: the wrapped function
     """
-    return CUDAGraphWrapper(fn)
+    gm.forward = CUDAGraphWrapper(gm.forward)
+    return gm
 
 
 # Registry mapping pass names to pass functions
