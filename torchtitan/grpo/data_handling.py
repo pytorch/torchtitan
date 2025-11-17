@@ -223,12 +223,17 @@ def prep_data(
 
 
 def prep_empty_data_matricies(
-    max_token_len, batch_size, gradient_accumulation_steps, seq_len, dp_degree
+    max_token_len,
+    batch_size,
+    gradient_accumulation_steps,
+    seq_len,
+    dp_degree,
+    num_microbatches=1,
 ):
     dynamic_batch_size = batch_size * seq_len // max_token_len
     dynamic_batch_size = min(
         dynamic_batch_size,
-        batch_size * gradient_accumulation_steps,
+        batch_size * gradient_accumulation_steps // num_microbatches,
     )
     # To nearest power of 2 of dynamic_batch_size so we have clean splits with gradient accumulation
     dynamic_batch_size = dynamic_batch_size // batch_size
@@ -419,6 +424,7 @@ class OnlineDataHandler:
                         grad_accum_size,
                         job_config.training.seq_len,
                         scale_adv_by_len=job_config.grpo.scale_adv_by_len,
+                        num_microbatches=job_config.grpo.num_microbatches,
                     )
                     flag = flag + 1
                     torch.distributed.broadcast(flag, 0)
@@ -469,6 +475,7 @@ class OnlineDataHandler:
                         grad_accum_size,
                         job_config.training.seq_len,
                         dp_degree,
+                        num_microbatches=job_config.grpo.num_microbatches,
                     )
                     # now get the batch
                     torch.distributed.broadcast_object_list(batches, 0)

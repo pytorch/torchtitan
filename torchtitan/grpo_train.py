@@ -973,7 +973,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             time.perf_counter() - batch_prep_time_start,
         )
 
-    def forward_backwards_step_ptx(self, ptx_inputs, ptx_labels):
+    def forward_backwards_step_ptx(self, ptx_inputs, ptx_labels, dynamic_scale):
         total_loss = 0
         n_tokens_seen = 0
         if ptx_inputs is None:
@@ -1060,11 +1060,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                             pred = model_parts[0](
                                 inputs, **extra_inputs, **extra_kwargs
                             )
-                            loss = self.loss_fn(pred, labels).mean() / len(ptx_inputs)
+                            loss = (
+                                self.loss_fn(pred, labels).mean()
+                                * dynamic_scale
+                                / len(ptx_inputs)
+                            )
                         # need to free pred before bwd to avoid peaking memory
                         del pred
                         loss.backward()
-                        total_loss += loss.detach().item()
+                        total_loss += loss.detach().item() / dynamic_scale
 
         return total_loss, n_tokens_seen
 
@@ -1114,6 +1118,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         grad_norms = list()
         logger.debug(f"Microbatches in this step: {len(microbatches)}")
         total_ptx_loss = 0.0
+        total_dynamic_scale = 0.0
         for mb_idx, microbatch in enumerate(microbatches):
             # For each PPO Microbatch (different from the microbatch in grad acc/dp)
             self.optimizers.zero_grad()
@@ -1136,13 +1141,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # Accumulate tokens for MFU/throughput computation
                 self.metrics_processor.ntokens_since_last_log += n_tokens_seen
                 # PTX loss, if applicable
+                dynamic_scale = 1.0
+                if self.job_config.grpo.ptx_scale_by_tokens:
+                    dynamic_scale = (
+                        self.job_config.grpo.ptx_mixin_batchsize
+                        * self.job_config.training.seq_len
+                        // self.dp_degree
+                    )
+                    dynamic_scale = dynamic_scale / nanobatch["total_masked_tokens"]
                 ptx_loss, ptx_tokens_seen = self.forward_backwards_step_ptx(
                     ptx_inputs=nanobatch["ptx_inputs"],
                     ptx_labels=nanobatch["ptx_labels"],
+                    dynamic_scale=dynamic_scale,
                 )
                 if ptx_loss is not None:
                     total_ptx_loss += ptx_loss / len(microbatches)
                     self.ntokens_seen += ptx_tokens_seen
+                    self.metrics_processor.ntokens_since_last_log += ptx_tokens_seen
+                    total_dynamic_scale += dynamic_scale / len(microbatches)
 
             grad_norm = dist_utils.clip_grad_norm_(
                 [p for m in self.model_parts for p in m.parameters()],
@@ -1183,9 +1199,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     parallel_dims.world_mesh["dp_cp"],
                     ft_pg,
                 )
+                global_dynamic_scale = dist_utils.dist_mean(
+                    torch.tensor(
+                        total_dynamic_scale, dtype=torch.float32, device=self.device
+                    ),
+                    parallel_dims.world_mesh["dp_cp"],
+                    ft_pg,
+                )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
             global_ptx_loss = total_ptx_loss
+            global_dynamic_scale = total_dynamic_scale
             global_ntokens_seen = self.ntokens_seen
         # Yeah, maybe we should include a max here, but spikes will still be seen in the graph, it's hard to
         # not show a 1000 spike when it's usually below 1.0 after all.
@@ -1205,6 +1229,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     "loss_metrics/ptx_loss": global_ptx_loss,
                 }
             )
+            if self.job_config.grpo.ptx_scale_by_tokens:
+                extra_metrics.update(
+                    {
+                        "loss_metrics/ptx_scale": global_dynamic_scale,
+                    }
+                )
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
