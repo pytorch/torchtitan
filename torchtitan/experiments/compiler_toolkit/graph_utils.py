@@ -259,6 +259,7 @@ def make_compiler_with_passes(
     Returns:
         Tuple of (fw_compiler, bw_compiler) functions
     """
+
     def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
             "fwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
@@ -266,7 +267,7 @@ def make_compiler_with_passes(
 
     def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "fwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "bwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
         )
 
     return fw_compiler, bw_compiler

@@ -111,14 +111,17 @@ class CUDAGraphWrapper:
         return self.output
 
 
-def cudagraph_wrapper(
+def cudagraph_pass(
     gm: torch.fx.GraphModule, example_inputs
-):  # , num_partitions: int, partition_id: int) -> Callable:
+) -> torch.fx.GraphModule:
     """
-    Wrap a function with CUDAGraphWrapper.
-    @param fn: the function to be wrapped
-    @param metadata: the metadata of the function
-    @return: the wrapped function
+    Apply cudagraph.
+
+    This pass wraps the forward function with cudagraph during compilation and does
+    not record cudagraph until runtime.
+    - For the first run, it will warm up operators such as nccl.
+    - For the second run, it will record cudagraph and replay cudagraph.
+    - For the following runs, it will replay cudagraph.
     """
     gm.forward = CUDAGraphWrapper(gm.forward)
     return gm
@@ -128,7 +131,7 @@ def cudagraph_wrapper(
 AVAILABLE_PASSES = {
     "autobucketing_reordering": autobucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
-    "cudagraph_wrapper": cudagraph_wrapper,
+    "cudagraph": cudagraph_pass,
 }
 
 

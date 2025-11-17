@@ -9,6 +9,7 @@ import os
 import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable
+import gc
 
 import torch
 
@@ -703,6 +704,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()
 
+        # Note [explicit cudagraph close]
+        # cudagraph holds reference to nccl which prevents destroy nccl group.
+        # so we need to explicitly delete cudagraph which is held in joint_graph_module.
+        # An explicit gc.collect() is needed here to clean up reference cycles.
+        for part in self.model_parts:
+            part.joint_graph_module = None
+        gc.collect()
 
 def main(trainer_class: type[Trainer]) -> None:
     """Main entry point for training with a specified trainer class.
@@ -736,6 +744,7 @@ def main(trainer_class: type[Trainer]) -> None:
     else:
         trainer.close()
         if torch.distributed.is_initialized():
+
             torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
 
