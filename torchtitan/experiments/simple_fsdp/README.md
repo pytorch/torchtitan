@@ -52,14 +52,16 @@ SimpleFSDP relies on compiler backend to perform optimizations (i.e., bucketing 
 1. no optimization: default torch.compile backends (e.g., "inductor", "aot_eager", "eager")
 
 2. auto optimization: perform auto-bucketing & reordering without user inputs. **Note: it is not guaranteed that users will get the most optimized training performance**
-    - "aot_eager_autobucketing": perform autobucketing at aten fx-level, and perform code execution with aot_eager backend.
+    - "auto_bucketing": perform autobucketing at aten fx-level, and perform code execution with aot_eager backend. (We also support `inductor` backend).
+      ```bash
+      --compile.backend "aot_eager" --compile.graph_passes "auto_bucketing"
+      ```
 
-
-users can specify the pass (e.g., "aot_eager_autobucketing") via additional configs:
-
-```bash
---compile.model_backend_override "aot_eager_autobucketing"
-```
+3. manual optimization: perform manual bucketing & reordering with user FQN inputs.
+    - "transformer_block_bucketing": perform bucketing by transformer blocks at aten fx-level, and perform code execution with aot_eager backend. (We also support `inductor` backend).
+      ```bash
+      --compile.backend "aot_eager" --compile.graph_passes "transformer_block_bucketing"
+      ```
 
 ### Citation
 
