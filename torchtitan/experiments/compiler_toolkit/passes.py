@@ -51,11 +51,10 @@ class CUDAGraphWrapper:
     def __init__(
         self,
         runnable: Callable,
-        graph_pool: Optional[torch.cuda._POOL_HANDLE] = None,
         static_input_indices: Optional[tuple[int]] = None,
     ):
         self.runnable = runnable
-        self.graph_pool = _global_graph_pool  # graph_pool if graph_pool is not None else torch.cuda.graph_pool_handle()
+        self.graph_pool = _global_graph_pool
         self.static_input_indices = OrderedSet(
             static_input_indices if static_input_indices is not None else []
         )
@@ -63,55 +62,37 @@ class CUDAGraphWrapper:
         self.cudagraph: Optional[torch.cuda.CUDAGraph] = None
 
         # TODO: weak ref
+        self.args = None
+        self.kwargs = None
         self.output = None
 
         self.has_warmup = False
 
+    def copy_static_inputs(self, *args):
+        for i in range(len(self.args)):
+            if i not in self.static_input_indices and isinstance(self.args[i], torch.Tensor):
+                self.args[i].copy_(args[i])
+
     def __call__(self, *args, **kwargs):
-        # assume that args and kwargs have been copied to
-        # static tensors
+        if not self.has_warmup:
+            self.has_warmup = True
+            return self.runnable(*args, **kwargs)
 
-        torch.cuda.synchronize()
-        print("a new run")
+        if self.cudagraph is None:
+            # TODO: weak ref?
+            self.args = args
+            self.kwargs = kwargs
+            input_addresses = [
+                x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args 
+            ]
+            self.input_addresses = input_addresses
 
-        self.runnable(*args, **kwargs)
+            self.cudagraph = torch.cuda.CUDAGraph()
 
-
-        g = torch.cuda.CUDAGraph()
-        # allocate a graph pool for debugging. Will reuse graph pool across cg.
-        with torch.cuda.graph(g, pool= torch.cuda.graph_pool_handle()):
-            # `output` is managed by pytorch's cudagraph pool
-            # TODO: use weak ref for output to reuse memory
-            self.output = self.runnable(*args, **kwargs)
-
-        for iter in range(10):
-            print(f"before iter {iter}")
-            g.replay()
-            print(f"after iter {iter}")
-
-        return self.runnable(*args, **kwargs)
-
-
-        # if not self.has_warmup:
-        #     self.has_warmup = True
-        #     return self.runnable(*args, **kwargs)
-
-        # if self.cudagraph is None:
-        #     self.args = args
-        #     self.kwargs = kwargs
-        #     input_addresses = [
-        #         x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-        #     ]
-        #     self.input_addresses = input_addresses
-
-        #     self.cudagraph = torch.cuda.CUDAGraph()
-
-        #     with torch.cuda.graph(self.cudagraph, pool=self.graph_pool):
-        #         # `output` is managed by pytorch's cudagraph pool
-        #         # TODO: use weak ref for output to reuse memory
-        #         self.output = self.runnable(*args, **kwargs)
-
-        # # TODO: add debug address check.
+            with torch.cuda.graph(self.cudagraph, pool=self.graph_pool):
+                # `output` is managed by pytorch's cudagraph pool
+                # TODO: use weak ref for output to reuse memory
+                self.output = self.runnable(*args, **kwargs)
 
         # if True:
         #     # check if the input addresses are the same
@@ -124,12 +105,9 @@ class CUDAGraphWrapper:
         #         f"got {new_input_addresses}"
         #     )
 
-        # for iter in range(10):
-        #     print(f"before iter {iter}")
-        #     self.cudagraph.replay()
-        #     print(f"after iter {iter}")
-        #     torch.cuda.synchronize()
 
+        self.copy_static_inputs(*args)
+        self.cudagraph.replay()
         return self.output
 
 
@@ -142,8 +120,7 @@ def cudagraph_wrapper(
     @param metadata: the metadata of the function
     @return: the wrapped function
     """
-    gc_disable = False  # partition_id != 0
-    return CUDAGraphWrapper(fn, gc_disable)
+    return CUDAGraphWrapper(fn)
 
 
 # Registry mapping pass names to pass functions
