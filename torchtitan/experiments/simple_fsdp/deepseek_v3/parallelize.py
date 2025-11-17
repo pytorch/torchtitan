@@ -19,9 +19,34 @@ from torchtitan.models.deepseek_v3.infra.parallelize import (
 )
 from torchtitan.tools.logging import logger
 
-from ..backend import get_compile_backend
+from ..backend import get_compile_backend_with_passes
 
 from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
+
+
+def get_transformer_block_buckets(model) -> list[list[str] | str]:
+    module_list = [
+        model.tok_embeddings,
+        [model.norm, model.output],
+    ]
+    for layer_id, transformer_block in model.layers.items():
+        # [TODO](ruisizhang123) add EP support for transformer block bucketing
+        module_list.append(transformer_block)
+
+    def convert_modules_to_fqns(modules, module_to_fqn_mapping):
+        """Convert a (possibly nested) list of modules to FQN strings."""
+        result = []
+        for m in modules:
+            if isinstance(m, list):
+                result.append(convert_modules_to_fqns(m, module_to_fqn_mapping))
+            else:
+                result.append(module_to_fqn_mapping.get(m, None))
+        return result
+
+    module_to_name = {m: n for n, m in model.named_modules()}
+    module_fqns = convert_modules_to_fqns(module_list, module_to_name)
+    return module_fqns
+
 
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
@@ -177,13 +202,14 @@ def parallelize_deepseekv3(
                     f"Invalid reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
                 )
 
-        backend = (
-            getattr(job_config.compile, "model_backend_override", None)
-            or job_config.compile.backend
+        backend = get_compile_backend_with_passes(
+            job_config.compile,
+            fsdp_reshard_after_forward,
+            get_transformer_block_buckets(model),
         )
         model = torch.compile(
             model,
-            backend=get_compile_backend(backend, fsdp_reshard_after_forward),
+            backend=backend,
             fullgraph=True,
         )
 
