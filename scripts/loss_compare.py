@@ -95,9 +95,12 @@ def get_clean_log_path(scenario: str, output_folder: str) -> str:
     return f"{output_folder}/{scenario}_training_clean.log"
 
 
-def build_base_command(config_file: str, train_file: str, options: str) -> str:
+def build_base_command(
+    config_file: str, train_file: str, options: str, job_dump_folder: str
+) -> str:
     """Build the base command from config file, train file, and options."""
     cmd = f"TRAIN_FILE='{train_file}' CONFIG_FILE='{config_file}' ./run_train.sh"
+    cmd += f" --job.dump_folder={job_dump_folder}"
     if options:
         cmd += f" {options}"
     return cmd
@@ -232,9 +235,10 @@ def build_training_command(
     options: str,
     steps: int,
     enable_seed_checkpoint: bool,
+    job_dump_folder: str,
 ) -> str:
     """Build the final training command with all options."""
-    base_cmd = build_base_command(config_file, train_file, options)
+    base_cmd = build_base_command(config_file, train_file, options, job_dump_folder)
     cmd = f"{base_cmd} {FIXED_OPTIONS} --training.steps={steps}"
     if enable_seed_checkpoint:
         cmd += (
@@ -255,6 +259,7 @@ def print_configuration(
     test_options: str,
     steps: int,
     enable_seed_checkpoint: bool,
+    job_dump_folder: str,
 ) -> None:
     """Print configuration summary."""
     log_print(
@@ -272,6 +277,7 @@ def print_configuration(
         baseline_options,
         steps,
         enable_seed_checkpoint,
+        job_dump_folder,
     )
     test_final_cmd = build_training_command(
         test_config,
@@ -279,6 +285,7 @@ def print_configuration(
         test_options,
         steps,
         enable_seed_checkpoint,
+        job_dump_folder,
     )
 
     log_print("Baseline command:")
@@ -313,6 +320,7 @@ def create_seed_checkpoint(
     config_file: str,
     train_file: str,
     output_folder: str | None,
+    job_dump_folder: str,
 ) -> None:
     """Create seed checkpoint."""
     if enable_seed_checkpoint:
@@ -322,7 +330,8 @@ def create_seed_checkpoint(
         # Build seed checkpoint command
         seed_cmd = (
             f"TRAIN_FILE='{train_file}' CONFIG_FILE='{config_file}' "
-            f"./run_train.sh --checkpoint.create_seed_checkpoint "
+            f"./run_train.sh --job.dump_folder={job_dump_folder} "
+            f"--checkpoint.create_seed_checkpoint "
             f"--checkpoint.enable {FIXED_OPTIONS}"
         )
 
@@ -340,6 +349,7 @@ def run_training(
     steps: int,
     enable_seed_checkpoint: bool,
     output_folder: str | None,
+    job_dump_folder: str,
 ) -> str:
     """Run training for a specific scenario. Returns the log file path."""
     log_file = get_log_path(scenario, output_folder)
@@ -349,7 +359,7 @@ def run_training(
 
     # Build the final command
     full_cmd = build_training_command(
-        config_file, train_file, options, steps, enable_seed_checkpoint
+        config_file, train_file, options, steps, enable_seed_checkpoint, job_dump_folder
     )
 
     env = os.environ.copy()
@@ -715,6 +725,11 @@ Examples:
             "Script exits with error if losses differ."
         ),
     )
+    parser.add_argument(
+        "--job-dump-folder",
+        default="outputs",
+        help="Job dump folder path (default: outputs)",
+    )
 
     args = parser.parse_args()
 
@@ -741,6 +756,7 @@ def run_scenario(
     steps: int,
     enable_seed_checkpoint: bool,
     output_folder: str | None,
+    job_dump_folder: str,
 ) -> str:
     """Run training for a specific scenario (baseline or test).
 
@@ -753,6 +769,7 @@ def run_scenario(
         steps: Number of training steps
         enable_seed_checkpoint: Whether to use seed checkpoint
         output_folder: Output folder for results
+        job_dump_folder: Job dump folder path
 
     Returns:
         Path to the log file
@@ -767,6 +784,7 @@ def run_scenario(
         steps,
         enable_seed_checkpoint,
         output_folder,
+        job_dump_folder,
     )
 
     return log_file
@@ -802,6 +820,7 @@ def main() -> None:
         args.test_options,
         args.steps,
         enable_seed_checkpoint,
+        args.job_dump_folder,
     )
 
     create_seed_checkpoint(
@@ -809,6 +828,7 @@ def main() -> None:
         args.baseline_config,
         args.baseline_train_file,
         args.output_folder,
+        args.job_dump_folder,
     )
     # Run baseline and test training
     baseline_log = run_scenario(
@@ -820,6 +840,7 @@ def main() -> None:
         args.steps,
         enable_seed_checkpoint,
         args.output_folder,
+        args.job_dump_folder,
     )
 
     test_log = run_scenario(
@@ -831,6 +852,7 @@ def main() -> None:
         args.steps,
         enable_seed_checkpoint,
         args.output_folder,
+        args.job_dump_folder,
     )
     log_print()
 
