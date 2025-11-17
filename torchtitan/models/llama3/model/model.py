@@ -358,11 +358,8 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        # h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
-
-        h = x
-        # out = h + self.feed_forward(self.ffn_norm(h))
-        out = h
+        h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
+        out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
     def init_weights(self):
