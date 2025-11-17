@@ -705,9 +705,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.metrics_processor.close()
 
         # Note [explicit cudagraph close]
-        # cudagraph holds reference to nccl which prevents destroy nccl group.
-        # so we need to explicitly delete cudagraph which is held in joint_graph_module.
-        # An explicit gc.collect() is needed here to clean up reference cycles.
+        # cudagraph holds reference to nccl which prevents destroy nccl
+        # group. so we need to explicitly delete cudagraph which is held
+        # in joint_graph_module. An explicit gc.collect() is necessary
+        # to clean up reference cycles.
         for part in self.model_parts:
             part.joint_graph_module = None
         gc.collect()
