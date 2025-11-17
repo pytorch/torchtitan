@@ -278,15 +278,6 @@ class Training:
     many temporary files.
     """
 
-    seed: int | None = None
-    """Choose the base RNG seed used for training"""
-
-    deterministic: bool = False
-    """Use deterministic algorithms wherever possible, may be slower"""
-
-    debug_moe_force_load_balance: bool = False
-    """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
-
 
 @dataclass
 class Parallelism:
@@ -300,9 +291,6 @@ class Parallelism:
     parallelism method used is DDP (Distributed Data Parallelism).
     1 means disabled.
     """
-
-    enable_compiled_autograd: bool = False
-    """Enable CompiledAutograd to compile the backward."""
 
     data_parallel_shard_degree: int = -1
     """
@@ -662,6 +650,26 @@ class ActivationCheckpoint:
     https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
     """
 
+    preserve_rng_state: bool = False
+    """
+    If deterministic output compared to non-checkpointed passes is required, set
+    to true. Results in stashing and restoring the RNG state during each checkpoint,
+    may be slower. See https://docs.pytorch.org/docs/stable/checkpoint.html
+    for details.
+    """
+
+    determinism_check: str = "default"
+    """
+    A string specifying the determinism function. See
+    https://docs.pytorch.org/docs/stable/checkpoint.html for details.
+    """
+
+    debug: bool = False
+    """
+    Capture ac debug information. Will be slower. See
+    https://docs.pytorch.org/docs/stable/checkpoint.html for details.
+    """
+
 
 @dataclass
 class Compile:
@@ -873,7 +881,7 @@ class Experimental:
     DEPRECATED (moved to Job.custom_config_module). Will be removed soon.
 
     This option allows users to extend TorchTitan's existing JobConfig by extending
-    a user defined JobConfig dataclass. Similar to ``--experimental.custom_model_path``, the user
+    a user defined JobConfig dataclass. Similar to ``--experimental.custom_import``, the user
     needs to ensure that the path can be imported.
     """
 
@@ -1014,6 +1022,20 @@ class GRPO:
     """
 
 
+class Debug:
+    seed: int | None = None
+    """Choose the base RNG seed used for training"""
+
+    deterministic: bool = False
+    """Use deterministic algorithms wherever possible, may be slower"""
+
+    deterministic_warn_only: bool = False
+    """Only warns about ops without deterministic implementations rather than erroring out  """
+
+    moe_force_load_balance: bool = False
+    """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
+
+
 @dataclass
 class JobConfig:
     """
@@ -1040,6 +1062,7 @@ class JobConfig:
     experimental: Experimental = field(default_factory=Experimental)
     validation: Validation = field(default_factory=Validation)
     grpo: GRPO = field(default_factory=GRPO)
+    debug: Debug = field(default_factory=Debug)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

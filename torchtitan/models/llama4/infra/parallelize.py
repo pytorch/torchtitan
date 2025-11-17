@@ -6,6 +6,9 @@
 
 import torch
 import torch.nn as nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    CheckpointWrapper,
+)
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Partial, Replicate, Shard
@@ -43,6 +46,7 @@ from torchtitan.distributed.expert_parallel import (
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.moe import moe as moe_module
 from torchtitan.tools.logging import logger
 
 
@@ -191,7 +195,6 @@ def parallelize_llama(
             model,
             dp_mesh,
             enable_compile=model_compile_enabled,
-            enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
     return model
@@ -528,17 +531,71 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     """
     # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
     # but it is experimental.
-    # torch._dynamo.config.capture_scalar_outputs = True
+    torch._dynamo.config.capture_scalar_outputs = True
+    # Workaround for https://github.com/pytorch/pytorch/issues/166926
+    torch._C._dynamo.eval_frame._set_lru_cache(False)
     for layer_id, transformer_block in model.layers.named_children():
-        # TODO: remove when torch.compile supports fullgraph=True for MoE
-        fullgraph = True
         if transformer_block.moe_enabled:
-            fullgraph = False
-        transformer_block = torch.compile(
-            transformer_block,
-            backend=compile_config.backend,
-            fullgraph=fullgraph,
-        )
+            # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
+            # So we must weave compile wrappers around those FSDP hooks to
+            # prevent AC from falling back the whole graph to eager.
+            # TODO: Fix Compile(AC(graph break))
+
+            if isinstance(transformer_block, CheckpointWrapper):
+                # TODO: Make CheckpointWrapper a transparent wrapper
+                # unwrap so that .named_children() works
+                block = transformer_block._checkpoint_wrapped_module
+            else:
+                block = transformer_block
+
+            for attr_name, submod in block.named_children():
+                assert getattr(block, attr_name) == getattr(
+                    transformer_block, attr_name
+                )
+
+                if isinstance(submod, moe_module.MoE):
+                    # avoid graph breaking on the GroupedExperts' FSDP hooks
+                    # by wrapping each submod's forward instead of their __call__
+                    moe = submod
+                    for attr_name, submod in moe.named_children():
+                        if attr_name == "experts":
+                            # NOTE: We don't compile token dispatch and token combine due to an issue on B200:
+                            # https://github.com/pytorch/torchtitan/issues/1940
+                            continue
+                        setattr(
+                            moe,
+                            attr_name,
+                            torch.compile(
+                                submod, backend=compile_config.backend, fullgraph=True
+                            ),
+                        )
+                else:
+                    setattr(
+                        block,
+                        attr_name,
+                        torch.compile(
+                            submod, backend=compile_config.backend, fullgraph=True
+                        ),
+                    )
+
+        else:
+            # If it's not a MoE layer, there is no FSDP(GroupedExperts)
+            # So we can compile the whole block
+            transformer_block = torch.compile(
+                transformer_block,
+                backend=compile_config.backend,
+                fullgraph=True,
+            )
+
         model.layers.register_module(layer_id, transformer_block)
+
+    moe_module._run_experts_grouped_mm = torch.compile(
+        moe_module._run_experts_grouped_mm,
+        backend=compile_config.backend,
+        fullgraph=True,
+    )
+
+    # NOTE: We don't compile for loop code path due to an issue with unbacked symints:
+    # https://github.com/pytorch/pytorch/issues/166460
 
     logger.info("Compiling each TransformerBlock with torch.compile")

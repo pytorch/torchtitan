@@ -771,7 +771,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
             mb_batches = batches[mb_start:mb_end]
             dynamic_batch = list()
-            print(mb_start, mb_end)
             try:
                 start_len = mb_batches[0][0].shape[1]
             except IndexError as e:
