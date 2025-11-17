@@ -76,3 +76,17 @@ def rescale_accumulated_loss(unwrapped_loss_fn, accumulation_steps):
     `unwrapped_loss_fn`.
     """
     return RescaleAccumulatedLoss(unwrapped_loss_fn, accumulation_steps)
+
+
+def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Common MSE loss function for Transformer models training."""
+    return torch.nn.functional.mse_loss(pred.float(), labels.float().detach())
+
+
+def build_mse_loss(job_config: JobConfig, **kwargs):
+    del kwargs  # delete any unused arguments
+    loss_fn = mse_loss
+    if job_config.compile.enable and "loss" in job_config.compile.components:
+        logger.info("Compiling the loss function with torch.compile")
+        loss_fn = torch.compile(loss_fn, backend=job_config.compile.backend)
+    return loss_fn

@@ -41,3 +41,6 @@ Sessionx.vim
 .DS_Store
 .venv/
 slurm-*
+
+# env files
+.env
