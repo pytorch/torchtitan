@@ -105,9 +105,11 @@ def parallelize_llama(
         #
         # Option 2: Record the placement and apply full placements later
         # - Record TP dimension placement now, apply full placement later with DP dimension
-        # - Can use standard Shard only (no need for _StridedShard)
+        # - No need to use _StridedShard, we can just use Shard()
         #
-        # Which approach should we adopt?
+        # It's mostly likely that we will go with option 2 as we are going to use
+        # Reparameterization to handle the full parameters transformation, which
+        # makes option 2 more natural.
         raise NotImplementedError("TP is not implemented yet.")
 
     if job_config.activation_checkpoint.mode != "none":
@@ -132,9 +134,7 @@ def parallelize_llama(
     # Note: This solution leaves the dp_shard process group wasted (
     # we can initialize it with fake backend).
     #
-    # Key architectural question:
-    # The parameter mesh differs from the activation mesh. Is this mesh divergence
-    # specific to FSDP + CP, or does it occur in other parallelism combinations?
+    # Note: We may be able to implement this solution with Reparameterization directly.
 
     # Keep cp_enabled here to remind us cp_enabled=True requires data_parallel
     if (
