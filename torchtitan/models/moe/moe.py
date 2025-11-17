@@ -464,13 +464,14 @@ class MoE(nn.Module):
         if not self.score_before_experts:
             # Unsort scores and routed outputs. Also save some allocations: store unsorted scores
             # and outputs in top_scores and routed_input, respectively.
-            top_scores = top_scores.flatten()
-            top_scores[token_indices_experts_sorted] = top_scores_experts_sorted
             routed_input[token_indices_experts_sorted] = routed_output
             routed_input = routed_input.reshape(-1, self.router.top_k, dim)
-            top_scores = top_scores.reshape(-1, 1, self.router.top_k)
             out_experts = (
-                torch.bmm(top_scores, routed_input.float()).to(x.dtype).squeeze(1)
+                torch.bmm(
+                    top_scores.reshape(-1, 1, self.router.top_k), routed_input.float()
+                )
+                .to(x.dtype)
+                .squeeze(1)
             )
         else:
             # Unsort routed outputs and save an allocation: store unsorted outputs in routed_input
@@ -543,6 +544,7 @@ class MoEOld(MoE):
             token_indices_experts_sorted,
             num_tokens_per_expert,
         ) = self.reorderer(top_scores, selected_experts_indices)
+        # NOTE: @goon - adjust for redefined reorderer output and divide by top_k
         token_indices_experts_sorted = (
             token_indices_experts_sorted // self.reorderer.top_k
         )

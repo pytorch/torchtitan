@@ -141,7 +141,7 @@ class TestModel:
         return moe_old, moe, ffn
 
     def test_moe_equivalence(
-        self, score_before_experts: bool = True
+        self, score_before_experts: bool = False
     ) -> tuple[float, float]:
         torch.manual_seed(42)
         moe_old, moe = self._get_moe_old_and_moe_layers(score_before_experts)
