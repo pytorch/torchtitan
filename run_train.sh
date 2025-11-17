@@ -25,7 +25,8 @@ if [ "$DRY_RUN" = "1" ]; then
     python scripts/dry_run.py --job.config_file ${CONFIG_FILE} "$@"
 else
     # Normal training with torchrun
-    PYTORCH_ALLOC_CONF="expandable_segments:True" \
+    # expandable_segments does not work with cg and nccl.
+    # https://github.com/pytorch/pytorch/issues/158029
     TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
     torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \

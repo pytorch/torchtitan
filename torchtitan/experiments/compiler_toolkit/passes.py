@@ -78,6 +78,7 @@ class CUDAGraphWrapper:
 
 
         g = torch.cuda.CUDAGraph()
+        # allocate a graph pool for debugging. Will reuse graph pool across cg.
         with torch.cuda.graph(g, pool= torch.cuda.graph_pool_handle()):
             # `output` is managed by pytorch's cudagraph pool
             # TODO: use weak ref for output to reuse memory
