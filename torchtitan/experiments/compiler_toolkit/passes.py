@@ -11,6 +11,8 @@ This module provides various compiler passes that can be applied to graph module
 during compilation. Passes can be selected and configured via job config.
 """
 
+from typing import Any, Callable, Optional, Sequence
+
 import torch
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
@@ -40,17 +42,17 @@ def regional_inductor_pass(
     return regional_inductor(gm, example_inputs)
 
 
-from typing import Callable, Optional
-
 _global_graph_pool = torch.cuda.graph_pool_handle()
 
 # TODO: make output and args weakref to allow reuse.
+# TODO: Check memory consumption
 
 
 class CUDAGraphWrapper:
     def __init__(
         self,
         runnable: Callable,
+        example_inputs: Sequence[Any],
         static_input_indices: Optional[tuple[int]] = None,
     ):
         self.runnable = runnable
@@ -58,32 +60,32 @@ class CUDAGraphWrapper:
         self.static_input_indices = OrderedSet(
             static_input_indices if static_input_indices is not None else []
         )
-
+        self.input_indices_to_copy = [
+            i
+            for i, inp in enumerate(example_inputs)
+            if isinstance(inp, torch.Tensor) and i not in self.static_input_indices
+        ]
         self.cudagraph: Optional[torch.cuda.CUDAGraph] = None
+        self.has_warmup = False
 
         # TODO: weak ref
         self.args = None
-        self.kwargs = None
         self.output = None
 
-        self.has_warmup = False
-
     def copy_static_inputs(self, *args):
-        for i in range(len(self.args)):
-            if i not in self.static_input_indices and isinstance(self.args[i], torch.Tensor):
-                self.args[i].copy_(args[i])
+        for i in self.input_indices_to_copy:
+            self.args[i].copy_(args[i])
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args):
         if not self.has_warmup:
             self.has_warmup = True
-            return self.runnable(*args, **kwargs)
+            return self.runnable(*args)
 
         if self.cudagraph is None:
             # TODO: weak ref?
             self.args = args
-            self.kwargs = kwargs
             input_addresses = [
-                x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args 
+                x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
             ]
             self.input_addresses = input_addresses
 
@@ -92,27 +94,45 @@ class CUDAGraphWrapper:
             with torch.cuda.graph(self.cudagraph, pool=self.graph_pool):
                 # `output` is managed by pytorch's cudagraph pool
                 # TODO: use weak ref for output to reuse memory
-                self.output = self.runnable(*args, **kwargs)
-
-        # if True:
-        #     # check if the input addresses are the same
-        #     new_input_addresses = [
-        #         x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-        #     ]
-        #     assert new_input_addresses == self.input_addresses, (
-        #         f"Input addresses for cudagraphs are different "
-        #         f"during replay. Expected {self.input_addresses}, "
-        #         f"got {new_input_addresses}"
-        #     )
-
+                self.output = self.runnable(*args)
 
         self.copy_static_inputs(*args)
         self.cudagraph.replay()
         return self.output
 
 
+def get_static_input_indices(gm: torch.fx.GraphModule, is_forward: bool) -> list[int]:
+    """
+    Get indices of gm inputs that are static input tensors whose tensor addresses do not
+    change across runs. Example of static input tensors include weights, buffers, and
+    outputs of previous cudagraph wrapped functions.
+    """
+    from torch._inductor.utils import count_tangents
+
+    static_input_indices = []
+    if (
+        is_forward
+        and (tracing_context := torch._guards.TracingContext.try_get())
+        and hasattr(tracing_context, "fw_metadata")
+    ):
+        # for forward, we rely on graph capture (i.e., dynamo or export) to provide
+        # the correct static input indices stored in tracing context. Typical examples
+        # include weights and buffers.
+        static_input_indices = tracing_context.fw_metadata.static_input_indices
+
+    elif not is_forward:
+        # for backward, we identify saved tensors as static inputs, since saved tensors
+        # are outputs of cudagraph-wrapped forward run. In PT2-generated backward gm,
+        # saved tensors are always the leading args. So we can get the number of saved
+        # tensors and generate static input indices.
+        fixed = count_tangents(gm)
+        static_input_indices = list(range(fixed))
+
+    return static_input_indices
+
+
 def cudagraph_pass(
-    gm: torch.fx.GraphModule, example_inputs
+    gm: torch.fx.GraphModule, example_inputs: Sequence[Any], is_forward: bool
 ) -> torch.fx.GraphModule:
     """
     Apply cudagraph.
@@ -123,7 +143,8 @@ def cudagraph_pass(
     - For the second run, it will record cudagraph and replay cudagraph.
     - For the following runs, it will replay cudagraph.
     """
-    gm.forward = CUDAGraphWrapper(gm.forward)
+    static_input_indices = get_static_input_indices(gm, is_forward)
+    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
     return gm
 
 
@@ -133,4 +154,3 @@ AVAILABLE_PASSES = {
     "regional_inductor": regional_inductor_pass,
     "cudagraph": cudagraph_pass,
 }
-

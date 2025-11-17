@@ -4,12 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import importlib
 import os
 import time
 from datetime import timedelta
 from typing import Any, Generator, Iterable
-import gc
 
 import torch
 
@@ -711,6 +711,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         for part in self.model_parts:
             part.joint_graph_module = None
         gc.collect()
+
 
 def main(trainer_class: type[Trainer]) -> None:
     """Main entry point for training with a specified trainer class.

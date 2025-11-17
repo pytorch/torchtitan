@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import functools
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
@@ -213,6 +214,7 @@ def compiler(
     example_inputs,
     passes: List[Callable] = None,
     dump_folder: str | None = None,
+    is_forward: bool = True,
 ):
     """
     Compile a graph module by applying a sequence of compiler passes.
@@ -234,6 +236,17 @@ def compiler(
         gm.print_readable(print_output=False, include_stride=True, include_device=True)
     )
     _dump_gm(dump_folder, gm, f"{name}_before_compiler")
+
+    if len(passes) > 0 and passes[-1].__name__ == "cudagraph_pass":
+        # cudagraph pass is always the last pass if it is applied
+        cg_pass = passes[-1]
+
+        # to identify static input indices, cudagraph passes behaves differently for
+        # forward and backward pass. so we explicitly pass the info.
+        _cg_pass = functools.partial(cg_pass, is_forward=is_forward)
+
+        # keep the function name to
+        passes[-1] = functools.wraps(cg_pass)(_cg_pass)
 
     for pass_fn in passes:
         logger.info(f"Applying pass: {pass_fn.__name__}")
@@ -262,12 +275,22 @@ def make_compiler_with_passes(
 
     def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "fwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "fwd_gm",
+            gm,
+            example_inputs,
+            passes=passes,
+            dump_folder=dump_folder,
+            is_forward=True,
         )
 
     def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "bwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "bwd_gm",
+            gm,
+            example_inputs,
+            passes=passes,
+            dump_folder=dump_folder,
+            is_forward=False,
         )
 
     return fw_compiler, bw_compiler
