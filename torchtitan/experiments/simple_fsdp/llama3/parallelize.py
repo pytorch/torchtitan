@@ -14,7 +14,7 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_tp
 from torchtitan.tools.logging import logger
 
-from ..backend import get_compile_backend
+from ..backend import get_compile_backend_with_passes
 
 from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
 
@@ -31,6 +31,31 @@ _op_sac_save_list = {
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
 }
+
+
+def get_transformer_block_buckets(model) -> list[list[str] | str]:
+    module_list = [
+        model.tok_embeddings,
+        [model.norm, model.output],
+    ]
+    for layer_id, transformer_block in model.layers.items():
+        module_list.append(transformer_block)
+
+    def convert_modules_to_fqns(modules, module_to_fqn_mapping):
+        """Convert a (possibly nested) list of modules to FQN strings."""
+        result = []
+        for m in modules:
+            if isinstance(m, list):
+                if fqn_list := convert_modules_to_fqns(m, module_to_fqn_mapping):
+                    result.append(fqn_list)
+            else:
+                if fqn := module_to_fqn_mapping.get(m):
+                    result.append(fqn)
+        return result
+
+    module_to_name = {m: n for n, m in model.named_modules()}
+    module_fqns = convert_modules_to_fqns(module_list, module_to_name)
+    return module_fqns
 
 
 def parallelize_llama(
@@ -139,13 +164,14 @@ def parallelize_llama(
                     f"Invalid fsdp_reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
                 )
 
-        backend = (
-            getattr(job_config.compile, "model_backend_override", None)
-            or job_config.compile.backend
+        backend = get_compile_backend_with_passes(
+            job_config.compile,
+            fsdp_reshard_after_forward,
+            get_transformer_block_buckets(model),
         )
         model = torch.compile(
             model,
-            backend=get_compile_backend(backend, fsdp_reshard_after_forward),
+            backend=backend,
             fullgraph=True,
         )
 

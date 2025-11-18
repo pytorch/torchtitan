@@ -19,6 +19,9 @@ from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils._ordered_set import OrderedSet
+from torchtitan.experiments.simple_fsdp.reshard_after_forward import (
+    annotate_fsdp_all_gather,
+)
 
 
 def autobucketing_reordering_pass(
@@ -192,9 +195,35 @@ def cudagraph_pass(
     gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
     return gm
 
+def validate_flex_attn_annotation_pass(
+    gm: torch.fx.GraphModule,
+) -> torch.fx.GraphModule:
+    """Verify user annotations show up in the graph."""
+    for node in gm.graph.nodes:
+        if node.target in {
+            torch.ops.higher_order.flex_attention,
+            torch.ops.higher_order.flex_attention_backward,
+        }:
+            assert "compile_with_inductor" in node.meta.get("custom", {})
+    return gm
+
+
+# Apply activation checkpointing on joint graph before partitioner
+def fsdp_reshard_after_fwd_pass(
+    gm: torch.fx.GraphModule, reshard_after_forward: bool
+) -> torch.fx.GraphModule:
+    # this pass implements simplefsdp's fsdp_reshard_after_forward behavior
+    # when fsdp_reshard_after_forward set to True, it will annotate simple_fsdp AG
+    #   to CheckpointPolicy.MUST_RECOMPUTE.
+    # when fsdp_reshard_after_forward set to False, it will annotate simple_fsdp AG
+    #   to CheckpointPolicy.MUST_SAVE.
+    gm = annotate_fsdp_all_gather(gm, reshard_after_forward)
+    gm.recompile()
+    return gm
+
 
 # Registry mapping pass names to pass functions
-AVAILABLE_PASSES = {
+AVAILABLE_COMPILER_PASSES = {
     "autobucketing_reordering": autobucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
     "cudagraph": cudagraph_pass,
