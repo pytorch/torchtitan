@@ -137,18 +137,18 @@ def parallelize_llama(
 
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # dp_mesh is the mesh for FSDP/HSDP
-        names = (
+        dp_mesh_names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
-        dp_mesh = parallel_dims.get_mesh(names)
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        edp_mesh = None
-        if parallel_dims.ep_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                edp_mesh = parallel_dims.get_mesh(["dp_replicate", "efsdp"])
-            else:
-                edp_mesh = parallel_dims.get_mesh("efsdp")
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,
@@ -355,7 +355,10 @@ def apply_fsdp(
             _experts_shard_placement_fn = None
             assert edp_mesh is not None
             assert hasattr(transformer_block, "moe")
-            if edp_mesh.size() * ep_degree > transformer_block.moe.experts.num_experts:
+            if (
+                edp_mesh["efsdp"].size() * ep_degree
+                > transformer_block.moe.experts.num_experts
+            ):
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
             fully_shard(

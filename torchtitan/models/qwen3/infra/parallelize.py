@@ -126,18 +126,18 @@ def parallelize_qwen3(
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
-        names = (
+        dp_mesh_names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
-        dp_mesh = parallel_dims.get_mesh(names)
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        names = (
+        edp_mesh_names = (
             ["dp_replicate", "efsdp"]
             if parallel_dims.dp_replicate_enabled
             else ["efsdp"]
         )
-        edp_mesh = parallel_dims.get_mesh(names)
+        edp_mesh = parallel_dims.get_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,
