@@ -9,7 +9,8 @@ import argparse
 import torch
 from triton.testing import do_bench
 
-from torchtitan.models.moe.moe import MoE, MoEArgs
+from torchtitan.models.deepseek_v3 import deepseekv3_args
+from torchtitan.models.moe.moe import MoE
 from torchtitan.moe_bench_and_test import apply_old_moe_monkey_patches
 
 if __name__ == "__main__":
@@ -24,27 +25,12 @@ if __name__ == "__main__":
     # DSv3-16B-like layers
     device = "cuda"
     dim = 2048
-    is_moe_list = None
     moe_inter_dim = 1408
-    num_experts = 64
-    num_shared_experts = 2
-    route_norm = False
-    score_before_experts = False
-    top_k = 6
-    use_grouped_mm = True
-
-    score_before_experts = False
-    moe_args = MoEArgs(
-        num_experts=num_experts,
-        num_shared_experts=num_shared_experts,
-        score_func="softmax",
-        route_norm=route_norm,
-        score_before_experts=score_before_experts,
-        top_k=top_k,
-        use_grouped_mm=use_grouped_mm,
-    )
+    seqlen = 64
 
     torch.manual_seed(42)
+
+    moe_args = deepseekv3_args["16B"].moe_args
     moe = MoE(moe_args, dim=dim, hidden_dim=moe_inter_dim).to(
         device=device, dtype=torch.bfloat16
     )

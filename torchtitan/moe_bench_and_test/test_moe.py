@@ -9,6 +9,8 @@ import pytest
 import torch
 from einops import rearrange
 
+from torchtitan.models.deepseek_v3 import deepseekv3_args
+
 from torchtitan.models.moe.moe import FeedForward, MoE, MoEArgs
 from torchtitan.moe_bench_and_test import (
     apply_old_moe_monkey_patches,
@@ -23,34 +25,18 @@ class TestModel:
     bsz = 2
     device = "cuda"
     dim = 2048
-    is_moe_list = None
     moe_inter_dim = 1408
     num_experts = 64
-    num_shared_experts = 2
-    perf_reps = 1000
-    perf_warmups = 100
-    route_norm = False
-    score_before_experts = False
     seqlen = 64
-    top_k = 6
-    use_grouped_mm = True
 
     def _get_moe_old_and_moe_layers(
-        self, score_before_experts: bool | None = None
+        self, score_before_experts: bool
     ) -> tuple[MoE, MoE]:
         """
         Create MoEOld and MOE layers with equivalent parameters.
         """
-        score_before_experts = score_before_experts or self.score_before_experts
-        moe_args = MoEArgs(
-            num_experts=self.num_experts,
-            num_shared_experts=self.num_shared_experts,
-            score_func="softmax",
-            route_norm=self.route_norm,
-            score_before_experts=score_before_experts,
-            top_k=self.top_k,
-            use_grouped_mm=self.use_grouped_mm,
-        )
+        moe_args = deepseekv3_args["16B"].moe_args
+        moe_args.score_before_experts = score_before_experts
         moe_old = MoE(moe_args, dim=self.dim, hidden_dim=self.moe_inter_dim).to(
             device=self.device, dtype=torch.bfloat16
         )
@@ -78,16 +64,15 @@ class TestModel:
         the same outputs. Accomplished by breaking the FeedForward weights into experts, choosing
         top_k = num_shared_experts, and ensuring that the router gives every expert weight 1.
         """
-        top_k = 4
         moe_args = MoEArgs(
             num_experts=self.num_experts,
             num_shared_experts=0,
             score_func="softmax",
             route_norm=True,
             score_before_experts=False,
-            top_k=self.num_experts,
-            route_scale=self.num_experts,  # Required for equivalence
-            use_grouped_mm=self.use_grouped_mm,
+            top_k=self.num_experts,  # Required for FFN equivalence
+            route_scale=self.num_experts,  # Required for FFN equivalence
+            use_grouped_mm=True,
         )
         moe_old = MoE(moe_args, dim=self.dim, hidden_dim=self.moe_inter_dim).to(
             device=self.device, dtype=torch.bfloat16
