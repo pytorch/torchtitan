@@ -14,6 +14,7 @@ during compilation. Passes can be selected and configured via job config.
 from typing import Callable
 
 import torch
+from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
 from torchtitan.experiments.compiler_toolkit.inductor_lite import (
@@ -32,9 +33,22 @@ def autobucketing_reordering_pass(
     Apply autobucketing and reordering optimization.
 
     This pass applies schedule_overlap_bucketing with collective_bucketing enabled
-    to optimize communication patterns in distributed training.
+    to optimize comm/compute overlap patterns in the graph.
     """
     schedule_overlap_bucketing(gm, collective_bucketing=True)
+    gm.recompile()
+    return gm
+
+
+def transformer_block_bucketing_reordering_pass(
+    gm: torch.fx.GraphModule, example_inputs, fsdp_manual_buckets
+) -> torch.fx.GraphModule:
+    """
+    Apply aten-level manual bucketing and reordering optimization.
+    """
+    manual_overlap_bucketing(
+        gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
+    )
     gm.recompile()
     return gm
 
@@ -100,6 +114,7 @@ def inductor_lite_pass(
 # Registry mapping pass names to pass functions
 AVAILABLE_COMPILER_PASSES = {
     "autobucketing_reordering": autobucketing_reordering_pass,
+    "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
     "inductor_lite": inductor_lite_pass,
 }

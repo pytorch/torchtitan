@@ -42,11 +42,30 @@ class TestNumerics(unittest.TestCase):
             ac_mode="selective",
             steps=10,
             seed=42,
-            eager_tb_folder="tb/test_llama3_fsdp_tp_eager",
-            compiled_tb_folder="tb/test_llama3_fsdp_tp_compiled",
+            eager_tb_folder="tb/test_llama3_fsdp_tp_autobucketing_eager",
+            compiled_tb_folder="tb/test_llama3_fsdp_tp_autobucketing_compiled",
             metrics=["loss_metrics/global_avg_loss", "grad_norm"],
             passes="autobucketing_reordering",
         )
+        self.assertTrue(result, "Llama3 FSDP+TP+autobucketing numerics test failed")
+
+    def test_llama3_fsdp_tp_manualbucketing(self):
+        result = run_numerics_test(
+            ngpu=4,
+            config_file="./torchtitan/models/llama3/train_configs/debug_model.toml",
+            dp_shard_degree=2,
+            tp_degree=2,
+            cp_degree=1,
+            ep_degree=1,
+            ac_mode="selective",
+            steps=10,
+            seed=42,
+            eager_tb_folder="tb/test_llama3_fsdp_tp_manualbucketing_eager",
+            compiled_tb_folder="tb/test_llama3_fsdp_tp_manualbucketing_compiled",
+            metrics=["loss_metrics/global_avg_loss", "grad_norm"],
+            passes="transformer_block_bucketing",
+        )
+        self.assertTrue(result, "Llama3 FSDP+TP+manualbucketing numerics test failed")
 
     def test_deepseek_v3_fsdp_tp_ep(self):
         """Test DeepSeek V3 with FSDP + TP + EP configuration."""
