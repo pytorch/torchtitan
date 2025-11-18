@@ -15,9 +15,8 @@ from torchtitan.protocols.train_spec import TrainSpec
 from .infra.parallelize import parallelize_hf_transformers
 
 from .infra.pipeline import pipeline_hf_transformers
-from .model.args import HFTransformerModelArgs
+from .model.args import HFTransformerModelArgs, TitanDenseModelArgs
 from .model.model import HFTransformerModel
-
 
 __all__ = [
     "HFTransformerModelArgs",
@@ -25,23 +24,6 @@ __all__ = [
 ]
 
 
-@dataclass
-class TitanDenseModelArgs:
-    """Arguments for the base TorchTitan model."""
-
-    dim: int = 4096
-    n_layers: int = 32
-    n_heads: int = 32
-    n_kv_heads: int | None = None
-    vocab_size: int | None = None
-    multiple_of: int = 256
-    ffn_dim_multiplier: float | None = None
-    norm_eps: float = 1e-5
-    rope_theta: float = 10000
-    max_seq_len: int = 2048
-    depth_init: bool = True
-    use_flex_attn: bool = False
-    attn_mask_type: str = "causal"
 
 
 flavors = {
