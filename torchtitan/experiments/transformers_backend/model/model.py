@@ -17,7 +17,7 @@ from transformers.modeling_utils import PreTrainedModel
 from .args import HFTransformerModelArgs
 
 
-class SlicableModuleDict(nn.ModuleDict):
+class SliceableModuleDict(nn.ModuleDict):
     """
     A ModuleDict that supports slicing like ModuleList.
     Keys are expected to be string representations of integers (e.g., "0", "1", "2").
@@ -30,8 +30,8 @@ class SlicableModuleDict(nn.ModuleDict):
                 self.keys(), key=lambda x: int(x) if x.isdigit() else float("inf")
             )
             sliced_keys = keys[key]
-            # Return a new SlicableModuleDict with the sliced items
-            return SlicableModuleDict({k: self[k] for k in sliced_keys})
+            # Return a new SliceableModuleDict with the sliced items
+            return SliceableModuleDict({k: self[k] for k in sliced_keys})
         return super().__getitem__(key)
 
     def __iter__(self):
@@ -106,7 +106,7 @@ class HFTransformerModel(nn.Module):
         # Convert ModuleList to ModuleDict to preserve original indices
         # This ensures state dict keys match checkpoint keys
         if isinstance(self.model.model.layers, nn.ModuleList):
-            self.model.model.layers = SlicableModuleDict(
+            self.model.model.layers = SliceableModuleDict(
                 {str(i): layer for i, layer in enumerate(self.model.model.layers)}
             )
 
