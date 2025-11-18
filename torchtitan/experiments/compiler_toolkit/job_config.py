@@ -5,16 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 
 @dataclass
 class Compile:
-    graph_passes: Literal["auto_bucketing", "transformer_block_bucketing"] | None = None
     """
-    Bucketing and overlapping passes in simplefsdp. Additional passes include:
-        auto_bucketing, transformer_block_bucketing
+    List of compiler pass names to apply in the compiler toolkit workflow.
+    By default, no passes are applied.
+    Example: --compile.passes autobucketing_reordering,regional_inductor
     """
+
+    passes: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -84,20 +84,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
-        # init distributed and build meshes
-        dist_utils.init_distributed(
-            job_config.comm,
-            enable_cpu_backend=job_config.training.enable_cpu_offload,
-            base_folder=job_config.job.dump_folder,
-        )
-
         job_config.maybe_log()
 
-        world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = job_config.parallelism
-        self.parallel_dims = parallel_dims = self._create_parallel_dims(
-            parallelism_config, world_size
-        )
+        # init distributed and build meshes
+        self.parallel_dims = parallel_dims = self.init_distributed()
 
         world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
@@ -319,7 +309,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
+            parallel_dims.tp_enabled
+            and not job_config.parallelism.disable_loss_parallel
         )
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
@@ -367,7 +358,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
-    def _create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
+    def init_distributed(self) -> ParallelDims:
+        job_config = self.job_config
+        dist_utils.init_distributed(
+            job_config.comm,
+            enable_cpu_backend=job_config.training.enable_cpu_offload,
+            base_folder=job_config.job.dump_folder,
+        )
+
+        world_size = int(os.environ["WORLD_SIZE"])
+        parallelism_config = job_config.parallelism
+
         return ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
@@ -697,9 +698,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.ntokens_seen = state_dict["ntokens_seen"]
 
     def close(self) -> None:
-        if self.checkpointer:
+        if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
-        if self.metrics_processor:
+        if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()
 
 
@@ -734,7 +735,8 @@ def main(trainer_class: type[Trainer]) -> None:
         raise
     else:
         trainer.close()
-        torch.distributed.destroy_process_group()
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
 
 

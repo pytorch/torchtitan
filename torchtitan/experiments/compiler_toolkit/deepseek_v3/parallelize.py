@@ -21,43 +21,15 @@ from torchtitan.experiments.compiler_toolkit.common_utils import (
 
 from torchtitan.experiments.compiler_toolkit.graph_utils import (
     CompiledModule,
-    get_inductor_lite_bw_compiler,
-    get_inductor_lite_fw_compiler,
+    get_compiler_passes_from_config,
+    get_joint_custom_passes_from_config,
     joint_graph_builder,
+    make_compiler_with_passes,
 )
 
 from torchtitan.experiments.simple_fsdp.deepseek_v3.parallelize import (
     parallelize_deepseekv3 as simple_fsdp_parallelize_deepseekv3,
 )
-from torchtitan.tools.logging import logger
-
-
-def compiler(name: str, gm: torch.fx.GraphModule, example_inputs):
-    logger.info(f"{name} before compiler:")
-    logger.info(gm.print_readable(print_output=False))
-
-    # TODO: regional_inductor should work with deepseek_v3
-    # gm = regional_inductor(gm, example_inputs)
-
-    logger.info(f"{name} after compiler:")
-    logger.info(gm.print_readable(print_output=False))
-    return gm
-
-
-def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
-    gm = compiler("fwd_gm", gm, example_inputs)
-
-    # TODO: fix inductor size assertion for all_reduce
-    extra_inductor_config = {"size_asserts": False}
-    return get_inductor_lite_fw_compiler(extra_inductor_config)(gm, example_inputs)
-
-
-def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
-    gm = compiler("bwd_gm", gm, example_inputs)
-
-    # TODO: fix inductor size assertion for all_reduce
-    extra_inductor_config = {"size_asserts": False}
-    return get_inductor_lite_bw_compiler(extra_inductor_config)(gm, example_inputs)
 
 
 def annotate_deepseekv3() -> None:
@@ -85,7 +57,17 @@ def parallelize_deepseekv3(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ) -> CompiledModule:
+    """
+    Parallelize and compile a DeepSeek v3 model with optional custom compiler passes.
 
+    Args:
+        model: The model to parallelize
+        parallel_dims: Parallel dimensions configuration
+        job_config: Job configuration
+
+    Returns:
+        CompiledModule wrapping the parallelized and compiled model
+    """
     annotate_deepseekv3()
 
     register_blockmask_pytree_node()
@@ -94,11 +76,24 @@ def parallelize_deepseekv3(
     with disable_compile(job_config):
         model = simple_fsdp_parallelize_deepseekv3(model, parallel_dims, job_config)
 
+    # Get joint custom passes from config
+    joint_custom_passes = get_joint_custom_passes_from_config(parallel_dims, job_config)
+
+    # Get compiler passes from config
+    compiler_passes = get_compiler_passes_from_config(job_config)
+
+    # Create compilers with specified passes (defaults to no passes)
+    fw_compiler, bw_compiler = make_compiler_with_passes(
+        compiler_passes, dump_folder=job_config.job.dump_folder
+    )
+
+    # Create custom joint_graph_builder with deepseekv3-specific compilers
     deepseekv3_joint_graph_builder = functools.partial(
         joint_graph_builder,
         fw_compiler=fw_compiler,
         bw_compiler=bw_compiler,
-        joint_custom_pass=None,
+        joint_custom_passes=joint_custom_passes,
+        dump_folder=job_config.job.dump_folder,
     )
 
     # TODO: CompiledModule should take sample input as well, so that we can
