@@ -10,10 +10,8 @@ import torch
 
 from autoparallel.api import AutoParallel
 
-from torch.distributed import DeviceMesh
-from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 
 from torchtitan.tools.logging import logger
@@ -25,29 +23,18 @@ def apply_local_map_to_moe():
     TODO: fix tracing with local shapes so that we can use Shard placements
 
     Current HOP signature we get:
-
-    class subgraph_0(torch.nn.Module):
-        def forward(self,
-        rms_norm_5: "f32[64, 2048, 256][524288, 256, 1]cuda:0",
-        self____modules__layers____modules__1____modules__moe____modules__router____modules__gate____parameters__weight: "f32[8, 256][256, 1]cuda:0",
-        self____modules__layers____modules__1____modules__moe____buffers__expert_bias: "f32[8][1]cuda:0",
-        self____modules__layers____modules__1____modules__moe____modules__experts____parameters__w1: "f32[8, 256, 256][65536, 256, 1]cuda:0",
-        self____modules__layers____modules__1____modules__moe____modules__experts____parameters__w3: "f32[8, 256, 256][65536, 256, 1]cuda:0",
-        self____modules__layers____modules__1____modules__moe____modules__experts____parameters__w2: "f32[8, 256, 256][65536, 256, 1]cuda:0",
-        self____modules__layers____modules__1____modules__moe____modules__shared_experts____modules__w1____parameters__weight: "f32[512, 256][256, 1]cuda:0",
-        self____modules__layers____modules__1____modules__moe____modules__shared_experts____modules__w3____parameters__weight: "f32[512, 256][256, 1]cuda:0",
-        self____modules__layers____modules__1____modules__moe____modules__shared_experts____modules__w2____parameters__weight: "f32[256, 512][512, 1]cuda:0"):
     """
-    from torchtitan.models.moe import moe
     from torch.distributed._tensor.experimental import local_map
+    from torchtitan.models.moe import moe
+
     moe._moe_forward = local_map(
         moe._moe_forward,
         out_placements=(
-            (Replicate(),), # (Shard(0),),
+            (Replicate(),),  # (Shard(0),),
             (Replicate(),),
         ),
         in_placements=(
-            (Replicate(),), # (Shard(0),),
+            (Replicate(),),  # (Shard(0),),
             (Replicate(),),
             (Replicate(),),
             (Replicate(),),
@@ -146,7 +133,8 @@ def parallelize_deepseekv3(
         )
         out_sharding = x_sharding
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not job_config.parallelism.disable_loss_parallel
+            parallel_dims.tp_enabled
+            and not job_config.parallelism.disable_loss_parallel
         )
         if loss_parallel_enabled:
             out_sharding = tuple(
@@ -190,24 +178,31 @@ def _preserve_moe_attributes(original_model, parallel_model):
     This is only needed for attributes that aren't used in the graph, so they aren't
     lifted as graph inputs and fetched by the pre-graph runtime wrapper.
 
-    `moe_enabled` ane `load_balance_coeff` are used later in the optimizer to identify
+    `moe_enabled` and `load_balance_coeff` are used later in the optimizer to identify
     this block as a moe block. This should be safe as they are read-only.
     """
+
     def get_moe_modules(model):
         """Extract all MoE modules from the model."""
         moe_modules = []
-        if hasattr(model, 'layers'):
+        if hasattr(model, "layers"):
             if isinstance(model.layers, torch.nn.ModuleDict):
                 # regular torchtitan structure
                 blocks = model.layers.values()
             else:
                 # autoparallel might change structure
-                blocks = model.layers.children() if hasattr(model.layers, 'children') else []
+                blocks = (
+                    model.layers.children() if hasattr(model.layers, "children") else []
+                )
 
             for block in blocks:
-                if hasattr(block, 'moe_enabled') and block.moe_enabled and hasattr(block, 'moe'):
+                if (
+                    hasattr(block, "moe_enabled")
+                    and block.moe_enabled
+                    and hasattr(block, "moe")
+                ):
                     moe_modules.append(block.moe)
-                elif hasattr(block, 'moe'):  # fallback for autoparallel
+                elif hasattr(block, "moe"):  # fallback for autoparallel
                     moe_modules.append(block.moe)
         return moe_modules
 
@@ -217,9 +212,9 @@ def _preserve_moe_attributes(original_model, parallel_model):
     # Copy custom attributes from original to parallel MoE modules
     # This is fine to do since these attributes are read only
     for orig_moe, par_moe in zip(original_moe_modules, parallel_moe_modules):
-        if hasattr(orig_moe, 'moe_enabled'):
+        if hasattr(orig_moe, "moe_enabled"):
             par_moe.load_balance_coeff = orig_moe.load_balance_coeff
 
         # Copy load_balance_coeff
-        if hasattr(orig_moe, 'load_balance_coeff'):
+        if hasattr(orig_moe, "load_balance_coeff"):
             par_moe.load_balance_coeff = orig_moe.load_balance_coeff

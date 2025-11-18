@@ -13,15 +13,17 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.protocols.train_spec import TrainSpec
 
-from torchtitan.models.llama3 import llama3_args, TransformerModelArgs, Transformer
+from torchtitan.models.llama3 import llama3_args, Transformer
 from torchtitan.models.llama3.model.state_dict_adapter import Llama3StateDictAdapter
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .parallelize_llama import parallelize_llama
 
 
-# CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.toml ./run_train.sh --model.name auto_parallel.llama3 --parallelism.tensor_parallel_degree 4
+# CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.toml
+# ./run_train.sh --model.name auto_parallel.llama3 --parallelism.tensor_parallel_degree 4
+
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(

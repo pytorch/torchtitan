@@ -12,11 +12,12 @@ from torchtitan.components.optimizer import build_optimizers_with_moe_load_balan
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.models.moe import MoEArgs
-from torchtitan.protocols.train_spec import TrainSpec
 
-from torchtitan.models.deepseek_v3 import deepseekv3_args, DeepSeekV3ModelArgs, DeepSeekV3Model
-from torchtitan.models.deepseek_v3.model.state_dict_adapter import DeepSeekV3StateDictAdapter
+from torchtitan.models.deepseek_v3 import deepseekv3_args, DeepSeekV3Model
+from torchtitan.models.deepseek_v3.model.state_dict_adapter import (
+    DeepSeekV3StateDictAdapter,
+)
+from torchtitan.protocols.train_spec import TrainSpec
 
 from .parallelize_deepseekv3 import parallelize_deepseekv3
 

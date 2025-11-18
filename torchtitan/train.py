@@ -8,13 +8,12 @@ import importlib
 import os
 import time
 from datetime import timedelta
-from functools import partial
-from typing import Any, Generator, Iterable, Optional
+from typing import Any, Generator, Iterable
 
 import torch
+from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.tensor import DTensor
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
@@ -34,7 +33,6 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
@@ -108,13 +106,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         # TODO(whc)
-        # I do this becuase otherwise sometimes inductor will skip re-running passes like comms reordering
+        # I do this because otherwise sometimes inductor will skip re-running passes like comms reordering
         torch._inductor.config.force_disable_caches = True
         # this is necessary for working with reordering passes. Just leave it set for all the jobs for now.
         torch._inductor.config.allow_buffer_reuse = False
 
         # allow configuring inductor comms optimizations from torchtitan commandline
-        configure_inductor_for_autobucketing(job_config.experimental.comms_bucket_reorder_strategy)
+        configure_inductor_for_autobucketing(
+            job_config.experimental.comms_bucket_reorder_strategy
+        )
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).

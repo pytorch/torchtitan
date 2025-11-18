@@ -20,6 +20,7 @@ PERFETTO_UI_ROOT_URL = (
     "https://interncache-all.fbcdn.net/manifold/perfetto-artifacts/tree/ui/index.html"
 )
 
+
 @contextlib.contextmanager
 def maybe_enable_profiling(
     profiling_config: ProfilingConfig,
@@ -57,7 +58,10 @@ def maybe_enable_profiling(
             # but conveniently prints the internal url for perfetto on manifold for mast jobs
             manifold_mount_prefix = "/mnt/mffuse/"
             if output_file.find(manifold_mount_prefix) == 0:
-                manifold_path = os.path.join("torchtrain_datasets/tree", output_file.split(manifold_mount_prefix)[1])
+                manifold_path = os.path.join(
+                    "torchtrain_datasets/tree",
+                    output_file.split(manifold_mount_prefix)[1],
+                )
                 perfetto_url = (
                     PERFETTO_UI_ROOT_URL
                     + "#!/?url=https://interncache-all.fbcdn.net/manifold/"

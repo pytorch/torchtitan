@@ -10,7 +10,6 @@ import torch
 
 from autoparallel.api import AutoParallel
 
-from torch.distributed import DeviceMesh
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
 
@@ -33,6 +32,7 @@ def parallelize_llama(
     the model must fit on GPU or CPU memory.
     """
     world_mesh = parallel_dims.world_mesh
+
     def input_fn():
         global_batch_size = job_config.training.global_batch_size
         if global_batch_size < 0:
@@ -101,7 +101,8 @@ def parallelize_llama(
         )
         out_sharding = x_sharding
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not job_config.parallelism.disable_loss_parallel
+            parallel_dims.tp_enabled
+            and not job_config.parallelism.disable_loss_parallel
         )
         if loss_parallel_enabled:
             out_sharding = tuple(

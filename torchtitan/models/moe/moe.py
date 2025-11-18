@@ -353,7 +353,10 @@ class TokenReorderer(nn.Module):
             num_tokens_per_expert,
         )
 
-def _moe_forward(x, router, expert_bias, reorderer, score_before_experts, experts, shared_experts):
+
+def _moe_forward(
+    x, router, expert_bias, reorderer, score_before_experts, experts, shared_experts
+):
     # x: 64, 2048, 256
     bs, slen, dim = x.shape
     x = x.view(-1, dim)
@@ -390,17 +393,16 @@ def _moe_forward(x, router, expert_bias, reorderer, score_before_experts, expert
     ) = reorderer(top_scores, selected_experts_indices)
 
     # shape (bs*slen*top_k, dim)
-    token_indices_experts_sorted = token_indices_experts_sorted.reshape(
-        -1, 1
-    ).expand(-1, dim)
+    token_indices_experts_sorted = token_indices_experts_sorted.reshape(-1, 1).expand(
+        -1, dim
+    )
 
     # shape (bs*slen*top_k, dim)
     routed_input = torch.gather(x, dim=0, index=token_indices_experts_sorted)
 
     if score_before_experts:
         routed_input = (
-            routed_input.to(torch.float32)
-            * top_scores_experts_sorted.reshape(-1, 1)
+            routed_input.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)
         ).to(x.dtype)
 
     # shape (bs*slen*top_k, dim)
@@ -408,8 +410,7 @@ def _moe_forward(x, router, expert_bias, reorderer, score_before_experts, expert
 
     if not score_before_experts:
         routed_output = (
-            routed_output.to(torch.float32)
-            * top_scores_experts_sorted.reshape(-1, 1)
+            routed_output.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)
         ).to(x.dtype)
 
     # shared expert
@@ -418,9 +419,7 @@ def _moe_forward(x, router, expert_bias, reorderer, score_before_experts, expert
     else:
         out = torch.zeros_like(x)
 
-    out = out.scatter_add(
-        dim=0, index=token_indices_experts_sorted, src=routed_output
-    )
+    out = out.scatter_add(dim=0, index=token_indices_experts_sorted, src=routed_output)
     out = out.reshape(bs, slen, dim)
     return out, num_tokens_per_expert
 
@@ -482,7 +481,15 @@ class MoE(nn.Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
-        out, num_tokens_per_expert = _moe_forward(x, self.router, self.expert_bias, self.reorderer, self.score_before_experts, self.experts, self.shared_experts)
+        out, num_tokens_per_expert = _moe_forward(
+            x,
+            self.router,
+            self.expert_bias,
+            self.reorderer,
+            self.score_before_experts,
+            self.experts,
+            self.shared_experts,
+        )
 
         # HOPs don't support buffer mutations, keep this outside
         with torch.no_grad():
