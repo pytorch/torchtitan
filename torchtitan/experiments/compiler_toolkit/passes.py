@@ -195,6 +195,7 @@ def cudagraph_pass(
     gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
     return gm
 
+
 def validate_flex_attn_annotation_pass(
     gm: torch.fx.GraphModule,
 ) -> torch.fx.GraphModule:
