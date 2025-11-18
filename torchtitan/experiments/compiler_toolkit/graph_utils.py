@@ -112,7 +112,7 @@ def joint_graph_builder(
         tracing_context,
     ) = export_joint(model, model_args, model_kwargs, dump_folder=dump_folder)
 
-    # Optional validation
+    # run custom passes on joint-graph before partitioner
     if joint_custom_passes is not None:
         for joint_custom_pass in joint_custom_passes:
             joint_with_descriptors.graph_module = joint_custom_pass(
@@ -240,7 +240,12 @@ def compiler(
     _dump_gm(dump_folder, gm, f"{name}_before_compiler")
 
     for pass_fn in passes:
-        logger.info(f"Applying pass: {pass_fn.__name__}")
+        pass_name = (
+            pass_fn.func.__name__
+            if isinstance(pass_fn, functools.partial)
+            else pass_fn.__name__
+        )
+        logger.info(f"Applying pass: {pass_name}")
         gm = pass_fn(gm, example_inputs)
 
     logger.debug(f"{name} after compiler:")
@@ -277,7 +282,7 @@ def make_compiler_with_passes(
     return fw_compiler, bw_compiler
 
 
-def get_compiler_passes_from_config(job_config: JobConfig):
+def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfig):
     """
     Extract and validate compiler passes from job config.
 
@@ -288,8 +293,18 @@ def get_compiler_passes_from_config(job_config: JobConfig):
         List of compiler pass functions
     """
     from torchtitan.experiments.compiler_toolkit.passes import AVAILABLE_COMPILER_PASSES
+    from torchtitan.experiments.simple_fsdp.llama3.parallelize import (
+        get_transformer_block_buckets,
+    )
 
     pass_names = getattr(job_config.compile, "passes", [])
+    if (
+        "autobucketing_reordering" in pass_names
+        and "transformer_block_bucketing" in pass_names
+    ):
+        raise ValueError(
+            "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
+        )
     compiler_passes = []
 
     for pass_name in pass_names:
@@ -298,7 +313,15 @@ def get_compiler_passes_from_config(job_config: JobConfig):
                 f"Unknown compiler pass: {pass_name}. "
                 f"Available compiler passes: {list(AVAILABLE_COMPILER_PASSES.keys())}"
             )
-        compiler_passes.append(AVAILABLE_COMPILER_PASSES[pass_name])
+        if pass_name == "transformer_block_bucketing":
+            compiler_passes.append(
+                functools.partial(
+                    AVAILABLE_COMPILER_PASSES[pass_name],
+                    fsdp_manual_buckets=get_transformer_block_buckets(model),
+                )
+            )
+        else:
+            compiler_passes.append(AVAILABLE_COMPILER_PASSES[pass_name])
 
     if pass_names:
         logger.info(f"Using compiler passes from config: {pass_names}")
