@@ -79,7 +79,6 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         self._create_getter_setter_dynamically(has_moe=False)
 
         self._titan_injected_model_args = {}
-        self._titan_injected_model_args.update(kwargs)
         self._configure_hf_attention(attn_implementation)
 
         self._initialize_dense_attributes(titan_dense_args)
