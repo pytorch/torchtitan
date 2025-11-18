@@ -125,9 +125,8 @@ class TestModel:
 
         return moe_old, moe, ffn
 
-    def test_moe_equivalence(
-        self, score_before_experts: bool = False
-    ) -> tuple[float, float]:
+    @pytest.mark.parametrize("score_before_experts", [False, True])
+    def test_moe_equivalence(self, score_before_experts: bool) -> None:
         torch.manual_seed(42)
         moe_old, moe = self._get_moe_old_and_moe_layers(score_before_experts)
         inputs = torch.randn(
@@ -167,8 +166,8 @@ class TestModel:
             self.assert_close_ratio,
         )
 
-    def test_moe_ffn_equivalence(self, iteration: int = 0) -> tuple[float, float]:
-        torch.manual_seed(42 + iteration)
+    def test_moe_ffn_equivalence(self) -> None:
+        torch.manual_seed(42)
         moe_old, moe, ffn = self._get_equiv_layers()
         with torch.no_grad():
             inputs = torch.randn(
@@ -189,7 +188,9 @@ class TestModel:
 
             moe_old_rel_err = get_err_ratio(out_ffn, out_moe_old)
             moe_rel_err = get_err_ratio(out_ffn, out_moe)
-            return moe_old_rel_err, moe_rel_err
+            print(f"{moe_old_rel_err=}")
+            print(f"{moe_rel_err=}")
+            print(f"{moe_old_rel_err/moe_rel_err=}")
 
     def test_determinism(self):
         torch.manual_seed(42)
@@ -225,31 +226,3 @@ class TestModel:
         torch.testing.assert_close(out_std, torch.zeros_like(out_std))
         with pytest.raises(AssertionError):
             torch.testing.assert_close(out_old_std, torch.zeros_like(out_old_std))
-
-
-if __name__ == "__main__":
-    t = TestModel()
-
-    # Collect some accuracy stats
-    moe_old_rel_errs = []
-    moe_rel_errs = []
-    accuracy_iters = 10
-    for idx in range(accuracy_iters):
-        moe_old_rel_err, moe_rel_err = t.test_moe_ffn_equivalence(idx)
-        moe_old_rel_errs.append(moe_old_rel_err)
-        moe_rel_errs.append(moe_rel_err)
-    mean_moe_old_rel_err = torch.tensor(moe_old_rel_errs)
-    mean_moe_rel_err = torch.tensor(moe_rel_errs)
-
-    print(f"\nACCURACY VS FFN: {accuracy_iters} iterations\n")
-    print(f"{mean_moe_old_rel_err.mean()=}, {mean_moe_old_rel_err.std()=}")
-    print(f"{mean_moe_rel_err.mean()=}, {mean_moe_rel_err.std()=}")
-    print(f"{mean_moe_old_rel_err.mean()/mean_moe_rel_err.mean()=}")
-
-    t.test_moe_equivalence(True)
-    print("\nMoEOld AND MoE CLOSE: score_before_experts=True")
-    t.test_moe_equivalence(False)
-    print("\nMoEOld AND MoE CLOSE: score_before_experts=False")
-
-    print("\nDeterminism")
-    t.test_determinism()

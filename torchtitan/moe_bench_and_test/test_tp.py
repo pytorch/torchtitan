@@ -15,10 +15,11 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import JobConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.deepseek_v3 import (
-    deepseekv3_args,
     DeepSeekV3Model,
+    deepseekv3_args,
     parallelize_deepseekv3,
 )
 from torchtitan.moe_bench_and_test import (
@@ -85,13 +86,14 @@ if __name__ == "__main__":
         parallel_dims_fsdp = ParallelDims(
             **pd_kwargs, dp_shard=world_size, tp=1, ep=1, etp=1
         )
+        tp = ep = world_size
+        etp = 1
         parallel_dims_ep = ParallelDims(
-            # **pd_kwargs, dp_shard=1, tp=world_size, ep=1, etp=1
             **pd_kwargs,
             dp_shard=1,
-            tp=world_size,
-            ep=world_size,
-            etp=1,
+            tp=tp,
+            ep=ep,
+            etp=etp,
         )
 
         # Default JobConfig is fine for parallelization.
@@ -163,12 +165,12 @@ if __name__ == "__main__":
         )
 
         if not rank:
-            print(f"\n{args=}, {world_size=}")
-            print(f"\n{err_ratio_fsdp_ep=}")
-            print(f"{err_ratio_fsdp_ep_old=}")
+            print(f"\n{args=}, {world_size=}, {tp=}, {ep=}, {etp=}")
+            print(f"\n{err_ratio_fsdp_ep_old=}")
+            print(f"{err_ratio_fsdp_ep=}")
             print(f"{err_ratio_ep_ep_old=}")
-            print(f"\n{kl_fsdp_ep=}")
-            print(f"{kl_fsdp_ep_old=}")
+            print(f"\n{kl_fsdp_ep_old=}")
+            print(f"{kl_fsdp_ep=}")
             print(f"{kl_ep_ep_old=}")
     finally:
         dist.destroy_process_group()
