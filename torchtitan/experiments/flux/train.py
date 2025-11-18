@@ -68,9 +68,10 @@ class FluxTrainer(Trainer):
         dist_utils.set_determinism(
             self.world_mesh,
             self.device,
-            job_config.training.seed,
-            job_config.training.deterministic,
-            distinct_seed_mesh_dim="dp_shard",
+            distinct_seed_mesh_dims=["dp_replicate", "dp_shard"],
+            seed=job_config.training.seed,
+            deterministic=job_config.training.deterministic,
+
         )
 
         self._dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
@@ -348,11 +349,10 @@ class FluxTrainer(Trainer):
         """
         Calculate the validation loss for the Flux model.
 
-        This follows the original paper's evaluation protocol. For each sample, calculate the loss at 7 equally spaced
-        values for t in [0, 1] (excluding 1) and average it. This will make each batch size 7x larger, which may require
-        a different batch size.
+        This follows the original paper's evaluation protocol. Each validation sample contains the timestep
+        at which it is evaluated (an integer between 0 and 7).
 
-        Returns: Average loss per timestep across all samples in the batch.
+        Returns: Average loss across samples.
         """
         if isinstance(labels, list):  # if mean and logvar are provided
             mean, logvar = labels

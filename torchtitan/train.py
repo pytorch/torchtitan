@@ -113,8 +113,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         dist_utils.set_determinism(
             world_mesh,
             self.device,
-            job_config.training.seed,
-            job_config.training.deterministic,
+            distinct_seed_mesh_dims=["pp"],
+            seed=job_config.training.seed,
+            deterministic=job_config.training.deterministic,
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 

@@ -107,19 +107,26 @@ def dist_mean(
 def set_determinism(
     world_mesh: DeviceMesh | None,
     device: torch.device,
+    distinct_seed_mesh_dims: list[str],
     seed: int | None = None,
     deterministic: bool = False,
-    distinct_seed_mesh_dim: str = "pp",
 ) -> None:
     """
     Set the same DTensor manual seed for all dimensions in world mesh, but only different seeds
-    across dimension denoted by `distinct_seed_mesh_dim`. An example use case is pipeline parallelism,
+    across dimensions denoted by `distinct_seed_mesh_dims`. An example use case is pipeline parallelism,
     where we want to have the same seed across SPMD groups, but different seeds across PP groups.
 
     Currently, does not set seeds for the CUDA RNG since TorchTitan always uses DTensor for SPMD parallelisms,
     and DTensor manages its own RNG tracker, but we could extend to support both if needed.
 
     Set Determinism flags for increased reproducibility with loss of performance.
+
+    Args:
+        world_mesh: Device mesh for distributed training
+        device: Device to use
+        distinct_seed_mesh_dims: List of mesh dimension names to have distinct seeds across.
+        seed: Base seed value (if None, will be determined automatically)
+        deterministic: Whether to enable deterministic algorithms
     """
     if deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
@@ -146,28 +153,43 @@ def set_determinism(
         torch.distributed.broadcast(seed_tensor, src=0)
         seed = seed_tensor.to("cpu").view(torch.uint64).item()
 
-    # Set distinct seed for each rank in mesh dimensions, with dimension name provdied by `distinct_seed_mesh_dim`
+    # Set distinct seed for each rank in mesh dimensions, with dimension names provided by `distinct_seed_mesh_dims`
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
     # and choose a unique seed for each rank on the PP mesh.
-    # TODO(jianiw): We could further extend this to support mutiple distinct dimensions instead of just one.
-    if (
-        c10d.get_world_size() > 1
-        and distinct_seed_mesh_dim in world_mesh.mesh_dim_names
-    ):
-        distinct_mesh = world_mesh[distinct_seed_mesh_dim]
-        seed += distinct_mesh.get_local_rank()
+    # We support multiple distinct dimensions by adding each distinct dimension's local rank to the seed.
+    distinct_dims_in_mesh = [
+        dim for dim in distinct_seed_mesh_dims if dim in world_mesh.mesh_dim_names
+    ]
+
+    if c10d.get_world_size() > 1 and distinct_dims_in_mesh:
+        # Each dimension contributes: local_rank * (product of all previous dimension sizes)
+        # This guarantees uniqueness like multi-dimensional array indexing
+        seed_offset = 0
+        cumulative_size = 1
+
+        for dim in distinct_dims_in_mesh:
+            distinct_mesh = world_mesh[dim]
+            local_rank = distinct_mesh.get_local_rank()
+            # Add contribution from this dimension
+            seed_offset += local_rank * cumulative_size
+            # Update cumulative size for next dimension
+            cumulative_size *= distinct_mesh.size()
+
+        seed += seed_offset
         seed %= 2**64
 
         logger.debug(
-            f"{distinct_seed_mesh_dim} rank {distinct_mesh.get_local_rank()}, Global rank {c10d.get_rank()} using seed: {seed}"
+            f"Distinct dims {distinct_dims_in_mesh}, Global rank {c10d.get_rank()} using seed: {seed}"
         )
-        duplicate_seed_mesh = list(
-            filter(
-                lambda name: name != distinct_seed_mesh_dim, world_mesh.mesh_dim_names
-            )
-        )
+
+        # Filter out all distinct dimensions to get duplicate_seed_mesh
+        duplicate_seed_mesh_dims = [
+            name
+            for name in world_mesh.mesh_dim_names
+            if name not in distinct_dims_in_mesh
+        ]
         duplicate_seed_mesh = (
-            world_mesh[duplicate_seed_mesh] if len(duplicate_seed_mesh) else None
+            world_mesh[duplicate_seed_mesh_dims] if duplicate_seed_mesh_dims else None
         )
     else:
         duplicate_seed_mesh = world_mesh
