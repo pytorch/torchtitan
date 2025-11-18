@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import dataclasses
 import functools
 from pathlib import Path
 from typing import Any, Callable, List, Optional
@@ -23,6 +24,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 
+@dataclasses.dataclass(frozen=True)
 class GraphBuilderOptions:
     dump_folder: str | None = None
     use_inductor_lite: bool = False
@@ -247,17 +249,20 @@ def compiler(
 
     if (
         len(passes) > 0
-        and (last_pass := passes[-1].__name__)
-        and (last_pass == "cudagraph" or last_pass == "inductor_lite")
+        and (last_pass_name := passes[-1].__name__)
+        and (
+            last_pass_name == "cudagraph_pass" or last_pass_name == "inductor_lite_pass"
+        )
     ):
         # cudagraph pass or inductor lite pass is always the last pass if it is applied
         # these two passes behaves differently for forward and backwawrd. so we explicitly
         # pass the info. For example, different methods are used to identify static input
         # indices.
-        last_pass = functools.partial(last_pass, is_forward=is_forward)
+        last_pass = passes[-1]
+        _last_pass = functools.partial(last_pass, is_forward=is_forward)
 
         # keep the function name for debug log
-        passes[-1] = functools.wraps(last_pass)(last_pass)
+        passes[-1] = functools.wraps(last_pass)(_last_pass)
 
     logger.debug(f"{name} before compiler:")
     logger.debug(
@@ -274,11 +279,20 @@ def compiler(
         logger.info(f"Applying pass: {pass_name}")
         gm = pass_fn(gm, example_inputs)
 
-    logger.debug(f"{name} after compiler:")
-    logger.debug(
-        gm.print_readable(print_output=False, include_stride=True, include_device=True)
-    )
-    _dump_gm(dump_folder, gm, f"{name}_after_compiler")
+    if (
+        len(passes) > 0
+        and (last_pass_name := passes[-1].__name__)
+        and (last_pass_name != "inductor_lite_pass")
+    ):
+        # inductor lite mode returns a CompiledFxGraph which does not support print_readable.
+        logger.debug(f"{name} after compiler:")
+        logger.debug(
+            gm.print_readable(
+                print_output=False, include_stride=True, include_device=True
+            )
+        )
+        _dump_gm(dump_folder, gm, f"{name}_after_compiler")
+
     return gm
 
 
@@ -344,7 +358,8 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
         # inductor lite supports regional_inductor by default. They share the same
         # user-facing frontend API (i.e., the context manager), uses different
         # backend implementations, and achieves the same compilation result.
-        pass_names.remove("regional_inductor")
+        if "regional_inductor" in pass_names:
+            pass_names.remove("regional_inductor")
 
         # inductor lite pass has to be the last pass
         move_value_to_end(pass_names, "inductor_lite")
