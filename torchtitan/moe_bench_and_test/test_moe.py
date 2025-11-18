@@ -9,29 +9,12 @@ import pytest
 import torch
 from einops import rearrange
 
-from torchtitan.models.moe.moe import FeedForward, MoE, MoEArgs, MoEOld
-
-
-# NOTE: @goon -  torch.testing.assert_close is very strict and hard to pass. Use the more-lenient
-# assert_close from FLA, slightly modified.
-# https://github.com/fla-org/flash-linear-attention/blob/3ddba2a043100837a1f6499b5eb6692de71a477b/fla/utils.py?plain=1#L82
-def get_abs_err(x, y):
-    return (x.detach() - y.detach()).flatten().abs().max().item()
-
-
-def get_err_ratio(x, y):
-    err = (x.detach() - y.detach()).flatten().square().mean().sqrt().item()
-    base = (x.detach()).flatten().square().mean().sqrt().item()
-    return err / (base + 1e-8)
-
-
-def assert_close(prefix, ref, tri, ratio, err_atol=1e-6):
-    abs_atol = get_abs_err(ref, tri)
-    msg = f"{prefix:>16} diff: {abs_atol:.6f} ratio: {get_err_ratio(ref, tri):.6f}"
-    error_rate = get_err_ratio(ref, tri)
-    if abs_atol <= err_atol:
-        return
-    assert error_rate < ratio, msg
+from torchtitan.models.moe.moe import FeedForward, MoE, MoEArgs
+from torchtitan.moe_bench_and_test import (
+    apply_old_moe_monkey_patches,
+    assert_close,
+    get_err_ratio,
+)
 
 
 class TestModel:
@@ -54,7 +37,7 @@ class TestModel:
 
     def _get_moe_old_and_moe_layers(
         self, score_before_experts: bool | None = None
-    ) -> tuple[MoEOld, MoE]:
+    ) -> tuple[MoE, MoE]:
         """
         Create MoEOld and MOE layers with equivalent parameters.
         """
@@ -68,9 +51,10 @@ class TestModel:
             top_k=self.top_k,
             use_grouped_mm=self.use_grouped_mm,
         )
-        moe_old = MoEOld(moe_args, dim=self.dim, hidden_dim=self.moe_inter_dim).to(
+        moe_old = MoE(moe_args, dim=self.dim, hidden_dim=self.moe_inter_dim).to(
             device=self.device, dtype=torch.bfloat16
         )
+        apply_old_moe_monkey_patches(moe_old)
         moe = MoE(moe_args, dim=self.dim, hidden_dim=self.moe_inter_dim).to(
             device=self.device, dtype=torch.bfloat16
         )
@@ -78,7 +62,7 @@ class TestModel:
         moe_old.init_weights(1 / self.dim**0.5, self.device)
 
         with torch.no_grad():
-            # Set the MoE model params equal to the MoEOld ones.
+            # Set the MoE model params equal
             for p, p2 in zip(
                 moe_old.parameters(),
                 moe.parameters(),
@@ -88,7 +72,7 @@ class TestModel:
 
         return moe_old, moe
 
-    def _get_equiv_layers(self) -> tuple[MoEOld, MoE, FeedForward]:
+    def _get_equiv_layers(self) -> tuple[MoE, MoE, FeedForward]:
         """
         Create MoEOld, MOE, and FeedForward layers which are all configured so that they should have
         the same outputs. Accomplished by breaking the FeedForward weights into experts, choosing
@@ -105,9 +89,10 @@ class TestModel:
             route_scale=self.num_experts,  # Required for equivalence
             use_grouped_mm=self.use_grouped_mm,
         )
-        moe_old = MoEOld(moe_args, dim=self.dim, hidden_dim=self.moe_inter_dim).to(
+        moe_old = MoE(moe_args, dim=self.dim, hidden_dim=self.moe_inter_dim).to(
             device=self.device, dtype=torch.bfloat16
         )
+        apply_old_moe_monkey_patches(moe_old)
         moe = MoE(moe_args, dim=self.dim, hidden_dim=self.moe_inter_dim).to(
             device=self.device, dtype=torch.bfloat16
         )
@@ -134,7 +119,7 @@ class TestModel:
 
             # Zero out the router weights, so every expert has equal weighting.
             moe_old.router.gate.weight.zero_()
-            # Set the MoE model params equal to the MoEOld ones.
+            # Set the MoE model params equal
             for p, p2 in zip(moe_old.parameters(), moe.parameters(), strict=True):
                 p2.data.copy_(p.data)
 
@@ -233,6 +218,9 @@ class TestModel:
 
         print(f"{out_old_std=}")
         print(f"{out_std=}")
+        # And relative to the mean element size:
+        print(f"{out_old_std/out_moe_old.abs().mean()=}")
+        print(f"{out_std/out_moe.abs().mean()=}")
 
         torch.testing.assert_close(out_std, torch.zeros_like(out_std))
         with pytest.raises(AssertionError):

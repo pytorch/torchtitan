@@ -7,15 +7,16 @@
 import argparse
 
 import torch
-from triton.testing import do_bench
 
-from torchtitan.models.moe.moe import MoE, MoEArgs, MoEOld
+from torchtitan.components.metrics import DeviceMemoryMonitor
+from torchtitan.models.moe.moe import MoE, MoEArgs
+
+from torchtitan.moe_bench_and_test import apply_old_moe_monkey_patches
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("cls", choices=["moe", "moe_old"])
-    parser.add_argument("--perf_reps", type=int, default=1000)
-    parser.add_argument("--perf_warmups", type=int, default=100)
+    parser.add_argument("--iters", type=int, default=1)
     parser.add_argument("--seqlen", type=int, default=4096)
     parser.add_argument("--bsz", type=int, default=4)
     args = parser.parse_args()
@@ -29,6 +30,7 @@ if __name__ == "__main__":
     num_shared_experts = 2
     route_norm = False
     score_before_experts = False
+    seqlen = 64
     top_k = 6
     use_grouped_mm = True
 
@@ -43,17 +45,13 @@ if __name__ == "__main__":
         use_grouped_mm=use_grouped_mm,
     )
 
-    if args.cls == "moe":
-        cls = MoE
-    elif args.cls == "moe_old":
-        cls = MoEOld
-    else:
-        raise ValueError
-
     torch.manual_seed(42)
-    moe = cls(moe_args, dim=dim, hidden_dim=moe_inter_dim).to(
+    moe = MoE(moe_args, dim=dim, hidden_dim=moe_inter_dim).to(
         device=device, dtype=torch.bfloat16
     )
+    if args.cls == "moe_old":
+        apply_old_moe_monkey_patches(moe)
+
     moe.init_weights(1 / dim**0.5, device)
     inputs = torch.randn(
         args.bsz,
@@ -62,10 +60,13 @@ if __name__ == "__main__":
         device=device,
         dtype=torch.bfloat16,
     )
-    moe_time_ms = do_bench(
-        lambda: moe(inputs).sum().backward(),
-        warmup=args.perf_warmups,
-        rep=args.perf_reps,
-    )
+    mem_monitor = DeviceMemoryMonitor(device="cuda:0")
+    for _ in range(args.iters):
+        moe(inputs).sum().backward()
+        moe.zero_grad()
+
+    torch.cuda.synchronize()
     print(f"\n{args=}")
-    print(f"{moe_time_ms=}")
+    peak_stats = mem_monitor.get_peak_stats()
+    print(f"{peak_stats.max_active_gib=}")
+    print(f"{peak_stats.max_reserved_gib=}")
