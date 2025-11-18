@@ -173,14 +173,7 @@ def set_determinism(
             f"Distinct dims {distinct_seed_mesh_dims}, Global rank {c10d.get_rank()} using seed: {seed}"
         )
 
-        # Filter out all distinct dimensions to get duplicate_seed_mesh
-        duplicate_seed_meshes = list(
-            v
-            for k, v in parallel_dims.get_all_meshes().items()
-            if k not in distinct_seed_mesh_dims
-        )
     else:
-        duplicate_seed_meshes = [parallel_dims.world_mesh]
         logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
 
     # The native RNGs and python RNG may not be important, except for the 1-D PP case, but we seed them for consistency.
@@ -188,12 +181,14 @@ def set_determinism(
     # PYTHONHASHSEED can be a decimal number in the range [0, 2**32 - 1]
     os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
 
-    # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
-    # IF PP is also used, this seed is unique per PP rank.
-    # TODO: remove the need of duplicate_seed_meshes once torch.distributed.tensor._random.manual_seed
-    # doesn't require a mesh input.
-    if duplicate_seed_meshes:
-        torch.distributed.tensor._random.manual_seed(seed, duplicate_seed_meshes[0])
+    # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for
+    # all ranks of the SPMD mesh. If PP is also used, this seed is unique per PP rank.
+    # TODO: remove the need of passing in a mes once
+    # torch.distributed.tensor._random.manual_seed doesn't require a mesh input.
+    if parallel_dims.world_size > parallel_dims.pp_size:
+        # We just need to pass the world_mesh as the device_id is the only information
+        # this API uses.
+        torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
 
 
 def create_context_parallel_ctx(
