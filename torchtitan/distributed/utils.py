@@ -106,13 +106,13 @@ def set_determinism(
     if debug_config.deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
         torch.use_deterministic_algorithms(True)
-        # Otherwise, HF register buffer for ROPE (inv_freq) and this will be by default be initialized to Nan
-        torch.utils.deterministic.fill_uninitialized_memory = False
         torch.use_deterministic_algorithms(
             True, warn_only=debug_config.deterministic_warn_only
         )
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        # Otherwise, Huggignface modeling register buffer for ROPE (inv_freq) and this will be by default be initialized to Nan
+        torch.utils.deterministic.fill_uninitialized_memory = False
         # env var for deterministic CuBLAS
         # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
