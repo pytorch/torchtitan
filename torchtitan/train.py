@@ -12,9 +12,9 @@ from typing import Any, Generator, Iterable
 
 import torch
 
-from torch.distributed.elastic.multiprocessing.errors import record
-
 import torchtitan.protocols.train_spec as train_spec_module
+
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
@@ -208,6 +208,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.loss_fn, self.gradient_accumulation_steps
         )
 
+        # TODO(local_tensor): Remove this early return once LocalTensor supports
+        # init_weights().Currently skipping parallelism setup and model initialization
+        # in local tensor mode.
+        if job_config.comm.local_tensor_mode:
+            return
+
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
@@ -360,13 +366,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def init_distributed(self) -> ParallelDims:
         job_config = self.job_config
-        dist_utils.init_distributed(
+        world_size = dist_utils.init_distributed(
             job_config.comm,
             enable_cpu_backend=job_config.training.enable_cpu_offload,
             base_folder=job_config.job.dump_folder,
         )
 
-        world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
 
         return ParallelDims(
@@ -717,6 +722,13 @@ def main(trainer_class: type[Trainer]) -> None:
 
     try:
         trainer = trainer_class(config)
+
+        # TODO(local_tensor): Remove this special case once LocalTensor supports
+        # init_weights(). In local tensor mode, skip training/checkpointing as the
+        # model is not fully initialized
+        if config.comm.local_tensor_mode:
+            logger.info("Local tensor mode enabled - skipping training execution")
+            return
 
         if config.checkpoint.create_seed_checkpoint:
             assert (

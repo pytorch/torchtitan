@@ -791,6 +791,9 @@ class Comm:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
+    local_tensor_mode: bool = False
+    """Local tensor mode, for debugging purposes. This is an experimental feature."""
+
 
 @dataclass
 class MemoryEstimation:
