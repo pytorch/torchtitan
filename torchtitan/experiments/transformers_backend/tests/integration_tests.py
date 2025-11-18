@@ -22,7 +22,6 @@ def build_transformers_backend_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name meta-llama/Llama-3.2-1B",
-                    "--training.dataset c4-test",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
@@ -63,7 +62,7 @@ def main():
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
 
-    test_list = _TEST_SUITES_FUNCTION["transformers_backend"]()()
+    test_list = _TEST_SUITES_FUNCTION["transformers_backend"]()
     run_tests(args, test_list)
 
 

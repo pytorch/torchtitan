@@ -15,6 +15,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.modeling_utils import AttentionInterface
 
+
 @dataclass
 class TitanDenseModelArgs:
     """Arguments for the base TorchTitan model."""
@@ -32,6 +33,7 @@ class TitanDenseModelArgs:
     depth_init: bool = True
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
+
 
 @dataclass
 class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
