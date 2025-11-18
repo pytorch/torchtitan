@@ -107,7 +107,6 @@ def parallelize_vlm(
             model,
             world_mesh,
             enable_compile=job_config.compile.enable,
-            enable_compiled_autograd=job_config.parallelism.enable_compiled_autograd,
         )
 
     return model

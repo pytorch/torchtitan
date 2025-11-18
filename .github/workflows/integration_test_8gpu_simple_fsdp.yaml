@@ -5,9 +5,11 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/simple_fsdp/**'
+      - '.github/workflows/integration_test_8gpu_simple_fsdp.yaml'
   pull_request:
     paths:
       - 'torchtitan/experiments/simple_fsdp/**'
+      - '.github/workflows/integration_test_8gpu_simple_fsdp.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -49,3 +51,7 @@ jobs:
 
         mkdir artifacts-to-be-uploaded
         python -m torchtitan.experiments.simple_fsdp.tests.integration_tests artifacts-to-be-uploaded --ngpu 8
+
+        # Run the numerics unit tests of SimpleFSDP
+        torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/simple_fsdp/tests/test_numerics.py -v
+        rm -rf artifacts-to-be-uploaded/*/checkpoint

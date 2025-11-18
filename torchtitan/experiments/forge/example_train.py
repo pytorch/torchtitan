@@ -7,7 +7,7 @@
 import importlib
 import time
 from datetime import timedelta
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -17,15 +17,16 @@ from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.metrics import build_metrics_processor
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
-from torchtitan.config import ConfigManager, JobConfig
-from torchtitan.datasets.hf_datasets import build_hf_dataloader
+from torchtitan.config import JobConfig
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.tools import utils
-from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.logging import logger
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
+from torchtitan.train import main
 
 from .engine import ForgeEngine
 
@@ -57,7 +58,7 @@ class Trainer(ForgeEngine):
         self.tokenizer = build_hf_tokenizer(job_config)
 
         # build dataloader
-        self.dataloader = build_hf_dataloader(
+        self.dataloader = build_text_dataloader(
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
@@ -350,19 +351,4 @@ class Trainer(ForgeEngine):
 
 
 if __name__ == "__main__":
-    init_logger()
-    config_manager = ConfigManager()
-    config = config_manager.parse_args()
-    trainer: Optional[Trainer] = None
-
-    try:
-        trainer = Trainer(config)
-        trainer.train()
-    except Exception:
-        if trainer:
-            trainer.close()
-        raise
-    else:
-        trainer.close()
-        torch.distributed.destroy_process_group()
-        logger.info("Process group destroyed.")
+    main(Trainer)
