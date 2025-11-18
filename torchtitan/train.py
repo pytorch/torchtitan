@@ -11,7 +11,6 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable
 
 import torch
-from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 
 from torch.distributed.elastic.multiprocessing.errors import record
 
@@ -103,17 +102,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
             gc_freq=job_config.training.gc_freq, debug=job_config.training.gc_debug
-        )
-
-        # TODO(whc)
-        # I do this because otherwise sometimes inductor will skip re-running passes like comms reordering
-        torch._inductor.config.force_disable_caches = True
-        # this is necessary for working with reordering passes. Just leave it set for all the jobs for now.
-        torch._inductor.config.allow_buffer_reuse = False
-
-        # allow configuring inductor comms optimizations from torchtitan commandline
-        configure_inductor_for_autobucketing(
-            job_config.experimental.comms_bucket_reorder_strategy
         )
 
         # Set random seed, and maybe enable deterministic mode

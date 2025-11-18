@@ -10,6 +10,7 @@ import types
 import torch
 
 from autoparallel.api import AutoParallel
+from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torchtitan.config import JobConfig
@@ -181,6 +182,18 @@ def parallelize_deepseekv3(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
+
+    # TODO(whc)
+    # I do this because otherwise sometimes inductor will skip re-running passes like comms reordering
+    torch._inductor.config.force_disable_caches = True
+    # this is necessary for working with reordering passes. Just leave it set for all the jobs for now.
+    torch._inductor.config.allow_buffer_reuse = False
+
+    # allow configuring inductor comms optimizations from torchtitan commandline
+    configure_inductor_for_autobucketing(
+        job_config.experimental.comms_bucket_reorder_strategy
+    )
+
     world_mesh = parallel_dims.world_mesh
 
     def input_fn():
