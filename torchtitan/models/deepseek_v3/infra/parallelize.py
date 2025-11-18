@@ -118,7 +118,7 @@ def parallelize_deepseekv3(
         )
 
     if model_compile_enabled:
-        apply_compile(model, job_config.compile)
+        apply_compile(model, job_config.compile, job_config.activation_checkpoint)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
