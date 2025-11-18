@@ -55,18 +55,32 @@ class VarlenAttentionWrapper(torch.nn.Module):
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cu_seq_q: torch.Tensor,
-        cu_seq_k: torch.Tensor,
-        max_q: int,
-        max_k: int,
+        xq: torch.Tensor,
+        xk: torch.Tensor,
+        xv: torch.Tensor,
+        head_dim: torch.Tensor,
+        attention_masks: VarlenMetadata,
         is_causal: bool = True,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        cu_seq_q = attention_masks.cu_seq_q
+        cu_seq_k = attention_masks.cu_seq_k
+        max_q = attention_masks.max_q
+        max_k = attention_masks.max_k
+
+        n_local_heads = xq.shape[1]
+        xq_packed = xq.transpose(1, 2).contiguous().view(-1, n_local_heads, head_dim)
+        xk_packed = xk.transpose(1, 2).contiguous().view(-1, n_local_heads, head_dim)
+        xv_packed = xv.transpose(1, 2).contiguous().view(-1, n_local_heads, head_dim)
 
         return VarlenAttentionWrapper._compiled_varlen_attn(
-            q, k, v, cu_seq_q, cu_seq_k, max_q, max_k, is_causal=True
+            xq_packed,
+            xk_packed,
+            xv_packed,
+            cu_seq_q,
+            cu_seq_k,
+            max_q,
+            max_k,
+            is_causal=True,
         )
 
 
@@ -104,7 +118,6 @@ class FlexAttentionWrapper(torch.nn.Module):
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
         # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
         #    to convert `lse` to be DTensor.
-
         return FlexAttentionWrapper._compiled_flex_attn(
             q,
             k,
@@ -266,7 +279,9 @@ def create_attention_mask(*args, **kwargs):
     return _compiled_create_block_mask(*args, **kwargs)
 
 
-def create_varlen_cu_seqs(input_batch: torch.Tensor, eos_id: int) -> VarlenMetadata:
+def create_varlen_metadata_for_document(
+    input_batch: torch.Tensor, eos_id: int
+) -> VarlenMetadata:
     """
     Creates cumulative sequence length indices needed for variable length attention
 

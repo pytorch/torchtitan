@@ -36,7 +36,7 @@ llama3_args = {
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
-        use_flex_attn=True,
+        attention_type="flex",
         attn_mask_type="block_causal",
     ),
     "debugmodel_varlen_attn": TransformerModelArgs(
@@ -45,7 +45,7 @@ llama3_args = {
         n_heads=16,
         vocab_size=2048,
         rope_theta=500000,
-        use_varlen_attn=True,
+        attention_type="varlen",
     ),
     "8B": TransformerModelArgs(
         dim=4096,
@@ -64,7 +64,7 @@ llama3_args = {
         ffn_dim_multiplier=1.3,
         multiple_of=1024,
         rope_theta=500000,
-        use_flex_attn=True,
+        attention_type="flex",
         attn_mask_type="block_causal",
     ),
     "8B_varlen": TransformerModelArgs(
@@ -75,7 +75,7 @@ llama3_args = {
         ffn_dim_multiplier=1.3,
         multiple_of=1024,
         rope_theta=500000,
-        use_varlen_attn=True,
+        attention_type="varlen",
     ),
     "70B": TransformerModelArgs(
         dim=8192,
