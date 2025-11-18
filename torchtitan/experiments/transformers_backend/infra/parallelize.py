@@ -21,7 +21,11 @@ from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import apply_compile, apply_ddp, apply_fsdp
+from torchtitan.models.llama3.infra.parallelize import (
+    apply_compile,
+    apply_ddp,
+    apply_fsdp,
+)
 from torchtitan.tools.logging import logger
 
 

@@ -22,7 +22,6 @@ from torchtitan.distributed.pipeline_parallel import (
     pipeline_module_split,
 )
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
-from torchtitan.tools.logging import logger
 
 
 def pipeline_hf_transformers(
@@ -108,8 +107,6 @@ def pipeline_hf_transformers(
             output_weight,
             include_rotary_emb=True,
         )
-    for i, stage_ms in enumerate(module_names_per_stage):
-        logger.debug(f"Stage {i}: {stage_ms}")
 
     stages, model_parts = pipeline_module_split(
         model,
