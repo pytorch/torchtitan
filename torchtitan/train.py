@@ -163,6 +163,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             model_param_count,
             self.metrics_processor.num_flops_per_token,
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
+
         logger.info(
             f"{color.blue}Model {job_config.model.name} {job_config.model.flavor} "
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
@@ -245,6 +246,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
+
             model.to_empty(device=init_device)
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
