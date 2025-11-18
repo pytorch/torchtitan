@@ -108,7 +108,7 @@ def parallelize_llama(
         # - No need to use _StridedShard, we can just use Shard()
         #
         # It's mostly likely that we will go with option 2 as we are going to use
-        # Reparameterization to handle the full parameters transformation, which
+        # parameterization to handle the full parameters transformation, which
         # makes option 2 more natural.
         raise NotImplementedError("TP is not implemented yet.")
 
@@ -134,7 +134,7 @@ def parallelize_llama(
     # Note: This solution leaves the dp_shard process group wasted (
     # we can initialize it with fake backend).
     #
-    # Note: We may be able to implement this solution with Reparameterization directly.
+    # Note: We may be able to implement this solution with parameterization directly.
 
     # Keep cp_enabled here to remind us cp_enabled=True requires data_parallel
     if (
