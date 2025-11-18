@@ -128,13 +128,14 @@ def parallelize_deepseekv3(
             dp_mode = "fully_shard"
 
         dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
 
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ["dp_replicate", "efsdp"]
-        else:
-            dp_mesh_dim_names = ["efsdp"]
-        edp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
+        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_mesh(edp_mesh_names)
 
         for _, transformer_block in model.layers.items():
             if transformer_block.moe_enabled and parallel_dims.ep_enabled:
@@ -142,7 +143,7 @@ def parallelize_deepseekv3(
                 assert edp_mesh is not None
                 assert hasattr(transformer_block, "moe")
                 if (
-                    edp_mesh.size() * parallel_dims.ep
+                    edp_mesh["efsdp"].size() * parallel_dims.ep
                     > transformer_block.moe.experts.num_experts
                 ):
                     experts_shard_dim = 1
