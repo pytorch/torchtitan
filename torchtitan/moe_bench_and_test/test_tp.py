@@ -15,11 +15,10 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import JobConfig
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.deepseek_v3 import (
-    DeepSeekV3Model,
     deepseekv3_args,
+    DeepSeekV3Model,
     parallelize_deepseekv3,
 )
 from torchtitan.moe_bench_and_test import (
