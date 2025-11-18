@@ -69,6 +69,11 @@ def parallelize_gptoss(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
+
     if parallel_dims.tp_enabled:
         if (
             job_config.parallelism.enable_async_tensor_parallel
@@ -113,10 +118,6 @@ def parallelize_gptoss(
             dual_pipe_v=dual_pipe_v,
         )
 
-    model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
-    )
-
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(
             model,
@@ -134,11 +135,12 @@ def parallelize_gptoss(
         dp_mesh = parallel_dims.get_mesh(names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh_dim_names = []
+        edp_mesh = None
         if parallel_dims.ep_enabled:
             if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
+                edp_mesh = parallel_dims.get_mesh(["dp_replicate", "efsdp"])
+            else:
+                edp_mesh = parallel_dims.get_mesh("efsdp")
 
         apply_fsdp(
             model,
@@ -149,11 +151,7 @@ def parallelize_gptoss(
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=(
-                parallel_dims.get_mesh(dp_mod_ep_mesh_dim_names)
-                if parallel_dims.ep_enabled
-                else None
-            ),
+            edp_mesh=edp_mesh,
         )
 
         if parallel_dims.dp_replicate_enabled:

@@ -143,12 +143,12 @@ def parallelize_llama(
         dp_mesh = parallel_dims.get_mesh(names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh = None
+        edp_mesh = None
         if parallel_dims.ep_enabled:
             if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh = parallel_dims.get_mesh(["dp_replicate", "efsdp"])
+                edp_mesh = parallel_dims.get_mesh(["dp_replicate", "efsdp"])
             else:
-                dp_mod_ep_mesh = parallel_dims.get_mesh("efsdp")
+                edp_mesh = parallel_dims.get_mesh("efsdp")
 
         apply_fsdp(
             model,
@@ -159,7 +159,7 @@ def parallelize_llama(
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=dp_mod_ep_mesh,
+            edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
@@ -290,7 +290,7 @@ def apply_fsdp(
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
-    dp_mod_ep_mesh: DeviceMesh | None = None,
+    edp_mesh: DeviceMesh | None = None,
     gradient_divide_factor: int | None = None,
 ):
     """
@@ -341,10 +341,10 @@ def apply_fsdp(
     for layer_id, transformer_block in model.layers.items():
         # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
         # - the router and the shared experts are sharded together with the TransformerBlock
-        # - the routed experts are sharded with the remaining dp_mod_ep_mesh
+        # - the routed experts are sharded with the remaining edp_mesh
         if transformer_block.moe_enabled and ep_degree > 1:
             fsdp_mod_ep_config = fsdp_config.copy()
-            fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
+            fsdp_mod_ep_config["mesh"] = edp_mesh
 
             # NOTE: EP alreadys shards the routed experts on dim 0 (num_experts).
             #       When dp_mod_ep * ep > num_experts, FSDP default dim-0 sharding
@@ -353,12 +353,9 @@ def apply_fsdp(
             #       on non-0 dim. For now it may not be worth the complexity to support
             #       shard_placement_fn on the outer TransformerBlock-level FSDP.
             _experts_shard_placement_fn = None
-            assert dp_mod_ep_mesh is not None
+            assert edp_mesh is not None
             assert hasattr(transformer_block, "moe")
-            if (
-                dp_mod_ep_mesh.size() * ep_degree
-                > transformer_block.moe.experts.num_experts
-            ):
+            if edp_mesh.size() * ep_degree > transformer_block.moe.experts.num_experts:
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
             fully_shard(

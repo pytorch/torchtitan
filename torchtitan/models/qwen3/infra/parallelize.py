@@ -148,7 +148,7 @@ def parallelize_qwen3(
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=edp_mesh,
+            edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 

@@ -121,7 +121,6 @@ class ParallelDims:
         )
 
         batch = self.dp_replicate * self.dp_shard
-        loss = self.dp_replicate * self.dp_shard * self.cp
         fsdp = self.dp_shard * self.cp
         efsdp = fsdp * self.tp // (self.etp * self.ep)
 
@@ -145,12 +144,12 @@ class ParallelDims:
             (self.pp, self.dp_replicate, efsdp, self.ep, self.etp),
         )
 
-        # We have created all the required 1D meshes. This part is to create the
-        # all the 2D meshes. We pre-created 2D meshes and error out if the users
-        # try to access a 2D mesh that is not pre-created.
-        hsdp_mesh = dense_mesh["dp_replicate", "fsdp"]
-        ehsdp_mesh = sparse_mesh["dp_replicate", "efsdp"]
-        ep_etp_mesh = sparse_mesh["ep", "etp"]
+        self._global_meshes = {
+            "dataloading": dataloading_mesh,
+            "loss": loss_mesh,
+            "dense": dense_mesh,
+            "sparse": sparse_mesh,
+        }
 
         self._meshes = {
             "pp": dataloading_mesh["pp"],
@@ -163,9 +162,6 @@ class ParallelDims:
             "ep": sparse_mesh["ep"],
             "efsdp": sparse_mesh["efsdp"],
             "etp": sparse_mesh["etp"],
-            "dp_replicate_fsdp": hsdp_mesh,
-            "dp_replicate_efsdp": ehsdp_mesh,
-            "ep_etp": ep_etp_mesh,
         }
 
         # Validate mesh sizes
@@ -191,19 +187,10 @@ class ParallelDims:
             "ep": self.ep,
             "efsdp": self.dp_shard * self.cp * self.tp // (self.etp * self.ep),
             "etp": self.etp,
-            "dp_replicate_fsdp": (self.dp_replicate, self.dp_shard * self.cp),
-            "dp_replicate_efsdp": (
-                self.dp_replicate,
-                self.dp_shard * self.cp * self.tp // (self.etp * self.ep),
-            ),
-            "ep_etp": (self.ep, self.etp),
         }
 
         for mesh_name, expected_size in expected_sizes.items():
-            if isinstance(expected_size, tuple):
-                actual_size = self._meshes[mesh_name].shape
-            else:
-                actual_size = self._meshes[mesh_name].size()
+            actual_size = self._meshes[mesh_name].size()
             assert actual_size == expected_size, (
                 f"Mesh '{mesh_name}' has unexpected size: "
                 f"expected {expected_size}, got {actual_size}"
@@ -232,17 +219,24 @@ class ParallelDims:
         if isinstance(dims, str):
             dims = [dims]
 
-        mesh_name = "_".join(dims)
-        if mesh_name not in self._meshes:
-            raise ValueError(
-                f"Invalid mesh dim: '{mesh_name}'. "
-                f"Valid dimensions are: {list(self._meshes.keys())}"
-            )
+        for mesh_name in dims:
+            if mesh_name not in self._meshes:
+                raise ValueError(
+                    f"Invalid mesh dim: '{mesh_name}'. "
+                    f"Valid dimensions are: {list(self._meshes.keys())}"
+                )
 
         if any(not self._mesh_exist(dim, self._meshes[dim].size()) for dim in dims):
             return None
 
-        return self._meshes[mesh_name]
+        if len(dims) == 1:
+            return self._meshes[dims[0]]
+        else:
+            for global_mesh in self._global_meshes.values():
+                if not set(dims).issubset(set(global_mesh.mesh_dim_names)):
+                    continue
+                return global_mesh[tuple(dims)]
+            raise ValueError(f"Invalid mesh name combinations {dims}.")
 
     def get_all_meshes(self, one_dimensioal_only: bool = True) -> dict[str, DeviceMesh]:
         if not self._meshes:

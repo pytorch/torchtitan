@@ -98,9 +98,9 @@ def parallelize_deepseekv3(
             model,
             tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
             ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
-            etp_mesh=parallel_dims.get_mesh("etp")
-            if parallel_dims.etp_enabled
-            else None,
+            etp_mesh=(
+                parallel_dims.get_mesh("etp") if parallel_dims.etp_enabled else None
+            ),
             ep_etp_mesh=(
                 parallel_dims.get_mesh("ep_etp")
                 if parallel_dims.tp_enabled
@@ -153,7 +153,7 @@ def parallelize_deepseekv3(
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=edp_mesh,
+            edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
