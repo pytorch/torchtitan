@@ -24,6 +24,8 @@ from torchtitan.experiments.compiler_toolkit.graph_utils import (
     get_joint_custom_passes_from_config,
     joint_graph_builder,
     make_compiler_with_passes,
+    GraphBuilderOptions,
+    is_using_inductor_lite,
 )
 from torchtitan.experiments.simple_fsdp.llama3.parallelize import (
     parallelize_llama as simple_fsdp_parallelize_llama,
@@ -74,13 +76,18 @@ def parallelize_llama(
         compiler_passes, dump_folder=job_config.job.dump_folder
     )
 
+    options = GraphBuilderOptions(
+        dump_folder = job_config.job.dump_folder,
+        use_inductor_lite = is_using_inductor_lite(job_config),
+    )
+
     # Create custom joint_graph_builder with llama-specific compilers
     llama_joint_graph_builder = functools.partial(
         joint_graph_builder,
         fw_compiler=fw_compiler,
         bw_compiler=bw_compiler,
         joint_custom_passes=joint_custom_passes,
-        dump_folder=job_config.job.dump_folder,
+        options=options,
     )
 
     # TODO: CompiledModule should take sample input as well, so that we can

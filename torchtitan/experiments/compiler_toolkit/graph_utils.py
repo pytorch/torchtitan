@@ -23,6 +23,11 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 
+class GraphBuilderOptions:
+    dump_folder: str | None = None
+    use_inductor_lite: bool = False
+
+
 def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> None:
     # TODO: make the dump rank configurable
     if not dump_folder or torch.distributed.get_rank() != 0:
@@ -88,7 +93,7 @@ def joint_graph_builder(
     fw_compiler: Optional[Callable] = None,
     bw_compiler: Optional[Callable] = None,
     joint_custom_passes: Optional[List[Callable]] = None,
-    dump_folder: str | None = None,
+    options: GraphBuilderOptions = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -100,7 +105,7 @@ def joint_graph_builder(
         fw_compiler: Optional custom forward compiler function
         bw_compiler: Optional custom backward compiler function
         joint_custom_passes: list of custom passes to run on the joint graph
-        dump_folder: Optional folder to dump the graph to
+        options: Optional configs for graph builder
     """
     assert isinstance(model_args, tuple)
     for idx, arg in enumerate(model_args):
@@ -110,7 +115,7 @@ def joint_graph_builder(
     (
         joint_with_descriptors,
         tracing_context,
-    ) = export_joint(model, model_args, model_kwargs, dump_folder=dump_folder)
+    ) = export_joint(model, model_args, model_kwargs, dump_folder=options.dump_folder)
 
     # Optional validation
     if joint_custom_passes is not None:
@@ -120,7 +125,7 @@ def joint_graph_builder(
             )
 
     with tracing(tracing_context), torch._functorch.config.patch(
-        selective_decompose=True
+        selective_decompose=options.use_inductor_lite
     ):
         fn = aot_compile_joint_with_descriptors(
             joint_with_descriptors, fw_compiler=fw_compiler, bw_compiler=bw_compiler
@@ -135,59 +140,6 @@ def joint_graph_builder(
         return fn(*inputs, **kwargs)
 
     return wrapper_fn
-
-
-def get_inductor_lite_fw_compiler(extra_config: Optional[dict] = None):
-    from torch._inductor import lite_mode_options
-    from torch._inductor.compile_fx import compile_fx_inner
-
-    context = torch._guards.TracingContext.try_get()
-
-    if not context or not context.fw_metadata:
-        logger.warn("No context or fw_metadata available")
-        static_input_idxs = ()
-    else:
-        static_input_idxs = context.fw_metadata.static_input_indices
-
-    inductor_config = lite_mode_options
-    if extra_config:
-        inductor_config.update(extra_config)
-
-    def fw_compiler(gm: torch.fx.GraphModule, example_inputs: tuple):
-        with torch._inductor.config.patch(inductor_config):
-            compiled_fn = compile_fx_inner(
-                gm,
-                example_inputs,
-                static_input_idxs=static_input_idxs,
-                is_backward=False,
-            )
-        return compiled_fn
-
-    return fw_compiler
-
-
-def get_inductor_lite_bw_compiler(extra_config: Optional[dict] = None):
-    from torch._inductor import lite_mode_options
-    from torch._inductor.compile_fx import compile_fx_inner
-    from torch._inductor.utils import count_tangents
-
-    inductor_config = lite_mode_options
-    if extra_config:
-        inductor_config.update(extra_config)
-
-    def bw_compiler(gm: torch.fx.GraphModule, example_inputs: tuple):
-        fixed = count_tangents(gm)
-
-        with torch._inductor.config.patch(inductor_config):
-            compiled_fn = compile_fx_inner(
-                gm,
-                example_inputs,
-                static_input_idxs=list(range(fixed)),
-                is_backward=True,
-            )
-        return compiled_fn
-
-    return bw_compiler
 
 
 class CompiledModule(torch.nn.Module):
@@ -403,3 +355,8 @@ def get_joint_custom_passes_from_config(
     )
 
     return joint_custom_passes
+
+
+def is_using_inductor_lite(job_config: JobConfig) -> bool:
+    pass_names = getattr(job_config.compile, "passes", [])
+    return "inductor_lite" in pass_names
