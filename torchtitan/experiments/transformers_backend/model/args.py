@@ -150,7 +150,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
     def update_from_config(self, job_config: JobConfig):
         # Load HF config (overwrites our HF attributes)
         hf_model_config = AutoConfig.from_pretrained(
-            job_config.model.name,
+            job_config.hf_transformers.model,
             attn_implementation=self.attn_implementation,
             trust_remote_code=True,
         )

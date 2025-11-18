@@ -4,19 +4,20 @@
 
 - Requirements `transformers==4.57.1`
 
-- Config: `torchtitan/torchtitan/experiments/transformers_backend/configs/qwen3_fsdp2_tp2_pp2.toml`
+- Config: `torchtitan/torchtitan/experiments/transformers_backend/configs/qwen3.toml`
 ```diff
 ...
 [model]
 - name = "llama3"
-+ name = "Qwen/Qwen3-4B-Instruct-2507"
++ name = "transformers_backend"
 flavor = "debugmodel"
 hf_assets_path = "./tests/assets/tokenizer"
+
++[hf_transformers]
++model = "Qwen/Qwen3-4B-Instruct-2507"
 ...
 ```
-**Note:** Any model name containing "/" is automatically recognized as a HuggingFace model ID and will use the `transformers_backend`.
-
-- Train: `LOG_RANK=7 CONFIG_FILE=<YOUR_PATH>/torchtitan/experiments/transformers_backend/configs/qwen3_fsdp2_tp2_pp2.toml ./run_train.sh --compile.enable`
+- Train: `LOG_RANK=7 CONFIG_FILE=<YOUR_PATH>/torchtitan/experiments/transformers_backend/configs/qwen3.toml ./run_train.sh --job.custom_config_module=torchtitan.experiments.transformers_backend.job_config --compile.enable`
     - Make sure you have created the tokenizers beforehand
 <img width="1334" height="453" alt="image" src="https://github.com/user-attachments/assets/da459448-027b-4af9-8176-6a3e433a272c" />
 

@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -15,17 +17,13 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import (
-    apply_compile,
-    apply_ddp,
-    apply_fsdp,
-)
+from torchtitan.experiments.transformers_backend.job_config import JobConfig
+from torchtitan.models.llama3.infra.parallelize import apply_compile, apply_ddp
 from torchtitan.tools.logging import logger
 
 
@@ -274,3 +272,164 @@ def apply_non_moe_tp(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}"
         "Tensor Parallelism to the model"
     )
+
+
+def apply_fsdp(
+    model: nn.Module,
+    dp_mesh: DeviceMesh,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+    pp_enabled: bool,
+    cpu_offload: bool = False,
+    reshard_after_forward_policy: str = "default",
+    ep_degree: int = 1,
+    dp_mod_ep_mesh: DeviceMesh | None = None,
+    gradient_divide_factor: int | None = None,
+):
+    """
+    Apply data parallelism (via FSDP2) to the model.
+
+    Args:
+        model (nn.Module): The model to apply data parallelism to.
+        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
+        param_dtype (torch.dtype): The data type to use for model parameters.
+        reduce_dtype (torch.dtype): The data type to use for reduction operations.
+        pp_enabled (bool): Whether pipeline parallelism is enabled.
+        cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
+        reshard_after_forward_policy (str, optional): The policy to use for resharding after forward pass. Defaults to "default".
+            Other options: "never", "always".
+            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
+            - "always" will enable `reshard_after_forward` for all forward passes.
+            - "never" will disable `reshard_after_forward` for all forward passes.
+
+    """
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if cpu_offload:
+        fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+    match reshard_after_forward_policy:
+        case "always":
+            reshard_after_forward = True
+        case "never":
+            reshard_after_forward = False
+        case "default":
+            # For PP, by default do not reshard after forward to avoid per-microbatch
+            # all-gathers, which can be expensive and non-overlapped
+            reshard_after_forward = not pp_enabled
+        case _:
+            raise ValueError(
+                f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
+            )
+
+    if model.tok_embeddings is not None:
+        fully_shard(
+            model.tok_embeddings,
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward,
+        )
+
+    for transformer_block in model.layers:
+        # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
+        # - the router and the shared experts are sharded together with the TransformerBlock
+        # - the routed experts are sharded with the remaining dp_mod_ep_mesh
+        if (
+            hasattr(transformer_block, "moe_enabled")
+            and transformer_block.moe_enabled
+            and ep_degree > 1
+        ):
+            fsdp_mod_ep_config = fsdp_config.copy()
+            fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
+            moe_block = transformer_block.mlp
+            # NOTE: EP alreadys shards the routed experts on dim 0 (num_experts).
+            #       When dp_mod_ep * ep > num_experts, FSDP default dim-0 sharding
+            #       causes inefficiency, so we choose to do FSDP sharding on dim-1.
+            #       Even when EP is not used, we may still want to shard the experts
+            #       on non-0 dim. For now it may not be worth the complexity to support
+            #       shard_placement_fn on the outer TransformerBlock-level FSDP.
+            _experts_shard_placement_fn = None
+            assert dp_mod_ep_mesh is not None
+            if dp_mod_ep_mesh.size() * ep_degree > moe_block.experts.num_experts:
+                _experts_shard_placement_fn = lambda param: Shard(1)
+
+            fully_shard(
+                moe_block.experts,
+                **fsdp_mod_ep_config,
+                reshard_after_forward=reshard_after_forward,
+                shard_placement_fn=_experts_shard_placement_fn,
+            )
+
+            # NOTE: # Although the FSDP sharding of experts is done on a mesh of
+            #       a different size than other parameters, the gradient division
+            #       factor should be consistent with data.
+            moe_block.experts.set_gradient_divide_factor(
+                gradient_divide_factor,
+            )
+
+        fully_shard(
+            transformer_block,
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward,
+        )
+
+    # As an optimization, do not reshard_after_forward the last layers by default
+    # since FSDP would prefetch them immediately after the forward pass
+    if model.norm is not None and model.output is not None:
+        fully_shard(
+            [model.norm, model.output],
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward_policy == "always",
+        )
+
+    fully_shard(model, **fsdp_config)
+
+    # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
+    # in EP could interfere with implicit prefetching in FSDP
+    if ep_degree == 1:
+        return
+
+    # forward
+    transformer_blocks = list(model.layers.values())
+    next_transformer_blocks = transformer_blocks[1:] + [None]
+
+    if model.tok_embeddings is not None and model.layers is not None:
+        model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
+
+    for transformer_block, next_transformer_block in zip(
+        transformer_blocks, next_transformer_blocks
+    ):
+        if next_transformer_block is not None:
+            if next_transformer_block.moe_enabled:
+                transformer_block.set_modules_to_forward_prefetch(
+                    [next_transformer_block, next_transformer_block.mlp.experts]
+                )
+            else:
+                transformer_block.set_modules_to_forward_prefetch(
+                    [next_transformer_block]
+                )
+        elif model.norm is not None and model.output is not None:
+            transformer_block.set_modules_to_forward_prefetch(
+                [model.norm, model.output]
+            )
+
+    # backward
+    reversed_transformer_blocks = list(reversed(model.layers.values()))
+    prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
+
+    if model.norm is not None and model.output is not None and model.layers is not None:
+        model.output.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
+
+    for transformer_block, prev_transformer_block in zip(
+        reversed_transformer_blocks, prev_transformer_blocks
+    ):
+        if prev_transformer_block is not None:
+            if prev_transformer_block.moe_enabled:
+                transformer_block.set_modules_to_backward_prefetch(
+                    [prev_transformer_block, prev_transformer_block.mlp.experts]
+                )
+            else:
+                transformer_block.set_modules_to_backward_prefetch(
+                    [prev_transformer_block]
+                )
+        elif model.tok_embeddings is not None:
+            transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])

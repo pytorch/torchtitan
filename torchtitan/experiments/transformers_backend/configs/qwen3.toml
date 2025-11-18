@@ -20,11 +20,14 @@ save_tb_folder = "tb"
 enable_wandb = false
 
 [model]
-name = "Qwen/Qwen3-4B-Instruct-2507"
+name = "transformers_backend"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
 hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
+
+[hf_transformers]
+model = "Qwen/Qwen3-4B-Instruct-2507"
 
 [optimizer]
 name = "AdamW"
