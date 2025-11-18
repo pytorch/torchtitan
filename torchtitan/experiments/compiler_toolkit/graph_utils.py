@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import functools
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
@@ -86,7 +87,7 @@ def joint_graph_builder(
     model_kwargs: dict,
     fw_compiler: Optional[Callable] = None,
     bw_compiler: Optional[Callable] = None,
-    joint_custom_pass: Optional[Callable] = None,
+    joint_custom_passes: Optional[List[Callable]] = None,
     dump_folder: str | None = None,
 ):
     """
@@ -98,7 +99,7 @@ def joint_graph_builder(
         model_kwargs: Dict of model input keyword arguments
         fw_compiler: Optional custom forward compiler function
         bw_compiler: Optional custom backward compiler function
-        joint_custom_pass: Optional custom pass to run on the joint graph
+        joint_custom_passes: list of custom passes to run on the joint graph
         dump_folder: Optional folder to dump the graph to
     """
     assert isinstance(model_args, tuple)
@@ -112,8 +113,11 @@ def joint_graph_builder(
     ) = export_joint(model, model_args, model_kwargs, dump_folder=dump_folder)
 
     # Optional validation
-    if joint_custom_pass is not None:
-        joint_custom_pass(joint_with_descriptors)
+    if joint_custom_passes is not None:
+        for joint_custom_pass in joint_custom_passes:
+            joint_with_descriptors.graph_module = joint_custom_pass(
+                joint_with_descriptors.graph_module
+            )
 
     with tracing(tracing_context):
         fn = aot_compile_joint_with_descriptors(
@@ -283,20 +287,64 @@ def get_compiler_passes_from_config(job_config: JobConfig):
     Returns:
         List of compiler pass functions
     """
-    from torchtitan.experiments.compiler_toolkit.passes import AVAILABLE_PASSES
+    from torchtitan.experiments.compiler_toolkit.passes import AVAILABLE_COMPILER_PASSES
 
     pass_names = getattr(job_config.compile, "passes", [])
     compiler_passes = []
 
     for pass_name in pass_names:
-        if pass_name not in AVAILABLE_PASSES:
+        if pass_name not in AVAILABLE_COMPILER_PASSES:
             raise ValueError(
                 f"Unknown compiler pass: {pass_name}. "
-                f"Available passes: {list(AVAILABLE_PASSES.keys())}"
+                f"Available compiler passes: {list(AVAILABLE_COMPILER_PASSES.keys())}"
             )
-        compiler_passes.append(AVAILABLE_PASSES[pass_name])
+        compiler_passes.append(AVAILABLE_COMPILER_PASSES[pass_name])
 
     if pass_names:
         logger.info(f"Using compiler passes from config: {pass_names}")
 
     return compiler_passes
+
+
+def get_joint_custom_passes_from_config(
+    parallel_dims: ParallelDims, job_config: JobConfig
+):
+    """
+    Extract and validate joint custom passes from job config.
+
+    Args:
+        job_config: Job configuration containing parallelism.fsdp_reshard_after_forward
+
+    Returns:
+        List of joint custom pass functions
+    """
+    from torchtitan.experiments.compiler_toolkit.passes import (
+        fsdp_reshard_after_fwd_pass,
+        validate_flex_attn_annotation_pass,
+    )
+
+    joint_custom_passes = []
+    joint_custom_passes.append(validate_flex_attn_annotation_pass)
+
+    match job_config.parallelism.fsdp_reshard_after_forward:
+        case "always":
+            fsdp_reshard_after_forward = True
+        case "never":
+            fsdp_reshard_after_forward = False
+        case "default":
+            # For PP, by default do not reshard after forward to avoid per-microbatch
+            # all-gathers, which can be expensive and non-overlapped
+            fsdp_reshard_after_forward = not parallel_dims.pp_enabled
+        case _:
+            raise ValueError(
+                f"Invalid fsdp_reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+            )
+
+    joint_custom_passes.append(
+        functools.partial(
+            fsdp_reshard_after_fwd_pass,
+            reshard_after_forward=fsdp_reshard_after_forward,
+        )
+    )
+
+    return joint_custom_passes
