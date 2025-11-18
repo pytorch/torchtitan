@@ -11,9 +11,11 @@ This module provides various compiler passes that can be applied to graph module
 during compilation. Passes can be selected and configured via job config.
 """
 
+import warnings
 from typing import Any, Callable, Optional, Sequence
 
 import torch
+from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils._ordered_set import OrderedSet
@@ -42,10 +44,44 @@ def regional_inductor_pass(
     return regional_inductor(gm, example_inputs)
 
 
-_global_graph_pool = torch.cuda.graph_pool_handle()
+def init_global_graph_pool() -> tuple[
+    torch.cuda.CUDAGraph, torch.cuda._POOL_HANDLE, torch.cuda.Stream
+]:
+    dummy_graph = torch.cuda.CUDAGraph()
+
+    # create a global cudagraph memory pool to allow memory reuse across cudagraphs.
+    graph_pool = torch.cuda.graph_pool_handle()
+
+    # create a global cuda stream for graph capture. we need to use a single stream
+    # for all allocations to the memory pool, otherwise the allocations to separate streams
+    # will not be used.
+    graph_capture_stream = torch.cuda.Stream()
+
+    # use a dummy graph to keep the global graph pool alive
+    with (
+        # suppress an empty cudagraph warning, since we intentionally create
+        # an empty cudagraph here
+        warnings.catch_warnings(record=True),
+        torch.cuda.graph(
+            dummy_graph,
+            pool=graph_pool,
+            stream=graph_capture_stream,
+            capture_error_mode="thread_local",
+        ),
+    ):
+        pass
+
+    return dummy_graph, graph_pool, graph_capture_stream
+
+
+(
+    _global_dummy_graph,
+    _global_graph_pool,
+    _global_graph_capture_stream,
+) = init_global_graph_pool()
+
 
 # TODO: make output and args weakref to allow reuse.
-# TODO: Check memory consumption
 
 
 class CUDAGraphWrapper:
@@ -57,6 +93,7 @@ class CUDAGraphWrapper:
     ):
         self.runnable = runnable
         self.graph_pool = _global_graph_pool
+        self.stream = _global_graph_capture_stream
         self.static_input_indices = OrderedSet(
             static_input_indices if static_input_indices is not None else []
         )
@@ -79,7 +116,13 @@ class CUDAGraphWrapper:
     def __call__(self, *args):
         if not self.has_warmup:
             self.has_warmup = True
-            return self.runnable(*args)
+            device = torch.cuda.current_device()
+
+            # warmup in cudagraph memory pool to avoid fragmentation
+            # across eager memory pool and cudagraph memory pool.
+            with _use_cuda_memory_pool_manager(device, self.graph_pool, self.stream):
+                out = self.runnable(*args)
+            return out
 
         if self.cudagraph is None:
             # TODO: weak ref?
@@ -91,7 +134,9 @@ class CUDAGraphWrapper:
 
             self.cudagraph = torch.cuda.CUDAGraph()
 
-            with torch.cuda.graph(self.cudagraph, pool=self.graph_pool):
+            with torch.cuda.graph(
+                self.cudagraph, pool=self.graph_pool, stream=self.stream
+            ):
                 # `output` is managed by pytorch's cudagraph pool
                 # TODO: use weak ref for output to reuse memory
                 self.output = self.runnable(*args)
