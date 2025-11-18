@@ -10,7 +10,7 @@ Inductor lite pass for the compiler toolkit.
 This module provides inductor lite pass that can be applied to graph modules
 during compilation.
 """
-from typing import Any, Callable, List, Optional
+from typing import Optional
 
 import torch
 from torchtitan.tools.logging import logger

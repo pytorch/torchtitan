@@ -11,9 +11,15 @@ This module provides various compiler passes that can be applied to graph module
 during compilation. Passes can be selected and configured via job config.
 """
 
+from typing import Callable
+
 import torch
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
+from torchtitan.experiments.compiler_toolkit.inductor_lite import (
+    get_inductor_lite_bw_compiler,
+    get_inductor_lite_fw_compiler,
+)
 from torchtitan.experiments.simple_fsdp.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
@@ -69,8 +75,31 @@ def fsdp_reshard_after_fwd_pass(
     return gm
 
 
+def inductor_lite_pass(
+    gm: torch.fx.GraphModule, example_inputs, is_forward: bool
+) -> Callable:
+    """
+    Apply inductor lite mode.
+
+    This pass takes a gm and generates a callable (not gm) using inductor. The lite
+    mode falls back for all ops except explicitly user-annotated ops under
+    regional compile.
+    """
+    # TODO: fix inductor size assertion for all_reduce
+    # https://github.com/pytorch/pytorch/issues/167430
+    extra_inductor_config = {"size_asserts": False}
+
+    if is_forward:
+        _compiler = get_inductor_lite_fw_compiler(extra_inductor_config)
+    else:
+        _compiler = get_inductor_lite_bw_compiler(extra_inductor_config)
+
+    return _compiler(gm, example_inputs)
+
+
 # Registry mapping pass names to pass functions
 AVAILABLE_COMPILER_PASSES = {
     "autobucketing_reordering": autobucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
+    "inductor_lite": inductor_lite_pass,
 }

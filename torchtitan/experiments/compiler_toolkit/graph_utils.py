@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional
 
 import torch
+from torch._dynamo.exc import Unsupported
 from torch._dynamo.functional_export import dynamo_graph_capture_for_export
 from torch._functorch.aot_autograd import (
     aot_compile_joint_with_descriptors,
@@ -38,6 +39,10 @@ def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> No
     output_path.write_text(
         gm.print_readable(print_output=False, include_stride=True, include_device=True)
     )
+
+
+def move_value_to_end(lst: list[Any], value: Any) -> None:
+    return [x for x in lst if x != value] + [x for x in lst if x == value]
 
 
 def export_joint(
@@ -224,6 +229,7 @@ def compiler(
     example_inputs,
     passes: List[Callable] = None,
     dump_folder: str | None = None,
+    is_forward: bool = True,
 ):
     """
     Compile a graph module by applying a sequence of compiler passes.
@@ -239,6 +245,20 @@ def compiler(
     """
     if passes is None:
         passes = DEFAULT_COMPILER_PASSES
+
+    if (
+        len(passes) > 0
+        and (last_pass := passes[-1].__name__)
+        and (last_pass == "cudagraph" or last_pass == "inductor_lite")
+    ):
+        # cudagraph pass or inductor lite pass is always the last pass if it is applied
+        # these two passes behaves differently for forward and backwawrd. so we explicitly
+        # pass the info. For example, different methods are used to identify static input
+        # indices.
+        last_pass = functools.partial(last_pass, is_forward=is_forward)
+
+        # keep the function name for debug log
+        passes[-1] = functools.wraps(last_pass)(last_pass)
 
     logger.debug(f"{name} before compiler:")
     logger.debug(
@@ -273,12 +293,22 @@ def make_compiler_with_passes(
 
     def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "fwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "fwd_gm",
+            gm,
+            example_inputs,
+            passes=passes,
+            dump_folder=dump_folder,
+            is_forward=True,
         )
 
     def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "bwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "bwd_gm",
+            gm,
+            example_inputs,
+            passes=passes,
+            dump_folder=dump_folder,
+            is_forward=False,
         )
 
     return fw_compiler, bw_compiler
@@ -297,6 +327,21 @@ def get_compiler_passes_from_config(job_config: JobConfig):
     from torchtitan.experiments.compiler_toolkit.passes import AVAILABLE_COMPILER_PASSES
 
     pass_names = getattr(job_config.compile, "passes", [])
+
+    if "cudagraph" in pass_names and "inductor_lite" in pass_names:
+        raise Unsupported("cudagraph and inductor_lite cannot be applied together.")
+    elif "cudagrpah" in pass_names:
+        # cudagraph pass has to be the last pass
+        move_value_to_end(pass_names, "cudagraph")
+    elif "inductor_lite" in pass_names:
+        # inductor lite supports regional_inductor by default. They share the same
+        # user-facing frontend API (i.e., the context manager), uses different
+        # backend implementations, and achieves the same compilation result.
+        pass_names.remove("regional_inductor")
+
+        # inductor lite pass has to be the last pass
+        move_value_to_end(pass_names, "inductor_lite")
+
     compiler_passes = []
 
     for pass_name in pass_names:

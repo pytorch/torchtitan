@@ -23,10 +23,10 @@ from torchtitan.experiments.compiler_toolkit.graph_utils import (
     CompiledModule,
     get_compiler_passes_from_config,
     get_joint_custom_passes_from_config,
-    joint_graph_builder,
-    make_compiler_with_passes,
     GraphBuilderOptions,
     is_using_inductor_lite,
+    joint_graph_builder,
+    make_compiler_with_passes,
 )
 
 from torchtitan.experiments.simple_fsdp.deepseek_v3.parallelize import (
@@ -90,8 +90,8 @@ def parallelize_deepseekv3(
     )
 
     options = GraphBuilderOptions(
-        dump_folder = job_config.job.dump_folder,
-        use_inductor_lite = is_using_inductor_lite(job_config),
+        dump_folder=job_config.job.dump_folder,
+        use_inductor_lite=is_using_inductor_lite(job_config),
     )
 
     # Create custom joint_graph_builder with deepseekv3-specific compilers
