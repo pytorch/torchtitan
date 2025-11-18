@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional
 
 import torch
-from torch._dynamo.exc import Unsupported
 from torch._dynamo.functional_export import dynamo_graph_capture_for_export
 from torch._functorch.aot_autograd import (
     aot_compile_joint_with_descriptors,
