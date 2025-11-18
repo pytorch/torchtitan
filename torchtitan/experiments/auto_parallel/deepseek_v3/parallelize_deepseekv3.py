@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import time
+import types
 
 import torch
 
@@ -17,7 +18,94 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 
-def apply_local_map_to_moe():
+def _moe_forward(
+    x, router, expert_bias, reorderer, score_before_experts, experts, shared_experts
+):
+    bs, slen, dim = x.shape
+    x = x.view(-1, dim)
+
+    # top_scores and selected_experts_indices shape (bs*slen*top_k,)
+    # num_tokens_per_expert shape (num_experts,)
+    (
+        top_scores,
+        selected_experts_indices,
+        num_tokens_per_expert,
+    ) = router(x, expert_bias)
+    num_tokens_per_expert_update = num_tokens_per_expert
+
+    # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
+    # num_tokens_per_expert shape (num_experts,)
+    # NOTE: the reason we need to compute num_tokens_per_expert again is:
+    #       1st computation in router is to update self.tokens_per_expert
+    #       which would be the same across all TP ranks.
+    #       2nd computation in reorderer is for the actual routing and experts computation
+    #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
+    #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
+    (
+        top_scores_experts_sorted,
+        token_indices_experts_sorted,
+        num_tokens_per_expert,
+    ) = reorderer(top_scores, selected_experts_indices)
+
+    # shape (bs*slen*top_k, dim)
+    token_indices_experts_sorted = token_indices_experts_sorted.reshape(-1, 1).expand(
+        -1, dim
+    )
+
+    # shape (bs*slen*top_k, dim)
+    routed_input = torch.gather(x, dim=0, index=token_indices_experts_sorted)
+
+    if score_before_experts:
+        routed_input = (
+            routed_input.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)
+        ).to(x.dtype)
+
+    # shape (bs*slen*top_k, dim)
+    routed_output = experts(routed_input, num_tokens_per_expert)
+
+    # shared expert
+    # Note: we execute the shared expert before scoring the output of the routed expert
+    # to "implicitly" overlap the shared expert compute with token combine communication
+    if shared_experts is not None:
+        out = shared_experts(x)
+    else:
+        out = torch.zeros_like(x)
+
+    if not score_before_experts:
+        routed_output = (
+            routed_output.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)
+        ).to(x.dtype)
+
+    out = out.scatter_add(dim=0, index=token_indices_experts_sorted, src=routed_output)
+    out = out.reshape(bs, slen, dim)
+    return out, num_tokens_per_expert_update
+
+
+def moe_forward(self, x: torch.Tensor) -> torch.Tensor:
+    out, num_tokens_per_expert = _moe_forward(
+        x,
+        self.router,
+        self.expert_bias,
+        self.reorderer,
+        self.score_before_experts,
+        self.experts,
+        self.shared_experts,
+    )
+    # HOPs don't support buffer mutations, keep this outside
+    # tokens_per_expert will be used to update the expert bias for load balancing.
+    # and also to count the expert usage
+    # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert --
+    #       first in the forward pass, and then in the backward pass. However, this has no
+    #       effect on the expert bias update thanks to the torch.sign() operator.
+    with torch.no_grad():
+        self.tokens_per_expert.add_(num_tokens_per_expert)
+
+    with torch.no_grad():
+        self.tokens_per_expert.add_(num_tokens_per_expert)
+    return out
+
+
+def monkey_patch_local_map_moe(model, world_mesh):
     """
     TODO: fix HOPs not restoring the original signature.
     TODO: fix tracing with local shapes so that we can use Shard placements
@@ -25,10 +113,11 @@ def apply_local_map_to_moe():
     Current HOP signature we get:
     """
     from torch.distributed._tensor.experimental import local_map
-    from torchtitan.models.moe import moe
 
-    moe._moe_forward = local_map(
-        moe._moe_forward,
+    # from torchtitan.models.moe import moe
+    global _moe_forward
+    _moe_forward = local_map(
+        _moe_forward,
         out_placements=(
             (Replicate(),),  # (Shard(0),),
             (Replicate(),),
@@ -46,8 +135,37 @@ def apply_local_map_to_moe():
         ),
         redistribute_inputs=True,
         in_grad_placements=None,
-        device_mesh=None,
+        device_mesh=world_mesh,
     )
+
+    for block in model.layers.children():
+        if not block.moe_enabled:
+            continue
+        block.moe.forward = types.MethodType(moe_forward, block.moe)
+
+    # torch.distributed.breakpoint()
+    # moe.forward = moe_forward
+    # moe._moe_forward = local_map(
+    #     moe._moe_forward,
+    #     out_placements=(
+    #         (Replicate(),),  # (Shard(0),),
+    #         (Replicate(),),
+    #     ),
+    #     in_placements=(
+    #         (Replicate(),),  # (Shard(0),),
+    #         (Replicate(),),
+    #         (Replicate(),),
+    #         (Replicate(),),
+    #         (Replicate(),),
+    #         (Replicate(),),
+    #         (Replicate(),),
+    #         (Replicate(),),
+    #         (Replicate(),),
+    #     ),
+    #     redistribute_inputs=True,
+    #     in_grad_placements=None,
+    #     device_mesh=mesh,
+    # )
 
 
 # Run workflow with:
@@ -87,7 +205,7 @@ def parallelize_deepseekv3(
     assert parallel_dims.pp_enabled is False, "PP not supported yet"
 
     # apply local_map to MoE
-    apply_local_map_to_moe()
+    monkey_patch_local_map_moe(model, world_mesh)
 
     # torch._inductor.config.bucket_all_gathers_fx_bucket_size_determinator = (
     #     lambda bucket_idx: 500 / parallel_dims.tp
