@@ -20,6 +20,7 @@ from torch._guards import tracing, TracingContext
 from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.compiler_toolkit.common_utils import end_with_pass
 from torchtitan.tools.logging import logger
 
 
@@ -240,7 +241,7 @@ def compiler(
     )
     _dump_gm(dump_folder, gm, f"{name}_before_compiler")
 
-    if len(passes) > 0 and passes[-1].__name__ == "cudagraph_pass":
+    if end_with_pass(passes, ["cudagraph_pass"]):
         # cudagraph pass is always the last pass if it is applied
         cg_pass = passes[-1]
 
@@ -304,6 +305,21 @@ def make_compiler_with_passes(
     return fw_compiler, bw_compiler
 
 
+def validate_pass_names(pass_names: list[str]) -> None:
+    if "cudagraph" in pass_names:
+        assert (
+            pass_names[-1] == "cudagraph"
+        ), "cudagraph has to be the last pass to apply"
+
+    if (
+        "autobucketing_reordering" in pass_names
+        and "transformer_block_bucketing" in pass_names
+    ):
+        raise ValueError(
+            "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
+        )
+
+
 def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfig):
     """
     Extract and validate compiler passes from job config.
@@ -320,13 +336,7 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
     )
 
     pass_names = getattr(job_config.compile, "passes", [])
-    if (
-        "autobucketing_reordering" in pass_names
-        and "transformer_block_bucketing" in pass_names
-    ):
-        raise ValueError(
-            "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
-        )
+    validate_pass_names(pass_names)
     compiler_passes = []
 
     use_cudagraph = "cudagraph" in pass_names
