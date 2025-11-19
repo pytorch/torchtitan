@@ -48,7 +48,12 @@ jobs:
           fi
 
           # Export matrix to job outputs
-          echo "matrix=$(cat matrix.json)" >> $GITHUB_OUTPUT
+          {
+            echo 'matrix<<EOF'
+            cat matrix.json
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
 
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
