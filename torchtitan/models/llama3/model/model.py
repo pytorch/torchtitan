@@ -194,14 +194,14 @@ class Attention(nn.Module):
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
-        self.use_flex_attn = model_args.attention_type == "flex"
-        self.use_varlen_attn = model_args.attention_type == "varlen"
-        if self.use_flex_attn:
-            self.inner_attention = FlexAttentionWrapper()
-        elif self.use_varlen_attn:
-            self.inner_attention = VarlenAttentionWrapper()
-        else:
-            self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.attn_type = model_args.attention_type
+        match self.attn_type:
+            case "flex":
+                self.inner_attention = FlexAttentionWrapper()
+            case "varlen":
+                self.inner_attention = VarlenAttentionWrapper()
+            case _:
+                self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -246,22 +246,23 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        if self.use_flex_attn:
-            assert isinstance(attention_masks, BlockMask), attention_masks
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
-        elif self.use_varlen_attn:
-            assert isinstance(attention_masks, VarlenMetadata), attention_masks
-            output = self.inner_attention(
-                xq,
-                xk,
-                xv,
-                self.head_dim,
-                attention_masks,
-                is_causal=True,
-            )
-        else:
-            assert attention_masks is None
-            output = self.inner_attention(xq, xk, xv)
+        match self.attn_type:
+            case "flex":
+                assert isinstance(attention_masks, BlockMask), attention_masks
+                output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+            case "varlen":
+                assert isinstance(attention_masks, VarlenMetadata), attention_masks
+                output = self.inner_attention(
+                    xq,
+                    xk,
+                    xv,
+                    self.head_dim,
+                    attention_masks,
+                    is_causal=True,
+                )
+            case _:
+                assert attention_masks is None
+                output = self.inner_attention(xq, xk, xv)
 
         output = output.transpose(
             1, 2
@@ -468,7 +469,7 @@ class Transformer(nn.Module, ModelProtocol):
     def _get_flex_attention_masks(
         self,
         input_batch: torch.Tensor,
-        eos_id: int,
+        tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
@@ -478,7 +479,7 @@ class Transformer(nn.Module, ModelProtocol):
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
-                mask_mods.append(get_document_mask_mod(input_batch, eos_id))
+                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
@@ -505,7 +506,7 @@ class Transformer(nn.Module, ModelProtocol):
         match self.model_args.attention_type:
             case "flex":
                 return self._get_flex_attention_masks(
-                    input_batch, tokenizer.eos_id, extra_inputs
+                    input_batch, tokenizer, extra_inputs
                 )
             case "varlen":
                 return self._get_varlen_attention_masks(
