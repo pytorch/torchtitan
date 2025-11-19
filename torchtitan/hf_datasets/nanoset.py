@@ -1,17 +1,17 @@
-import os
 import warnings
 from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import torch
 from datatrove.utils.dataset import DatatroveFolderDataset
+from numba import jit
+from torch.distributed.checkpoint.stateful import Stateful
+from torch.utils.data import IterableDataset
+
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
-from torch.distributed.checkpoint.stateful import Stateful
-from torch.utils.data import IterableDataset
-from numba import jit
 
 
 def normalize(weights: List[float]) -> List[np.array]:
@@ -42,9 +42,12 @@ class Nanoset(torch.utils.data.Dataset):
     The Nanoset dataset
     Args:
         dataset_folders (List[str]): List of folders with tokenized datasets
-        dataset_weights (Union[List[float], None]): List with the weights for weighted datasets. If None, consume all samples from all datasets without weighting. Weights are normalized in __init__
+        dataset_weights (Union[List[float], None]): List with the weights for weighted datasets. If None,
+                                                    consume all samples from all datasets without weighting.
+                                                    Weights are normalized in __init__
         sequence_length (int): Sequence length of the built samples
-        token_size (int): Number of bytes for the tokens stored in the processed dataset files. 2 for vocab sizes < 65535, 4 otherwise
+        token_size (int): Number of bytes for the tokens stored in the processed dataset files.
+                          2 for vocab sizes < 65535, 4 otherwise
     """
 
     def __init__(
@@ -81,11 +84,11 @@ class Nanoset(torch.utils.data.Dataset):
             )
 
         # Build Nanoset Index
-        ## To build the index we need the length of each dataset
+        # To build the index we need the length of each dataset
         self.dataset_lengths = [
             len(datatrove_dataset) for datatrove_dataset in self.datatrove_datasets
         ]
-        ## Set dataset weights
+        # Set dataset weights
         if (
             dataset_weights is None
         ):  # Case of training with > 1 datasets without weighting them: Consume both datasets entirely on each epoch
@@ -95,7 +98,7 @@ class Nanoset(torch.utils.data.Dataset):
         assert len(dataset_folders) == len(
             self.dataset_weights
         ), f"Specified {len(self.dataset_weights)} weights but {len(dataset_folders)} datasets were provided."
-        ## Build dataset index and dataset sample index
+        # Build dataset index and dataset sample index
         self.dataset_index, self.dataset_sample_index = self.build_nanoset_index()
 
         self.print_nanoset_info()
@@ -162,7 +165,8 @@ class Nanoset(torch.utils.data.Dataset):
         )
         for index, sample_count in enumerate(dataset_sample_count):
             logger.info(
-                f">   Total number of samples from the {self.dataset_folders[index]} dataset: {sample_count} ({round(normalize(dataset_sample_count).tolist()[index], 2)})",
+                f">   Total number of samples from the {self.dataset_folders[index]} dataset: "
+                f"{sample_count} ({round(normalize(dataset_sample_count).tolist()[index], 2)})",
             )
 
 
