@@ -108,8 +108,15 @@ def inductor_lite_pass(
     else:
         _compiler = get_inductor_lite_bw_compiler(extra_inductor_config)
 
-    return _compiler(gm, example_inputs)
+    with (
+        # TODO Investigate error on MOE model with use_grouped_mm=False.
+        # For repro, see: https://gist.github.com/zhxchen17/d794ff58236243d9faddf713b9fc6a61
+        torch._dynamo.config.patch(fake_tensor_cache_enabled=False),
+        torch.fx.traceback.preserve_node_meta(),
+    ):
+        compiled_fn = _compiler(gm, example_inputs)
 
+    return compiled_fn
 
 # Registry mapping pass names to pass functions
 AVAILABLE_COMPILER_PASSES = {

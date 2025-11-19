@@ -332,6 +332,14 @@ def validate_pass_names(pass_names: list[str]) -> None:
             pass_names[-1] == "inductor_lite"
         ), "inductor_lite has to be the last pass to apply"
 
+    if (
+        "autobucketing_reordering" in pass_names
+        and "transformer_block_bucketing" in pass_names
+    ):
+        raise ValueError(
+            "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
+        )
+
 
 def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfig):
     """
@@ -351,13 +359,6 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
     pass_names = getattr(job_config.compile, "passes", [])
     validate_pass_names(pass_names)
 
-    if (
-        "autobucketing_reordering" in pass_names
-        and "transformer_block_bucketing" in pass_names
-    ):
-        raise ValueError(
-            "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
-        )
     compiler_passes = []
 
     for pass_name in pass_names:
