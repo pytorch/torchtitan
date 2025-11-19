@@ -236,7 +236,7 @@ def _apply_ac_to_transformer_block(
     *,
     base_fqn: str | None = None,
     model_compile_enabled: bool = False,
-    attn_type: str = "sdpa",
+    use_flex_attn: bool = False,
     op_sac_save_list: set[torch._ops.OpOverload] | None = None,
 ) -> nn.Module:
     valid_ac_modes = ("full", "selective")
@@ -259,7 +259,7 @@ def _apply_ac_to_transformer_block(
 
     if use_op_sac:
         op_sac_save_list = op_sac_save_list or set()
-        if attn_type == "flex":
+        if use_flex_attn:
             """
             For Flex Attention, we need to apply SAC carefully to avoid invalidating
             torch.compile. Any torch.compile inside the SAC region will be ignored,
@@ -288,7 +288,7 @@ def apply_ac(
     ac_config: ACConfig,
     *,
     model_compile_enabled: bool = False,
-    attn_type: str = "sdpa",
+    use_flex_attn: bool = False,
     op_sac_save_list: set[torch._ops.OpOverload] | None = None,
     base_folder: str = "",
 ) -> None:
@@ -302,7 +302,7 @@ def apply_ac(
         model (nn.Module): The model to apply activation checkpointing to.
         ac_config (ACConfig): The activation checkpointing config.
         model_compile_enabled (bool): Whether torch.compile is enabled for the model.
-        attn_type (str): Attention type (one of [sdpa, varlen, flex])
+        use_flex_attn (bool): Whether flex attention is enabled for the model.
         op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
             of recomputing.
     Returns:
@@ -326,7 +326,7 @@ def apply_ac(
                 ac_config,
                 base_fqn=f"layers.{layer_id}",
                 model_compile_enabled=model_compile_enabled,
-                attn_type=attn_type,
+                use_flex_attn=use_flex_attn,
                 op_sac_save_list=op_sac_save_list,
             )
             model.layers.register_module(layer_id, transformer_block)

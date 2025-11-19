@@ -9,8 +9,6 @@
 
 from dataclasses import dataclass, field
 
-from typing import Literal
-
 from torch import nn
 from torchtitan.config import JobConfig
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
@@ -44,7 +42,7 @@ class TransformerModelArgs(BaseModelArgs):
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
 
-    attention_type: Literal["flex", "varlen"] = "sdpa"
+    attn_type: str = "sdpa"
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
@@ -58,7 +56,7 @@ class TransformerModelArgs(BaseModelArgs):
 
         if (
             job_config.parallelism.context_parallel_degree > 1
-            and self.attention_type != "sdpa"
+            and self.attn_type != "sdpa"
         ):
             raise NotImplementedError(
                 "CP support for FlexAttention is still in progress."

@@ -60,7 +60,6 @@ class VarlenAttentionWrapper(torch.nn.Module):
         xv: torch.Tensor,
         head_dim: torch.Tensor,
         attention_masks: VarlenMetadata,
-        is_causal: bool = True,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -68,9 +67,9 @@ class VarlenAttentionWrapper(torch.nn.Module):
         max_k = attention_masks.max_k
 
         n_local_heads = xq.shape[1]
-        xq_packed = xq.transpose(1, 2).contiguous().view(-1, n_local_heads, head_dim)
-        xk_packed = xk.transpose(1, 2).contiguous().view(-1, n_local_heads, head_dim)
-        xv_packed = xv.transpose(1, 2).contiguous().view(-1, n_local_heads, head_dim)
+        xq_packed = xq.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        xk_packed = xk.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        xv_packed = xv.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
 
         return VarlenAttentionWrapper._compiled_varlen_attn(
             xq_packed,
@@ -325,6 +324,7 @@ def create_varlen_metadata_for_document(
     max_seqlen = 0
     if len(all_seq_lengths) > 0:
         all_seq_lengths = torch.cat(all_seq_lengths)
+        # device to host sync but only done once per model forward
         max_seqlen = all_seq_lengths.max().item()
 
     return VarlenMetadata(

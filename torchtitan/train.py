@@ -454,7 +454,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
-        attn_type = getattr(self.model_args, "attention_type", False)
+        attn_type = getattr(self.model_args, "attn_type", "sdpa")
         if attn_type in ["flex", "varlen"]:
             extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
                 input_batch=inputs,

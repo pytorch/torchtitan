@@ -194,7 +194,7 @@ class Attention(nn.Module):
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
-        self.attn_type = model_args.attention_type
+        self.attn_type = model_args.attn_type
         match self.attn_type:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
@@ -258,11 +258,12 @@ class Attention(nn.Module):
                     xv,
                     self.head_dim,
                     attention_masks,
-                    is_causal=True,
                 )
-            case _:
+            case "sdpa":
                 assert attention_masks is None
                 output = self.inner_attention(xq, xk, xv)
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
         output = output.transpose(
             1, 2
@@ -489,28 +490,25 @@ class Transformer(nn.Module, ModelProtocol):
             and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
         )
 
-    def _get_varlen_attention_masks(
-        self,
-        input_batch: torch.Tensor,
-        eos_id: int,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
-    ) -> AttentionMasksType:
-        return create_varlen_metadata_for_document(input_batch, eos_id)
-
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-        match self.model_args.attention_type:
+        match self.model_args.attn_type:
             case "flex":
                 return self._get_flex_attention_masks(
                     input_batch, tokenizer, extra_inputs
                 )
             case "varlen":
-                return self._get_varlen_attention_masks(
-                    input_batch, tokenizer.eos_id, extra_inputs
+                if self.model_args.attn_mask_type != "block_causal":
+                    raise ValueError(
+                        f"varlen attention is only supported with block_causal \
+                        attention mask type, got {self.model_args.attn_mask_type}"
+                    )
+                return create_varlen_metadata_for_document(
+                    input_batch, tokenizer.eos_id
                 )
             case _:
                 raise NotImplementedError(

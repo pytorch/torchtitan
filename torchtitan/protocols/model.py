@@ -71,21 +71,3 @@ class ModelProtocol(Protocol):
         raise NotImplementedError(
             "This model does not support attention masking/Flex Attention."
         )
-
-    def _get_varlen_attention_masks(
-        self,
-        input_batch: torch.Tensor,
-        eos_id: int,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
-    ) -> AttentionMasksType:
-        raise NotImplementedError(
-            "This model does not support variable length attention."
-        )
-
-    def _get_flex_attention_masks(
-        self,
-        input_batch: torch.Tensor,
-        eos_id: int,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
-    ) -> AttentionMasksType:
-        raise NotImplementedError("This model does not support flex attention.")

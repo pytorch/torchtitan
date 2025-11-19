@@ -202,11 +202,12 @@ class Attention(nn.Module):
         # values of these two variables.
         self.use_rope = use_rope
 
-        self.use_flex_attn = model_args.use_flex_attn
-        if self.use_flex_attn:
-            self.inner_attention = FlexAttentionWrapper()
-        else:
-            self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.attn_type = model_args.attn_type
+        match self.attn_type:
+            case "flex":
+                self.inner_attention = FlexAttentionWrapper()
+            case _:
+                self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -217,7 +218,7 @@ class Attention(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: AttentionMasksType,
     ):
         """
         Forward pass of the attention module.
@@ -252,7 +253,7 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        if self.use_flex_attn:
+        if self.attn_type == "flex":
             assert isinstance(attention_masks, dict), attention_masks
             attention_mask = attention_masks["rope" if self.use_rope else "nope"]
             output = self.inner_attention(xq, xk, xv, block_mask=attention_mask)
