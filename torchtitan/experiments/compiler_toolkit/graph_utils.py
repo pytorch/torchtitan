@@ -46,6 +46,14 @@ def move_value_to_end(lst: list[Any], value: Any) -> None:
     return [x for x in lst if x != value] + [x for x in lst if x == value]
 
 
+def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
+    return (
+        len(passes) > 0
+        and (last_pass_name := getattr(passes[-1], "__name__", None))
+        and (last_pass_name in names)
+    )
+
+
 def export_joint(
     model, args, kwargs=None, dump_folder: str | None = None
 ) -> tuple[JointWithDescriptors, TracingContext]:
@@ -247,13 +255,7 @@ def compiler(
     if passes is None:
         passes = DEFAULT_COMPILER_PASSES
 
-    if (
-        len(passes) > 0
-        and (last_pass_name := passes[-1].__name__)
-        and (
-            last_pass_name == "cudagraph_pass" or last_pass_name == "inductor_lite_pass"
-        )
-    ):
+    if end_with_pass(passes, ["cudagraph_pass", "inductor_lite_pass"]):
         # cudagraph pass or inductor lite pass is always the last pass if it is applied
         # these two passes behaves differently for forward and backwawrd. so we explicitly
         # pass the info. For example, different methods are used to identify static input
@@ -279,11 +281,7 @@ def compiler(
         logger.info(f"Applying pass: {pass_name}")
         gm = pass_fn(gm, example_inputs)
 
-    if (
-        len(passes) > 0
-        and (last_pass_name := passes[-1].__name__)
-        and (last_pass_name != "inductor_lite_pass")
-    ):
+    if not end_with_pass(passes, ["inductor_lite_pass"]):
         # inductor lite mode returns a CompiledFxGraph which does not support print_readable.
         logger.debug(f"{name} after compiler:")
         logger.debug(
