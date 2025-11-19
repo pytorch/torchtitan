@@ -301,6 +301,33 @@ def print_configuration(
 # =============================================================================
 
 
+def check_git_clean_state() -> None:
+    """Check if git working directory is clean before switching commits.
+
+    Raises SystemExit if there are uncommitted changes or untracked files.
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    if result.stdout.strip():
+        log_print("Error: Git working directory is not clean")
+        log_print("       Cannot switch commits with uncommitted changes")
+        log_print("")
+        log_print("Modified/untracked files:")
+        for line in result.stdout.strip().split("\n"):
+            log_print(f"  {line}")
+        log_print("")
+        log_print("Please commit, stash, or discard your changes before running this script")
+        log_print("  - To commit: git add -A && git commit -m 'message'")
+        log_print("  - To stash: git stash")
+        log_print("  - To discard: git checkout -- . && git clean -fd")
+        sys.exit(1)
+
+
 def checkout_commit(commit: str, commit_name: str) -> None:
     """Checkout git commit."""
     if commit != ".":
@@ -839,6 +866,12 @@ def main() -> None:
         enable_seed_checkpoint,
         args.job_dump_folder,
     )
+
+    # Check if git working directory is clean before switching commits
+    # Skip check if both commits are "." (comparing configs on same commit)
+    needs_git_checkout = args.baseline_commit != "." or args.test_commit != "."
+    if needs_git_checkout:
+        check_git_clean_state()
 
     create_seed_checkpoint(
         enable_seed_checkpoint,
