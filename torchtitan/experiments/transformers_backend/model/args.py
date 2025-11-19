@@ -171,6 +171,8 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
 
         self.max_seq_len = job_config.training.seq_len
 
+        self.deterministic = job_config.debug.deterministic
+
         # Configure HF-specific settings to match TorchTitan settings
         # TODO: false ?
         self.attention_bias = False
