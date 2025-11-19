@@ -420,7 +420,6 @@ class MoE(nn.Module):
             selected_experts_indices,
             num_tokens_per_expert,
         ) = self.router(x, self.expert_bias)
-        top_k = selected_experts_indices.shape[-1]
 
         # tokens_per_expert will be used to update the expert bias for load balancing.
         # and also to count the expert usage
@@ -463,12 +462,12 @@ class MoE(nn.Module):
 
         # Unsort routed outputs
         routed_output_unsorted = torch.zeros(
-            (bs * slen * top_k, dim),
+            (bs * slen * self.router.top_k, dim),
             dtype=routed_output.dtype,
             device=routed_output.device,
         )
         routed_output_unsorted[token_indices_experts_sorted] = routed_output
-        routed_output_unsorted = routed_output_unsorted.reshape(-1, top_k, dim)
+        routed_output_unsorted = routed_output_unsorted.reshape(-1, self.router.top_k, dim)
         if not self.score_before_experts:
             out_experts = (
                 torch.bmm(
