@@ -34,7 +34,6 @@ def inference(config: JobConfig):
             f"FSDP all-gather will hang if some ranks have no prompts to process."
         )
 
-    bs = config.inference.local_batch_size
     # Distribute prompts across processes using round-robin assignment
     prompts = original_prompts[global_rank::world_size]
 
@@ -46,6 +45,7 @@ def inference(config: JobConfig):
 
     if prompts:
         # Generate images for this process's assigned prompts
+        bs = config.inference.local_batch_size
 
         output_dir = os.path.join(
             config.job.dump_folder,
