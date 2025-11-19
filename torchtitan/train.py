@@ -244,7 +244,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
         else:
-            # apply Autoparallel
+            # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
 
             model.to_empty(device=init_device)
