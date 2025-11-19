@@ -98,6 +98,18 @@ class Metrics:
 
 
 @dataclass
+class ExtraLosses:
+    load_balance_loss_type: Literal["sequence_wise", "batch_wise"] = "sequence_wise"
+    """Type of load balance loss to use"""
+
+    load_balance_loss_weight: float = 0
+    """Weight of load balance loss"""
+
+    load_balance_coeff: float | None = 1e-3
+    """Coefficient of bias update for aux-loss-free load balancing"""
+
+
+@dataclass
 class Model:
     name: str = "llama3"
     """Which model to train"""
@@ -129,6 +141,9 @@ class Model:
     If true, model definition will be printed to stdout after all model
     converters have been applied.
     """
+
+    extra_losses: ExtraLosses = field(default_factory=ExtraLosses)
+    """Extra losses to use"""
 
 
 @dataclass

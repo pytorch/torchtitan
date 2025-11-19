@@ -78,3 +78,21 @@ def build_mse_loss(job_config: JobConfig, **kwargs):
         logger.info("Compiling the loss function with torch.compile")
         loss_fn = torch.compile(loss_fn, backend=job_config.compile.backend)
     return loss_fn
+
+
+def moe_loss(
+    pred: tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
+    labels: torch.Tensor,
+    loss_fn: LossFunction,
+) -> torch.Tensor:
+    """Sequence-wise auxiliary load balance loss function for MoE
+    model training.
+    """
+    if isinstance(pred, tuple):
+        pred, load_balance_loss = pred
+        loss = loss_fn(pred, labels)
+        # USE STE to make the magnitude of loss remain the same
+        loss = loss + (load_balance_loss - load_balance_loss.detach())
+    else:
+        loss = loss_fn(pred, labels)
+    return loss
