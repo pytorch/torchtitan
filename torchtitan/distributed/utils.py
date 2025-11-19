@@ -185,7 +185,7 @@ def set_determinism(
     # all ranks of the SPMD mesh. If PP is also used, this seed is unique per PP rank.
     # TODO: remove the need of passing in a mes once
     # torch.distributed.tensor._random.manual_seed doesn't require a mesh input.
-    if parallel_dims.world_size > parallel_dims.pp_size:
+    if parallel_dims.world_size > parallel_dims.pp:
         # We just need to pass the world_mesh as the device_id is the only information
         # this API uses.
         torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
