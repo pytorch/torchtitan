@@ -21,6 +21,7 @@ from torch._guards import tracing, TracingContext
 from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.compiler_toolkit.common_utils import end_with_pass
 from torchtitan.tools.logging import logger
 
 
@@ -39,18 +40,6 @@ def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> No
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         gm.print_readable(print_output=False, include_stride=True, include_device=True)
-    )
-
-
-def move_value_to_end(lst: list[Any], value: Any) -> None:
-    return [x for x in lst if x != value] + [x for x in lst if x == value]
-
-
-def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
-    return (
-        len(passes) > 0
-        and (last_pass_name := getattr(passes[-1], "__name__", None))
-        and (last_pass_name in names)
     )
 
 
@@ -255,10 +244,10 @@ def compiler(
     if passes is None:
         passes = DEFAULT_COMPILER_PASSES
 
-    if end_with_pass(passes, ["cudagraph_pass", "inductor_lite_pass"]):
-        # cudagraph pass or inductor lite pass is always the last pass if it is applied
-        # these two passes behaves differently for forward and backwawrd. so we explicitly
-        # pass the info. For example, different methods are used to identify static input
+    if end_with_pass(passes, ["inductor_lite_pass"]):
+        # inductor lite pass is always the last pass if it is applied since it
+        # behaves differently for forward and backwawrd. so we explicitly pass
+        # the info. For example, different methods are used to identify static input
         # indices.
         last_pass = passes[-1]
         _last_pass = functools.partial(last_pass, is_forward=is_forward)
@@ -330,6 +319,20 @@ def make_compiler_with_passes(
     return fw_compiler, bw_compiler
 
 
+def validate_pass_names(pass_names: list[str]) -> None:
+    if "inductor_lite" in pass_names:
+        # inductor lite supports regional_inductor by default. They share the same
+        # user-facing frontend API (i.e., the context manager), use different
+        # backend implementations, and achieve the same compilation result.
+        assert "regional_inductor" not in pass_names, (
+            "inductor_lite uses regional_inductor by default. please use one "
+            "pass at a time."
+        )
+        assert (
+            pass_names[-1] == "inductor_lite"
+        ), "inductor_lite has to be the last pass to apply"
+
+
 def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfig):
     """
     Extract and validate compiler passes from job config.
@@ -346,21 +349,7 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
     )
 
     pass_names = getattr(job_config.compile, "passes", [])
-
-    if "cudagraph" in pass_names and "inductor_lite" in pass_names:
-        raise ValueError("Cannot apply cudagraph and inductor_lite at the same time!")
-    elif "cudagrpah" in pass_names:
-        # cudagraph pass has to be the last pass
-        move_value_to_end(pass_names, "cudagraph")
-    elif "inductor_lite" in pass_names:
-        # inductor lite supports regional_inductor by default. They share the same
-        # user-facing frontend API (i.e., the context manager), use different
-        # backend implementations, and achieve the same compilation result.
-        if "regional_inductor" in pass_names:
-            pass_names.remove("regional_inductor")
-
-        # inductor lite pass has to be the last pass
-        move_value_to_end(pass_names, "inductor_lite")
+    validate_pass_names(pass_names)
 
     if (
         "autobucketing_reordering" in pass_names
