@@ -21,11 +21,12 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.loss import LossFunction
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
-from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.experiments.transformers_backend.job_config import JobConfig
+from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
 
 # NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
+
 
 def generate_llm_fqn_per_model_part(
     num_stages: int,
