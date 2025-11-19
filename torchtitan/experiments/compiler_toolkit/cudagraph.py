@@ -62,6 +62,7 @@ class CUDAGraphWrapper:
         runnable: Callable,
         example_inputs: Sequence[Any],
         static_input_indices: Optional[tuple[int]] = None,
+        should_check_address: bool = False,
     ):
         self.runnable = runnable
         self.graph_pool = _global_graph_pool
@@ -80,9 +81,29 @@ class CUDAGraphWrapper:
         self.args = None
         self.output = None
 
-    def copy_static_inputs(self, *args):
+        # (debug only) whether check static input tensor addresses during runtime
+        self.should_check_address = should_check_address
+
+    def copy_non_static_inputs(self, *args):
         for i in self.input_indices_to_copy:
             self.args[i].copy_(args[i])
+
+    def check_input_types(self, inputs) -> None:
+        for inp in inputs:
+            assert isinstance(inp, (torch.Tensor, int, torch._C.Generator)), (
+                "args must be tensor, integer (for dynamic shapes), "
+                "or Generator (for random number generator), "
+                f"but found {type(inp)}"
+            )
+
+    def check_static_inputs_address(self) -> None:
+        for i in self.static_input_indices:
+            actual = args[i].data_ptr()
+            expected = self.input_addresses[i]
+            assert expected == actual, (
+                "Expected the same static tensor address but found "
+                f"{expected} != {actual}"
+            )
 
     def __call__(self, *args):
         if not self.has_warmup:
@@ -96,11 +117,11 @@ class CUDAGraphWrapper:
             return out
 
         if self.cudagraph is None:
+            self.check_input_types(args)
             self.args = args
-            input_addresses = [
+            self.input_addresses = [
                 x.data_ptr() if isinstance(x, torch.Tensor) else None for x in args
             ]
-            self.input_addresses = input_addresses
 
             self.cudagraph = torch.cuda.CUDAGraph()
 
@@ -110,7 +131,10 @@ class CUDAGraphWrapper:
                 # `output` is managed by pytorch's cudagraph pool
                 self.output = self.runnable(*args)
 
-        self.copy_static_inputs(*args)
+        if self.should_check_address:
+            self.check_static_inputs_address()
+
+        self.copy_non_static_inputs(*args)
         self.cudagraph.replay()
         return self.output
 
