@@ -30,16 +30,20 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
-    steps:                                                                                                                                 - id: set                                                                                                                              run: |                                                                                                                                 # Decide which matrix entries to include based on event type                                                                         if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "schedule" ]]; then
-            # Include both CUDA and ROCm
-            echo '{"include":[
-              {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"},
-              {"name":"rocm","runner":"linux.rocm.gpu.gfx942.8","gpu-arch-type":"rocm","gpu-arch-version":"7.0","docker-image":"torchtitan-rocm-ubuntu-22.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/rocm7.0"}
+    steps:
+      - id: set
+        run: |
+          # Decide which matrix entries to include based on event type
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "schedule" ]]; then
+          # Include both CUDA and ROCm
+          echo '{"include":[
+            {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"},
+            {"name":"rocm","runner":"linux.rocm.gpu.gfx942.8","gpu-arch-type":"rocm","gpu-arch-version":"7.0","docker-image":"torchtitan-rocm-ubuntu-22.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/rocm7.0"}
             ]}' > matrix.json
           else
-            # Include only CUDA
-            echo '{"include":[
-              {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"}
+          # Include only CUDA
+          echo '{"include":[
+            {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"}
             ]}' > matrix.json
           fi
 
