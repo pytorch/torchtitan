@@ -97,8 +97,8 @@ deepseekv3_args = {
         qk_rope_head_dim=64,
         v_head_dim=128,
         mscale=0.70,
-        # use_flex_attn=True,
-        # attn_mask_type="block_causal",
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
     ),
     "236B": DeepSeekV3ModelArgs(
         vocab_size=102400,
@@ -124,8 +124,8 @@ deepseekv3_args = {
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,
-        # use_flex_attn=True,
-        # attn_mask_type="block_causal",
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
     ),
     "671B": DeepSeekV3ModelArgs(
         vocab_size=129280,
@@ -151,8 +151,8 @@ deepseekv3_args = {
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,
-        # use_flex_attn=True,
-        # attn_mask_type="block_causal",
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
     ),
 }
 

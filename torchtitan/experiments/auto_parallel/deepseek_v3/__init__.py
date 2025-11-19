@@ -6,6 +6,8 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import copy
+
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
@@ -14,6 +16,7 @@ from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 
 from torchtitan.models.deepseek_v3 import deepseekv3_args, DeepSeekV3Model
+from torchtitan.models.deepseek_v3.model.args import DeepSeekV3ModelArgs
 from torchtitan.models.deepseek_v3.model.state_dict_adapter import (
     DeepSeekV3StateDictAdapter,
 )
@@ -23,9 +26,19 @@ from .parallelize_deepseekv3 import parallelize_deepseekv3
 
 
 def get_train_spec() -> TrainSpec:
+    model_args = copy.deepcopy(deepseekv3_args)
+
+    default_args = DeepSeekV3ModelArgs()
+    for config, args in model_args.items():
+        if "flex_attn" in config:
+            continue
+
+        use_flex_attn = (default_args.use_flex_attn,)
+        attn_mask_type = (default_args.attn_mask_type,)
+
     return TrainSpec(
         model_cls=DeepSeekV3Model,
-        model_args=deepseekv3_args,
+        model_args=model_args,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
