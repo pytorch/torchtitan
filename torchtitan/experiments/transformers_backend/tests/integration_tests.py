@@ -21,7 +21,8 @@ def build_transformers_backend_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name meta-llama/Llama-3.2-1B",
+                    "--job.custom_config_module=torchtitan.experiments.transformers_backend.job_config",
+                    "--hf_transformers.model Qwen/Qwen2.5-7B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
