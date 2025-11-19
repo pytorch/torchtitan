@@ -76,6 +76,20 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
             "llama3_fsdp_tp_flexattn_autobucketing_regional_inductor",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.passes cudagraph",
+                ],
+            ],
+            "llama3 FSDP+TP+cudagraph",
+            "llama3_fsdp_tp_cudagraph",
+            ngpu=4,
+        ),
         # deepseek_v3 tests
         OverrideDefinitions(
             [
