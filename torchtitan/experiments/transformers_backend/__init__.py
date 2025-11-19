@@ -12,7 +12,7 @@ from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_hf_transformers
 
-from .infra.pipeline import pipeline_hf_transformers
+from .infra.pipeline_parallel import pipeline_hf_transformers
 from .model.args import HFTransformerModelArgs, TitanDenseModelArgs
 from .model.model import HFTransformerModel
 

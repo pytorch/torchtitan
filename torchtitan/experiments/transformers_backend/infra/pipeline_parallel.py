@@ -4,224 +4,28 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
-
 import math
-import os
-from typing import Callable
 
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
-
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
-    _PipelineScheduleRuntime,
     get_schedule_class,
-    PipelineScheduleMulti,
     PipelineScheduleSingle,
     ScheduleDualPipeV,
     ScheduleZBVZeroBubble,
 )
 
-from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
-from torchtitan.config import JobConfig
+from torchtitan.components.loss import LossFunction
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
+from torchtitan.experiments.transformers_backend.job_config import JobConfig
 from torchtitan.tools.logging import logger
 
-__all__ = [
-    "pipeline_llm",
-    "build_pipeline_schedule",
-    "generate_llm_fqn_per_model_part",
-    "pipeline_module_split",
-]
-
-
-def pipeline_llm(
-    model: nn.Module,
-    parallel_dims: ParallelDims,
-    job_config: JobConfig,
-    device: torch.device,
-    model_args: BaseModelArgs,
-    parallelize_fn: ParallelizeFunction,
-    loss_fn: LossFunction,
-) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    pp_mesh = parallel_dims.world_mesh["pp"]
-
-    # Determine the number of virtual stages based on schedule type
-    schedule_class = get_schedule_class(
-        job_config.parallelism.pipeline_parallel_schedule
-    )
-    is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
-    layers_per_stage = job_config.parallelism.pipeline_parallel_layers_per_stage
-    if hasattr(model_args, "n_layers"):
-        num_layers = model_args.n_layers
-    else:
-        raise ValueError("Model does not have n_layers attribute.")
-
-    # You can adjust these weights based on the computational cost of embeddings and output layers
-    # Higher weights mean these modules are treated as "heavier" in the distribution
-    input_weight = job_config.parallelism.pipeline_parallel_first_stage_less_layers
-    output_weight = job_config.parallelism.pipeline_parallel_last_stage_less_layers
-
-    # Calculate number of virtual stages
-    if layers_per_stage is not None:
-
-        # Calculate number of virtual stages needed (using ceiling division)
-        # This allows for unequal distribution where stages can differ by at most 1 layer
-        num_virtual_stages = math.ceil(
-            (num_layers + input_weight + output_weight) / layers_per_stage
-        )
-
-        # Validation: check stages per rank based on schedule type
-        model_config_info = f"Model has {num_layers} layers with pipeline_parallel_layers_per_stage={layers_per_stage}"
-        stage_distribution_info = (
-            f"resulting in {num_virtual_stages=} across {parallel_dims.pp} PP ranks"
-        )
-
-        if num_virtual_stages % parallel_dims.pp != 0:
-            raise ValueError(
-                f"Number of virtual stages ({num_virtual_stages}) must be divisible by "
-                f"pipeline parallel size ({parallel_dims.pp}). "
-                f"{model_config_info}. "
-                f"Please adjust pipeline_parallel_layers_per_stage to a value that results in a number of stages "
-                f"divisible by {parallel_dims.pp}."
-            )
-
-        stages_per_rank = num_virtual_stages // parallel_dims.pp
-
-        if is_single_stage_schedule and stages_per_rank != 1:
-            raise ValueError(
-                f"Single stage schedule requires exactly 1 stage per rank, but got {stages_per_rank} stages per rank. "
-                f"{model_config_info}, {stage_distribution_info}. "
-                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // parallel_dims.pp} or higher "
-                f"to achieve 1 stage per rank."
-            )
-
-        if not is_single_stage_schedule and stages_per_rank < 2:
-            raise ValueError(
-                f"Multi-stage schedule requires at least 2 stages per rank, but got {stages_per_rank} stages per rank. "
-                f"{model_config_info}, {stage_distribution_info}. "
-                f"Please decrease pipeline_parallel_layers_per_stage to achieve at least 2 stages per rank."
-            )
-    else:
-        # Fallback to default behavior when layers_per_stage is not provided
-        # For multi-stage schedules, default is 2 virtual stages per rank
-        # For single-stage schedules, default is 1 virtual stage per rank
-        stages_per_rank = 1 if is_single_stage_schedule else 2
-        num_virtual_stages = parallel_dims.pp * stages_per_rank
-
-    module_names_per_stage = job_config.parallelism.module_fqns_per_model_part
-    if module_names_per_stage is None:
-        module_names_per_stage = generate_llm_fqn_per_model_part(
-            num_virtual_stages, num_layers, input_weight, output_weight
-        )
-    for i, stage_ms in enumerate(module_names_per_stage):
-        logger.debug(f"Stage {i}: {stage_ms}")
-
-    stages, model_parts = pipeline_module_split(
-        model,
-        pp_mesh,
-        job_config.parallelism.pipeline_parallel_schedule,
-        device,
-        module_names_per_stage,
-    )
-
-    # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
-    # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
-    # optimizer, and checkpointing
-    for i, m in enumerate(model_parts):
-        # apply SPMD-style PT-D techniques
-        m = parallelize_fn(m, parallel_dims, job_config)
-        model_parts[i] = m
-        # NOTE: this is to update the model in the stage
-        #       in case the model is modified e.g. by torch.compile
-        stages[i].submod = m
-
-    pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
-
-    # This is used in the train loop to determine whether to pass in the input_ids and labels
-    has_first_stage = False
-    has_last_stage = False
-    for stage in stages:
-        if stage.is_first:
-            has_first_stage = True
-        if stage.is_last:
-            has_last_stage = True
-
-    return pp_schedule, model_parts, has_first_stage, has_last_stage
-
-
-def build_pipeline_schedule(
-    job_config: JobConfig, stages: list[PipelineStage], loss_fn: Callable
-) -> _PipelineSchedule:
-    """Builds a pipeline schedule for the given job configuration and stages.
-
-    Args:
-        job_config (JobConfig): The job configuration.
-        stages (list[PipelineStage]): The stages to be scheduled.
-        loss_fn (Callable): The loss function.
-
-    Returns:
-        _PipelineSchedule: The pipeline schedule for the given stages.
-    """
-    pp_schedule_csv = job_config.parallelism.pipeline_parallel_schedule_csv
-
-    # Validate that pp_schedule_csv is a valid path
-    if pp_schedule_csv:
-        if not os.path.isfile(pp_schedule_csv):
-            raise FileNotFoundError(
-                f"The specified path {pp_schedule_csv} does not exist or is not a file."
-            )
-        schedule_class = _PipelineScheduleRuntime
-    else:
-        schedule_class = get_schedule_class(
-            job_config.parallelism.pipeline_parallel_schedule
-        )
-
-    looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
-    microbatch_size = job_config.parallelism.pipeline_parallel_microbatch_size
-    batch_size = job_config.training.local_batch_size
-    # validate that the batch size is divisible by the microbatch_size otherwise we'll hang or error during training
-    if batch_size % microbatch_size != 0:
-        raise ValueError(
-            f"Batch size {job_config.training.local_batch_size} must be divisible by microbatch_size {microbatch_size}. "
-            "Update the config arguments for either batch_size or pipeline_parallel_microbatch_size."
-        )
-    n_microbatches = batch_size // microbatch_size
-    # We expect that the number of local stages (`len(stages)`) is the same across all ranks
-    num_total_stages = job_config.parallelism.pipeline_parallel_degree * len(stages)
-    if n_microbatches < num_total_stages:
-        logger.warning(
-            f"Number of microbatches ({n_microbatches}) is less than the total number "
-            f"of stages ({num_total_stages}) which may result in a bubble in the pipeline."
-        )
-
-    schedule = schedule_class(
-        stages if looped_schedule else stages[0],
-        n_microbatches=n_microbatches,
-        loss_fn=rescale_accumulated_loss(loss_fn, n_microbatches),
-        scale_grads=False,
-    )
-    logger.info(
-        f"Using pipeline schedule {job_config.parallelism.pipeline_parallel_schedule} "
-        f"with {n_microbatches} microbatches and {num_total_stages} stages."
-    )
-
-    if pp_schedule_csv:
-        assert schedule_class in [
-            PipelineScheduleSingle,
-            PipelineScheduleMulti,
-            _PipelineScheduleRuntime,
-        ], (
-            "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
-            "and _PipelineScheduleRuntime support csv schedules"
-        )
-        schedule._load_csv(pp_schedule_csv)
-
-    return schedule
-
+# NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
 
 def generate_llm_fqn_per_model_part(
     num_stages: int,
@@ -231,16 +35,13 @@ def generate_llm_fqn_per_model_part(
 ) -> list[list[str]]:
     """
     Programmatically generates module names model part, focused on LLMs models.
-
     Args:
         num_stages: Number of pipeline stages
         num_layers: Total number of transformer layers in the model
-        input_weight: Weight for input modules (tok_embeddings) in layer calculation
+        input_weight: Weight for input modules (embed_tokens) in layer calculation
         output_weight: Weight for output modules (norm + output) in layer calculation
-
     Returns:
         List of lists containing module names for each model part
-
     Example:
         generate_llm_fqn_per_model_part(2, 3, input_weight=2, output_weight=2)
         treats embeddings as 2 layers and norm+output as 2 layers for distribution
@@ -251,7 +52,7 @@ def generate_llm_fqn_per_model_part(
     if num_stages == 1:
         # Single stage gets everything
         layer_names = [f"layers.{i}" for i in range(num_layers)]
-        return [["tok_embeddings"] + layer_names + ["norm", "output"]]
+        return [["tok_embeddings"] + layer_names + ["norm", "output", "rotary_emb"]]
 
     # Calculate effective layers including weights
     num_effective_layers = num_layers + input_weight + output_weight
@@ -329,6 +130,7 @@ def generate_llm_fqn_per_model_part(
                     stage_modules.append(f"layers.{current_layer}")
                     current_layer += 1
 
+        stage_modules.append("rotary_emb")
         module_names_per_stage.append(stage_modules)
 
     return module_names_per_stage
@@ -417,8 +219,8 @@ def pipeline_module_split(
                         setattr(model, module_name, nn.ModuleList())
             # Handle simple module attributes (e.g., "linear", "norm")
             elif module_name not in modules_to_keep:
-                # Replace with None
-                setattr(model, module_name, None)
+                # Replace with Identity
+                setattr(model, module_name, nn.Identity())
 
         stage = PipelineStage(
             model,
@@ -473,3 +275,116 @@ def pipeline_module_split(
         models.append(model_chunk)
 
     return stages, models
+
+
+def pipeline_hf_transformers(
+    model: nn.Module,
+    parallel_dims: ParallelDims,
+    job_config: JobConfig,
+    device: torch.device,
+    model_args: BaseModelArgs,
+    parallelize_fn: ParallelizeFunction,
+    loss_fn: LossFunction,
+) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
+    pp_mesh = parallel_dims.world_mesh["pp"]
+
+    # Determine the number of virtual stages based on schedule type
+    schedule_class = get_schedule_class(
+        job_config.parallelism.pipeline_parallel_schedule
+    )
+    is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
+    layers_per_stage = job_config.parallelism.pipeline_parallel_layers_per_stage
+    if hasattr(model_args, "n_layers"):
+        num_layers = model_args.n_layers
+    else:
+        raise ValueError("Model does not have n_layers attribute.")
+
+    # You can adjust these weights based on the computational cost of embeddings and output layers
+    # Higher weights mean these modules are treated as "heavier" in the distribution
+    input_weight = job_config.parallelism.pipeline_parallel_first_stage_less_layers
+    output_weight = job_config.parallelism.pipeline_parallel_last_stage_less_layers
+
+    # Calculate number of virtual stages
+    if layers_per_stage is not None:
+
+        # Calculate number of virtual stages needed (using ceiling division)
+        # This allows for unequal distribution where stages can differ by at most 1 layer
+        num_virtual_stages = math.ceil(
+            (num_layers + input_weight + output_weight) / layers_per_stage
+        )
+
+        # Validation: check stages per rank based on schedule type
+        model_config_info = f"Model has {num_layers} layers with pipeline_parallel_layers_per_stage={layers_per_stage}"
+        stage_distribution_info = (
+            f"resulting in {num_virtual_stages=} across {parallel_dims.pp} PP ranks"
+        )
+
+        if num_virtual_stages % parallel_dims.pp != 0:
+            raise ValueError(
+                f"Number of virtual stages ({num_virtual_stages}) must be divisible by "
+                f"pipeline parallel size ({parallel_dims.pp}). "
+                f"{model_config_info}. "
+                f"Please adjust pipeline_parallel_layers_per_stage to a value that results in a number of stages "
+                f"divisible by {parallel_dims.pp}."
+            )
+
+        stages_per_rank = num_virtual_stages // parallel_dims.pp
+
+        if is_single_stage_schedule and stages_per_rank != 1:
+            raise ValueError(
+                f"Single stage schedule requires exactly 1 stage per rank, but got {stages_per_rank} stages per rank. "
+                f"{model_config_info}, {stage_distribution_info}. "
+                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // parallel_dims.pp} or higher "
+                f"to achieve 1 stage per rank."
+            )
+
+        if not is_single_stage_schedule and stages_per_rank < 2:
+            raise ValueError(
+                f"Multi-stage schedule requires at least 2 stages per rank, but got {stages_per_rank} stages per rank. "
+                f"{model_config_info}, {stage_distribution_info}. "
+                f"Please decrease pipeline_parallel_layers_per_stage to achieve at least 2 stages per rank."
+            )
+    else:
+        # Fallback to default behavior when layers_per_stage is not provided
+        # For multi-stage schedules, default is 2 virtual stages per rank
+        # For single-stage schedules, default is 1 virtual stage per rank
+        stages_per_rank = 1 if is_single_stage_schedule else 2
+        num_virtual_stages = parallel_dims.pp * stages_per_rank
+
+    module_names_per_stage = job_config.parallelism.module_fqns_per_model_part
+    if module_names_per_stage is None:
+        module_names_per_stage = generate_llm_fqn_per_model_part(
+            num_virtual_stages, num_layers, input_weight, output_weight
+        )
+
+    stages, model_parts = pipeline_module_split(
+        model,
+        pp_mesh,
+        job_config.parallelism.pipeline_parallel_schedule,
+        device,
+        module_names_per_stage,
+    )
+
+    # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
+    # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
+    # optimizer, and checkpointing
+    for i, m in enumerate(model_parts):
+        # apply SPMD-style PT-D techniques
+        m = parallelize_fn(m, parallel_dims, job_config)
+        model_parts[i] = m
+        # NOTE: this is to update the model in the stage
+        #       in case the model is modified e.g. by torch.compile
+        stages[i].submod = m
+
+    pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
+
+    # This is used in the train loop to determine whether to pass in the input_ids and labels
+    has_first_stage = False
+    has_last_stage = False
+    for stage in stages:
+        if stage.is_first:
+            has_first_stage = True
+        if stage.is_last:
+            has_last_stage = True
+
+    return pp_schedule, model_parts, has_first_stage, has_last_stage
