@@ -6,8 +6,11 @@
 
 import time
 import types
+from typing import Callable, Optional
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from autoparallel.api import AutoParallel
 from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
@@ -15,12 +18,78 @@ from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.moe.moe import _run_experts_grouped_mm
 
 from torchtitan.tools.logging import logger
 
 
+def create_functional_router_forward(
+    self: nn.Module,
+) -> Callable:  # TokenChoiceTopKRouter
+    def functional_router_forward(
+        x: torch.Tensor, gate_weight: torch.nn.Parameter, expert_bias: torch.Tensor
+    ):
+        # scores shape (bs*slen, num_experts)
+        scores = F.linear(x, gate_weight)
+
+        # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
+        if self.score_func == "sigmoid":
+            scores = torch.sigmoid(scores.to(torch.float32))
+        elif self.score_func == "softmax":
+            scores = F.softmax(scores.to(torch.float32), dim=1)
+        else:
+            raise NotImplementedError(f"Unknown score function {self.score_func}")
+
+        # top scores shape (bs*slen, top_k)
+        # NOTE: The expert_bias is only used for routing. The gating value
+        #       top_scores is still derived from the original scores.
+        if expert_bias is not None:
+            _, selected_experts_indices = torch.topk(
+                scores + expert_bias, k=self.top_k, dim=1
+            )
+            top_scores = scores.gather(dim=1, index=selected_experts_indices)
+        else:
+            top_scores, selected_experts_indices = torch.topk(
+                scores, k=self.top_k, dim=1
+            )
+
+        # debug override: balanced round-robin routing
+        if self._debug_force_load_balance:
+            (
+                selected_experts_indices,
+                top_scores,
+            ) = self._debug_force_load_balance_routing(scores)
+
+        if self.route_norm:
+            denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
+            top_scores = top_scores / denominator
+        top_scores = top_scores * self.route_scale
+
+        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
+        num_tokens_per_expert = torch.histc(
+            selected_experts_indices.view(-1),
+            bins=self.num_experts,
+            min=0,
+            max=self.num_experts,
+        )
+
+        return top_scores, selected_experts_indices, num_tokens_per_expert
+
+    return functional_router_forward
+
+
 def _moe_forward(
-    x, router, expert_bias, reorderer, score_before_experts, experts, shared_experts
+    x: torch.Tensor,
+    router_gate_weight: torch.nn.Parameter,
+    expert_bias: Optional[torch.Tensor],
+    experts_w1: torch.Tensor,
+    experts_w3: torch.Tensor,
+    experts_w2: torch.Tensor,
+    shared_w1_weight: torch.Tensor,
+    shared_w3_weight: torch.Tensor,
+    shared_w2_weight: torch.Tensor,
+    functional_router_forward: Callable,
+    reorderer: nn.Module,  # TokenReorderer
 ):
     bs, slen, dim = x.shape
     x = x.view(-1, dim)
@@ -31,7 +100,7 @@ def _moe_forward(
         top_scores,
         selected_experts_indices,
         num_tokens_per_expert,
-    ) = router(x, expert_bias)
+    ) = functional_router_forward(x, router_gate_weight, expert_bias)
     num_tokens_per_expert_update = num_tokens_per_expert
 
     # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
@@ -56,26 +125,34 @@ def _moe_forward(
     # shape (bs*slen*top_k, dim)
     routed_input = torch.gather(x, dim=0, index=token_indices_experts_sorted)
 
-    if score_before_experts:
-        routed_input = (
-            routed_input.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)
-        ).to(x.dtype)
+    # DSv3 score_before_experts is always False
+    # if score_before_experts:
+    #     routed_input = (
+    #         routed_input.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)
+    #     ).to(x.dtype)
 
     # shape (bs*slen*top_k, dim)
-    routed_output = experts(routed_input, num_tokens_per_expert)
+    # routed_output = experts(routed_input, num_tokens_per_expert)
+    routed_output = _run_experts_grouped_mm(
+        experts_w1, experts_w2, experts_w3, routed_input, num_tokens_per_expert
+    )
 
     # shared expert
     # Note: we execute the shared expert before scoring the output of the routed expert
     # to "implicitly" overlap the shared expert compute with token combine communication
-    if shared_experts is not None:
-        out = shared_experts(x)
-    else:
-        out = torch.zeros_like(x)
+    # if shared_experts is not None:
+    # out = shared_experts(x)
+    _h1 = F.linear(x, shared_w1_weight)
+    _h3 = F.linear(x, shared_w3_weight)
+    out = F.linear(F.silu(_h1) * _h3, shared_w2_weight)
+    # else:
+    #     out = torch.zeros_like(x)
 
-    if not score_before_experts:
-        routed_output = (
-            routed_output.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)
-        ).to(x.dtype)
+    # DSv3 score_before_experts is False
+    # if not score_before_experts:
+    routed_output = (
+        routed_output.to(torch.float32) * top_scores_experts_sorted.reshape(-1, 1)
+    ).to(x.dtype)
 
     out = out.scatter_add(dim=0, index=token_indices_experts_sorted, src=routed_output)
     out = out.reshape(bs, slen, dim)
@@ -83,14 +160,19 @@ def _moe_forward(
 
 
 def moe_forward(self, x: torch.Tensor) -> torch.Tensor:
+    functional_router_forward = create_functional_router_forward(self.router)
     out, num_tokens_per_expert = _moe_forward(
         x,
-        self.router,
+        self.router.gate.weight,
         self.expert_bias,
+        self.experts.w1,
+        self.experts.w3,
+        self.experts.w2,
+        self.shared_experts.w1.weight,
+        self.shared_experts.w3.weight,
+        self.shared_experts.w2.weight,
+        functional_router_forward,
         self.reorderer,
-        self.score_before_experts,
-        self.experts,
-        self.shared_experts,
     )
     # HOPs don't support buffer mutations, keep this outside
     # tokens_per_expert will be used to update the expert bias for load balancing.
@@ -100,10 +182,20 @@ def moe_forward(self, x: torch.Tensor) -> torch.Tensor:
     #       effect on the expert bias update thanks to the torch.sign() operator.
     with torch.no_grad():
         self.tokens_per_expert.add_(num_tokens_per_expert)
-
-    with torch.no_grad():
-        self.tokens_per_expert.add_(num_tokens_per_expert)
     return out
+
+
+def monkey_patch_checks(moe):
+    # causes data-dependent issue, hardcoded into monkey patch
+    assert not moe.score_before_experts
+    assert moe.router.gate.bias is None
+    assert moe.experts.use_grouped_mm
+    assert moe.shared_experts is not None
+    assert moe.shared_experts.w1.bias is None
+    assert moe.shared_experts.w2.bias is None
+    assert moe.shared_experts.w3.bias is None
+    assert not list(moe.reorderer.parameters())
+    assert not list(moe.reorderer.buffers())
 
 
 def monkey_patch_local_map_moe(model, world_mesh):
@@ -120,19 +212,21 @@ def monkey_patch_local_map_moe(model, world_mesh):
     _moe_forward = local_map(
         _moe_forward,
         out_placements=(
-            (Replicate(),),  # (Shard(0),),
-            (Replicate(),),
+            (Replicate(),),  # out: torch.Tensor
+            (Replicate(),),  # num_tokens_per_expert_update: torch.Tensor
         ),
         in_placements=(
-            (Replicate(),),  # (Shard(0),),
-            (Replicate(),),
-            (Replicate(),),
-            (Replicate(),),
-            (Replicate(),),
-            (Replicate(),),
-            (Replicate(),),
-            (Replicate(),),
-            (Replicate(),),
+            (Replicate(),),  # x: torch.Tensor,
+            (Replicate(),),  # router_gate_weight: torch.nn.Parameter,
+            (Replicate(),),  # expert_bias: Optional[torch.Tensor],
+            (Replicate(),),  # experts_w1: torch.Tensor,
+            (Replicate(),),  # experts_w3: torch.Tensor,
+            (Replicate(),),  # experts_w2: torch.Tensor,
+            (Replicate(),),  # shared_w1: torch.Tensor,
+            (Replicate(),),  # shared_w3: torch.Tensor,
+            (Replicate(),),  # shared_w2: torch.Tensor,
+            None,  # functional_router_forward: Callable,
+            None,  # reorderer: TokenReorderer,
         ),
         redistribute_inputs=True,
         in_grad_placements=None,
@@ -143,30 +237,7 @@ def monkey_patch_local_map_moe(model, world_mesh):
         if not block.moe_enabled:
             continue
         block.moe.forward = types.MethodType(moe_forward, block.moe)
-
-    # torch.distributed.breakpoint()
-    # moe.forward = moe_forward
-    # moe._moe_forward = local_map(
-    #     moe._moe_forward,
-    #     out_placements=(
-    #         (Replicate(),),  # (Shard(0),),
-    #         (Replicate(),),
-    #     ),
-    #     in_placements=(
-    #         (Replicate(),),  # (Shard(0),),
-    #         (Replicate(),),
-    #         (Replicate(),),
-    #         (Replicate(),),
-    #         (Replicate(),),
-    #         (Replicate(),),
-    #         (Replicate(),),
-    #         (Replicate(),),
-    #         (Replicate(),),
-    #     ),
-    #     redistribute_inputs=True,
-    #     in_grad_placements=None,
-    #     device_mesh=mesh,
-    # )
+        monkey_patch_checks(block.moe)
 
 
 # Run workflow with:
