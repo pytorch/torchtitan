@@ -710,7 +710,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # in joint_graph_module. An explicit gc.collect() is necessary
         # to clean up reference cycles.
         for part in self.model_parts:
-            part.joint_graph_module = None
+            if hasattr(part, "joint_graph_module"):
+                part.joint_graph_module = None
         gc.collect()
 
 

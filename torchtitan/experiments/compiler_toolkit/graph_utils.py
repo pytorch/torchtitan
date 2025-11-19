@@ -339,12 +339,7 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
     validate_pass_names(pass_names)
     compiler_passes = []
 
-    use_cudagraph = "cudagraph" in pass_names
-
     for pass_name in pass_names:
-        if pass_name == "cudagraph":
-            continue
-
         if pass_name not in AVAILABLE_COMPILER_PASSES:
             raise ValueError(
                 f"Unknown compiler pass: {pass_name}. "
@@ -359,10 +354,6 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
             )
         else:
             compiler_passes.append(AVAILABLE_COMPILER_PASSES[pass_name])
-
-    if use_cudagraph:
-        # cudagraph should always be the last fx pass to apply
-        compiler_passes.append(AVAILABLE_COMPILER_PASSES["cudagraph"])
 
     if pass_names:
         logger.info(f"Using compiler passes from config: {pass_names}")
