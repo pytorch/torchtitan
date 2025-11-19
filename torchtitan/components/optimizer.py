@@ -340,10 +340,30 @@ def build_optimizers_with_moe_load_balancing(
         ft_manager=ft_manager,
     )
 
+    # AP friendly methods
+    def is_moe_block(block):
+        moe_enabled = getattr(block, "moe_enabled", False)
+        has_moe_submod = hasattr(block, "moe")  # AP
+        return moe_enabled or has_moe_submod
+
+    def should_manual_allreduce(tokens_per_expert_by_layer):
+        return not isinstance(
+            tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
+        )
+
+    def get_transformer_blocks(model_part):
+        if isinstance(model_part.layers, nn.ModuleDict):
+            # regular torchtitan
+            blocks = model_part.layers.values()
+        else:
+            # TODO: fix autoparallel to preserve the module dict
+            blocks = model_part.layers.children()
+        return blocks
+
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         for model_part in model_parts:
-            for transformer_block in model_part.layers.values():
-                if transformer_block.moe_enabled:
+            for transformer_block in get_transformer_blocks(model_part):
+                if is_moe_block(transformer_block):
                     # Assumption: load_balance_coeff is set universally on all moe blocks.
                     return bool(transformer_block.moe.load_balance_coeff)
         return False
@@ -359,26 +379,6 @@ def build_optimizers_with_moe_load_balancing(
         dp_cp_mesh = (
             parallel_dims.world_mesh["dp_cp"] if parallel_dims.dp_cp_enabled else None
         )
-
-        # AP friendly methods
-        def is_moe_block(block):
-            moe_enabled = getattr(block, "moe_enabled", False)
-            has_moe_submod = hasattr(block, "moe")  # AP
-            return moe_enabled or has_moe_submod
-
-        def get_transformer_blocks(model_part):
-            if isinstance(model_part.layers, nn.ModuleDict):
-                # regular torchtitan
-                blocks = model_part.layers.values()
-            else:
-                # TODO: fix autoparallel to preserve the module dict
-                blocks = model_part.layers.children()
-            return blocks
-
-        def should_manual_allreduce(tokens_per_expert_by_layer):
-            return not isinstance(
-                tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
-            )
 
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
