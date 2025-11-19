@@ -168,6 +168,9 @@ def validate_arguments(
     test_train_file: str,
     test_options: str,
     steps: int,
+    assert_equal: bool,
+    export_result: str | None,
+    import_result: str | None,
 ) -> None:
     """Validate command line arguments."""
     # Validate commit arguments - if one is ".", both must be "."
@@ -199,6 +202,34 @@ def validate_arguments(
     # Validate steps is a positive integer
     if steps <= 0:
         log_print(f"Error: --steps must be a positive integer, got: {steps}")
+        sys.exit(1)
+
+    # Validate export-result requires assert-equal
+    if export_result and not assert_equal:
+        log_print("Error: --export-result requires --assert-equal")
+        log_print("       Export only happens when losses are verified to match")
+        sys.exit(1)
+
+    # Validate import-result requires assert-equal
+    if import_result and not assert_equal:
+        log_print("Error: --import-result requires --assert-equal")
+        log_print("       Import is used to verify all losses match")
+        sys.exit(1)
+
+    # Validate export-result and import-result are mutually exclusive
+    if export_result and import_result:
+        log_print(
+            "Error: --export-result and --import-result cannot be " "used together"
+        )
+        log_print(
+            "       Use export to save results or import to compare "
+            "against saved results"
+        )
+        sys.exit(1)
+
+    # Validate import file exists
+    if import_result and not os.path.exists(import_result):
+        log_print(f"Error: Import file does not exist: {import_result}")
         sys.exit(1)
 
 
@@ -321,7 +352,10 @@ def check_git_clean_state() -> None:
         for line in result.stdout.strip().split("\n"):
             log_print(f"  {line}")
         log_print("")
-        log_print("Please commit, stash, or discard your changes before running this script")
+        log_print(
+            "Please commit, stash, or discard your changes before "
+            "running this script"
+        )
         log_print("  - To commit: git add -A && git commit -m 'message'")
         log_print("  - To stash: git stash")
         log_print("  - To discard: git checkout -- . && git clean -fd")
@@ -429,6 +463,34 @@ def read_losses_from_file(loss_file: str) -> dict[int, float]:
             step, loss = line.strip().split()
             losses[int(step)] = float(loss)
     return losses
+
+
+def export_losses_to_file(losses: dict[int, float], export_path: str) -> None:
+    """Export losses to file and stdout.
+
+    Args:
+        losses: Dictionary mapping step numbers to loss values
+        export_path: Path to export file
+    """
+    log_print(f"Exporting losses to {export_path}")
+
+    # Write to file and collect output for stdout
+    with open(export_path, "w") as f:
+        for step in sorted(losses.keys()):
+            loss = losses[step]
+            line = f"{step} {loss}"
+            f.write(line + "\n")
+
+    log_print(f"Exported {len(losses)} loss values:")
+    log_print()
+
+    # Output to stdout in same format
+    for step in sorted(losses.keys()):
+        loss = losses[step]
+        print(f"{step} {loss}")
+
+    log_print()
+    log_print(f"Losses saved to: {export_path}")
 
 
 def extract_loss_data(output_folder: str | None) -> None:
@@ -554,13 +616,18 @@ def perform_loss_analysis(
     generate_summary_statistics(baseline_losses, test_losses, stats_file)
 
 
-def assert_losses_equal(baseline_log: str, test_log: str) -> None:
-    """Assert that losses are equal between baseline and test using
-    unittest.
+def assert_losses_equal(
+    baseline_log: str, test_log: str, import_result: str | None = None
+) -> None:
+    """Assert that losses are equal between baseline and test using unittest.
+
+    If import_result is provided, also compares baseline with imported losses.
     """
     log_print("Asserting losses are equal...")
     log_print(f"Baseline log: {baseline_log}")
     log_print(f"Test log: {test_log}")
+    if import_result:
+        log_print(f"Import file: {import_result}")
 
     # Extract losses from both logs
     baseline_losses = extract_losses_from_log(baseline_log)
@@ -577,6 +644,15 @@ def assert_losses_equal(baseline_log: str, test_log: str) -> None:
         log_print("Error: No losses found in test log")
         sys.exit(1)
 
+    # Load imported losses if provided
+    imported_losses = None
+    if import_result:
+        imported_losses = read_losses_from_file(import_result)
+        log_print(f"Loaded {len(imported_losses)} steps from import file")
+        if not imported_losses:
+            log_print("Error: No losses found in import file")
+            sys.exit(1)
+
     # Create a test case
     class LossEqualityTest(unittest.TestCase):
         def test_losses_equal(self):
@@ -591,16 +667,40 @@ def assert_losses_equal(baseline_log: str, test_log: str) -> None:
                 f"test has {len(test_steps)} steps",
             )
 
+            # If imported losses exist, check steps match
+            if imported_losses:
+                imported_steps = set(imported_losses.keys())
+                self.assertEqual(
+                    baseline_steps,
+                    imported_steps,
+                    f"Steps mismatch: baseline has {len(baseline_steps)} steps, "
+                    f"imported has {len(imported_steps)} steps",
+                )
+
             # Check that losses are equal for each step
             for step in sorted(baseline_steps):
                 baseline_loss = baseline_losses[step]
                 test_loss = test_losses[step]
+
+                # Compare baseline vs test
                 self.assertEqual(
                     baseline_loss,
                     test_loss,
                     f"Loss mismatch at step {step}: "
                     f"baseline={baseline_loss}, test={test_loss}",
                 )
+
+                # Compare baseline vs imported (if provided)
+                # No need to compare test vs imported since:
+                # baseline==test and baseline==imported implies test==imported
+                if imported_losses:
+                    imported_loss = imported_losses[step]
+                    self.assertEqual(
+                        baseline_loss,
+                        imported_loss,
+                        f"Loss mismatch at step {step}: "
+                        f"baseline={baseline_loss}, imported={imported_loss}",
+                    )
 
     # Run the test
     suite = unittest.TestLoader().loadTestsFromTestCase(LossEqualityTest)
@@ -611,7 +711,13 @@ def assert_losses_equal(baseline_log: str, test_log: str) -> None:
         log_print("Loss assertion failed!")
         sys.exit(1)
     else:
-        log_print("All losses are equal. Assertion passed!")
+        if import_result:
+            log_print(
+                "All losses are equal (baseline, test, and imported). "
+                "Assertion passed!"
+            )
+        else:
+            log_print("All losses are equal. Assertion passed!")
 
 
 def cleanup_temp_files(output_folder: str | None) -> None:
@@ -755,6 +861,24 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--export-result",
+        default="",
+        help=(
+            "Export losses to specified file path (requires --assert-equal). "
+            "Exports only when losses match. Format: '{step} {loss}' per line."
+        ),
+    )
+    parser.add_argument(
+        "--import-result",
+        default="",
+        help=(
+            "Import losses from specified file path for comparison "
+            "(requires --assert-equal). "
+            "Compares imported losses with both baseline and test "
+            "(all 3 must match)."
+        ),
+    )
+    parser.add_argument(
         "--job-dump-folder",
         default="outputs",
         help="Job dump folder path (default: outputs)",
@@ -784,6 +908,14 @@ Examples:
     # Convert empty output_folder to None
     if not args.output_folder:
         args.output_folder = None
+
+    # Convert empty export_result to None
+    if not args.export_result:
+        args.export_result = None
+
+    # Convert empty import_result to None
+    if not args.import_result:
+        args.import_result = None
 
     return args
 
@@ -848,6 +980,9 @@ def main() -> None:
         args.test_train_file,
         args.test_options,
         args.steps,
+        args.assert_equal,
+        args.export_result,
+        args.import_result,
     )
 
     # Setup environment
@@ -910,7 +1045,14 @@ def main() -> None:
 
     # Assert losses are equal if requested
     if args.assert_equal:
-        assert_losses_equal(baseline_log, test_log)
+        # Pass import_result if provided for 3-way comparison
+        assert_losses_equal(baseline_log, test_log, args.import_result)
+
+        # Export losses if requested (only after assertion passes)
+        if args.export_result:
+            # Extract baseline losses (they equal test losses since assertion passed)
+            baseline_losses = extract_losses_from_log(baseline_log)
+            export_losses_to_file(baseline_losses, args.export_result)
 
     # Analysis and reporting
     perform_loss_analysis(baseline_log, test_log, stats_file)
