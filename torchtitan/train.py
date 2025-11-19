@@ -130,7 +130,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
-        model_cls = self.train_spec.model_cls
         # set the model args from training job configs
         model_args.update_from_config(job_config)
         self.model_args = model_args
@@ -144,11 +143,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ):
             model = self.train_spec.model_cls(model_args)
 
-        with torch.device("meta"):
-            model = model_cls(model_args)
-            # Build the collection of model converters. No-op if `model.converters` empty
-            model_converters = build_model_converters(job_config, parallel_dims)
-            model_converters.convert(model)
+        # Build the collection of model converters. No-op if `model.converters` empty
+        model_converters = build_model_converters(job_config, parallel_dims)
+        model_converters.convert(model)
 
         # metrics logging
         build_metrics_processor_fn = (
