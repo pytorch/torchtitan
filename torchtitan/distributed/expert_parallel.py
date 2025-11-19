@@ -271,6 +271,7 @@ class ReordererSequenceParallel(ParallelStyle):
                 "TokenReorderer class in MoE should always have top_k attribute."
             )
         if isinstance(mod, TokenReordererOld):
+            # HACK: @goon - this code path is just for testing; remove.
             token_indices_experts_sorted += (
                 top_scores.shape[0] // mod.top_k * local_rank
             )
