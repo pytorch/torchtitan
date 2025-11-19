@@ -140,6 +140,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.expert_parallel_degree 4",
                     "--parallelism.expert_tensor_parallel_degree 1",
                     "--activation_checkpoint.mode none",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
                     "--compile.passes inductor_lite",
                 ],
             ],
