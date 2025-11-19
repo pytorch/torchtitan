@@ -22,7 +22,7 @@ if __name__ == "__main__":
     parser.add_argument("--bsz", type=int, default=4)
     args = parser.parse_args()
 
-    # DSv3-16B-like layers
+    # DSv3-16B layers
     device = "cuda"
     dim = 2048
     moe_inter_dim = 1408
