@@ -467,7 +467,9 @@ class MoE(nn.Module):
             device=routed_output.device,
         )
         routed_output_unsorted[token_indices_experts_sorted] = routed_output
-        routed_output_unsorted = routed_output_unsorted.reshape(-1, self.router.top_k, dim)
+        routed_output_unsorted = routed_output_unsorted.reshape(
+            -1, self.router.top_k, dim
+        )
         if not self.score_before_experts:
             out_experts = (
                 torch.bmm(

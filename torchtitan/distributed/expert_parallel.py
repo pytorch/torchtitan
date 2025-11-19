@@ -22,6 +22,7 @@ from torch.distributed.tensor import (
 from torch.distributed.tensor.parallel import ParallelStyle
 
 from torchtitan.models.moe.utils import _permute, _unpermute
+from torchtitan.moe_bench_and_test import TokenReordererOld
 
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
@@ -269,7 +270,12 @@ class ReordererSequenceParallel(ParallelStyle):
             raise ValueError(
                 "TokenReorderer class in MoE should always have top_k attribute."
             )
-        token_indices_experts_sorted += top_scores.shape[0] // mod.top_k * local_rank
+        if isinstance(mod, TokenReordererOld):
+            token_indices_experts_sorted += (
+                top_scores.shape[0] // mod.top_k * local_rank
+            )
+        else:
+            token_indices_experts_sorted += top_scores.shape[0] * local_rank
 
         return top_scores, token_indices_experts_sorted, num_tokens_per_expert
 

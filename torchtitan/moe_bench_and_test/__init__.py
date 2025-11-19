@@ -165,6 +165,6 @@ class TokenReordererOld(TokenReorderer):
 def apply_old_moe_monkey_patches(module: nn.Module) -> None:
     for mod in module.modules():
         if isinstance(mod, MoE):
-            mod.forward = types.MethodType(MoEOld.forward, mod)
+            mod.__class__ = MoEOld
         if isinstance(mod, TokenReorderer):
-            mod.forward = types.MethodType(TokenReordererOld.forward, mod)
+            mod.__class__ = TokenReordererOld
