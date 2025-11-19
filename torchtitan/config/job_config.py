@@ -209,8 +209,10 @@ class Training:
     loaded from this path instead of downloaded.
     """
 
-    dataset_type: Literal["huggingface", "nanoset", "preprocessed"] = "huggingface"
-    """Type of dataset to use ['huggingface', 'nanoset', 'preprocessed']"""
+    dataset_type: Literal[
+        "huggingface", "nanoset", "preprocessed", "packed_memmap"
+    ] = "huggingface"
+    """Type of dataset to use ['huggingface', 'nanoset', 'preprocessed', 'packed_memmap']"""
 
     dataset_folders: list[str] = field(default_factory=list)
     """List of folders containing tokenized datasets for Nanoset"""
@@ -1019,6 +1021,11 @@ class GRPO:
     ptx_scale: float = 1.0
     """
     Scale factor for pretrain/sft mixin
+    """
+
+    ptx_scale_by_tokens: bool = False
+    """
+    Whether to scale by total tokens.
     """
 
 
