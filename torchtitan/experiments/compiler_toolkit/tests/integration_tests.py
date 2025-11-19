@@ -101,6 +101,20 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
             "llama3_fsdp_tp_flexattn_manualbucketing_regional_inductor",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.passes inductor_lite",
+                ],
+            ],
+            "llama3 FSDP+TP+inductor_lite",
+            "llama3_fsdp_tp_inductor_lite",
+            ngpu=4,
+        ),
         # deepseek_v3 tests
         OverrideDefinitions(
             [
@@ -131,20 +145,6 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
             ],
             "deepseek_v3 FSDP+TP+EP+FlexAttention",
             "deepseekv3_fsdp_tp_ep_flexattention",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--model.name compiler_toolkit.llama3",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
-                    "--compile.passes autobucketing_reordering",
-                ],
-            ],
-            "llama3 FSDP+TP+inductor_lite",
-            "llama3_fsdp_tp_inductor_lite",
             ngpu=4,
         ),
     ]
