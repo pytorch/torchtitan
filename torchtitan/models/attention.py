@@ -47,7 +47,8 @@ class FlexAttentionWrapper(torch.nn.Module):
     """
 
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="max-autotune-no-cudagraphs",
+        flex_attention,
+        mode="max-autotune-no-cudagraphs",
     )
 
     def forward(

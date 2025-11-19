@@ -1011,6 +1011,16 @@ class GRPO:
         If None, veto mechanism is disabled.
     """
 
+    ptx_mixin_batchsize: int = 0
+    """
+    Batch size for pretrain/sft mixin. If <= 0, this is ignored.
+    """
+
+    ptx_scale: float = 1.0
+    """
+    Scale factor for pretrain/sft mixin
+    """
+
 
 class Debug:
     seed: int | None = None
