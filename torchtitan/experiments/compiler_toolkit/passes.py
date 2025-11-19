@@ -118,6 +118,7 @@ def inductor_lite_pass(
 
     return compiled_fn
 
+
 # Registry mapping pass names to pass functions
 AVAILABLE_COMPILER_PASSES = {
     "autobucketing_reordering": autobucketing_reordering_pass,
