@@ -25,26 +25,43 @@ permissions:
       contents: read
 
 jobs:
+  # Step 1: Dynamically compute the matrix based on conditions
+  set-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          # Decide which matrix entries to include based on event type
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "schedule" ]]; then
+          # Include both CUDA and ROCm
+          echo '{"include":[
+            {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"},
+            {"name":"rocm","runner":"linux.rocm.gpu.gfx942.8","gpu-arch-type":"rocm","gpu-arch-version":"7.0","docker-image":"torchtitan-rocm-ubuntu-22.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/rocm7.0"}
+            ]}' > matrix.json
+          else
+          # Include only CUDA
+          echo '{"include":[
+            {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"}
+            ]}' > matrix.json
+          fi
+
+          # Export matrix to job outputs
+          {
+            echo 'matrix<<EOF'
+            cat matrix.json
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+
+  # Step 2: Use the dynamic matrix in the build-test job
   build-test:
+    needs: set-matrix
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: cuda
-            runner: linux.g5.48xlarge.nvidia.gpu
-            gpu-arch-type: cuda
-            gpu-arch-version: "12.6"
-            # This image is faster to clone than the default, but it lacks CC needed by triton
-            # (1m25s vs 2m37s).
-            docker-image: torchtitan-ubuntu-20.04-clang12
-            index-url: https://download.pytorch.org/whl/nightly/cu126
-          - name: rocm
-            runner: linux.rocm.gpu.gfx942.8
-            gpu-arch-type: rocm
-            gpu-arch-version: "7.0"
-            docker-image: torchtitan-rocm-ubuntu-22.04-clang12
-            index-url: https://download.pytorch.org/whl/nightly/rocm7.0
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
     with:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
@@ -73,8 +90,7 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        export TEST_WITH_ROCM=$([[ "${{ matrix.gpu-arch-type }}" == "rocm" ]] && echo 1 || echo 0)
-        python -m tests.integration_tests.run_tests --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
         rm -rf artifacts-to-be-uploaded/*/checkpoint
