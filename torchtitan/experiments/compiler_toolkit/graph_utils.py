@@ -354,8 +354,8 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
         move_value_to_end(pass_names, "cudagraph")
     elif "inductor_lite" in pass_names:
         # inductor lite supports regional_inductor by default. They share the same
-        # user-facing frontend API (i.e., the context manager), uses different
-        # backend implementations, and achieves the same compilation result.
+        # user-facing frontend API (i.e., the context manager), use different
+        # backend implementations, and achieve the same compilation result.
         if "regional_inductor" in pass_names:
             pass_names.remove("regional_inductor")
 
@@ -369,7 +369,6 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
         raise ValueError(
             "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
         )
-
     compiler_passes = []
 
     for pass_name in pass_names:
