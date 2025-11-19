@@ -350,6 +350,7 @@ def run_training(
     enable_seed_checkpoint: bool,
     output_folder: str | None,
     job_dump_folder: str,
+    ngpus: int,
 ) -> str:
     """Run training for a specific scenario. Returns the log file path."""
     log_file = get_log_path(scenario, output_folder)
@@ -363,6 +364,7 @@ def run_training(
     )
 
     env = os.environ.copy()
+    env["NGPU"] = str(ngpus)
 
     run_with_realtime_output(full_cmd, log_file, env)
 
@@ -730,6 +732,18 @@ Examples:
         default="outputs",
         help="Job dump folder path (default: outputs)",
     )
+    parser.add_argument(
+        "--baseline-ngpus",
+        type=int,
+        default=8,
+        help="Number of GPUs for baseline run (default: 8)",
+    )
+    parser.add_argument(
+        "--test-ngpus",
+        type=int,
+        default=8,
+        help="Number of GPUs for test run (default: 8)",
+    )
 
     args = parser.parse_args()
 
@@ -757,6 +771,7 @@ def run_scenario(
     enable_seed_checkpoint: bool,
     output_folder: str | None,
     job_dump_folder: str,
+    ngpus: int,
 ) -> str:
     """Run training for a specific scenario (baseline or test).
 
@@ -770,6 +785,7 @@ def run_scenario(
         enable_seed_checkpoint: Whether to use seed checkpoint
         output_folder: Output folder for results
         job_dump_folder: Job dump folder path
+        ngpus: Number of GPUs to use
 
     Returns:
         Path to the log file
@@ -785,6 +801,7 @@ def run_scenario(
         enable_seed_checkpoint,
         output_folder,
         job_dump_folder,
+        ngpus,
     )
 
     return log_file
@@ -841,6 +858,7 @@ def main() -> None:
         enable_seed_checkpoint,
         args.output_folder,
         args.job_dump_folder,
+        args.baseline_ngpus,
     )
 
     test_log = run_scenario(
@@ -853,6 +871,7 @@ def main() -> None:
         enable_seed_checkpoint,
         args.output_folder,
         args.job_dump_folder,
+        args.test_ngpus,
     )
     log_print()
 
