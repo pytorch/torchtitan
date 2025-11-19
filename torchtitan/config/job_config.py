@@ -791,8 +791,14 @@ class Comm:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
+    fake_backend: bool = False
+    """Fake comm backend for dry run mode only"""
+
     local_tensor_mode: bool = False
-    """Local tensor mode, for debugging purposes. This is an experimental feature."""
+    """
+    Local tensor mode, for debugging purposes. This is an experimental feature.
+    fake_backend should be set to True as well if local_tensor_mode is True.
+    """
 
 
 @dataclass

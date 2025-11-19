@@ -14,7 +14,6 @@ import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
 from torch import distributed as dist
-from torch.distributed import _local_tensor
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
@@ -259,8 +258,8 @@ def maybe_enable_amp(
             )
 
 
-def init_local_tensor_mode(world_size: int) -> int:
-    """Initialize local tensor mode for debugging purposes.
+def init_fake_mode(world_size: int) -> int:
+    """Initialize fake backend
 
     Args:
         world_size: The number of GPUs to simulate
@@ -273,8 +272,6 @@ def init_local_tensor_mode(world_size: int) -> int:
         rank=0,
         world_size=world_size,
     )
-    lm = _local_tensor.LocalTensorMode(world_size)
-    lm.__enter__()
     return world_size
 
 
@@ -284,7 +281,7 @@ def init_distributed(
     base_folder: str = "",
     ranks: list[int] | None = None,
 ) -> int:
-    if comm_config.local_tensor_mode:
+    if comm_config.fake_backend:
         ngpu_str = os.environ.get("NGPU")
         if ngpu_str is None:
             raise ValueError(
@@ -296,7 +293,7 @@ def init_distributed(
             raise ValueError(
                 f"NGPU environment variable must be a valid integer, got: {ngpu_str}"
             ) from e
-        return init_local_tensor_mode(world_size)
+        return init_fake_mode(world_size)
 
     def _warn_overwrite_env(env, val):
         if env in os.environ:

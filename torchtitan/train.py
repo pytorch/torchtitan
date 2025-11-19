@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import Any, Generator, Iterable
 
 import torch
+from torch.distributed import _local_tensor
 
 from torch.distributed.elastic.multiprocessing.errors import record
 
@@ -372,8 +373,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             base_folder=job_config.job.dump_folder,
         )
 
-        parallelism_config = job_config.parallelism
+        if job_config.comm.local_tensor_mode:
+            if not job_config.comm.fake_backend:
+                raise ValueError("LocalTensor can only be used with fake backend.")
+            lm = _local_tensor.LocalTensorMode(world_size)
+            lm.__enter__()
 
+        parallelism_config = job_config.parallelism
         return ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,

@@ -22,7 +22,7 @@ TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 if [ "$DRY_RUN" = "1" ]; then
     # Dry run mode: validate configuration without GPU/distributed setup
     echo "Running in DRY RUN mode - configuration validation only"
-    NGPU="${NGPU}" LOCAL_RANK=0 python3 -m "${TRAIN_FILE}" --job.config_file "${CONFIG_FILE}" "$@" --comm.local_tensor_mode
+    NGPU="${NGPU}" LOCAL_RANK=0 python3 -m "${TRAIN_FILE}" --job.config_file "${CONFIG_FILE}" "$@" --comm.fake_backend --training.steps=1
 else
     # Normal training with torchrun
     PYTORCH_ALLOC_CONF="expandable_segments:True" \
