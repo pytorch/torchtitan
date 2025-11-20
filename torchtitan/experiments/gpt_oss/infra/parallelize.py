@@ -53,8 +53,6 @@ def parallelize_gptoss(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    world_mesh = parallel_dims.world_mesh
-
     assert (
         job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -65,6 +63,10 @@ def parallelize_gptoss(
     use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
     if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
         raise NotImplementedError("CP support for FlexAttention is still in progress.")
+
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
 
     if parallel_dims.tp_enabled:
         if (
@@ -86,7 +88,7 @@ def parallelize_gptoss(
 
         apply_non_moe_tp(
             model,
-            world_mesh["tp"],
+            parallel_dims.get_mesh("tp"),
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
             enable_async_tp=False,
@@ -95,10 +97,10 @@ def parallelize_gptoss(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
-                world_mesh["ep", "tp"]
+            tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
+            ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
+            ep_etp_mesh=(
+                parallel_dims.get_mesh("ep_etp")
                 if parallel_dims.tp_enabled
                 and parallel_dims.ep_enabled
                 and parallel_dims.etp_enabled
@@ -106,10 +108,6 @@ def parallelize_gptoss(
             ),
             etp_enabled=parallel_dims.etp_enabled,
         )
-
-    model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
-    )
 
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(
@@ -123,18 +121,18 @@ def parallelize_gptoss(
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh_dim_names = []
-        if parallel_dims.ep_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,
@@ -145,11 +143,7 @@ def parallelize_gptoss(
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=(
-                world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
-                if parallel_dims.ep_enabled
-                else None
-            ),
+            edp_mesh=edp_mesh,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -163,9 +157,9 @@ def parallelize_gptoss(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
+        dp_mesh = parallel_dims.get_mesh("dp_replicate")
+        if dp_mesh is not None and dp_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
-        dp_mesh = world_mesh
         apply_ddp(
             model,
             dp_mesh,
@@ -256,7 +250,7 @@ def apply_moe_ep_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
-    ep_tp_mesh: DeviceMesh | None,
+    ep_etp_mesh: DeviceMesh | None,
     etp_enabled: bool,
 ):
     assert ep_mesh is not None or tp_mesh is not None
@@ -301,7 +295,7 @@ def apply_moe_ep_tp(
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
         else:
-            experts_mesh = ep_tp_mesh
+            experts_mesh = ep_etp_mesh
             experts_plan = GptossExpertTensorParallel()
 
         parallelize_module(

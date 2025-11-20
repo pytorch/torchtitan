@@ -50,7 +50,6 @@ def parallelize_deepseekv3(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
@@ -81,26 +80,28 @@ def parallelize_deepseekv3(
 
         apply_non_moe_tp(
             model,
-            world_mesh["tp"],
+            parallel_dims.get_mesh("tp"),
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
             use_flex_attn=use_flex_attn,
         )
-        maybe_enable_async_tp(job_config, world_mesh["tp"])
+        maybe_enable_async_tp(job_config, parallel_dims.get_mesh("tp"))
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
-                world_mesh["ep", "tp"]
+            tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
+            ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
+            etp_mesh=(
+                parallel_dims.get_mesh("etp") if parallel_dims.etp_enabled else None
+            ),
+            ep_etp_mesh=(
+                parallel_dims.get_mesh(["ep", "etp"])
                 if parallel_dims.tp_enabled
                 and parallel_dims.ep_enabled
                 and parallel_dims.etp_enabled
                 else None
             ),
-            etp_enabled=parallel_dims.etp_enabled,
         )
 
     model_compile_enabled = (
@@ -123,18 +124,18 @@ def parallelize_deepseekv3(
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh_dim_names = []
-        if parallel_dims.ep_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,
@@ -145,11 +146,7 @@ def parallelize_deepseekv3(
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=(
-                world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
-                if parallel_dims.ep_enabled
-                else None
-            ),
+            edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
@@ -164,9 +161,9 @@ def parallelize_deepseekv3(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
+        dp_mesh = parallel_dims.get_mesh("dp_replicate")
+        if dp_mesh is not None and dp_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
-        dp_mesh = world_mesh
         apply_ddp(
             model,
             dp_mesh,

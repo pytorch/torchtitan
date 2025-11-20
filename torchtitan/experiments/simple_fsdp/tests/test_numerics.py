@@ -20,13 +20,13 @@ class TestSimpleFSDP(FSDPTest):
         self.loss_fn = cross_entropy_loss
         data_parallel_shard_degree = -1
         if self.mode == "replicate":
-            self.dp_mesh_dim_names = ("dp_replicate",)
+            self.dp_mesh_dim_names = ["dp_replicate"]
             data_parallel_replicate_degree = self.world_size
         elif self.mode == "fully_shard":
-            self.dp_mesh_dim_names = ("dp_shard_cp",)
+            self.dp_mesh_dim_names = ["fsdp"]
             data_parallel_replicate_degree = 1
         elif self.mode == "hybrid_shard":
-            self.dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+            self.dp_mesh_dim_names = ["dp_replicate", "fsdp"]
             data_parallel_replicate_degree = self.world_size // 2
         else:
             raise ValueError(f"Unsupported mode {self.mode}")
@@ -41,7 +41,6 @@ class TestSimpleFSDP(FSDPTest):
             etp=1,
             world_size=self.world_size,
         )
-        self.device_mesh = self.parallel_dims.world_mesh
 
     def get_input(self):
         inputs = torch.randn(8, 8).cuda()
@@ -50,7 +49,7 @@ class TestSimpleFSDP(FSDPTest):
         return model, inputs, labels
 
     def run_fsdp2(self, model, inputs, labels, epoch=20):
-        fully_shard(model, mesh=self.device_mesh[tuple(self.dp_mesh_dim_names)])
+        fully_shard(model, mesh=self.parallel_dims.get_mesh(self.dp_mesh_dim_names))
         optim = self.optimizer(model.parameters(), lr=1e-4)
         losses = []
         for _ in range(epoch):
@@ -65,7 +64,7 @@ class TestSimpleFSDP(FSDPTest):
     def run_simple_fsdp(self, model, inputs, labels, epoch=20):
         model = data_parallel(
             model,
-            device_mesh=self.device_mesh[tuple(self.dp_mesh_dim_names)],
+            device_mesh=self.parallel_dims.get_mesh(self.dp_mesh_dim_names),
             mode=self.mode,
         )
         optim = self.optimizer(model.parameters(), lr=1e-4)
@@ -82,7 +81,7 @@ class TestSimpleFSDP(FSDPTest):
     def run_simple_fsdp_compiled_aot_eager(self, model, inputs, labels, epoch=20):
         model = data_parallel(
             model,
-            device_mesh=self.device_mesh[tuple(self.dp_mesh_dim_names)],
+            device_mesh=self.parallel_dims.get_mesh(self.dp_mesh_dim_names),
             mode=self.mode,
         )
         # TODO: Add "inductor" backend when it's numerical issues are fixed
