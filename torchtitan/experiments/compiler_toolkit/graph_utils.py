@@ -261,16 +261,16 @@ def compiler(
     )
     _dump_gm(dump_folder, gm, f"{name}_before_compiler")
 
-    if end_with_pass(passes, ["cudagraph_pass"]):
-        # cudagraph pass is always the last pass if it is applied
-        cg_pass = passes[-1]
+    if end_with_pass(passes, ["cudagraph_pass", "inductor_lite_pass"]):
+        # cudagraph pass or inductor lite pass is always the last pass if it is applied
+        last_pass = passes[-1]
 
-        # to identify static input indices, cudagraph passes behaves differently for
-        # forward and backward pass. so we explicitly pass the info.
-        _cg_pass = functools.partial(cg_pass, is_forward=is_forward)
+        # these two passes behave differently for forward and backward pass to identify
+        # static input indices. so we explicitly pass the info.
+        _last_pass = functools.partial(last_pass, is_forward=is_forward)
 
         # keep the function name for debug log
-        passes[-1] = functools.wraps(cg_pass)(_cg_pass)
+        passes[-1] = functools.wraps(last_pass)(_last_pass)
 
     for pass_fn in passes:
         pass_name = (
@@ -375,7 +375,6 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
 
     pass_names = getattr(job_config.compile, "passes", [])
     validate_pass_names(pass_names)
-
     compiler_passes = []
 
     for pass_name in pass_names:
