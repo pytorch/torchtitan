@@ -26,31 +26,14 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.context_parallel_degree 2",
-                ]
-            ],
-            "HSDP+CP",
-            "hsdp+cp",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--validation.enable",
-                ]
-            ],
-            "Flux Validation Test",
-            "validation",
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--checkpoint.enable",
                 ],
-                [],
+                []
             ],
-            "Flux Generation script test",
-            "test_generate",
-            ngpu=2,
+            "HSDP+CP+Validation+Inference",
+            "hsdp+cp+validation+inference",
+            ngpu=8,
         ),
     ]
     return integration_tests_flavors
@@ -84,7 +67,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
 
         # save checkpoint (idx == 0) and load it for generation (idx == 1)
-        if test_name == "test_generate" and idx == 1:
+        if test_name == "hsdp+cp+validation+inference" and idx == 1:
             # For flux generation, test using inference script
             cmd = (
                 f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
