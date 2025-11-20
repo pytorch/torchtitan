@@ -281,6 +281,9 @@ def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):
         lm = _local_tensor.LocalTensorMode(world_size)
         lm.__enter__()
 
+        # TODO: remove this once the root cause is figured out
+        torch.manual_seed(42)
+
     return world_size
 
 

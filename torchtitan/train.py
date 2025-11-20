@@ -208,12 +208,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.loss_fn, self.gradient_accumulation_steps
         )
 
-        # TODO(local_tensor): Remove this special case once LocalTensor supports
-        # init_weights(). Currently it fails occasionally.
-        if job_config.comm.comm_mode == "local_tensor":
-            logger.info("Local tensor mode enabled - skipping training execution")
-            return
-
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
