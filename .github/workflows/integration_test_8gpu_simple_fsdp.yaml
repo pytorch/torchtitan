@@ -50,7 +50,11 @@ jobs:
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
-        python -m torchtitan.experiments.simple_fsdp.tests.integration_tests artifacts-to-be-uploaded --ngpu 8
+        # Run front-end integration tests of SimpleFSDP
+        python -m torchtitan.experiments.simple_fsdp.tests.frontend_integration_tests artifacts-to-be-uploaded --ngpu 8
+
+        # Run backend pass integration tests of SimpleFSDP
+        python -m torchtitan.experiments.simple_fsdp.tests.compiler_pass_integration_tests artifacts-to-be-uploaded --ngpu 8 --comm_mode local_tensor
 
         # Run the numerics unit tests of SimpleFSDP
         torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/simple_fsdp/tests/test_numerics.py -v
