@@ -258,11 +258,12 @@ def maybe_enable_amp(
             )
 
 
-def init_fake_mode(world_size: int) -> int:
+def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):
     """Initialize fake backend
 
     Args:
         world_size: The number of GPUs to simulate
+        comm_mode: Communication mode ("fake_backend" or "local_tensor")
 
     Returns:
         The world size
@@ -272,6 +273,14 @@ def init_fake_mode(world_size: int) -> int:
         rank=0,
         world_size=world_size,
     )
+
+    # If local_tensor mode is enabled, initialize LocalTensorMode context
+    if comm_mode == "local_tensor":
+        from torch.distributed import _local_tensor
+
+        lm = _local_tensor.LocalTensorMode(world_size)
+        lm.__enter__()
+
     return world_size
 
 
@@ -281,11 +290,11 @@ def init_distributed(
     base_folder: str = "",
     ranks: list[int] | None = None,
 ) -> int:
-    if comm_config.fake_backend:
+    if comm_config.comm_mode in ("fake_backend", "local_tensor"):
         ngpu_str = os.environ.get("NGPU")
         if ngpu_str is None:
             raise ValueError(
-                "NGPU environment variable must be set when using local_tensor_mode"
+                f"NGPU environment variable must be set when using comm_mode={comm_config.comm_mode}"
             )
         try:
             world_size = int(ngpu_str)
@@ -293,7 +302,8 @@ def init_distributed(
             raise ValueError(
                 f"NGPU environment variable must be a valid integer, got: {ngpu_str}"
             ) from e
-        return init_fake_mode(world_size)
+        init_fake_mode(world_size, comm_config.comm_mode)
+        return world_size
 
     def _warn_overwrite_env(env, val):
         if env in os.environ:
