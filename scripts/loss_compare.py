@@ -353,8 +353,7 @@ def check_git_clean_state() -> None:
             log_print(f"  {line}")
         log_print("")
         log_print(
-            "Please commit, stash, or discard your changes before "
-            "running this script"
+            "Please commit, stash, or discard your changes before running this script"
         )
         log_print("  - To commit: git add -A && git commit -m 'message'")
         log_print("  - To stash: git stash")
