@@ -335,9 +335,12 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertEqual(parallel_dims._meshes["efsdp"].size(), 1)
 
         # Validate 2D mesh shapes
-        self.assertEqual(parallel_dims._meshes["dp_replicate_fsdp"].shape, (1, 1))
-        self.assertEqual(parallel_dims._meshes["dp_replicate_efsdp"].shape, (1, 1))
-        self.assertEqual(parallel_dims._meshes["ep_etp"].shape, (1, 1))
+        dp_replicate_fsdp_mesh = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+        self.assertIsNone(dp_replicate_fsdp_mesh)  # Both dimensions have size 1
+        dp_replicate_efsdp_mesh = parallel_dims.get_mesh(["dp_replicate", "efsdp"])
+        self.assertIsNone(dp_replicate_efsdp_mesh)  # Both dimensions have size 1
+        ep_etp_mesh = parallel_dims.get_mesh(["ep", "etp"])
+        self.assertIsNone(ep_etp_mesh)  # Both dimensions have size 1
 
         # Test get_mesh returns None when all dimensions have size 1
         self.assertIsNone(parallel_dims.get_mesh("tp"))
@@ -483,13 +486,16 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             )  # fsdp * tp / (etp * ep) = 2 * 2 / (1 * 1) = 4
 
             # Validate 2D mesh shapes
+            dp_replicate_fsdp_mesh = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+            self.assertIsNotNone(dp_replicate_fsdp_mesh)
             self.assertEqual(
-                parallel_dims._meshes["dp_replicate_fsdp"].shape, (2, 2)
+                dp_replicate_fsdp_mesh.shape, (2, 2)
             )  # (dp_replicate, fsdp)
-            self.assertEqual(
-                parallel_dims._meshes["dp_replicate_efsdp"].shape, (2, 4)
-            )  # (dp_replicate, efsdp)
-            self.assertEqual(parallel_dims._meshes["ep_etp"].shape, (1, 1))  # (ep, etp)
+            # efsdp mesh only exists when ep > 1, so dp_replicate_efsdp should be None when ep=1
+            dp_replicate_efsdp_mesh = parallel_dims.get_mesh(["dp_replicate", "efsdp"])
+            self.assertIsNone(dp_replicate_efsdp_mesh)  # efsdp disabled when ep=1
+            ep_etp_mesh = parallel_dims.get_mesh(["ep", "etp"])
+            self.assertIsNone(ep_etp_mesh)  # Both dimensions have size 1
 
             # Test get_mesh returns valid meshes for enabled dimensions (size > 1)
             self.assertIsNotNone(parallel_dims.get_mesh("tp"))
@@ -524,11 +530,15 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertNotIn("ep", one_d_meshes)
             self.assertNotIn("etp", one_d_meshes)
 
+            # In the new implementation, get_all_meshes only returns 1D meshes from _meshes
+            # Multi-D meshes are not stored separately, but can be obtained via get_mesh()
             all_meshes = parallel_dims.get_all_meshes(one_dimensioal_only=False)
-            self.assertGreater(len(all_meshes), len(one_d_meshes))
-            # Should also include 2D meshes
-            self.assertIn("dp_replicate_fsdp", all_meshes)
-            self.assertIn("dp_replicate_efsdp", all_meshes)
+            # Since _meshes only contains 1D meshes, both should return the same
+            self.assertEqual(len(all_meshes), len(one_d_meshes))
+            # Verify we can get 2D meshes via get_mesh() instead
+            dp_replicate_fsdp = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+            self.assertIsNotNone(dp_replicate_fsdp)
+            self.assertEqual(dp_replicate_fsdp.ndim, 2)
 
             # Test world_mesh property
             world_mesh_property = parallel_dims.world_mesh

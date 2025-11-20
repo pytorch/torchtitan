@@ -64,7 +64,6 @@ def parallelize_gptoss(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )

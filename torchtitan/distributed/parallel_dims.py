@@ -60,6 +60,8 @@ class ParallelDims:
 
     def _mesh_exist(self, name: str, degree: int) -> bool:
         if name == "efsdp":
+            # We always keep the efsdp if EP is larger than 1 because we need
+            # FSDP wrapping to help the MoE layers do mixed precision training.
             return True if self.ep > 1 else False
         return degree > 1
 
@@ -75,9 +77,13 @@ class ParallelDims:
                      ``dp_replicate`` and ``dp_shard``. The backend is set to ``fake`` for
                      this dimension to avoid unnecessary process group creation.
             loss:    Used by all-reduce when computing the loss. Includes ``dp_replicate``,
-                     ``dp_shard``, and ``cp`` degrees, as all are data parallelisms.
+                     ``dp_shard``, and ``cp`` degrees, as all of them parallelize the data,
+                     essentially require the weight gradients reduction.
             dp_replicate: For DDP or HSDP replicate dimension.
-            fsdp:    For FSDP dimension. This includes ``dp_shard`` and ``cp``.
+            fsdp:    For FSDP dimension. This includes ``dp_shard`` and ``cp``. Note that
+                     we always assume that when ``cp`` is used, FSDP is also applied to
+                     utilize its weight all-gather and gradients reduce_scatter even if
+                     there may be no data parallelism (e.g., global batch size is 1).
             cp:      Context Parallelism (CP).
             tp:      Tensor Parallelism (TP).
             ep:      Expert Parallelism (EP).
@@ -86,15 +92,18 @@ class ParallelDims:
 
         Note: Most dimensions above are created by unflattening the world mesh, except for loss,
         which is created by flattening the batch and cp dimensions.
-        This API performs the following unflatten operations:
+        This API performs the following unflatten operations from the world mesh:
 
-            ["pp", "batch", "cp", "tp"]
-            ["pp", "dp_replicate", "fsdp", "tp"]
-            ["pp", "dp_replicate", "efsdp", "ep", "etp"]
+            ["pp", "batch", "cp", "tp"]  # dataloading_mesh
+            ["pp", "dp_replicate", "fsdp", "tp"]  # dense_mesh
+            ["pp", "dp_replicate", "efsdp", "ep", "etp"]  # sparse_mesh
 
         Note: DeviceMesh currently recreates the process group for each dimension.
         It should share the process group for the same dim group to avoid unnecessary
-        process group creation.
+        process group creation. We can also use Fake to achieve a similar goal.
+        However, using Fake to avoid redundancy messing up the code. We only use Fake
+        when it is necessary. For now, we just let DeviceMesh create redundant process
+        group and wait for DeviceMesh to fix the issue.
         """
 
         def unflatten_mesh(
@@ -197,12 +206,12 @@ class ParallelDims:
             )
 
     def get_mesh(self, dims: str | list[str]) -> DeviceMesh | None:
-        """Get a device mesh by dimension names.
+        """Get a device mesh by dimension name(s).
 
         Args:
             dims: Names of the mesh dimension. Valid options include:
                  'pp', 'batch', 'loss', 'dp_replicate', 'fsdp',
-                 'cp', 'tp', 'ep', 'etp', 'efsdp'
+                 'cp', 'tp', 'ep', 'etp', 'efsdp'.
 
         Returns:
             DeviceMesh for the requested dimension(s). The DeviceMesh exists if
