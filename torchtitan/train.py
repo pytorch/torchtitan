@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import gc
 import importlib
 import os
 import time
@@ -703,16 +702,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
             self.metrics_processor.close()
-
-        # Note [explicit cudagraph close]
-        # cudagraph holds reference to nccl which prevents destroy nccl
-        # group. so we need to explicitly delete cudagraph which is held
-        # in joint_graph_module. An explicit gc.collect() is necessary
-        # to clean up reference cycles.
-        for part in self.model_parts:
-            if hasattr(part, "joint_graph_module"):
-                part.joint_graph_module = None
-        gc.collect()
 
 
 def main(trainer_class: type[Trainer]) -> None:
