@@ -364,9 +364,7 @@ def build_optimizers_with_moe_load_balancing(
         model_parts: list[nn.Module],
         parallel_dims: ParallelDims,
     ):
-        loss_mesh = (
-            parallel_dims.get_mesh("loss") if parallel_dims.dp_cp_enabled else None
-        )
+        loss_mesh = parallel_dims.get_optional_mesh("loss")
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_list = []

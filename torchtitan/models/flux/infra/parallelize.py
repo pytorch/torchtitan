@@ -33,9 +33,10 @@ def parallelize_flux(
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
 
+        dp_mesh = parallel_dims.get_mesh(names)
         apply_fsdp(
             model,
-            parallel_dims.get_mesh(names),
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             cpu_offload=job_config.training.enable_cpu_offload,
@@ -148,8 +149,9 @@ def parallelize_encoders(
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
+        dp_mesh = parallel_dims.get_mesh(names)
         fsdp_config: dict[str, Any] = {
-            "mesh": parallel_dims.get_mesh(names),
+            "mesh": dp_mesh,
             "mp_policy": mp_policy,
         }
         if job_config.training.enable_cpu_offload:

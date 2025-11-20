@@ -120,17 +120,16 @@ class Validator(BaseValidator):
             inputs = input_dict["input"]
             labels = labels.to(device_type)
 
-            optional_context_parallel_ctx = (
-                dist_utils.create_context_parallel_ctx(
-                    cp_mesh=parallel_dims.get_mesh("cp"),
+            optional_context_parallel_ctx = None
+            if parallel_dims.cp_enabled:
+                cp_mesh = parallel_dims.get_mesh("cp")
+                optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
+                    cp_mesh=cp_mesh,
                     cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                     cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                     cp_no_restore_buffers={inputs, labels},
                     cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
                 )
-                if parallel_dims.cp_enabled
-                else None
-            )
 
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
@@ -175,7 +174,9 @@ class Validator(BaseValidator):
         loss = torch.sum(torch.stack(accumulated_losses))
         loss /= num_steps
         if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_mean(loss, parallel_dims.get_mesh("loss"))
+            global_avg_loss = dist_utils.dist_mean(
+                loss, parallel_dims.get_optional_mesh("loss")
+            )
         else:
             global_avg_loss = loss.item()
 

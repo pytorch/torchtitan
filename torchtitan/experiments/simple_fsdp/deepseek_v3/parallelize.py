@@ -95,10 +95,10 @@ def parallelize_deepseekv3(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
-            tp_mesh=parallel_dims.get_mesh("tp"),
-            ep_mesh=parallel_dims.get_mesh("ep"),
-            etp_mesh=parallel_dims.get_mesh("etp"),
-            ep_etp_mesh=parallel_dims.get_mesh(["ep", "etp"]),
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -135,7 +135,7 @@ def parallelize_deepseekv3(
             if parallel_dims.dp_replicate_enabled
             else ["efsdp"]
         )
-        edp_mesh = parallel_dims.get_mesh(edp_mesh_names)
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         for _, transformer_block in model.layers.items():
             if transformer_block.moe_enabled and parallel_dims.ep_enabled:

@@ -44,7 +44,13 @@ def parallelize_llama(
         job_config.experimental.comms_bucket_reorder_strategy
     )
 
-    world_mesh = parallel_dims.world_mesh
+    dense_names = ["dp_replicate", "fsdp", "tp"]
+    dense_names = [
+        name
+        for name in dense_names
+        if parallel_dims.get_optional_mesh(name) is not None
+    ]
+    dense_mesh = parallel_dims.get_mesh(dense_names)
 
     def input_fn():
         global_batch_size = job_config.training.global_batch_size
@@ -88,7 +94,7 @@ def parallelize_llama(
     with AutoParallel(
         model,
         input_fn,
-        world_mesh,
+        dense_mesh,
         mp_policy=mp_policy,
         compile=job_config.compile,
     ) as autop:
@@ -97,20 +103,20 @@ def parallelize_llama(
         possible_input_shardings = {
             # maps relative to mesh dim names used in torchtitan
             "dp_replicate": Shard(0),
-            "dp_shard": Shard(0),
+            "fsdp": Shard(0),
             "tp": Replicate(),
         }
         # only used if loss parallel is enabled
         possible_output_shardings = {
             # maps relative to mesh dim names used in torchtitan
-            "dp_shard": Shard(0),
+            "fsdp": Shard(0),
             "tp": Shard(2),
         }
         assert all(
-            name in possible_input_shardings for name in world_mesh.mesh_dim_names
+            name in possible_input_shardings for name in dense_mesh.mesh_dim_names
         ), f"Unsupported mesh dim in world mesh, only {possible_input_shardings.keys()} are supported by AutoParallel"
         x_sharding = tuple(
-            possible_input_shardings[name] for name in world_mesh.mesh_dim_names
+            possible_input_shardings[name] for name in dense_mesh.mesh_dim_names
         )
         out_sharding = x_sharding
         loss_parallel_enabled = (
@@ -120,7 +126,7 @@ def parallelize_llama(
         if loss_parallel_enabled:
             out_sharding = tuple(
                 possible_output_shardings[name]
-                for name in world_mesh.mesh_dim_names
+                for name in dense_mesh.mesh_dim_names
                 if name != "dp_replicate"
             )
         autop.add_input_constraints([x_sharding])
@@ -141,7 +147,7 @@ def parallelize_llama(
         # it would require putting the loss inside the model as well
         def _return_as_dtensor_for_loss_parallel(module, args, output):
             return torch.distributed.tensor.DTensor.from_local(
-                output, world_mesh["tp"], (Shard(2),)
+                output, dense_mesh["tp"], (Shard(2),)
             )
 
         # not keeping a reference to the hook, don't plan on

@@ -243,9 +243,7 @@ class Trainer(ForgeEngine):
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
-            pp_mesh=(
-                parallel_dims.get_mesh("pp") if parallel_dims.pp_enabled else None
-            ),
+            pp_mesh=parallel_dims.get_optional_mesh("pp"),
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
@@ -262,8 +260,8 @@ class Trainer(ForgeEngine):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             global_avg_loss, global_max_loss = (
-                dist_utils.dist_mean(loss, parallel_dims.get_mesh("loss")),
-                dist_utils.dist_max(loss, parallel_dims.get_mesh("loss")),
+                dist_utils.dist_mean(loss, parallel_dims.get_optional_mesh("loss")),
+                dist_utils.dist_max(loss, parallel_dims.get_optional_mesh("loss")),
             )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()

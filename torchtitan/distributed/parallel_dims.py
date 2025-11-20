@@ -60,6 +60,8 @@ class ParallelDims:
 
     def _mesh_exist(self, name: str, degree: int) -> bool:
         if name == "efsdp":
+            # We always keep the efsdp if EP is larger than 1 because we need
+            # FSDP wrapping to help the MoE layers do mixed precision training.
             return True if self.ep > 1 else False
         return degree > 1
 
@@ -75,9 +77,13 @@ class ParallelDims:
                      ``dp_replicate`` and ``dp_shard``. The backend is set to ``fake`` for
                      this dimension to avoid unnecessary process group creation.
             loss:    Used by all-reduce when computing the loss. Includes ``dp_replicate``,
-                     ``dp_shard``, and ``cp`` degrees, as all are data parallelisms.
+                     ``dp_shard``, and ``cp`` degrees, as all of them parallelize the data,
+                     essentially require the weight gradients reduction.
             dp_replicate: For DDP or HSDP replicate dimension.
-            fsdp:    For FSDP dimension. This includes ``dp_shard`` and ``cp``.
+            fsdp:    For FSDP dimension. This includes ``dp_shard`` and ``cp``. Note that
+                     we always assume that when ``cp`` is used, FSDP is also applied to
+                     utilize its weight all-gather and gradients reduce_scatter even if
+                     there may be no data parallelism (e.g., global batch size is 1).
             cp:      Context Parallelism (CP).
             tp:      Tensor Parallelism (TP).
             ep:      Expert Parallelism (EP).
@@ -86,19 +92,24 @@ class ParallelDims:
 
         Note: Most dimensions above are created by unflattening the world mesh, except for loss,
         which is created by flattening the batch and cp dimensions.
-        This API performs the following unflatten operations:
+        This API performs the following unflatten operations from the world mesh:
 
-            ["pp", "batch", "cp", "tp"]
-            ["pp", "dp_replicate", "fsdp", "tp"]
-            ["pp", "dp_replicate", "efsdp", "ep", "etp"]
+            ["pp", "batch", "cp", "tp"]  # dataloading_mesh
+            ["pp", "dp_replicate", "fsdp", "tp"]  # dense_mesh
+            ["pp", "dp_replicate", "efsdp", "ep", "etp"]  # sparse_mesh
 
         Note: DeviceMesh currently recreates the process group for each dimension.
         It should share the process group for the same dim group to avoid unnecessary
-        process group creation.
+        process group creation. We can also use Fake to achieve a similar goal.
+        However, using Fake to avoid redundancy messing up the code. We only use Fake
+        when it is necessary. For now, we just let DeviceMesh create redundant process
+        group and wait for DeviceMesh to fix the issue.
         """
 
         def unflatten_mesh(
-            world_mesh: DeviceMesh, dim_names: tuple[str], dim_degrees: tuple[int]
+            world_mesh: DeviceMesh,
+            dim_names: tuple[str, ...],
+            dim_degrees: tuple[int, ...],
         ):
             """Unflatten the world mesh to create the required mesh dimensions.
 
@@ -169,7 +180,7 @@ class ParallelDims:
 
         logger.info(
             f"Successfully created meshes with active dimensions: "
-            f"{list(self.get_all_meshes().keys())}"
+            f"{list(self.get_all_one_dimensional_meshes().keys())}"
         )
 
         return self._world_mesh
@@ -196,19 +207,18 @@ class ParallelDims:
                 f"expected {expected_size}, got {actual_size}"
             )
 
-    def get_mesh(self, dims: str | list[str]) -> DeviceMesh | None:
-        """Get a device mesh by dimension names.
+    def get_optional_mesh(self, dims: str | list[str]) -> DeviceMesh | None:
+        """Get a device mesh by dimension name(s), returning None if not enabled.
 
         Args:
             dims: Names of the mesh dimension. Valid options include:
                  'pp', 'batch', 'loss', 'dp_replicate', 'fsdp',
-                 'cp', 'tp', 'ep', 'etp', 'efsdp'
+                 'cp', 'tp', 'ep', 'etp', 'efsdp'.
 
         Returns:
-            DeviceMesh for the requested dimension(s). The DeviceMesh exists if
-            1) dimension size is larger than 1 (the parallelism is enabled)
-            2) efsdp is enabled even if size is 1 if ep is > 1.
-            The return value if None otherwise.
+            DeviceMesh for the requested dimension(s), or None if:
+            - The dimension size is 1 (parallelism not enabled)
+            - The dimension doesn't exist (except efsdp which can exist even if size is 1 when ep > 1)
 
         Raises:
             ValueError: If the requested dimension name(s) is not valid.
@@ -233,25 +243,69 @@ class ParallelDims:
             return self._meshes[dims[0]]
         else:
             for global_mesh in self._global_meshes.values():
+                assert global_mesh.mesh_dim_names is not None
                 if not set(dims).issubset(set(global_mesh.mesh_dim_names)):
                     continue
                 return global_mesh[tuple(dims)]
             raise ValueError(f"Invalid mesh name combinations {dims}.")
 
-    def get_all_meshes(self, one_dimensioal_only: bool = True) -> dict[str, DeviceMesh]:
+    def get_mesh(self, dims: str | list[str]) -> DeviceMesh:
+        """Get a device mesh by dimension name(s), raising if not available.
+
+        Args:
+            dims: Names of the mesh dimension. Valid options include:
+                 'pp', 'batch', 'loss', 'dp_replicate', 'fsdp',
+                 'cp', 'tp', 'ep', 'etp', 'efsdp'.
+
+        Returns:
+            DeviceMesh for the requested dimension(s).
+
+        Raises:
+            ValueError: If the mesh is not available (dimension size = 1 or not enabled),
+                or if the requested dimension name(s) is not valid.
+        """
+        mesh = self.get_optional_mesh(dims)
+        if mesh is None:
+            enabled_str = (
+                "enabled (size > 1)" if isinstance(dims, str) else "all enabled"
+            )
+            raise ValueError(
+                f"Mesh '{dims}' is not available. "
+                f"Ensure the corresponding parallelism dimension is {enabled_str}."
+            )
+        return mesh
+
+    def get_all_one_dimensional_meshes(self) -> dict[str, DeviceMesh]:
+        """Get all enabled one-dimensional device meshes.
+
+        Returns a dictionary of enabled one-dimensional device meshes, allowing you to
+        access their process groups.
+
+        Note:
+            Device meshes created with the Fake backend are still included in the results.
+
+        Returns:
+            dict[str, DeviceMesh]: A dictionary mapping mesh dimension names to their
+                corresponding DeviceMesh objects. Only includes meshes where:
+                - ndim == 1 (one-dimensional)
+                - parallelism is enabled (size > 1)
+
+        Example:
+            >>> parallel_dims = ParallelDims(
+            ...     dp_replicate=2, dp_shard=2, cp=1, tp=2, pp=1, ep=1, etp=1, world_size=8
+            ... )
+            >>> meshes = parallel_dims.get_all_one_dimensional_meshes()
+            >>> print(meshes.keys())
+            dict_keys(['dp_replicate', 'fsdp', 'tp', 'batch', 'loss', 'efsdp'])
+        """
         if not self._meshes:
             self.build_mesh()
-        if one_dimensioal_only:
-            return {
-                k: v for k, v in self._meshes.items() if v.ndim == 1 and v.size() > 1
-            }
-        else:
-            return {k: v for k, v in self._meshes.items() if v.size() > 1}
+        return {k: v for k, v in self._meshes.items() if v.ndim == 1 and v.size() > 1}
 
     @property
     def world_mesh(self) -> DeviceMesh:
         if self._world_mesh is None:
-            self.build_mesh()
+            self._world_mesh = self.build_mesh()
         return self._world_mesh
 
     @property

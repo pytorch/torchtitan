@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
-import itertools
 import math
 import os
 from abc import abstractmethod
@@ -59,6 +58,7 @@ def _dist_reduce(
     return funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item()
 
 
+# TODO: rename this to maybe_dist_max
 def dist_max(
     x: torch.Tensor,
     mesh: DeviceMesh | None = None,
@@ -147,15 +147,17 @@ def set_determinism(
         seed_tensor = torch.get_rng_state()[:8].to(device)
         torch.distributed.broadcast(seed_tensor, src=0)
         seed = seed_tensor.to("cpu").view(torch.uint64).item()
+    assert isinstance(seed, int)
 
     # Set distinct seed for each rank in mesh dimensions, with dimension names provided by `distinct_seed_mesh_dims`
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
     # and choose a unique seed for each rank on the PP mesh.
     # We support multiple distinct dimensions by adding each distinct dimension's local rank to the seed.
     distinct_seed_meshes = [
-        parallel_dims.get_mesh(dim) for dim in distinct_seed_mesh_dims
+        parallel_dims.get_optional_mesh(dim) for dim in distinct_seed_mesh_dims
     ]
     distinct_seed_meshes = [mesh for mesh in distinct_seed_meshes if mesh is not None]
+    assert all(mesh is not None for mesh in distinct_seed_meshes)
 
     if distinct_seed_meshes:
         # Each dimension contributes: local_rank * (product of all previous dimension sizes)
@@ -187,7 +189,7 @@ def set_determinism(
 
     # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for
     # all ranks of the SPMD mesh. If PP is also used, this seed is unique per PP rank.
-    # TODO: remove the need of passing in a mes once
+    # TODO: remove the need of passing in a mesh once
     # torch.distributed.tensor._random.manual_seed doesn't require a mesh input.
     if parallel_dims.world_size > parallel_dims.pp:
         # We just need to pass the world_mesh as the device_id is the only information
@@ -386,9 +388,11 @@ def set_pg_timeouts(
     device_module.synchronize()
 
     # None represents the 'default' PG, not part of the mesh
-    for group in itertools.chain(
-        [None], [mesh.get_group() for mesh in parallel_dims.get_all_meshes().values()]
-    ):
+    groups: list[torch.distributed.ProcessGroup | None] = [
+        mesh.get_group()
+        for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
+    ] + [None]
+    for group in groups:
         torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
 
 

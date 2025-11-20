@@ -85,6 +85,7 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    tp_mesh = None
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
@@ -109,12 +110,15 @@ def parallelize_llama(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
+        # tp_mesh might have been set above if tp_enabled, otherwise get it here
+        if tp_mesh is None:
+            tp_mesh = parallel_dims.get_mesh("tp")
         apply_moe_ep_tp(
             model,
             tp_mesh=tp_mesh,
-            ep_mesh=parallel_dims.get_mesh("ep"),
-            etp_mesh=parallel_dims.get_mesh("etp"),
-            ep_etp_mesh=parallel_dims.get_mesh(["ep", "etp"]),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
         )
 
@@ -148,7 +152,7 @@ def parallelize_llama(
             if parallel_dims.dp_replicate_enabled
             else ["efsdp"]
         )
-        edp_mesh = parallel_dims.get_mesh(edp_mesh_names)
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,

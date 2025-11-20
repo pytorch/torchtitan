@@ -90,9 +90,10 @@ def parallelize_qwen3(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
             model,
-            parallel_dims.get_mesh("tp"),
+            tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
@@ -101,12 +102,13 @@ def parallelize_qwen3(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_moe_ep_tp(
             model,
-            tp_mesh=parallel_dims.get_mesh("tp"),
-            ep_mesh=parallel_dims.get_mesh("ep"),
-            etp_mesh=parallel_dims.get_mesh("etp"),
-            ep_etp_mesh=parallel_dims.get_mesh(["ep", "etp"]),
+            tp_mesh=tp_mesh,
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
         )
 
@@ -137,7 +139,7 @@ def parallelize_qwen3(
             if parallel_dims.dp_replicate_enabled
             else ["efsdp"]
         )
-        edp_mesh = parallel_dims.get_mesh(edp_mesh_names)
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,
@@ -164,7 +166,7 @@ def parallelize_qwen3(
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if dp_mesh is not None and dp_mesh.ndim > 1:
+        if dp_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
         apply_ddp(
             model,

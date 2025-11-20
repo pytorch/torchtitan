@@ -31,8 +31,22 @@ class FakeParallelDims:
         for size in mesh_sizes:
             self.world_size *= size
 
+        # Add individual parallelism degree attributes to match real ParallelDims interface
+        self.pp = self.mesh_sizes.get("pp", 1)
+        self.tp = self.mesh_sizes.get("tp", 1)
+        self.cp = self.mesh_sizes.get("cp", 1)
+        self.dp_replicate = self.mesh_sizes.get("dp_replicate", 1)
+        self.dp_shard = self.mesh_sizes.get("dp_shard", 1)
+        self.ep = self.mesh_sizes.get("ep", 1)
+        self.etp = self.mesh_sizes.get("etp", 1)
+
+        # For backward compatibility with 'dp' dimension name
+        if "dp" in self.mesh_sizes:
+            self.dp_replicate = self.mesh_sizes["dp"]
+
         # Create a world_mesh mock
         self.world_mesh = MagicMock()
+        self.world_mesh.device_type = "cpu"
 
     def get_mesh(self, key):
         """Return a submesh for the given dimension."""
@@ -58,6 +72,14 @@ class FakeParallelDims:
             return submesh
         else:
             return None
+
+    def get_optional_mesh(self, key):
+        """Return a submesh for the given dimension, or None if not available.
+
+        This is the same as get_mesh() for FakeParallelDims since get_mesh()
+        already returns None for unavailable meshes.
+        """
+        return self.get_mesh(key)
 
     def get_all_meshes(self):
         """Return a dict of all meshes."""
@@ -244,6 +266,7 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
         fake_mesh.world_size = 1
         fake_mesh.world_mesh = MagicMock()
         fake_mesh.get_mesh.return_value = None
+        fake_mesh.get_optional_mesh.return_value = None
         fake_mesh.get_all_meshes.return_value = {}
 
         debug_config = DebugConfig(seed=base_seed, deterministic=False)

@@ -270,7 +270,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
     def test_get_mesh_lazy_initialization(self):
-        """Test that get_mesh triggers build_mesh if not built yet."""
+        """Test that get_optional_mesh triggers build_mesh if not built yet."""
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=1,
@@ -284,8 +284,8 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         # Don't call build_mesh explicitly
         self.assertEqual(len(parallel_dims._meshes), 0)
 
-        # get_mesh should trigger build_mesh
-        result = parallel_dims.get_mesh("tp")
+        # get_optional_mesh should trigger build_mesh
+        result = parallel_dims.get_optional_mesh("tp")
         # Result is None because tp has size 1, but build_mesh should have been called
         self.assertGreater(len(parallel_dims._meshes), 0)
 
@@ -335,26 +335,30 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertEqual(parallel_dims._meshes["efsdp"].size(), 1)
 
         # Validate 2D mesh shapes
-        self.assertEqual(parallel_dims._meshes["dp_replicate_fsdp"].shape, (1, 1))
-        self.assertEqual(parallel_dims._meshes["dp_replicate_efsdp"].shape, (1, 1))
-        self.assertEqual(parallel_dims._meshes["ep_etp"].shape, (1, 1))
+        dp_replicate_fsdp_mesh = parallel_dims.get_optional_mesh(
+            ["dp_replicate", "fsdp"]
+        )
+        self.assertIsNone(dp_replicate_fsdp_mesh)  # Both dimensions have size 1
+        dp_replicate_efsdp_mesh = parallel_dims.get_optional_mesh(
+            ["dp_replicate", "efsdp"]
+        )
+        self.assertIsNone(dp_replicate_efsdp_mesh)  # Both dimensions have size 1
+        ep_etp_mesh = parallel_dims.get_optional_mesh(["ep", "etp"])
+        self.assertIsNone(ep_etp_mesh)  # Both dimensions have size 1
 
-        # Test get_mesh returns None when all dimensions have size 1
-        self.assertIsNone(parallel_dims.get_mesh("tp"))
-        self.assertIsNone(parallel_dims.get_mesh("dp_replicate"))
-        self.assertIsNone(parallel_dims.get_mesh("pp"))
-        self.assertIsNone(parallel_dims.get_mesh("cp"))
-        self.assertIsNone(parallel_dims.get_mesh("fsdp"))
+        # Test get_optional_mesh returns None when all dimensions have size 1
+        self.assertIsNone(parallel_dims.get_optional_mesh("tp"))
+        self.assertIsNone(parallel_dims.get_optional_mesh("dp_replicate"))
+        self.assertIsNone(parallel_dims.get_optional_mesh("pp"))
+        self.assertIsNone(parallel_dims.get_optional_mesh("cp"))
+        self.assertIsNone(parallel_dims.get_optional_mesh("fsdp"))
 
-        # Test get_mesh with list input
-        self.assertIsNone(parallel_dims.get_mesh(["dp_replicate", "fsdp"]))
+        # Test get_optional_mesh with list input
+        self.assertIsNone(parallel_dims.get_optional_mesh(["dp_replicate", "fsdp"]))
 
-        # Test get_all_meshes returns empty when all dimensions have size 1
-        one_d_meshes = parallel_dims.get_all_meshes(one_dimensioal_only=True)
+        # Test get_all_one_dimensional_meshes returns empty when all dimensions have size 1
+        one_d_meshes = parallel_dims.get_all_one_dimensional_meshes()
         self.assertEqual(len(one_d_meshes), 0)
-
-        all_meshes = parallel_dims.get_all_meshes(one_dimensioal_only=False)
-        self.assertEqual(len(all_meshes), 0)
 
         # Test world_mesh property
         world_mesh_property = parallel_dims.world_mesh
@@ -363,7 +367,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
     def test_get_mesh_with_list_input(self):
-        """Test get_mesh accepts both string and list inputs."""
+        """Test get_optional_mesh accepts both string and list inputs."""
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=1,
@@ -377,7 +381,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         parallel_dims.build_mesh()
 
         # Should accept list input
-        result = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+        result = parallel_dims.get_optional_mesh(["dp_replicate", "fsdp"])
         # Returns None because both dimensions have size 1
         self.assertIsNone(result)
 
@@ -483,13 +487,18 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             )  # fsdp * tp / (etp * ep) = 2 * 2 / (1 * 1) = 4
 
             # Validate 2D mesh shapes
+            dp_replicate_fsdp_mesh = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+            self.assertIsNotNone(dp_replicate_fsdp_mesh)
             self.assertEqual(
-                parallel_dims._meshes["dp_replicate_fsdp"].shape, (2, 2)
+                dp_replicate_fsdp_mesh.shape, (2, 2)
             )  # (dp_replicate, fsdp)
-            self.assertEqual(
-                parallel_dims._meshes["dp_replicate_efsdp"].shape, (2, 4)
-            )  # (dp_replicate, efsdp)
-            self.assertEqual(parallel_dims._meshes["ep_etp"].shape, (1, 1))  # (ep, etp)
+            # efsdp mesh only exists when ep > 1, so dp_replicate_efsdp should be None when ep=1
+            dp_replicate_efsdp_mesh = parallel_dims.get_optional_mesh(
+                ["dp_replicate", "efsdp"]
+            )
+            self.assertIsNone(dp_replicate_efsdp_mesh)  # efsdp disabled when ep=1
+            ep_etp_mesh = parallel_dims.get_optional_mesh(["ep", "etp"])
+            self.assertIsNone(ep_etp_mesh)  # Both dimensions have size 1
 
             # Test get_mesh returns valid meshes for enabled dimensions (size > 1)
             self.assertIsNotNone(parallel_dims.get_mesh("tp"))
@@ -498,18 +507,18 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertIsNotNone(parallel_dims.get_mesh("batch"))
             self.assertIsNotNone(parallel_dims.get_mesh("loss"))
 
-            # Test get_mesh returns None for disabled dimensions (size = 1)
-            self.assertIsNone(parallel_dims.get_mesh("pp"))
-            self.assertIsNone(parallel_dims.get_mesh("cp"))
-            self.assertIsNone(parallel_dims.get_mesh("ep"))
+            # Test get_optional_mesh returns None for disabled dimensions (size = 1)
+            self.assertIsNone(parallel_dims.get_optional_mesh("pp"))
+            self.assertIsNone(parallel_dims.get_optional_mesh("cp"))
+            self.assertIsNone(parallel_dims.get_optional_mesh("ep"))
 
             # Test get_mesh with 2D mesh names
             self.assertIsNotNone(parallel_dims.get_mesh(["dp_replicate", "fsdp"]))
             hsdp_mesh = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
             self.assertEqual(hsdp_mesh.shape, (2, 2))
 
-            # Test get_all_meshes returns only meshes with size > 1
-            one_d_meshes = parallel_dims.get_all_meshes(one_dimensioal_only=True)
+            # Test get_all_one_dimensional_meshes returns only meshes with size > 1
+            one_d_meshes = parallel_dims.get_all_one_dimensional_meshes()
             self.assertGreater(len(one_d_meshes), 0)
             # Should include: dp_replicate, fsdp, tp, batch, loss, efsdp (all with size > 1)
             self.assertIn("dp_replicate", one_d_meshes)
@@ -524,11 +533,10 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertNotIn("ep", one_d_meshes)
             self.assertNotIn("etp", one_d_meshes)
 
-            all_meshes = parallel_dims.get_all_meshes(one_dimensioal_only=False)
-            self.assertGreater(len(all_meshes), len(one_d_meshes))
-            # Should also include 2D meshes
-            self.assertIn("dp_replicate_fsdp", all_meshes)
-            self.assertIn("dp_replicate_efsdp", all_meshes)
+            # Test that we can get 2D meshes via get_mesh() instead
+            dp_replicate_fsdp = parallel_dims.get_mesh(["dp_replicate", "fsdp"])
+            self.assertIsNotNone(dp_replicate_fsdp)
+            self.assertEqual(dp_replicate_fsdp.ndim, 2)
 
             # Test world_mesh property
             world_mesh_property = parallel_dims.world_mesh

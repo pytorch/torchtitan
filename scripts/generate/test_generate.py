@@ -135,7 +135,19 @@ def test_generate(
 
         # apply_tp (with Sequence Parallel) on unevenly sharded
         # sequences would require https://github.com/pytorch/torchtitan/pull/686
+        # pyrefly: ignore [bad-argument-type]
         apply_tp_minus_sp(model, parallel_dims.get_mesh("tp"))
+    else:
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            etp=1,
+            world_size=1,
+        )
 
     debug_config = DebugConfig(seed=seed, deterministic=deterministic)
     dist_utils.set_determinism(

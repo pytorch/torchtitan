@@ -483,23 +483,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
-        cp_buffers = [inputs, labels]
+        cp_buffers: list[torch.Tensor] = [inputs, labels]
         cp_seq_dims = [1, 1]
         if hasattr(model_parts[0], "freqs_cis"):
-            cp_buffers += [m.freqs_cis for m in model_parts]
+            for m in model_parts:
+                assert isinstance(m.freqs_cis, torch.Tensor)
+                cp_buffers.append(m.freqs_cis)
             cp_seq_dims += [0 for _ in model_parts]
 
-        optional_context_parallel_ctx = (
-            dist_utils.create_context_parallel_ctx(
-                cp_mesh=parallel_dims.get_mesh("cp"),
+        optional_context_parallel_ctx = None
+        if parallel_dims.cp_enabled:
+            cp_mesh = parallel_dims.get_mesh("cp")
+            optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
+                cp_mesh=cp_mesh,
                 cp_buffers=cp_buffers,
                 cp_seq_dims=cp_seq_dims,
                 cp_no_restore_buffers={inputs, labels},
                 cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
             )
-            if parallel_dims.cp_enabled
-            else None
-        )
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
@@ -571,7 +572,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
-            pp_mesh=parallel_dims.get_mesh("pp"),
+            pp_mesh=parallel_dims.get_optional_mesh("pp"),
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
@@ -588,7 +589,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
-            loss_mesh = parallel_dims.get_mesh("loss")
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
             global_avg_loss, global_max_loss, global_ntokens_seen = (
                 dist_utils.dist_mean(loss, loss_mesh, ft_pg),
                 dist_utils.dist_max(loss, loss_mesh, ft_pg),

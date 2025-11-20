@@ -83,31 +83,24 @@ def parallelize_deepseekv3(
                 "Currently, float8 tensorwise TP is not tested for deepseekv3"
             )
 
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
             model,
-            parallel_dims.get_mesh("tp"),
+            tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
         )
-        maybe_enable_async_tp(job_config, parallel_dims.get_mesh("tp"))
+        maybe_enable_async_tp(job_config, tp_mesh)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
         apply_moe_ep_tp(
             model,
-            tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
-            ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
-            etp_mesh=(
-                parallel_dims.get_mesh("etp") if parallel_dims.etp_enabled else None
-            ),
-            ep_etp_mesh=(
-                parallel_dims.get_mesh("ep_etp")
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
         )
 
@@ -142,7 +135,7 @@ def parallelize_deepseekv3(
             if parallel_dims.dp_replicate_enabled
             else ["efsdp"]
         )
-        edp_mesh = parallel_dims.get_mesh(edp_mesh_names)
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,
@@ -169,7 +162,7 @@ def parallelize_deepseekv3(
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if dp_mesh is not None and dp_mesh.ndim > 1:
+        if dp_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
         apply_ddp(
             model,

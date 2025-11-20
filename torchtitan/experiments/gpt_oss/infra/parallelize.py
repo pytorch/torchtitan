@@ -69,7 +69,6 @@ def parallelize_gptoss(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
@@ -105,15 +104,9 @@ def parallelize_gptoss(
 
         apply_moe_ep_tp(
             model,
-            tp_mesh=parallel_dims.get_mesh("tp") if parallel_dims.tp_enabled else None,
-            ep_mesh=parallel_dims.get_mesh("ep") if parallel_dims.ep_enabled else None,
-            ep_etp_mesh=(
-                parallel_dims.get_mesh("ep_etp")
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh("ep_etp"),
             etp_enabled=parallel_dims.etp_enabled,
             dual_pipe_v=dual_pipe_v,
         )
@@ -140,7 +133,7 @@ def parallelize_gptoss(
             if parallel_dims.dp_replicate_enabled
             else ["efsdp"]
         )
-        edp_mesh = parallel_dims.get_mesh(edp_mesh_names)
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,

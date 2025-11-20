@@ -220,9 +220,11 @@ class FluxValidator(Validator):
                 latents = pack_latents(latents)
                 target = pack_latents(noise - labels)
 
-                optional_context_parallel_ctx = (
-                    dist_utils.create_context_parallel_ctx(
-                        cp_mesh=parallel_dims.get_mesh("cp"),
+                optional_context_parallel_ctx = None
+                if parallel_dims.cp_enabled:
+                    cp_mesh = parallel_dims.get_mesh("cp")
+                    optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
+                        cp_mesh=cp_mesh,
                         cp_buffers=[
                             latents,
                             latent_pos_enc,
@@ -240,9 +242,6 @@ class FluxValidator(Validator):
                         },
                         cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
                     )
-                    if parallel_dims.cp_enabled
-                    else None
-                )
 
                 with self.validation_context(optional_context_parallel_ctx):
                     with self.maybe_enable_amp:
@@ -267,7 +266,9 @@ class FluxValidator(Validator):
         loss = torch.sum(torch.stack(accumulated_losses))
         loss /= num_steps
         if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_mean(loss, parallel_dims.get_mesh("loss"))
+            global_avg_loss = dist_utils.dist_mean(
+                loss, parallel_dims.get_optional_mesh("loss")
+            )
         else:
             global_avg_loss = loss.item()
 
