@@ -90,11 +90,12 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        # Verify the accuracy.
-        echo "Checking FSDP4 v.s. HSDP2FSDP4 accuracy parity"
+        # Verify the accuracy first.
+        echo "Checking FSDP8 v.s. HSDP (4, 2) accuracy parity"
         export baseline_options="--parallelism.data_parallel_replicate_degree=1"
         export test_options="--parallelism.data_parallel_replicate_degree=4"
         python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal --steps=10  --import-result assets/ci_llama3_losses.txt
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
