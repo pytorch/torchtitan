@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from contextlib import contextmanager
+from typing import Callable
 
 import torch
 from torch.distributed.tensor import DTensor, Replicate
@@ -53,3 +54,11 @@ def register_blockmask_pytree_node():
             flatten_with_keys_fn=BlockMask._flatten_with_keys,
             serialized_type_name="torch.nn.attention.flex_attention.BlockMask",
         )
+
+
+def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
+    return (
+        len(passes) > 0
+        and (last_pass_name := getattr(passes[-1], "__name__", None))
+        and (last_pass_name in names)
+    )
