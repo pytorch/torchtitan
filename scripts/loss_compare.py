@@ -321,7 +321,9 @@ def check_git_clean_state() -> None:
         for line in result.stdout.strip().split("\n"):
             log_print(f"  {line}")
         log_print("")
-        log_print("Please commit, stash, or discard your changes before running this script")
+        log_print(
+            "Please commit, stash, or discard your changes before running this script"
+        )
         log_print("  - To commit: git add -A && git commit -m 'message'")
         log_print("  - To stash: git stash")
         log_print("  - To discard: git checkout -- . && git clean -fd")
