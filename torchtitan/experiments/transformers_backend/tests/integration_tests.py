@@ -21,6 +21,7 @@ def build_transformers_backend_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--model.name transformers_backend",
                     "--job.custom_config_module=torchtitan.experiments.transformers_backend.job_config",
                     "--hf_transformers.model Qwen/Qwen2.5-7B",
                     "--parallelism.data_parallel_shard_degree 2",
