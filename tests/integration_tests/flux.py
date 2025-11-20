@@ -29,7 +29,7 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
                     "--validation.enable",
                     "--checkpoint.enable",
                 ],
-                []
+                [],
             ],
             "HSDP+CP+Validation+Inference",
             "hsdp+cp+validation+inference",
