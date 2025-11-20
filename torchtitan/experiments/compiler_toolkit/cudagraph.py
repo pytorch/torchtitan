@@ -98,7 +98,7 @@ class CUDAGraphWrapper:
 
     def check_static_inputs_address(self) -> None:
         for i in self.static_input_indices:
-            actual = args[i].data_ptr()
+            actual = self.args[i].data_ptr()
             expected = self.input_addresses[i]
             assert expected == actual, (
                 "Expected the same static tensor address but found "
