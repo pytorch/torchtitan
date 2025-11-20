@@ -21,7 +21,10 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.config.job_config import Compile as CompileConfig
+from torchtitan.config.job_config import (
+    ActivationCheckpoint as ACConfig,
+    Compile as CompileConfig,
+)
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
@@ -129,7 +132,7 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, job_config.compile)
+        apply_compile(model, job_config.compile, job_config.activation_checkpoint)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -506,11 +509,19 @@ def apply_moe_ep_tp(
         )
 
 
-def apply_compile(model: nn.Module, compile_config: CompileConfig):
+def apply_compile(model: nn.Module, compile_config: CompileConfig, ac_config: ACConfig):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+
+    if ac_config.mode == "selective":
+        logger.warning(
+            "Compile + Selective Activation Checkpointing is not yet supported for MoE models, "
+            "please use Full Activation Checkpointing instead. Turning off Compile."
+        )
+        return
+
     # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
     # but it is experimental.
     torch._dynamo.config.capture_scalar_outputs = True
