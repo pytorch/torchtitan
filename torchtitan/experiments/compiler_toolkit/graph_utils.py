@@ -261,6 +261,17 @@ def compiler(
     )
     _dump_gm(dump_folder, gm, f"{name}_before_compiler")
 
+    if end_with_pass(passes, ["cudagraph_pass"]):
+        # cudagraph pass is always the last pass if it is applied
+        cg_pass = passes[-1]
+
+        # to identify static input indices, cudagraph passes behaves differently for
+        # forward and backward pass. so we explicitly pass the info.
+        _cg_pass = functools.partial(cg_pass, is_forward=is_forward)
+
+        # keep the function name for debug log
+        passes[-1] = functools.wraps(cg_pass)(_cg_pass)
+
     for pass_fn in passes:
         pass_name = (
             pass_fn.func.__name__
@@ -320,7 +331,9 @@ def make_compiler_with_passes(
 
 
 def validate_pass_names(pass_names: list[str]) -> None:
-    if "inductor_lite" in pass_names:
+    if "inductor_lite" in pass_names and "cudagraph" in pass_names:
+        raise ValueError("Cannot apply inductor_lite and cudagraph at the same time!")
+    elif "inductor_lite" in pass_names:
         # inductor lite supports regional_inductor by default. They share the same
         # user-facing frontend API (i.e., the context manager), use different
         # backend implementations, and achieve the same compilation result.
@@ -331,6 +344,10 @@ def validate_pass_names(pass_names: list[str]) -> None:
         assert (
             pass_names[-1] == "inductor_lite"
         ), "inductor_lite has to be the last pass to apply"
+    elif "cudagraph" in pass_names:
+        assert (
+            pass_names[-1] == "cudagraph"
+        ), "cudagraph has to be the last pass to apply"
 
     if (
         "autobucketing_reordering" in pass_names

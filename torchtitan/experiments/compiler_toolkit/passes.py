@@ -11,12 +11,16 @@ This module provides various compiler passes that can be applied to graph module
 during compilation. Passes can be selected and configured via job config.
 """
 
-from typing import Callable
+from typing import Any, Callable, Sequence
 
 import torch
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
+from torchtitan.experiments.compiler_toolkit.cudagraph import (
+    CUDAGraphWrapper,
+    get_static_input_indices,
+)
 from torchtitan.experiments.compiler_toolkit.inductor_lite import (
     get_inductor_lite_bw_compiler,
     get_inductor_lite_fw_compiler,
@@ -60,6 +64,23 @@ def regional_inductor_pass(
     Apply regional inductor compilation based on user annotation.
     """
     return regional_inductor(gm, example_inputs)
+
+
+def cudagraph_pass(
+    gm: torch.fx.GraphModule, example_inputs: Sequence[Any], is_forward: bool
+) -> torch.fx.GraphModule:
+    """
+    Apply cudagraph.
+
+    This pass wraps the forward function with cudagraph during compilation and does
+    not record cudagraph until runtime.
+    - For the first run, it will warm up operators such as nccl.
+    - For the second run, it will record cudagraph and replay cudagraph.
+    - For the following runs, it will replay cudagraph.
+    """
+    static_input_indices = get_static_input_indices(gm, is_forward)
+    gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
+    return gm
 
 
 def validate_flex_attn_annotation_pass(
@@ -125,4 +146,5 @@ AVAILABLE_COMPILER_PASSES = {
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
     "inductor_lite": inductor_lite_pass,
+    "cudagraph": cudagraph_pass,
 }
