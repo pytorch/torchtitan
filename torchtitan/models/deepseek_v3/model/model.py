@@ -311,6 +311,7 @@ class TransformerBlock(nn.Module):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
+        accumulated_load_balance_loss: torch.Tensor,
         attention_masks: AttentionMasksType | None,
     ):
         """
@@ -325,10 +326,15 @@ class TransformerBlock(nn.Module):
         """
         x = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x))
+            ffn_moe_output, load_balance_loss = self.moe(self.ffn_norm(x))
+            accumulated_load_balance_loss = (
+                accumulated_load_balance_loss + load_balance_loss
+            )
         else:
-            x = x + self.feed_forward(self.ffn_norm(x))
-        return x
+            ffn_moe_output = self.feed_forward(self.ffn_norm(x))
+
+        x = x + ffn_moe_output
+        return x, accumulated_load_balance_loss
 
     def init_weights(self, buffer_device: torch.device):
         for norm in (self.attention_norm, self.ffn_norm):
@@ -412,6 +418,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
     def forward(
         self,
         tokens: torch.Tensor,
+        accumulated_load_balance_loss: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
     ):
         """
@@ -429,8 +436,16 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
 
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
+        accumulated_load_balance_loss = (
+            torch.zeros((), device=h.device, dtype=torch.float32)
+            if accumulated_load_balance_loss is None
+            else accumulated_load_balance_loss
+        )
+
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, attention_masks)
+            h, accumulated_load_balance_loss = layer(
+                h, self.freqs_cis, accumulated_load_balance_loss, attention_masks
+            )
         h = self.norm(h) if self.norm is not None else h
         output = self.output(h) if self.output is not None else h
-        return output
+        return output, accumulated_load_balance_loss

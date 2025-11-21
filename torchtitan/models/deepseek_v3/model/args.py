@@ -95,6 +95,11 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
         self.max_seq_len = seq_len
 
+        losses_config = job_config.model.extra_losses
+        self.moe_args.load_balance_loss_type = losses_config.load_balance_loss_type
+        self.moe_args.load_balance_loss_weight = losses_config.load_balance_loss_weight
+        self.moe_args.load_balance_coeff = losses_config.load_balance_coeff
+
         if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
                 "Failed to use grouped mm, which is only supported on SM90 or later",
