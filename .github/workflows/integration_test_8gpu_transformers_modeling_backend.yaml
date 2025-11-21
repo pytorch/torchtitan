@@ -4,10 +4,10 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'torchtitan/experiments/transformers_backend/**'
+      - 'torchtitan/experiments/transformers_modeling_backend/**'
   pull_request:
     paths:
-      - 'torchtitan/experiments/transformers_backend/**'
+      - 'torchtitan/experiments/transformers_modeling_backend/**'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -50,4 +50,4 @@ jobs:
         USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
 
         mkdir artifacts-to-be-uploaded
-        python -m torchtitan.experiments.transformers_backend.tests.integration_tests artifacts-to-be-uploaded --ngpu 8
+        python -m torchtitan.experiments.transformers_modeling_backend.tests.integration_tests artifacts-to-be-uploaded --ngpu 8
