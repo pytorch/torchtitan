@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import functools
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
@@ -19,6 +20,7 @@ from torch._guards import tracing, TracingContext
 from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.compiler_toolkit.common_utils import end_with_pass
 from torchtitan.tools.logging import logger
 
 
@@ -29,7 +31,9 @@ def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> No
 
     output_path = Path(dump_folder) / "compiler" / f"{name}.txt"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(gm.print_readable(print_output=False))
+    output_path.write_text(
+        gm.print_readable(print_output=False, include_stride=True, include_device=True)
+    )
 
 
 def export_joint(
@@ -47,7 +51,11 @@ def export_joint(
     ):
         gm = dynamo_graph_capture_for_export(model)(*args, **kwargs)
         logger.debug("Dynamo gm:")
-        logger.debug(gm.print_readable(print_output=False))
+        logger.debug(
+            gm.print_readable(
+                print_output=False, include_stride=True, include_device=True
+            )
+        )
         _dump_gm(dump_folder, gm, "dynamo_gm")
 
         tracing_context = gm.meta["tracing_context"]
@@ -80,7 +88,7 @@ def joint_graph_builder(
     model_kwargs: dict,
     fw_compiler: Optional[Callable] = None,
     bw_compiler: Optional[Callable] = None,
-    joint_custom_pass: Optional[Callable] = None,
+    joint_custom_passes: Optional[List[Callable]] = None,
     dump_folder: str | None = None,
 ):
     """
@@ -92,7 +100,7 @@ def joint_graph_builder(
         model_kwargs: Dict of model input keyword arguments
         fw_compiler: Optional custom forward compiler function
         bw_compiler: Optional custom backward compiler function
-        joint_custom_pass: Optional custom pass to run on the joint graph
+        joint_custom_passes: list of custom passes to run on the joint graph
         dump_folder: Optional folder to dump the graph to
     """
     assert isinstance(model_args, tuple)
@@ -105,9 +113,12 @@ def joint_graph_builder(
         tracing_context,
     ) = export_joint(model, model_args, model_kwargs, dump_folder=dump_folder)
 
-    # Optional validation
-    if joint_custom_pass is not None:
-        joint_custom_pass(joint_with_descriptors)
+    # run custom passes on joint-graph before partitioner
+    if joint_custom_passes is not None:
+        for joint_custom_pass in joint_custom_passes:
+            joint_with_descriptors.graph_module = joint_custom_pass(
+                joint_with_descriptors.graph_module
+            )
 
     with tracing(tracing_context):
         fn = aot_compile_joint_with_descriptors(
@@ -207,6 +218,7 @@ def compiler(
     example_inputs,
     passes: List[Callable] = None,
     dump_folder: str | None = None,
+    is_forward: bool = True,
 ):
     """
     Compile a graph module by applying a sequence of compiler passes.
@@ -224,15 +236,35 @@ def compiler(
         passes = DEFAULT_COMPILER_PASSES
 
     logger.debug(f"{name} before compiler:")
-    logger.debug(gm.print_readable(print_output=False))
+    logger.debug(
+        gm.print_readable(print_output=False, include_stride=True, include_device=True)
+    )
     _dump_gm(dump_folder, gm, f"{name}_before_compiler")
 
+    if end_with_pass(passes, ["cudagraph_pass"]):
+        # cudagraph pass is always the last pass if it is applied
+        cg_pass = passes[-1]
+
+        # to identify static input indices, cudagraph passes behaves differently for
+        # forward and backward pass. so we explicitly pass the info.
+        _cg_pass = functools.partial(cg_pass, is_forward=is_forward)
+
+        # keep the function name for debug log
+        passes[-1] = functools.wraps(cg_pass)(_cg_pass)
+
     for pass_fn in passes:
-        logger.info(f"Applying pass: {pass_fn.__name__}")
+        pass_name = (
+            pass_fn.func.__name__
+            if isinstance(pass_fn, functools.partial)
+            else pass_fn.__name__
+        )
+        logger.info(f"Applying pass: {pass_name}")
         gm = pass_fn(gm, example_inputs)
 
     logger.debug(f"{name} after compiler:")
-    logger.debug(gm.print_readable(print_output=False))
+    logger.debug(
+        gm.print_readable(print_output=False, include_stride=True, include_device=True)
+    )
     _dump_gm(dump_folder, gm, f"{name}_after_compiler")
     return gm
 
@@ -252,18 +284,43 @@ def make_compiler_with_passes(
 
     def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "fwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "fwd_gm",
+            gm,
+            example_inputs,
+            passes=passes,
+            dump_folder=dump_folder,
+            is_forward=True,
         )
 
     def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "bwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "bwd_gm",
+            gm,
+            example_inputs,
+            passes=passes,
+            dump_folder=dump_folder,
+            is_forward=False,
         )
 
     return fw_compiler, bw_compiler
 
 
-def get_compiler_passes_from_config(job_config: JobConfig):
+def validate_pass_names(pass_names: list[str]) -> None:
+    if "cudagraph" in pass_names:
+        assert (
+            pass_names[-1] == "cudagraph"
+        ), "cudagraph has to be the last pass to apply"
+
+    if (
+        "autobucketing_reordering" in pass_names
+        and "transformer_block_bucketing" in pass_names
+    ):
+        raise ValueError(
+            "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
+        )
+
+
+def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfig):
     """
     Extract and validate compiler passes from job config.
 
@@ -273,20 +330,76 @@ def get_compiler_passes_from_config(job_config: JobConfig):
     Returns:
         List of compiler pass functions
     """
-    from torchtitan.experiments.compiler_toolkit.passes import AVAILABLE_PASSES
+    from torchtitan.experiments.compiler_toolkit.passes import AVAILABLE_COMPILER_PASSES
+    from torchtitan.experiments.simple_fsdp.llama3.parallelize import (
+        get_transformer_block_buckets,
+    )
 
     pass_names = getattr(job_config.compile, "passes", [])
+    validate_pass_names(pass_names)
     compiler_passes = []
 
     for pass_name in pass_names:
-        if pass_name not in AVAILABLE_PASSES:
+        if pass_name not in AVAILABLE_COMPILER_PASSES:
             raise ValueError(
                 f"Unknown compiler pass: {pass_name}. "
-                f"Available passes: {list(AVAILABLE_PASSES.keys())}"
+                f"Available compiler passes: {list(AVAILABLE_COMPILER_PASSES.keys())}"
             )
-        compiler_passes.append(AVAILABLE_PASSES[pass_name])
+        if pass_name == "transformer_block_bucketing":
+            compiler_passes.append(
+                functools.partial(
+                    AVAILABLE_COMPILER_PASSES[pass_name],
+                    fsdp_manual_buckets=get_transformer_block_buckets(model),
+                )
+            )
+        else:
+            compiler_passes.append(AVAILABLE_COMPILER_PASSES[pass_name])
 
     if pass_names:
         logger.info(f"Using compiler passes from config: {pass_names}")
 
     return compiler_passes
+
+
+def get_joint_custom_passes_from_config(
+    parallel_dims: ParallelDims, job_config: JobConfig
+):
+    """
+    Extract and validate joint custom passes from job config.
+
+    Args:
+        job_config: Job configuration containing parallelism.fsdp_reshard_after_forward
+
+    Returns:
+        List of joint custom pass functions
+    """
+    from torchtitan.experiments.compiler_toolkit.passes import (
+        fsdp_reshard_after_fwd_pass,
+        validate_flex_attn_annotation_pass,
+    )
+
+    joint_custom_passes = []
+    joint_custom_passes.append(validate_flex_attn_annotation_pass)
+
+    match job_config.parallelism.fsdp_reshard_after_forward:
+        case "always":
+            fsdp_reshard_after_forward = True
+        case "never":
+            fsdp_reshard_after_forward = False
+        case "default":
+            # For PP, by default do not reshard after forward to avoid per-microbatch
+            # all-gathers, which can be expensive and non-overlapped
+            fsdp_reshard_after_forward = not parallel_dims.pp_enabled
+        case _:
+            raise ValueError(
+                f"Invalid fsdp_reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+            )
+
+    joint_custom_passes.append(
+        functools.partial(
+            fsdp_reshard_after_fwd_pass,
+            reshard_after_forward=fsdp_reshard_after_forward,
+        )
+    )
+
+    return joint_custom_passes
