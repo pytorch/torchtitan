@@ -102,7 +102,8 @@ def parallelize_llama(
         maybe_enable_async_tp(job_config, tp_mesh)
 
     if job_config.activation_checkpoint.mode != "none":
-        use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+        attn_type = getattr(model.model_args, "attn_type", "sdpa")
+        use_flex_attn = attn_type == "flex"
         model_compile_enabled = (
             job_config.compile.enable and "model" in job_config.compile.components
         )

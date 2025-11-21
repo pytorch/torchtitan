@@ -16,9 +16,10 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
 
 from torchtitan.config import JobConfig
+from torchtitan.models.attention import VarlenMetadata
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask
+AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
 @dataclass

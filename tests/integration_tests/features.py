@@ -349,6 +349,18 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--activation_checkpoint.mode='full'",
+                    "--model.flavor=debugmodel_varlen_attn",
+                ]
+            ],
+            "FSDP+VARLEN_ATTN",
+            "fsdp+varlen_attn",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.context_parallel_degree=4",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
