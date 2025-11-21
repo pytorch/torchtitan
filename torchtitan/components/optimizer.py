@@ -341,11 +341,6 @@ def build_optimizers_with_moe_load_balancing(
     )
 
     # AP friendly methods
-    def is_moe_block(block):
-        moe_enabled = getattr(block, "moe_enabled", False)
-        has_moe_submod = hasattr(block, "moe")  # AP
-        return moe_enabled or has_moe_submod
-
     def should_manual_allreduce(tokens_per_expert_by_layer):
         return not isinstance(
             tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
@@ -354,7 +349,7 @@ def build_optimizers_with_moe_load_balancing(
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         for model_part in model_parts:
             for transformer_block in model_part.layers.values():
-                if is_moe_block(transformer_block):
+                if transformer_block.moe_enabled:
                     # Assumption: load_balance_coeff is set universally on all moe blocks.
                     return bool(transformer_block.moe.load_balance_coeff)
         return False
@@ -376,7 +371,7 @@ def build_optimizers_with_moe_load_balancing(
         tokens_per_expert_list = []
         for model_part in model_parts:
             for transformer_block in model_part.layers.values():
-                if not is_moe_block(transformer_block):
+                if not transformer_block.moe_enabled:
                     continue
                 if transformer_block.moe.load_balance_coeff is None:
                     return
@@ -405,7 +400,7 @@ def build_optimizers_with_moe_load_balancing(
         with torch.no_grad():
             for model_part in model_parts:
                 for transformer_block in model_part.layers.values():
-                    if not is_moe_block(transformer_block):
+                    if not transformer_block.moe_enabled:
                         continue
                     moe = transformer_block.moe
 

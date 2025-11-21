@@ -240,6 +240,14 @@ def monkey_patch_local_map_moe(model, world_mesh):
         monkey_patch_checks(block.moe)
 
 
+# TODO: Autoparallel should transparently wrap the original nn.Module
+# but I don't know how to do that.
+def set_torchtitan_fields(orig, new):
+    assert isinstance(new.layers, torch.nn.ModuleDict)
+    for block in new.layers.values():
+        block.moe_enabled = hasattr(block, "moe")
+
+
 # Run workflow with:
 # CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name deepseekv3_auto_parallel
 def parallelize_deepseekv3(
@@ -351,6 +359,8 @@ def parallelize_deepseekv3(
         t1 = time.time()
         logger.info(f"AutoParallel took {t1 - t0} seconds")
         parallel_mod = autop.apply_placement(sharding_placement)
+
+    set_torchtitan_fields(model, parallel_mod)
 
     if loss_parallel_enabled:
 
