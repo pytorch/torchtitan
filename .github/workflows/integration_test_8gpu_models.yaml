@@ -54,3 +54,4 @@ jobs:
         python -m tests.integration_tests.run_tests --test_suite models artifacts-to-be-uploaded --ngpu 8
         python -m tests.integration_tests.flux artifacts-to-be-uploaded/flux --ngpu 8
         rm -rf artifacts-to-be-uploaded/*/checkpoint
+        rm -rf artifacts-to-be-uploaded/flux/*/inference_results/
