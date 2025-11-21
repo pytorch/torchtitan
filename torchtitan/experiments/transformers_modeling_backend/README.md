@@ -1,4 +1,6 @@
-# Huggingface Transformers backend
+# Huggingface Transformers Modeling backend
+
+This enables HF transformers models to be trained with `4D parallelism + torch.compile`
 
 ## Quick start
 
