@@ -1,4 +1,4 @@
-name: Transformers Backend 8 GPU Integration Tests
+name: Transformers Modeling Backend 8 GPU Integration Tests
 
 on:
   push:
