@@ -16,9 +16,6 @@ from torchtitan.tools.logging import logger
 
 # how much memory allocation/free ops to record in memory snapshots
 MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
-PERFETTO_UI_ROOT_URL = (
-    "https://interncache-all.fbcdn.net/manifold/perfetto-artifacts/tree/ui/index.html"
-)
 
 
 @contextlib.contextmanager
@@ -50,25 +47,13 @@ def maybe_enable_profiling(
 
             logger.info(f"Dumping profiler traces at step {prof.step_num}")
             begin = time.monotonic()
+
             output_file = os.path.join(curr_trace_dir, f"rank{rank}_trace.json")
 
             prof.export_chrome_trace(output_file)
-            log_str = f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
-            # not directly landable on upstream titan,
-            # but conveniently prints the internal url for perfetto on manifold for mast jobs
-            manifold_mount_prefix = "/mnt/mffuse/"
-            if output_file.find(manifold_mount_prefix) == 0:
-                manifold_path = os.path.join(
-                    "torchtrain_datasets/tree",
-                    output_file.split(manifold_mount_prefix)[1],
-                )
-                perfetto_url = (
-                    PERFETTO_UI_ROOT_URL
-                    + "#!/?url=https://interncache-all.fbcdn.net/manifold/"
-                    + manifold_path
-                )
-                log_str += f": {perfetto_url}"
-            logger.info(log_str)
+            logger.info(
+                f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
+            )
 
         logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
 
