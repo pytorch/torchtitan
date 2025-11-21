@@ -149,7 +149,7 @@ def _override_torch_ops_for_zero_bubble():
         return AddmmPassThrough.apply(bias_1, mat1_1, mat2_1, beta, alpha)
 
     # rms_norm operator: RMS normalization
-    class RmsNormSeparateWeightGrad(torch.autograd.Function):
+    class FusedRmsNormSeparateWeightGrad(torch.autograd.Function):
         @staticmethod
         def forward(ctx, input, normalized_shape, weight, eps, real_output, rstd):
             ctx.save_for_backward(input, weight, rstd)
@@ -161,7 +161,7 @@ def _override_torch_ops_for_zero_bubble():
             input, weight, rstd = ctx.saved_tensors
             # Call _fused_rms_norm_backward with output_mask=[False, True]
             # We only want gradient w.r.t. weight (index 1)
-            _, grad_weight = torch._fused_rms_norm_backward(
+            _, grad_weight = torch.ops.aten._fused_rms_norm_backward(
                 grad_output,
                 input,
                 ctx.normalized_shape,
@@ -171,7 +171,7 @@ def _override_torch_ops_for_zero_bubble():
             )
             return None, None, grad_weight, None, None, None
 
-    class RmsNormSeparateInputGrad(torch.autograd.Function):
+    class FusedRmsNormSeparateInputGrad(torch.autograd.Function):
         @staticmethod
         def forward(ctx, input, normalized_shape, weight, eps, real_output, rstd):
             ctx.save_for_backward(input, weight, rstd)
@@ -183,7 +183,7 @@ def _override_torch_ops_for_zero_bubble():
             input, weight, rstd = ctx.saved_tensors
             # Call _fused_rms_norm_backward with output_mask=[True, False]
             # We only want gradient w.r.t. input (index 0)
-            grad_input, _ = torch._fused_rms_norm_backward(
+            grad_input, _ = torch.ops.aten._fused_rms_norm_backward(
                 grad_output,
                 input,
                 ctx.normalized_shape,
@@ -193,18 +193,18 @@ def _override_torch_ops_for_zero_bubble():
             )
             return grad_input, None, None, None, None, None
 
-    class RmsNormPassThrough(torch.autograd.Function):
+    class FusedRmsNormPassThrough(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, real_output, fake_1, fake_2):
-            return real_output
+        def forward(ctx, real_output, real_std, fake_1, fake_2):
+            return real_output, real_std
 
         @staticmethod
-        def backward(ctx, gO):
+        def backward(ctx, gO, gStd):
             # Pass gradients to fake_1 and fake_2 to trigger their backward methods
-            # Return None for real_output since it's already detached
-            return None, gO, gO
+            # Return None for real_output/rstd since they are already detached
+            return None, None, gO, gO
 
-    def split_rms_norm(input, normalized_shape, weight=None, eps=None):
+    def split_fused_rms_norm(input, normalized_shape, weight=None, eps=None):
         # Compute the actual output using _fused_rms_norm which returns (output, rstd)
         with torch._C._AutoDispatchBelowAutograd():
             real_output, rstd = torch._fused_rms_norm(
@@ -217,10 +217,10 @@ def _override_torch_ops_for_zero_bubble():
             rstd = rstd.detach()
             rstd2 = rstd.clone().detach()
 
-        weight_1 = RmsNormSeparateWeightGrad.apply(
+        weight_1 = FusedRmsNormSeparateWeightGrad.apply(
             input.detach(), normalized_shape, weight, eps, real_output, rstd
         )
-        input_1 = RmsNormSeparateInputGrad.apply(
+        input_1 = FusedRmsNormSeparateInputGrad.apply(
             input,
             normalized_shape,
             weight.detach() if weight is not None else None,
@@ -228,7 +228,7 @@ def _override_torch_ops_for_zero_bubble():
             real_output,
             rstd2,
         )
-        return RmsNormPassThrough.apply(real_output, weight_1, input_1)
+        return FusedRmsNormPassThrough.apply(real_output, rstd, weight_1, input_1)
 
     # _grouped_mm operator: Grouped matrix multiplication for MoE
     class GroupedMmSeparateMat2Grad(torch.autograd.Function):
@@ -287,7 +287,7 @@ def _override_torch_ops_for_zero_bubble():
 
     lib.impl("mm", split_mm, "Autograd")
     lib.impl("addmm", split_addmm, "Autograd")
-    # lib.impl("_fused_rms_norm", split_rms_norm, "Autograd")
+    lib.impl("_fused_rms_norm", split_fused_rms_norm, "Autograd")
     lib.impl("_grouped_mm", split_grouped_mm, "Autograd")
     torch.autograd.set_detect_anomaly(True, check_nan=False)
 
