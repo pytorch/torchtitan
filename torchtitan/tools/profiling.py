@@ -49,7 +49,6 @@ def maybe_enable_profiling(
             begin = time.monotonic()
 
             output_file = os.path.join(curr_trace_dir, f"rank{rank}_trace.json")
-
             prof.export_chrome_trace(output_file)
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"

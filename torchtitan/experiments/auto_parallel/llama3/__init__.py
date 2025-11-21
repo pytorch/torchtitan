@@ -21,10 +21,6 @@ from torchtitan.protocols.train_spec import TrainSpec
 from .parallelize_llama import parallelize_llama
 
 
-# CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.toml
-# ./run_train.sh --model.name auto_parallel.llama3 --parallelism.tensor_parallel_degree 4
-
-
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
         model_cls=Transformer,
