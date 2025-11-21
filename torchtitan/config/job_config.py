@@ -865,11 +865,6 @@ class Experimental:
     needs to ensure that the path can be imported.
     """
 
-    # "aten" (default), "inductor", "none"
-    comms_bucket_reorder_strategy: str = "aten"
-
-    autop_force_bf16: bool = False
-
 
 @dataclass
 class Validation:
