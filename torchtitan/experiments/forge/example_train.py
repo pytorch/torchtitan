@@ -282,12 +282,13 @@ class Trainer(ForgeEngine):
         self.checkpointer.load(step=job_config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}.")
 
+        torch_profiler = maybe_enable_profiling(
+            job_config.profiling,
+            global_step=self.step,
+            base_folder=job_config.job.dump_folder,
+        )
+
         with (
-            maybe_enable_profiling(
-                job_config.profiling,
-                global_step=self.step,
-                base_folder=job_config.job.dump_folder,
-            ) as torch_profiler,
             maybe_enable_memory_snapshot(
                 job_config.profiling,
                 global_step=self.step,
