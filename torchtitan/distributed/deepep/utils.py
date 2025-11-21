@@ -43,6 +43,7 @@ def permute(
     return permuted_input, permuted_probs, sorted_indices
 
 
+@torch.compile(fullgraph=True)
 def unpermute(
     permuted_tokens: torch.Tensor,
     sorted_indices: torch.Tensor,
@@ -50,11 +51,15 @@ def unpermute(
 ):
     _, hidden = restore_shape
     input_dtype = permuted_tokens.dtype
-    # Create an output tensor filled with zeros
+
+    # Create output tensor
     output_tokens = torch.zeros(
         restore_shape, dtype=permuted_tokens.dtype, device=permuted_tokens.device
     )
+
     # Scatter add the permuted_input back to the original positions
+    # NOTE(phuc): this takes up to 30% of training time
+    # https://discord.com/channels/1173234175801827380/1231650422301921311/1440343137594638518
     output_tokens.scatter_add_(
         0, sorted_indices.unsqueeze(1).expand(-1, hidden), permuted_tokens
     )

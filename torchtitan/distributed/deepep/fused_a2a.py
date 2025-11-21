@@ -38,14 +38,14 @@ def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
         )
 
     # Allocate buffer if not existed or not enough buffer
-    # NOTES: the adaptive routing configuration of the network **must be off**
+    # NOTE(phuc): the adaptive routing configuration of the network **must be off**
     if (
         _buffer is None
         or _buffer.group != group
         or _buffer.num_nvl_bytes < num_nvl_bytes
         or _buffer.num_rdma_bytes < num_rdma_bytes
     ):
-        # NOTE: Original code from torchtitan-amd used primus_turbo.pytorch.deep_ep.Buffer
+        # NOTE(phuc): Original code from torchtitan-amd used primus_turbo.pytorch.deep_ep.Buffer
         # which has use_default_stream_as_comm_stream parameter. However, the standard
         # deep_ep.Buffer API does not have this parameter. Removing it to match the
         # deep_ep API. The default behavior should be equivalent.
@@ -72,11 +72,9 @@ class FusedDispatch(torch.autograd.Function):
         """Forward pass of fused dispatch."""
         previous_event = None
 
-        # print(f"executing deep_ep")
         if async_finish:
             previous_event = EventOverlap(EventHandle())
 
-        # print(f"get_buffer(group, get_hidden_bytes(x))")
         # Calculate layout before actual dispatch
         buffer = get_buffer(group, get_hidden_bytes(x))
         (
@@ -94,7 +92,7 @@ class FusedDispatch(torch.autograd.Function):
         )
 
         # Do MoE dispatch
-        # NOTES: the CPU will wait for GPU's signal to arrive,
+        # NOTE(phuc): the CPU will wait for GPU's signal to arrive,
         # so this is not compatible with CUDA graph
         # TODO(deepep-fork, phuc): The local DeepEP does not support num_recv_tokens_per_expert_as_cuda parameter
         # which exists in torchtitan-amd's forked DeepEP. When we fork DeepEP, we should add this parameter
