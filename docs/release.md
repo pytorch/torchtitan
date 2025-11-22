@@ -1,6 +1,6 @@
 ## Stable Releases
 Currently we follow a lightweight release process.
-- Update the version number in `assets/version.txt` with a PR. The version numbering should follow https://semver.org/.
+- Pick a version for the release. The version numbering should follow https://semver.org/.
   - E.g. for a pre-release `0.y.z`
     - if major features are added, increment `y`
     - if minor fixes are added, increment `z`
