@@ -75,10 +75,6 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
-
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
@@ -117,6 +113,8 @@ def parallelize_llama(
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
+    attn_type = getattr(model.model_args, "attn_type", "sdpa")
+    use_flex_attn = attn_type == "flex"
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(
             model,
