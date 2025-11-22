@@ -59,9 +59,9 @@ def parallelize_qwen3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    attn_type = getattr(model.model_args, "attn_type", "sdpa")
-    if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
-        raise NotImplementedError("CP support is only supported for SDPA.")
+    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
+        raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -112,7 +112,7 @@ def parallelize_qwen3(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=attn_type == "flex",
+            use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )

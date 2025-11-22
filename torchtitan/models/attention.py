@@ -8,7 +8,7 @@
 
 import functools
 from collections.abc import Callable
-from typing import ClassVar, NamedTuple
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -20,67 +20,16 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
-from torch.nn.attention.varlen import varlen_attn
-
 
 __all__ = [
     "FlexAttentionWrapper",
     "ScaledDotProductAttentionWrapper",
-    "VarlenAttentionWrapper",
-    "VarlenMetadata",
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_sliding_window_mask_mod",
     "get_fixed_block_mask_mod",
     "create_attention_mask",
 ]
-
-
-class VarlenMetadata(NamedTuple):
-    """
-    Cumulative sequence positions for queries and keys/values.
-
-    """
-
-    cu_seq_q: torch.Tensor
-    cu_seq_k: torch.Tensor
-    max_q: int
-    max_k: int
-
-
-class VarlenAttentionWrapper(torch.nn.Module):
-    _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
-        varlen_attn, mode="max-autotune-no-cudagraphs"
-    )
-
-    def forward(
-        self,
-        xq: torch.Tensor,
-        xk: torch.Tensor,
-        xv: torch.Tensor,
-        head_dim: torch.Tensor,
-        attention_masks: VarlenMetadata,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        cu_seq_q = attention_masks.cu_seq_q
-        cu_seq_k = attention_masks.cu_seq_k
-        max_q = attention_masks.max_q
-        max_k = attention_masks.max_k
-
-        n_local_heads = xq.shape[1]
-        xq_packed = xq.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
-        xk_packed = xk.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
-        xv_packed = xv.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
-
-        return VarlenAttentionWrapper._compiled_varlen_attn(
-            xq_packed,
-            xk_packed,
-            xv_packed,
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
-            is_causal=True,
-        )
 
 
 class FlexAttentionWrapper(torch.nn.Module):
@@ -117,6 +66,7 @@ class FlexAttentionWrapper(torch.nn.Module):
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
         # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
         #    to convert `lse` to be DTensor.
+
         return FlexAttentionWrapper._compiled_flex_attn(
             q,
             k,
@@ -276,60 +226,3 @@ def create_attention_mask(*args, **kwargs):
     arguments.
     """
     return _compiled_create_block_mask(*args, **kwargs)
-
-
-def create_varlen_metadata_for_document(
-    input_batch: torch.Tensor, eos_id: int
-) -> VarlenMetadata:
-    """
-    Creates cumulative sequence length indices needed for variable length attention
-
-    Args:
-        input_batch
-        eos_id: the EOS id marker
-
-    Returns:
-        VarlenMetadata containing cumulative sequence length indices for q, k, and max_seq_len
-    """
-    batch_size, seq_len = input_batch.shape
-    device = input_batch.device
-    cu_seqlens_list, all_seq_lengths = [], []
-    offset = 0
-    max_seqlen = 0
-
-    for b in range(batch_size):
-        tokens = input_batch[b]
-        eos_positions = (tokens == eos_id).nonzero(as_tuple=True)[0].to(torch.int32)
-        sample_cu_seqlens = torch.cat(
-            [
-                torch.tensor([0], dtype=torch.int32, device=device),
-                eos_positions + 1,
-                torch.tensor([seq_len], dtype=torch.int32, device=device),
-            ]
-        )
-        sample_cu_seqlens = torch.unique_consecutive(sample_cu_seqlens)
-
-        seq_lengths = torch.diff(sample_cu_seqlens)
-        all_seq_lengths.append(seq_lengths)
-
-        cu_seqlens_adjusted = sample_cu_seqlens[:-1] + offset
-        cu_seqlens_list.append(cu_seqlens_adjusted)
-
-        offset += seq_len
-
-    packed_cu_seqlens = torch.cat(
-        cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
-    )
-
-    max_seqlen = 0
-    if len(all_seq_lengths) > 0:
-        all_seq_lengths = torch.cat(all_seq_lengths)
-        # device to host sync but only done once per model forward
-        max_seqlen = all_seq_lengths.max().item()
-
-    return VarlenMetadata(
-        cu_seq_q=packed_cu_seqlens,
-        cu_seq_k=packed_cu_seqlens,
-        max_q=max_seqlen,
-        max_k=max_seqlen,
-    )

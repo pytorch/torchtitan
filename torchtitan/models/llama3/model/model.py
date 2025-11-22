@@ -16,13 +16,10 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
-    create_varlen_metadata_for_document,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
-    VarlenAttentionWrapper,
-    VarlenMetadata,
 )
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
@@ -194,14 +191,11 @@ class Attention(nn.Module):
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
-        self.attn_type = model_args.attn_type
-        match self.attn_type:
-            case "flex":
-                self.inner_attention = FlexAttentionWrapper()
-            case "varlen":
-                self.inner_attention = VarlenAttentionWrapper()
-            case _:
-                self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.use_flex_attn = model_args.use_flex_attn
+        if self.use_flex_attn:
+            self.inner_attention = FlexAttentionWrapper()
+        else:
+            self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -246,24 +240,16 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        match self.attn_type:
-            case "flex":
-                assert isinstance(attention_masks, BlockMask), attention_masks
-                output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
-            case "varlen":
-                assert isinstance(attention_masks, VarlenMetadata), attention_masks
-                output = self.inner_attention(
-                    xq,
-                    xk,
-                    xv,
-                    self.head_dim,
-                    attention_masks,
-                )
-            case "sdpa":
-                assert attention_masks is None
-                output = self.inner_attention(xq, xk, xv)
-            case _:
-                raise ValueError(f"Unknown attention type: {self.attn_type}")
+        assert (
+            isinstance(attention_masks, BlockMask) or attention_masks is None
+        ), attention_masks
+
+        if self.use_flex_attn:
+            assert isinstance(attention_masks, BlockMask), attention_masks
+            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+        else:
+            assert attention_masks is None
+            output = self.inner_attention(xq, xk, xv)
 
         output = output.transpose(
             1, 2
@@ -467,14 +453,13 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.rope_scaling_args,
         )
 
-    def _get_flex_attention_masks(
+    def get_attention_masks(
         self,
         input_batch: torch.Tensor,
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
-
         match self.model_args.attn_mask_type:
             case "causal":
                 B = 1
@@ -485,35 +470,9 @@ class Transformer(nn.Module, ModelProtocol):
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
                 )
-
         return create_attention_mask(
             and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
         )
-
-    def get_attention_masks(
-        self,
-        input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
-    ) -> AttentionMasksType:
-        match self.model_args.attn_type:
-            case "flex":
-                return self._get_flex_attention_masks(
-                    input_batch, tokenizer, extra_inputs
-                )
-            case "varlen":
-                if self.model_args.attn_mask_type != "block_causal":
-                    raise ValueError(
-                        f"varlen attention is only supported with block_causal \
-                        attention mask type, got {self.model_args.attn_mask_type}"
-                    )
-                return create_varlen_metadata_for_document(
-                    input_batch, tokenizer.eos_id
-                )
-            case _:
-                raise NotImplementedError(
-                    "Only varlen and flex attn masks are supported"
-                )
 
     def forward(
         self,
@@ -538,6 +497,7 @@ class Transformer(nn.Module, ModelProtocol):
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis, attention_masks=attention_masks)
+
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
         return output

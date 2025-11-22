@@ -36,7 +36,7 @@ class Qwen3ModelArgs(BaseModelArgs):
     max_seq_len: int = 4096
     depth_init: bool = True
 
-    attn_type: str = "sdpa"
+    use_flex_attn: bool = False
     attn_mask_type: str = "causal"
     eos_id: int = 151645
 

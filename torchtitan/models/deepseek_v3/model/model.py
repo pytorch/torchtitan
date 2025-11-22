@@ -184,12 +184,11 @@ class Attention(nn.Module):
             mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.attn_type = model_args.attn_type
-        match self.attn_type:
-            case "flex":
-                self.inner_attention = FlexAttentionWrapper()
-            case _:
-                self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.use_flex_attn = model_args.use_flex_attn
+        if self.use_flex_attn:
+            self.inner_attention = FlexAttentionWrapper()
+        else:
+            self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def forward(
         self,
@@ -246,15 +245,14 @@ class Attention(nn.Module):
         k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         v = v.transpose(1, 2)  # (bsz, n_heads, seqlen, v_head_dim)
 
-        match self.attn_type:
-            case "flex":
-                assert isinstance(attention_masks, BlockMask)
-                output = self.inner_attention(
-                    q, k, v, block_mask=attention_masks, scale=self.softmax_scale
-                )
-            case _:
-                assert attention_masks is None
-                output = self.inner_attention(q, k, v, scale=self.softmax_scale)
+        if self.use_flex_attn:
+            assert isinstance(attention_masks, BlockMask)
+            output = self.inner_attention(
+                q, k, v, block_mask=attention_masks, scale=self.softmax_scale
+            )
+        else:
+            assert attention_masks is None
+            output = self.inner_attention(q, k, v, scale=self.softmax_scale)
 
         # Reshape and project output
         output = output.transpose(

@@ -44,7 +44,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
         qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.
         v_head_dim (int): Dimension for value projections.
-        attn_type (str): Attention type.
+        use_flex_attn (bool): Whether to use FlexAttention.
         attn_mask_type (str): Type of attention mask.
         original_seq_len (int): Original sequence length.
         rope_theta (float): Base for rotary positional encoding.
@@ -76,7 +76,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     qk_nope_head_dim: int = 128
     qk_rope_head_dim: int = 64
     v_head_dim: int = 128
-    attn_type: str = "sdpa"
+    use_flex_attn: bool = False
     attn_mask_type: str = "causal"
 
     # yarn
@@ -101,8 +101,10 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
-            raise NotImplementedError("CP support is only supported for SDPA.")
+        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
+            raise NotImplementedError(
+                "CP support for FlexAttention is still in progress."
+            )
 
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
