@@ -475,38 +475,27 @@ def validate_tokenizer_model_alignment(
     model_args: "BaseModelArgs",
 ) -> None:
     """
-    Validate that tokenizer configuration matches model configuration.
+    Validate that tokenizer configuration is compatible with model configuration.
 
     Args:
         tokenizer: Tokenizer instance to validate. Can be None.
         model_args: Model arguments object containing configuration to validate against.
 
     Raises:
-        ValueError: If tokenizer and model configurations don't match.
+        ValueError: If tokenizer vocab_size exceeds model vocab_size, which would
+            cause index out of bounds errors during training.
     """
     if tokenizer is None:
         return
 
-    # Validate vocab_size
     if hasattr(model_args, "vocab_size"):
         tokenizer_vocab_size = tokenizer.get_vocab_size()
         model_vocab_size = model_args.vocab_size
-        if tokenizer_vocab_size != model_vocab_size:
+        if model_vocab_size < tokenizer_vocab_size:
             raise ValueError(
-                f"Tokenizer vocab_size ({tokenizer_vocab_size}) does not match "
-                f"model vocab_size ({model_vocab_size}). "
-                f"This mismatch will cause training errors. "
-                f"Please ensure the tokenizer and model configuration are aligned."
-            )
-
-    # Validate eos_id
-    if hasattr(model_args, "eos_id"):
-        tokenizer_eos_id = getattr(tokenizer, "eos_id", None)
-        model_eos_id = model_args.eos_id
-        if tokenizer_eos_id is not None and tokenizer_eos_id != model_eos_id:
-            raise ValueError(
-                f"Tokenizer eos_id ({tokenizer_eos_id}) does not match "
-                f"model eos_id ({model_eos_id}). "
-                f"This mismatch may cause training errors. "
-                f"Please ensure the tokenizer and model configuration are aligned."
+                f"Model vocab_size ({model_vocab_size}) is smaller than "
+                f"tokenizer vocab_size ({tokenizer_vocab_size}). "
+                f"This will cause index out of bounds errors during training. "
+                f"The model's embedding layer must be at least as large as the "
+                f"tokenizer's vocabulary size."
             )
