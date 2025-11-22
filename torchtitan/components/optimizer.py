@@ -340,11 +340,6 @@ def build_optimizers_with_moe_load_balancing(
         ft_manager=ft_manager,
     )
 
-    def should_manual_allreduce(tokens_per_expert_by_layer):
-        return not isinstance(
-            tokens_per_expert_by_layer, torch.distributed.tensor.DTensor
-        )
-
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         for model_part in model_parts:
             for transformer_block in model_part.layers.values():
@@ -385,7 +380,9 @@ def build_optimizers_with_moe_load_balancing(
         tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
         if dp_cp_mesh is not None:
-            if should_manual_allreduce(tokens_per_expert_by_layer):
+            if isinstance(tokens_per_expert_by_layer, torch.distributed.tensor.DTensor):
+                tokens_per_expert_by_layer = tokens_per_expert_by_layer.full_tensor()
+            else:
                 # Perform single all-reduce to get global statistics across all processes
                 pg = dp_cp_mesh.get_group()
                 torch.distributed.all_reduce(
