@@ -38,7 +38,6 @@ class Qwen3ModelArgs(BaseModelArgs):
 
     use_flex_attn: bool = False
     attn_mask_type: str = "causal"
-    eos_id: int = 151645
 
     enable_weight_tying: bool = False
 

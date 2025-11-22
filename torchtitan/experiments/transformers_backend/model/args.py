@@ -54,7 +54,6 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             "n_kv_heads": "num_key_value_heads",
             "norm_eps": "rms_norm_eps",
             "max_seq_len": "max_position_embeddings",
-            "eos_id": "eos_token_id",
         }
     }
 
