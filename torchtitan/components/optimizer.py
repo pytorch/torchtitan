@@ -381,7 +381,9 @@ def build_optimizers_with_moe_load_balancing(
 
         if dp_cp_mesh is not None:
             if isinstance(tokens_per_expert_by_layer, torch.distributed.tensor.DTensor):
-                tokens_per_expert_by_layer = tokens_per_expert_by_layer.full_tensor()
+                tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
+                    placements=[Replicate()] * dp_cp_mesh.ndim
+                )
             else:
                 # Perform single all-reduce to get global statistics across all processes
                 pg = dp_cp_mesh.get_group()
