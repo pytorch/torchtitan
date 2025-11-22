@@ -25,6 +25,7 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.models.utils import validate_tokenizer_model_alignment
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -133,6 +134,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # set the model args from training job configs
         model_args.update_from_config(job_config)
         self.model_args = model_args
+
+        validate_tokenizer_model_alignment(self.tokenizer, model_args)
 
         logger.info(
             f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
