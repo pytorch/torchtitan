@@ -21,7 +21,7 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.loss import LossFunction
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
-from torchtitan.experiments.transformers_backend.job_config import JobConfig
+from torchtitan.experiments.transformers_modeling_backend.job_config import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
 

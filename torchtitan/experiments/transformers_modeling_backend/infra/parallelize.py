@@ -22,7 +22,7 @@ from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.transformers_backend.job_config import JobConfig
+from torchtitan.experiments.transformers_modeling_backend.job_config import JobConfig
 from torchtitan.models.llama3.infra.parallelize import apply_compile, apply_ddp
 from torchtitan.tools.logging import logger
 
