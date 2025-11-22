@@ -2,6 +2,13 @@
 
 # torchtitan
 
+#### Modal Integration
+
+Clone the repository and run 
+
+`uv run modal run train_modal.py::train`
+
+
 #### A PyTorch native platform for training generative AI models
 
 [![8 GPU Feature Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_features.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_features.yaml?query=branch%3Amain)
