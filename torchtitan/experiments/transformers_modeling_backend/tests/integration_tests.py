@@ -11,7 +11,7 @@ from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import run_tests
 
 
-def build_transformers_backend_test_list() -> list[OverrideDefinitions]:
+def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]:
     """
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
@@ -21,8 +21,8 @@ def build_transformers_backend_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name transformers_backend",
-                    "--job.custom_config_module=torchtitan.experiments.transformers_backend.job_config",
+                    "--model.name transformers_modeling_backend",
+                    "--job.custom_config_module=torchtitan.experiments.transformers_modeling_backend.job_config",
                     "--hf_transformers.model Qwen/Qwen2.5-7B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -31,7 +31,7 @@ def build_transformers_backend_test_list() -> list[OverrideDefinitions]:
                 ],
             ],
             "Transformers Backend FSDP+TP+PP",
-            "transformers_backend_fsdp+tp+pp",
+            "transformers_modeling_backend_fsdp+tp+pp",
             ngpu=8,
         ),
     ]
@@ -39,7 +39,7 @@ def build_transformers_backend_test_list() -> list[OverrideDefinitions]:
 
 
 _TEST_SUITES_FUNCTION = {
-    "transformers_backend": build_transformers_backend_test_list,
+    "transformers_modeling_backend": build_transformers_modeling_backend_test_list,
 }
 
 
@@ -64,7 +64,7 @@ def main():
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
 
-    test_list = _TEST_SUITES_FUNCTION["transformers_backend"]()
+    test_list = _TEST_SUITES_FUNCTION["transformers_modeling_backend"]()
     run_tests(args, test_list)
 
 
