@@ -718,6 +718,14 @@ def main(trainer_class: type[Trainer]) -> None:
         trainer_class: The trainer class to instantiate (e.g., Trainer, FluxTrainer, TorchCommsTrainer)
     """
     init_logger()
+
+    import torchtitan
+
+    logger.info(
+        "torchtitan version: %s (0.0.0 means __version__ is not defined correctly).",
+        torchtitan.__version__,
+    )
+
     config_manager = ConfigManager()
     config = config_manager.parse_args()
     trainer: Trainer | None = None
