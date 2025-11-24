@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from contextlib import contextmanager
+from typing import Callable
 
 import torch
 from torch.distributed.tensor import DTensor, Replicate
@@ -55,11 +56,9 @@ def register_blockmask_pytree_node():
         )
 
 
-def validate_flex_attention_annotation(joint_with_descriptors):
-    """Verify user annotations show up in the graph."""
-    for node in joint_with_descriptors.graph_module.graph.nodes:
-        if node.target in {
-            torch.ops.higher_order.flex_attention,
-            torch.ops.higher_order.flex_attention_backward,
-        }:
-            assert "compile_with_inductor" in node.meta.get("custom", {})
+def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
+    return (
+        len(passes) > 0
+        and (last_pass_name := getattr(passes[-1], "__name__", None))
+        and (last_pass_name in names)
+    )

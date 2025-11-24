@@ -39,7 +39,7 @@ class GptOssModelArgs(BaseModelArgs):
         n_kv_heads (int): Number of key-value heads.
         sliding_window_size (int): Size of the sliding attention window.
         attn_mask_type (str): Type of basic attention mask.
-        use_flex_attn (bool): Whether to use FlexAttention. Only supports True.
+        attn_type (bool): Attention type, only supports Flex.
         original_seq_len (int): Original sequence length.
         rope_theta (float): Base for rotary positional encoding.
         rope_factor (float): Scaling factor for extended sequence lengths.
@@ -64,7 +64,7 @@ class GptOssModelArgs(BaseModelArgs):
     n_kv_heads: int = 8
     sliding_window_size: int = 128
     attn_mask_type: str = "causal"
-    use_flex_attn: bool = True  # NOTE: gpt-oss only support FlexAttention
+    attn_type: str = "flex"  # NOTE: gpt-oss only support FlexAttention
     # yarn
     original_seq_len: int = 4096
     rope_theta: float = 150000.0
