@@ -1,6 +1,6 @@
 # DeepEP Expert Parallelism for TorchTitan
 
-Achieve **near-linear scaling** from single node to 16 nodes (256 GPUs), **33% faster** than TorchTitan's default expert parallelism (14,796 vs 9,930 tok/s/GPU at EP=8). And Almost no throughput degradation when scaling expert parallel degree from 1 → 8, and all numbers below are reported for Qwen3-30B-A3B.
+Achieve **near-linear scaling** from single node to 16 nodes (128 GPUs), **33% faster** than TorchTitan's default expert parallelism (14,796 vs 9,930 tok/s/GPU at EP=8). And Almost no throughput degradation when scaling expert parallel degree from 1 → 8, and all numbers below are reported for Qwen3-30B-A3B.
 
 ## 🚀 Performance Highlights
 
