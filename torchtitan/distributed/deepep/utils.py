@@ -8,9 +8,6 @@ from typing import Optional
 import torch
 from deep_ep import Config
 
-# from .fused_indices_converter import fused_indices_to_multihot
-
-# from .deepep import fused_dispatch, fused_combine
 from .fused_a2a import fused_combine, fused_dispatch, set_deepep_num_sms
 from .fused_indices_converter import fused_indices_to_multihot
 
@@ -423,21 +420,7 @@ class PrimusTurboFlexTokenDispatcher:
     turbo_deepep_num_worst_tokens: int = 0
     use_turbo_grouped_mlp: bool = False
 
-    # default
-    # turbo_deepep_num_cus: int = 32
-    # turbo_deepep_dispatch_tuned_config: Optional[tuple] = None
-    # turbo_deepep_combine_tuned_config: Optional[tuple] = None
-
-    # === EP=4 Config (COMMENTED OUT - optimized for 4 GPUs) ===
-    # Optimal configs from comprehensive num_sms grid tuning for B200 single-node EP=4
-    # source: scripts/deepep/torchtitan_deepep_tune/summary/num_sms_tuning_summary.json (timestamp: 2025-11-13T16:22:33)
-    # Tuned for: Qwen3-30B-A3B (128 experts, topk=8, hidden=2048, 4 GPUs, B200 ~600 SMs)
-    # Comprehensive tuning tested num_sms: [8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 128]
-    # turbo_deepep_num_cus: int = 128  # 56.3% faster dispatch, 61.8% faster combine vs num_sms=24
-    # turbo_deepep_dispatch_tuned_config: Optional[tuple] = (32, 1024, 8, 128)  # 496.28 GB/s, 83.0% improvement vs worst
-    # turbo_deepep_combine_tuned_config: Optional[tuple] = (16, 256, 8, 128)    # 476.36 GB/s, 84.0% improvement vs worst
-
-    # === EP=8 Config (ACTIVE - optimized for 8 GPUs) ===
+    # === EP=8 Config (optimized for 8 GPUs) ===
     # Optimal configs from comprehensive num_sms grid tuning for B200 single-node EP=8
     # source: scripts/deepep/torchtitan_deepep_tune/summary/num_sms_tuning_summary.json (timestamp: 2025-11-13T17:06:53)
     # Tuned for: Qwen3-30B-A3B (128 experts, topk=8, hidden=2048, 8 GPUs, B200 ~600 SMs)
