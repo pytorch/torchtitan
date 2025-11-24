@@ -72,7 +72,7 @@ For multi-node, see torchtitan-amd repo. Format is different: `(num_sms, nvl_chu
 Edit `torchtitan/distributed/deepep/utils.py`:
 
 ```python
-class PrimusTurboFlexTokenDispatcher:
+class DeepEPTokenDispatcher:
     turbo_deepep_backend: str = "deepep"
     turbo_deepep_num_cus: int = 24  # ← num_sms
     turbo_sync_free_moe: bool = False

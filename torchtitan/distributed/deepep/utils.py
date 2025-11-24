@@ -410,7 +410,7 @@ class PrimusTurboDeepepManager:
         return hidden_states, permuted_probs
 
 
-class PrimusTurboFlexTokenDispatcher:
+class DeepEPTokenDispatcher:
     """
     PrimusTurbo token dispatcher using DeepEP or MORI.
     """

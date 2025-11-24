@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.deepep.utils import PrimusTurboFlexTokenDispatcher
+from torchtitan.distributed.deepep.utils import DeepEPTokenDispatcher
 
 from .utils import indices_padding_wrapper
 
@@ -141,7 +141,7 @@ class GroupedExperts(nn.Module):
         hidden_dim: int,
         num_experts: int,
         use_grouped_mm: bool,
-        deepep_dispatcher: PrimusTurboFlexTokenDispatcher = None,
+        deepep_dispatcher: DeepEPTokenDispatcher = None,
         score_before_experts: bool = False,
     ):
         super().__init__()
@@ -163,19 +163,6 @@ class GroupedExperts(nn.Module):
         num_tokens_per_expert: torch.Tensor,
         routed_prob: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # NOTE(phuc): fix ExpertParallelDeepEP compatibility
-        # When DeepEP is used, the _token_dispatch() method returns 3 values:
-        # (routed_input, num_tokens_per_expert, routed_prob), and distribute_module passes all of them
-        # to this forward() method. The routed_prob contains the routing scores that need to be
-        # multiplied with the tokens (either before or after expert computation).
-        # Without this parameter, we get: "GroupedExperts.forward() takes 3 positional arguments but 4 were given"
-
-        # NOTE(phuc): phuc added additional from amd
-        # Apply routing probability scaling BEFORE expert computation if score_before_experts=True
-        # if routed_prob is not None and self.score_before_experts:
-        #     # Convert to float32 for numerical stability, multiply by routing scores, then convert back
-        #     x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
-
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
@@ -201,12 +188,6 @@ class GroupedExperts(nn.Module):
             out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
         else:
             out = _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
-
-        # NOTE(phuc): phuc added additional from amd
-        # # Apply routing probability scaling AFTER expert computation if score_before_experts=False
-        # if routed_prob is not None and not self.score_before_experts:
-        #     # Convert to float32 for numerical stability, multiply by routing scores, then convert back
-        #     out = (out.to(torch.float32) * routed_prob.reshape(-1, 1)).to(out.dtype)
 
         return out
 
@@ -413,7 +394,7 @@ class MoE(nn.Module):
 
         self.use_deepep = moe_args.use_deepep
         if self.use_deepep:
-            self.deepep_dispatcher = PrimusTurboFlexTokenDispatcher(
+            self.deepep_dispatcher = DeepEPTokenDispatcher(
                 moe_router_topk=moe_args.top_k,
                 num_moe_experts=num_experts,
             )
