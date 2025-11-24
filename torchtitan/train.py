@@ -452,7 +452,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
-        if getattr(self.model_args, "use_flex_attn", False):
+        attn_type = getattr(self.model_args, "attn_type", "sdpa")
+        if attn_type in ["flex", "varlen"]:
             extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
@@ -472,11 +473,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
+        cp_buffers = [inputs, labels]
+        cp_seq_dims = [1, 1]
+        if hasattr(model_parts[0], "freqs_cis"):
+            cp_buffers += [m.freqs_cis for m in model_parts]
+            cp_seq_dims += [0 for _ in model_parts]
+
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],
-                cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
-                cp_seq_dims=[1, 1] + [0 for _ in model_parts],
+                cp_buffers=cp_buffers,
+                cp_seq_dims=cp_seq_dims,
                 cp_no_restore_buffers={inputs, labels},
                 cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
             )
@@ -719,7 +726,7 @@ def main(trainer_class: type[Trainer]) -> None:
         # TODO(local_tensor): Remove this special case once LocalTensor supports
         # init_weights() and foreach_allgather. In local tensor mode, skip
         # training/checkpointing as the # model is not fully initialized
-        if config.comm.comm_mode == "local_tensor":
+        if config.comm.mode == "local_tensor":
             logger.info("Local tensor mode enabled - skipping training execution")
             return
 

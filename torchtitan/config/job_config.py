@@ -791,7 +791,7 @@ class Comm:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
-    comm_mode: Literal["default", "fake_backend", "local_tensor"] = "default"
+    mode: Literal["default", "fake_backend", "local_tensor"] = "default"
     """
     Communication mode for distributed training.
 

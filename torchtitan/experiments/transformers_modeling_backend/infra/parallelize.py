@@ -6,53 +6,28 @@
 
 import torch
 import torch.nn as nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    CheckpointWrapper,
-)
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Partial, Replicate, Shard
+from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
-    PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
 )
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.config.job_config import Compile as CompileConfig
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
+
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
-from torchtitan.distributed.expert_parallel import (
-    ExpertParallel,
-    ExpertTensorParallel,
-    ReordererSequenceParallel,
-    TensorParallel,
-)
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
-from torchtitan.models.moe import moe as moe_module
+from torchtitan.experiments.transformers_modeling_backend.job_config import JobConfig
+from torchtitan.models.llama3.infra.parallelize import apply_compile, apply_ddp
 from torchtitan.tools.logging import logger
 
 
-# for selective op activation checkpointing
-_op_sac_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    torch.ops._c10d_functional.all_to_all_single.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-}
-
-
-def parallelize_llama(
+def parallelize_hf_transformers(
     model: nn.Module,
     parallel_dims: ParallelDims,
     job_config: JobConfig,
@@ -95,71 +70,32 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        apply_moe_ep_tp(
-            model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
-                world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
-            etp_enabled=parallel_dims.etp_enabled,
-        )
-
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
-    attn_type = getattr(model.model_args, "attn_type", "sdpa")
-    use_flex_attn = attn_type == "flex"
+
     if job_config.activation_checkpoint.mode != "none":
-        apply_ac(
-            model,
-            job_config.activation_checkpoint,
-            model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
-            op_sac_save_list=_op_sac_save_list,
-            base_folder=job_config.job.dump_folder,
-        )
+        apply_ac(model, job_config.activation_checkpoint)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
         apply_compile(model, job_config.compile)
 
-    dp_mesh: DeviceMesh | None = None
-    if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
+    if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
         if parallel_dims.dp_replicate_enabled:
             dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
         else:
             dp_mesh_dim_names = ("dp_shard_cp",)
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
-
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh_dim_names = []
-        if parallel_dims.ep_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
 
         apply_fsdp(
             model,
-            dp_mesh,
+            world_mesh[tuple(dp_mesh_dim_names)],
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=(
-                world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
-                if parallel_dims.ep_enabled
-                else None
-            ),
-            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -168,6 +104,7 @@ def parallelize_llama(
             logger.info("Applied FSDP to the model")
 
         if parallel_dims.cp_enabled:
+            model.set_cp_mesh(world_mesh["cp"])
             logger.info("Applied Context Parallel to the model")
 
         if job_config.training.enable_cpu_offload:
@@ -175,10 +112,9 @@ def parallelize_llama(
     elif parallel_dims.dp_replicate_enabled:
         if world_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
-        dp_mesh = world_mesh
         apply_ddp(
             model,
-            dp_mesh,
+            world_mesh,
             enable_compile=model_compile_enabled,
         )
 
@@ -196,22 +132,36 @@ def apply_non_moe_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
-    parallelize_module(
-        model,
-        tp_mesh,
-        {
-            "tok_embeddings": RowwiseParallel(
+
+    # skipping nn.Identity modules (which are added by pipeline parallelism for unused modules)
+    root_plan = {}
+
+    if hasattr(model, "tok_embeddings"):
+        if isinstance(model.tok_embeddings, nn.Identity):
+            root_plan["tok_embeddings"] = NoParallel()
+        else:
+            root_plan["tok_embeddings"] = RowwiseParallel(
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
-            "output": ColwiseParallel(
+            )
+
+    if hasattr(model, "norm"):
+        if isinstance(model.norm, nn.Identity):
+            root_plan["norm"] = NoParallel()
+        else:
+            root_plan["norm"] = SequenceParallel()
+
+    if hasattr(model, "output"):
+        if isinstance(model.output, nn.Identity):
+            root_plan["output"] = NoParallel()
+        else:
+            root_plan["output"] = ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
-            ),
-        },
-    )
+            )
+    if root_plan:  # Only call if there's something to parallelize
+        parallelize_module(model, tp_mesh, root_plan)
 
     # Parallel styles used for transformer block linear weights and their
     # inputs may be different for float8 linears with tensorwise scaling.
@@ -236,31 +186,81 @@ def apply_non_moe_tp(
         )
 
     # Apply tensor + sequence parallelism to every transformer block
-    for transformer_block in model.layers.values():
+    for transformer_block in model.layers:
         layer_plan = {
-            "attention_norm": SequenceParallel(),
-            "attention": prepare_module_input(
-                input_layouts=(Shard(1), None, None),
-                desired_input_layouts=(Replicate(), None, None),
+            "input_layernorm": SequenceParallel(),
+            "self_attn": prepare_module_input(
+                input_kwarg_layouts={"hidden_states": Shard(1)},
+                desired_input_kwarg_layouts={"hidden_states": Replicate()},
             ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
+            "post_attention_layernorm": SequenceParallel(),
         }
-        if not transformer_block.moe_enabled:
+
+        if getattr(transformer_block.self_attn, "q_lora_rank", None) is None:
             layer_plan.update(
                 {
-                    "feed_forward": prepare_module_input(
-                        input_layouts=(Shard(1),),
-                        desired_input_layouts=(Replicate(),),
-                    ),
-                    "feed_forward.w1": colwise_parallel(),
-                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-                    "feed_forward.w3": colwise_parallel(),
+                    "self_attn.q_proj": colwise_parallel(),
+                    "self_attn.k_proj": colwise_parallel(),
+                    "self_attn.v_proj": colwise_parallel(),
                 }
             )
+        else:
+            layer_plan.update(
+                {
+                    "self_attn.q_a_proj": NoParallel(),
+                    "self_attn.q_a_layernorm": NoParallel(),
+                    "self_attn.q_b_proj": colwise_parallel(),
+                    "self_attn.kv_a_proj_with_mqa": NoParallel(),
+                    "self_attn.kv_a_layernorm": NoParallel(),
+                    "self_attn.kv_b_proj": colwise_parallel(),
+                }
+            )
+
+        # Handle different names for the output projection layer, e.g. o_proj vs dense
+        o_proj_name = (
+            "o_proj" if hasattr(transformer_block.self_attn, "o_proj") else "dense"
+        )
+        layer_plan[f"self_attn.{o_proj_name}"] = rowwise_parallel(
+            output_layouts=Shard(1)
+        )
+        # For model that uses RMSNorm on Q and K (i.e. Qwen3)
+        if hasattr(transformer_block.self_attn, "q_norm") and hasattr(
+            transformer_block.self_attn, "k_norm"
+        ):
+            layer_plan["self_attn.q_norm"] = SequenceParallel(
+                sequence_dim=2, use_local_output=True
+            )
+            layer_plan["self_attn.k_norm"] = SequenceParallel(
+                sequence_dim=2, use_local_output=True
+            )
+
+        if not transformer_block.moe_enabled:
+            mlp_plan = {
+                "mlp": prepare_module_input(
+                    input_layouts=(Shard(1),),
+                    desired_input_layouts=(Replicate(),),
+                ),
+            }
+            # Handle different names for MLP layers, e.g. gate_proj vs fc1
+            gate_proj_name = (
+                "gate_proj" if hasattr(transformer_block.mlp, "gate_proj") else "fc1"
+            )
+            mlp_plan[f"mlp.{gate_proj_name}"] = colwise_parallel()
+
+            if hasattr(transformer_block.mlp, "up_proj"):
+                mlp_plan["mlp.up_proj"] = colwise_parallel()
+
+            down_proj_name = (
+                "down_proj" if hasattr(transformer_block.mlp, "down_proj") else "fc2"
+            )
+            mlp_plan[f"mlp.{down_proj_name}"] = rowwise_parallel(
+                output_layouts=Shard(1)
+            )
+            layer_plan.update(mlp_plan)
+
+        # Some models like Phi-2 don't have post_attention_layernorm
+        if not hasattr(transformer_block, "post_attention_layernorm"):
+            layer_plan.pop("post_attention_layernorm")
 
         parallelize_module(
             module=transformer_block,
@@ -329,14 +329,18 @@ def apply_fsdp(
             reshard_after_forward=reshard_after_forward,
         )
 
-    for layer_id, transformer_block in model.layers.items():
+    for transformer_block in model.layers:
         # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
         # - the router and the shared experts are sharded together with the TransformerBlock
         # - the routed experts are sharded with the remaining dp_mod_ep_mesh
-        if transformer_block.moe_enabled and ep_degree > 1:
+        if (
+            hasattr(transformer_block, "moe_enabled")
+            and transformer_block.moe_enabled
+            and ep_degree > 1
+        ):
             fsdp_mod_ep_config = fsdp_config.copy()
             fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
-
+            moe_block = transformer_block.mlp
             # NOTE: EP alreadys shards the routed experts on dim 0 (num_experts).
             #       When dp_mod_ep * ep > num_experts, FSDP default dim-0 sharding
             #       causes inefficiency, so we choose to do FSDP sharding on dim-1.
@@ -345,15 +349,11 @@ def apply_fsdp(
             #       shard_placement_fn on the outer TransformerBlock-level FSDP.
             _experts_shard_placement_fn = None
             assert dp_mod_ep_mesh is not None
-            assert hasattr(transformer_block, "moe")
-            if (
-                dp_mod_ep_mesh.size() * ep_degree
-                > transformer_block.moe.experts.num_experts
-            ):
+            if dp_mod_ep_mesh.size() * ep_degree > moe_block.experts.num_experts:
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
             fully_shard(
-                transformer_block.moe.experts,
+                moe_block.experts,
                 **fsdp_mod_ep_config,
                 reshard_after_forward=reshard_after_forward,
                 shard_placement_fn=_experts_shard_placement_fn,
@@ -362,7 +362,7 @@ def apply_fsdp(
             # NOTE: # Although the FSDP sharding of experts is done on a mesh of
             #       a different size than other parameters, the gradient division
             #       factor should be consistent with data.
-            transformer_block.moe.experts.set_gradient_divide_factor(
+            moe_block.experts.set_gradient_divide_factor(
                 gradient_divide_factor,
             )
 
@@ -392,7 +392,7 @@ def apply_fsdp(
     transformer_blocks = list(model.layers.values())
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
-    if model.tok_embeddings is not None and len(model.layers) > 0:
+    if model.tok_embeddings is not None and model.layers is not None:
         model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
 
     for transformer_block, next_transformer_block in zip(
@@ -401,7 +401,7 @@ def apply_fsdp(
         if next_transformer_block is not None:
             if next_transformer_block.moe_enabled:
                 transformer_block.set_modules_to_forward_prefetch(
-                    [next_transformer_block, next_transformer_block.moe.experts]
+                    [next_transformer_block, next_transformer_block.mlp.experts]
                 )
             else:
                 transformer_block.set_modules_to_forward_prefetch(
@@ -416,7 +416,7 @@ def apply_fsdp(
     reversed_transformer_blocks = list(reversed(model.layers.values()))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
-    if model.norm is not None and model.output is not None and len(model.layers) > 0:
+    if model.norm is not None and model.output is not None and model.layers is not None:
         model.output.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(
@@ -425,7 +425,7 @@ def apply_fsdp(
         if prev_transformer_block is not None:
             if prev_transformer_block.moe_enabled:
                 transformer_block.set_modules_to_backward_prefetch(
-                    [prev_transformer_block, prev_transformer_block.moe.experts]
+                    [prev_transformer_block, prev_transformer_block.mlp.experts]
                 )
             else:
                 transformer_block.set_modules_to_backward_prefetch(
@@ -433,149 +433,3 @@ def apply_fsdp(
                 )
         elif model.tok_embeddings is not None:
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
-
-
-def apply_moe_ep_tp(
-    model: nn.Module,
-    tp_mesh: DeviceMesh | None,
-    ep_mesh: DeviceMesh | None,
-    ep_tp_mesh: DeviceMesh | None,
-    etp_enabled: bool,
-):
-    assert ep_mesh is not None or tp_mesh is not None
-
-    for transformer_block in model.layers.values():
-        if not transformer_block.moe_enabled:
-            continue
-
-        if tp_mesh is not None:
-            moe_layer_plan = {
-                # input / output sharding on the seqlen dim
-                # all-gather for input, reduce-scatter for output
-                "moe": PrepareModuleInputOutput(
-                    input_layouts=(Shard(1),),
-                    desired_input_layouts=(Replicate(),),
-                    use_local_input=True,
-                    output_layouts=(Partial(),),
-                    desired_output_layouts=(Shard(1),),
-                ),
-                # replicate computation for the router
-                "moe.router.gate": NoParallel(),
-            }
-            if ep_mesh is not None and not etp_enabled:
-                # If TP is borrowed for EP, then split the tokens across TP ranks so that
-                # the reorderer, the all-to-all comms, and routed experts computation
-                # are effectively running Sequence Parallel (split along the folded bs*slen dim)
-                moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
-            if transformer_block.moe.shared_experts is not None:
-                # input Replicate, output Partial
-                moe_layer_plan.update(
-                    {
-                        "moe.shared_experts.w1": ColwiseParallel(),
-                        "moe.shared_experts.w2": RowwiseParallel(
-                            output_layouts=Partial()
-                        ),
-                        "moe.shared_experts.w3": ColwiseParallel(),
-                    }
-                )
-            parallelize_module(
-                module=transformer_block,
-                device_mesh=tp_mesh,
-                parallelize_plan=moe_layer_plan,
-            )
-
-        experts_mesh, experts_plan = None, None
-        if ep_mesh is None:
-            experts_mesh = tp_mesh
-            # input Replicate, output Partial
-            experts_plan = TensorParallel()
-        elif tp_mesh is None or not etp_enabled:
-            experts_mesh = ep_mesh
-            # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
-        else:
-            experts_mesh = ep_tp_mesh
-            experts_plan = ExpertTensorParallel()
-
-        parallelize_module(
-            module=transformer_block.moe.experts,
-            device_mesh=experts_mesh,
-            parallelize_plan=experts_plan,
-        )
-
-
-def apply_compile(model: nn.Module, compile_config: CompileConfig):
-    """
-    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
-    repeated structure. Alternatively one can compile the whole model (after applying DP).
-    """
-    # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
-    # but it is experimental.
-    torch._dynamo.config.capture_scalar_outputs = True
-    # Workaround for https://github.com/pytorch/pytorch/issues/166926
-    torch._C._dynamo.eval_frame._set_lru_cache(False)
-    for layer_id, transformer_block in model.layers.named_children():
-        if transformer_block.moe_enabled:
-            # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
-            # So we must weave compile wrappers around those FSDP hooks to
-            # prevent AC from falling back the whole graph to eager.
-            # TODO: Fix Compile(AC(graph break))
-
-            if isinstance(transformer_block, CheckpointWrapper):
-                # TODO: Make CheckpointWrapper a transparent wrapper
-                # unwrap so that .named_children() works
-                block = transformer_block._checkpoint_wrapped_module
-            else:
-                block = transformer_block
-
-            for attr_name, submod in block.named_children():
-                assert getattr(block, attr_name) == getattr(
-                    transformer_block, attr_name
-                )
-
-                if isinstance(submod, moe_module.MoE):
-                    # avoid graph breaking on the GroupedExperts' FSDP hooks
-                    # by wrapping each submod's forward instead of their __call__
-                    moe = submod
-                    for attr_name, submod in moe.named_children():
-                        if attr_name == "experts":
-                            # NOTE: We don't compile token dispatch and token combine due to an issue on B200:
-                            # https://github.com/pytorch/torchtitan/issues/1940
-                            continue
-                        setattr(
-                            moe,
-                            attr_name,
-                            torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
-                            ),
-                        )
-                else:
-                    setattr(
-                        block,
-                        attr_name,
-                        torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=True
-                        ),
-                    )
-
-        else:
-            # If it's not a MoE layer, there is no FSDP(GroupedExperts)
-            # So we can compile the whole block
-            transformer_block = torch.compile(
-                transformer_block,
-                backend=compile_config.backend,
-                fullgraph=True,
-            )
-
-        model.layers.register_module(layer_id, transformer_block)
-
-    moe_module._run_experts_grouped_mm = torch.compile(
-        moe_module._run_experts_grouped_mm,
-        backend=compile_config.backend,
-        fullgraph=True,
-    )
-
-    # NOTE: We don't compile for loop code path due to an issue with unbacked symints:
-    # https://github.com/pytorch/pytorch/issues/166460
-
-    logger.info("Compiling each TransformerBlock with torch.compile")
