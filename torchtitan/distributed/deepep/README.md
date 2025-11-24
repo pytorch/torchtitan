@@ -38,7 +38,7 @@ With expert parallelism optimized to remain within a single node for the 30B-A3B
 
 With **256 GPUs** :
 - Expected aggregate throughput: 3.6M tokens/sec (14,123 × 256 GPUs), translating to 10T tokens/month
-- Identified upcoming optimization (not upstream yet): it could bump the throughput by 30%, this means 10T tokens in 20 days, or equivalently **30T tokens in 2 months**. For reference: Qwen3 was trained on 36T tokens
+- Identified upcoming optimization (not upstream yet): it could bump the throughput by 30%, this means 10T tokens in 20 days, or equivalently **30T tokens in 2 months**. For reference: Qwen3-30B-A3B was trained on 36T tokens.
 
 ---
 
