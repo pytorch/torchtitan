@@ -32,14 +32,13 @@ Achieve **near-linear scaling** from single node to 16 nodes (128 GPUs), **33% f
 
 With expert parallelism optimized to remain within a single node for the 30B-A3B configuration, throughput is expected to scale near-linearly to 256 GPUs. Any throughput degradation at this scale is attributed to non-expert parallelism factors.
 
-- **Expected aggregate throughput**: 3.6M tokens/sec (14,123 × 256 GPUs), translating to 10T tokens/month
 
 
-### What This Enables
+### What does this enable?
 
-With **256 GPUs** at peak throughput:
-- Train **10T tokens in 30 days**
-- Train 10T tokens in 20 days, or equivalently **30T tokens in 2 months** (with identified ~30% optimization). For reference: Qwen3 was trained on 36T tokens
+With **256 GPUs** :
+- Expected aggregate throughput: 3.6M tokens/sec (14,123 × 256 GPUs), translating to 10T tokens/month
+- Identified upcoming optimization (not upstream yet): it could bump the throughput by 30%, this means 10T tokens in 20 days, or equivalently **30T tokens in 2 months**. For reference: Qwen3 was trained on 36T tokens
 
 ---
 
@@ -57,7 +56,7 @@ PYTORCH_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128,garbage_colle
 
 **Expected performance**: ~14,768 tok/s/GPU, ~340 TFLOPS on 8× B200s
 
-> **Note**: `PYTORCH_ALLOC_CONF` is required because PyTorch's default cache allocator reserves more memory than needed. This setting enables dynamic memory management.
+> **Note**: `PYTORCH_ALLOC_CONF` is required because PyTorch's default cache allocator reserves more memory than needed. This setting uses a smaller buffer.
 
 ---
 
@@ -204,9 +203,9 @@ Or via command line:
 ./run_train.sh --training.debug_moe_force_load_balance
 ```
 
-### Communication Pattern Tuning
+### DeepEP Tuning
 
-The default DeepEP configuration is optimized for **B200 GPUs with EP=8** (expert parallelism degree is limited within a single node). If your setup differs, you may need to tune:
+The default DeepEP configuration is optimized for **B200 GPUs with EP=8**. If your setup differs, you may need to tune:
 
 **When to tune**:
 - Using different GPU hardware (H100/H800/A100)
