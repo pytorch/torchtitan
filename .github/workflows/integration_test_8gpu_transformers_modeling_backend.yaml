@@ -1,15 +1,13 @@
-name: Compiler Toolkit 8 GPU Integration Tests
+name: Transformers Modeling Backend 8 GPU Integration Tests
 
 on:
   push:
     branches: [ main ]
     paths:
-      - 'torchtitan/experiments/compiler_toolkit/**'
-      - '.github/workflows/integration_test_8gpu_compiler_toolkit.yaml'
+      - 'torchtitan/experiments/transformers_modeling_backend/**'
   pull_request:
     paths:
-      - 'torchtitan/experiments/compiler_toolkit/**'
-      - '.github/workflows/integration_test_8gpu_compiler_toolkit.yaml'
+      - 'torchtitan/experiments/transformers_modeling_backend/**'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -24,7 +22,7 @@ defaults:
 
 jobs:
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     with:
       runner: linux.g5.48xlarge.nvidia.gpu
       gpu-arch-type: cuda
@@ -49,5 +47,7 @@ jobs:
 
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
 
+        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
+
         mkdir artifacts-to-be-uploaded
-        TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train python -m torchtitan.experiments.compiler_toolkit.tests.integration_tests artifacts-to-be-uploaded --ngpu 4
+        python -m torchtitan.experiments.transformers_modeling_backend.tests.integration_tests artifacts-to-be-uploaded --ngpu 8

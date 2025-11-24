@@ -61,9 +61,10 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+    attn_type = getattr(model.model_args, "attn_type", "sdpa")
+    use_flex_attn = attn_type == "flex"
+    if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
+        raise NotImplementedError("CP support is only supported for SDPA.")
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
@@ -84,7 +85,6 @@ def parallelize_deepseekv3(
             world_mesh["tp"],
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            use_flex_attn=use_flex_attn,
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
@@ -181,7 +181,6 @@ def apply_non_moe_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
-    use_flex_attn: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -211,18 +210,11 @@ def apply_non_moe_tp(
         PrepareModuleInput,
     )
 
-    if use_flex_attn:
-        attention_kernel_plan = prepare_module_input(
-            input_layouts=(Shard(1), Shard(1), Shard(1)),
-            desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
-            use_local_output=True,
-        )
-    else:
-        attention_kernel_plan = prepare_module_input(
-            input_layouts=(Shard(1), Shard(1), Shard(1)),
-            desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
-            use_local_output=True,
-        )
+    attention_kernel_plan = prepare_module_input(
+        input_layouts=(Shard(1), Shard(1), Shard(1)),
+        desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
+        use_local_output=True,
+    )
     # Apply tensor + sequence parallelism to every transformer block
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
