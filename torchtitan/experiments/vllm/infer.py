@@ -13,10 +13,7 @@ python torchtitan/experiments/vllm/infer.py
 """
 
 import argparse
-import json
-import os
 import shutil
-import tempfile
 
 import torch.nn as nn
 from vllm import LLM, SamplingParams
@@ -120,7 +117,7 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default="torchtitan/experiments/vllm/checkpoint/",
+        default="torchtitan/experiments/vllm/example_checkpoint/qwen3-0.6B",
         help="Path to TorchTitan checkpoint directory",
     )
     parser.add_argument(
@@ -155,36 +152,8 @@ def main():
     register_torchtitan_model()
 
     # Create a temporary directory with minimal config.json for vLLM
-    temp_dir = tempfile.mkdtemp(prefix="vllm_torchtitan_qwen_")
-    minimal_config = {
-        "architectures": ["Qwen3TorchTitanForCausalLM"],
-        # Why `model_type`: Tells HuggingFace Transformers to use `Qwen3Config` class (known type)
-        "model_type": "qwen3",  # Use known HF model type
-        # The following parameter is Qwen3-0.6B
-        "hidden_size": 3584,
-        "intermediate_size": 18944,
-        "num_attention_heads": 28,
-        "num_hidden_layers": 28,
-        "num_key_value_heads": 4,
-        "vocab_size": 151936,
-        "max_position_embeddings": 32768,
-        "rope_theta": 1000000.0,
-        "rms_norm_eps": 1e-06,
-        "tie_word_embeddings": False,
-        "head_dim": 128,
-        "attention_bias": False,
-        "hidden_act": "silu",
-        "qk_norm": True,
-        "torch_dtype": "bfloat16",
-        "skip_tokenizer_init": True,
-    }
 
-    config_path = os.path.join(temp_dir, "config.json")
-    with open(config_path, "w") as f:
-        json.dump(minimal_config, f, indent=2)
-
-    print(f"Created temporary model config at: {temp_dir}")
-    print(f"Using checkpoint: {args.model}")
+    print(f"Using checkpoint and config.json from: {args.model}")
 
     print("=" * 80)
     print("INITIALIZING vLLM WITH TORCHTITAN QWEN3 MODEL")
@@ -197,7 +166,7 @@ def main():
 
     # Initialize vLLM with custom TorchTitan Qwen3 model
     llm = LLM(
-        model=temp_dir,  # Use temporary directory with config.json
+        model=args.model,  # Use temporary directory with config.json
         hf_overrides=hf_overrides,
         dtype="bfloat16",
         trust_remote_code=True,
