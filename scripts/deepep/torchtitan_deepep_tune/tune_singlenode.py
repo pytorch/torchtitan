@@ -417,10 +417,10 @@ def main():
         print(f"  {log_path}")
         print(f"\nTo use in torchtitan:")
         print(
-            f"  PrimusTurboFlexTokenDispatcher.turbo_deepep_dispatch_tuned_config = {best_dispatch.as_tuple()}"
+            f"  DeepEPTokenDispatcher.turbo_deepep_dispatch_tuned_config = {best_dispatch.as_tuple()}"
         )
         print(
-            f"  PrimusTurboFlexTokenDispatcher.turbo_deepep_combine_tuned_config = {best_combine.as_tuple()}"
+            f"  DeepEPTokenDispatcher.turbo_deepep_combine_tuned_config = {best_combine.as_tuple()}"
         )
         print(f"{'='*80}\n")
 

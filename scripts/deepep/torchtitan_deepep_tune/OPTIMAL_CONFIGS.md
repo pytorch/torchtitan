@@ -37,7 +37,7 @@ combine_config = (24, 8, 256)
 Edit `torchtitan/distributed/deepep/utils.py` line ~308-309:
 
 ```python
-class PrimusTurboFlexTokenDispatcher:
+class DeepEPTokenDispatcher:
     turbo_deepep_backend: str = "deepep"
     turbo_deepep_num_cus: int = 24  # This is num_sms
     turbo_sync_free_moe: bool = False
@@ -53,12 +53,12 @@ class PrimusTurboFlexTokenDispatcher:
 In your training script, before MoE model is created:
 
 ```python
-from torchtitan.distributed.deepep.utils import PrimusTurboFlexTokenDispatcher
+from torchtitan.distributed.deepep.utils import DeepEPTokenDispatcher
 
 # For single-node EP=4
-PrimusTurboFlexTokenDispatcher.turbo_deepep_num_cus = 24
-PrimusTurboFlexTokenDispatcher.turbo_deepep_dispatch_tuned_config = (24, 8, 256)
-PrimusTurboFlexTokenDispatcher.turbo_deepep_combine_tuned_config = (24, 8, 256)
+DeepEPTokenDispatcher.turbo_deepep_num_cus = 24
+DeepEPTokenDispatcher.turbo_deepep_dispatch_tuned_config = (24, 8, 256)
+DeepEPTokenDispatcher.turbo_deepep_combine_tuned_config = (24, 8, 256)
 ```
 
 ## Config Parameters Explained

@@ -46,7 +46,7 @@ Format: `(num_sms, nvl_chunk, nvl_buffer)`
 File: `torchtitan/distributed/deepep/utils.py` line ~308-309
 
 ```python
-class PrimusTurboFlexTokenDispatcher:
+class DeepEPTokenDispatcher:
     turbo_deepep_backend: str = "deepep"
     turbo_deepep_num_cus: int = 24
     turbo_sync_free_moe: bool = False
@@ -62,11 +62,11 @@ class PrimusTurboFlexTokenDispatcher:
 Before model creation:
 
 ```python
-from torchtitan.distributed.deepep.utils import PrimusTurboFlexTokenDispatcher
+from torchtitan.distributed.deepep.utils import DeepEPTokenDispatcher
 
-PrimusTurboFlexTokenDispatcher.turbo_deepep_num_cus = 24
-PrimusTurboFlexTokenDispatcher.turbo_deepep_dispatch_tuned_config = (24, 8, 256)
-PrimusTurboFlexTokenDispatcher.turbo_deepep_combine_tuned_config = (24, 8, 256)
+DeepEPTokenDispatcher.turbo_deepep_num_cus = 24
+DeepEPTokenDispatcher.turbo_deepep_dispatch_tuned_config = (24, 8, 256)
+DeepEPTokenDispatcher.turbo_deepep_combine_tuned_config = (24, 8, 256)
 ```
 
 ## 📁 Files Created

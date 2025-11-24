@@ -347,14 +347,6 @@ class TransformerBlock(nn.Module):
 
         if self.moe_enabled:
             moe_output = self.moe(self.ffn_norm(x))
-
-            # import torch.distributed as dist
-            # if dist.get_rank() == 0:
-            #     print(f"------- moe_output ------")
-            #     print(moe_output)
-            #     print(f"------- x ------")
-            #     print(x)
-
             x = x + moe_output
         else:
             x = x + self.feed_forward(self.ffn_norm(x))

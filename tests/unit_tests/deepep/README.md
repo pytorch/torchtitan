@@ -2,7 +2,7 @@
 
 Tests for DeepEP-based components in TorchTitan.
 
-## PrimusTurboFlexTokenDispatcher Tests
+## DeepEPTokenDispatcher Tests
 
 Comprehensive test suite with unit tests (mocked) and distributed tests (multi-GPU).
 
