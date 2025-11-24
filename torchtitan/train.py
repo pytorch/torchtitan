@@ -722,7 +722,7 @@ def main(trainer_class: type[Trainer]) -> None:
     import torchtitan
 
     logger.info(
-        "TorchTitan version: %s (0.0.0 means __version__ is not defined correctly).",
+        "torchtitan version: %s (0.0.0 means __version__ is not defined correctly).",
         torchtitan.__version__,
     )
 
