@@ -20,6 +20,7 @@ from torch._guards import tracing, TracingContext
 from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.compiler_toolkit.common_utils import end_with_pass
 from torchtitan.tools.logging import logger
 
 
@@ -217,6 +218,7 @@ def compiler(
     example_inputs,
     passes: List[Callable] = None,
     dump_folder: str | None = None,
+    is_forward: bool = True,
 ):
     """
     Compile a graph module by applying a sequence of compiler passes.
@@ -238,6 +240,17 @@ def compiler(
         gm.print_readable(print_output=False, include_stride=True, include_device=True)
     )
     _dump_gm(dump_folder, gm, f"{name}_before_compiler")
+
+    if end_with_pass(passes, ["cudagraph_pass"]):
+        # cudagraph pass is always the last pass if it is applied
+        cg_pass = passes[-1]
+
+        # to identify static input indices, cudagraph passes behaves differently for
+        # forward and backward pass. so we explicitly pass the info.
+        _cg_pass = functools.partial(cg_pass, is_forward=is_forward)
+
+        # keep the function name for debug log
+        passes[-1] = functools.wraps(cg_pass)(_cg_pass)
 
     for pass_fn in passes:
         pass_name = (
@@ -271,15 +284,40 @@ def make_compiler_with_passes(
 
     def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "fwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "fwd_gm",
+            gm,
+            example_inputs,
+            passes=passes,
+            dump_folder=dump_folder,
+            is_forward=True,
         )
 
     def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
         return compiler(
-            "bwd_gm", gm, example_inputs, passes=passes, dump_folder=dump_folder
+            "bwd_gm",
+            gm,
+            example_inputs,
+            passes=passes,
+            dump_folder=dump_folder,
+            is_forward=False,
         )
 
     return fw_compiler, bw_compiler
+
+
+def validate_pass_names(pass_names: list[str]) -> None:
+    if "cudagraph" in pass_names:
+        assert (
+            pass_names[-1] == "cudagraph"
+        ), "cudagraph has to be the last pass to apply"
+
+    if (
+        "autobucketing_reordering" in pass_names
+        and "transformer_block_bucketing" in pass_names
+    ):
+        raise ValueError(
+            "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
+        )
 
 
 def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfig):
@@ -298,13 +336,7 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
     )
 
     pass_names = getattr(job_config.compile, "passes", [])
-    if (
-        "autobucketing_reordering" in pass_names
-        and "transformer_block_bucketing" in pass_names
-    ):
-        raise ValueError(
-            "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
-        )
+    validate_pass_names(pass_names)
     compiler_passes = []
 
     for pass_name in pass_names:

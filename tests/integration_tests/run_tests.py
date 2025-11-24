@@ -89,7 +89,10 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
             continue
 
         # Skip the test for ROCm
-        if args.gpu_arch_type == "rocm" and test_flavor.skip_rocm_test:
+        if (
+            getattr(args, "gpu_arch_type", "cuda") == "rocm"
+            and test_flavor.skip_rocm_test
+        ):
             continue
 
         # Check if we have enough GPUs
