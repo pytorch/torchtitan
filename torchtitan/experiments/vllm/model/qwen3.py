@@ -27,7 +27,7 @@ import torch
 
 # Import from local custom_models directory
 from torchtitan.experiments.vllm.custom_models import (
-    load_external_weights,
+    # load_external_weights,
     replace_with_trainable_attention,
     store_positions_in_context,
     VLLMModelForCausalLM,
@@ -73,8 +73,9 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
         from torchtitan.models.qwen3.model.model import Qwen3Model
 
         # Map HuggingFace config to TorchTitan ModelArgs
-        hf_config = vllm_config.hf_config
-        print("hf_config: ", hf_config)
+        logger.info("vllm config: ", vllm_config.__class__)
+        hf_config = vllm_config.model_config.hf_config
+        logger.info("hf_config: ", hf_config)
         model_args = Qwen3ModelArgs(
             vocab_size=getattr(hf_config, "vocab_size", 151936),
             dim=getattr(hf_config, "hidden_size", 2048),
@@ -161,7 +162,7 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
             weights_iter: Iterator of (name, tensor) pairs from HF checkpoint
 
         Returns:
-            Number of loaded and skipped parameters
+            Set of loaded parameter names (for vLLM compatibility)
         """
         # HF → TorchTitan name mapping (from Qwen3StateDictAdapter)
         hf_to_tt = {
@@ -194,11 +195,70 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
             ),
         }
 
-        # Load weights using utility function
-        loaded, skipped = load_external_weights(
-            model=self.model, weights_iter=weights_iter, name_mapping=hf_to_tt
+        # Track loaded parameter names
+        loaded_params = set()
+
+        # Convert iterator to list for processing
+        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+        # Get parameters from model
+        params_dict = dict(self.model.named_parameters())
+
+        weights_list = list(weights_iter)
+
+        for hf_name, loaded_weight in weights_list:
+            # Try to find matching pattern in name_mapping
+            target_name = None
+
+            # Check if it's a layer-specific weight
+            if "layers" in hf_name:
+                # Extract layer number
+                import regex as re
+
+                layer_match = re.search(r"layers\.(\d+)\.", hf_name)
+                if layer_match:
+                    layer_num = layer_match.group(1)
+
+                    # Try to find matching pattern
+                    for hf_pattern, target_pattern in hf_to_tt.items():
+                        if "{}" in hf_pattern and target_pattern is not None:
+                            hf_concrete = hf_pattern.format(layer_num)
+                            if hf_name == hf_concrete:
+                                target_name = target_pattern.format(layer_num)
+                                break
+            else:
+                # Non-layer weight (embeddings, norms, output)
+                target_name = hf_to_tt.get(hf_name)
+
+            # Skip if no mapping or explicitly marked as None
+            if target_name is None:
+                continue
+
+            # Check if parameter exists in model
+            if target_name not in params_dict:
+                continue
+
+            # Load the weight into model parameter
+            param = params_dict[target_name]
+
+            # Verify shapes match
+            if param.shape != loaded_weight.shape:
+                logger.warning(
+                    f"Shape mismatch for {target_name}: "
+                    f"Model: {param.shape}, Checkpoint: {loaded_weight.shape}"
+                )
+                continue
+
+            # Load the weight
+            default_weight_loader(param, loaded_weight)
+
+            # Add the parameter name to loaded set
+            # Since CallableModelWrapper overrides named_parameters(),
+            # the names returned here already match what vLLM expects
+            loaded_params.add(target_name)
+
+        logger.info(
+            f"✅ Loaded {len(loaded_params)} parameters, loaded weights are: {loaded_params}"
         )
 
-        logger.info(f"✅ Loaded {loaded} parameters, skipped {skipped}")
-
-        return loaded, skipped
+        return loaded_params
