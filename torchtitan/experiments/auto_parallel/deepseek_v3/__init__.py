@@ -33,8 +33,8 @@ def get_train_spec() -> TrainSpec:
         if "flex_attn" in config:
             continue
 
-        use_flex_attn = (default_args.use_flex_attn,)
-        attn_mask_type = (default_args.attn_mask_type,)
+        args.attn_type = default_args.attn_type
+        args.attn_mask_type = default_args.attn_mask_type
 
     return TrainSpec(
         model_cls=DeepSeekV3Model,
