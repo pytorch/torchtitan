@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -5,122 +6,128 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Simple inference script for TorchTitan-trained Qwen3 model using vLLM.
+Example CLI to run TorchTitan Qwen3 model inference with vLLM:
 
-This script demonstrates how to:
-1. Register a custom TorchTitan Qwen3 model with vLLM
-2. Load a TorchTitan checkpoint into vLLM
-3. Run inference using vLLM's optimized engine
-
-Usage:
-    python infer.py --model-path /path/to/torchtitan/checkpoint --prompt "Hello, world!"
+# Run inference
+python torchtitan/experiments/vllm/infer.py
 """
 
 import argparse
-import logging
-from pathlib import Path
+import json
+import os
+import shutil
+import tempfile
 
+import torch.nn as nn
 from vllm import LLM, SamplingParams
-from vllm.model_executor.models import ModelRegistry
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+from vllm.model_executor.parallel_context import ParallelContext
 
 
-def register_torchtitan_qwen3_model():
-    """Register the TorchTitan Qwen3 model with vLLM's model registry."""
-    from torchtitan.experiments.vllm.model.qwen3 import TorchTitanQwen3ForCausalLM
-
-    logger.info("Registering TorchTitan Qwen3 model with vLLM")
-
-    # Register the model using Qwen3's architecture but with custom weight loading
-    ModelRegistry.register_model(
-        "TorchTitanQwen3ForCausalLM",
-        TorchTitanQwen3ForCausalLM,
-    )
-
-    print("Successfully registered TorchTitanQwen3ForCausalLM")
-
-
-def run_inference(
-    model: str,
-    prompts: list[str],
-    max_tokens: int = 100,
-    temperature: float = 0.8,
-    top_p: float = 0.95,
-    tensor_parallel_size: int = 1,
-):
+def build_qwen3_torchtitan(vllm_config, parallel_context: ParallelContext) -> nn.Module:
     """
-    Run inference using vLLM with a TorchTitan-trained Qwen3 model.
+    Factory function to build Qwen3 with TorchTitan + vLLM.
+
+    This is registered with vLLM's ModelRegistry to enable:
+        LLM(model="Qwen/Qwen3-0.6B", ...)
 
     Args:
-        model: Model name
-        prompts: List of prompts to generate from
-        max_tokens: Maximum number of tokens to generate
-        temperature: Sampling temperature
-        top_p: Top-p sampling parameter
-        tensor_parallel_size: Number of GPUs for tensor parallelism
+        vllm_config: vLLM configuration object
+        parallel_context: Parallelism context with TP/PP info
+
+    Returns:
+        TorchTitanQwen3ForCausalLM instance
     """
-    # Create sampling parameters
-    sampling_params = SamplingParams(
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_tokens,
+    from torchtitan.experiments.vllm.model.qwen3 import TorchTitanQwen3ForCausalLM
+
+    # Create model
+    model = TorchTitanQwen3ForCausalLM(
+        vllm_config=vllm_config, parallel_context=parallel_context
     )
 
-    # entry point:
+    # Apply tensor parallelism if TP > 1
+    # This must happen AFTER model creation and attention replacement
+    # but BEFORE dtype conversion (to avoid dtype issues with DTensors)
+    if parallel_context is not None:
+        tp_size = parallel_context.get_tensor_parallel_world_size()
+        if tp_size > 1:
+            from torch.distributed.device_mesh import init_device_mesh
+            from torchtitan.models.qwen3.infra.parallelize import apply_non_moe_tp
+
+            print(f"🔧 Applying Tensor Parallelism (TP={tp_size})...")
+
+            # Create DeviceMesh for TorchTitan
+            tp_mesh = init_device_mesh(
+                "cuda",
+                (tp_size,),
+                mesh_dim_names=("tp",),
+            )
+
+            # Apply TorchTitan's tensor parallelism to shard weights
+            apply_non_moe_tp(
+                model.model,
+                tp_mesh=tp_mesh,
+                loss_parallel=False,  # Don't shard the output for loss computation
+                enable_float8_tensorwise_tp=False,
+                enable_async_tp=False,
+            )
+
+            print(f"✅ Applied Tensor Parallelism (TP={tp_size})")
+
+    # Convert to dtype if specified (happens after TP)
+    if hasattr(vllm_config, "model_config") and hasattr(
+        vllm_config.model_config, "dtype"
+    ):
+        model = model.to(dtype=vllm_config.model_config.dtype)
+
+    return model
+
+
+# Register with vLLM's ModelRegistry
+from vllm import ModelRegistry
+
+ModelRegistry.register_model("Qwen3TorchTitan", build_qwen3_torchtitan)
+
+
+def register_torchtitan_model():
+    """
+    Register the TorchTitan Qwen3 custom model with vLLM using factory function pattern.
+
+    This registers a factory function that vLLM will call to create the model,
+    allowing us to apply tensor parallelism and other transformations.
+    """
     try:
-        llm = LLM(
-            model=model,
-            model_impl="vllm",
-            skip_tokenizer_init=True,
+        from vllm import ModelRegistry
+
+        # Register the factory function with vLLM
+        # vLLM will call build_qwen3_torchtitan(vllm_config, parallel_context)
+        ModelRegistry.register_model(
+            "Qwen3TorchTitanForCausalLM", build_qwen3_torchtitan
         )
+
+        print("✅ Successfully registered TorchTitan Qwen3 custom model with vLLM")
+        return True
+
     except Exception as e:
-        logger.error(
-            "Failed to initialize vLLM engine with TorchTitanQwen3ForCausalLM model\n"
-        )
-        raise
-
-    logger.info("Model loaded successfully, starting generation...")
-
-    # Generate outputs
-    outputs = llm.generate(prompts, sampling_params)
-
-    # Print results
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        logger.info("-" * 80)
-        logger.info(f"Prompt: {prompt}")
-        logger.info(f"Generated: {generated_text}")
-
-    logger.info("-" * 80)
-    logger.info(f"Generated {len(outputs)} outputs successfully")
+        print(f"⚠️  Warning: Failed to register custom model: {e}")
+        return False
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run inference with TorchTitan Qwen3 model using vLLM"
+        description="Run TorchTitan Qwen3 model inference with vLLM",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--model",
         type=str,
         default="torchtitan/experiments/vllm/checkpoint/",
-        help="Path to the TorchTitan checkpoint or HuggingFace model directory",
+        help="Path to TorchTitan checkpoint directory",
     )
     parser.add_argument(
         "--prompt",
         type=str,
-        default="Hello, how are you?",
-        help="Single prompt to generate from",
-    )
-    parser.add_argument(
-        "--prompts-file",
-        type=str,
-        help="Path to file containing prompts (one per line)",
+        default="Hello, my name is",
+        help="Prompt text for generation",
     )
     parser.add_argument(
         "--max-tokens",
@@ -134,43 +141,101 @@ def main():
         default=0.8,
         help="Sampling temperature",
     )
-    parser.add_argument(
-        "--top-p",
-        type=float,
-        default=0.95,
-        help="Top-p (nucleus) sampling parameter",
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    print("=" * 80)
+    print("REGISTERING TORCHTITAN QWEN3 CUSTOM MODEL")
+    print("=" * 80)
+
+    # Register the custom model with vLLM
+    register_torchtitan_model()
+
+    # Create a temporary directory with minimal config.json for vLLM
+    temp_dir = tempfile.mkdtemp(prefix="vllm_torchtitan_qwen_")
+    minimal_config = {
+        "architectures": ["Qwen3TorchTitanForCausalLM"],
+        # Why `model_type`: Tells HuggingFace Transformers to use `Qwen3Config` class (known type)
+        "model_type": "qwen3",  # Use known HF model type
+        # The following parameter is Qwen3-0.6B
+        "hidden_size": 3584,
+        "intermediate_size": 18944,
+        "num_attention_heads": 28,
+        "num_hidden_layers": 28,
+        "num_key_value_heads": 4,
+        "vocab_size": 151936,
+        "max_position_embeddings": 32768,
+        "rope_theta": 1000000.0,
+        "rms_norm_eps": 1e-06,
+        "tie_word_embeddings": False,
+        "head_dim": 128,
+        "attention_bias": False,
+        "hidden_act": "silu",
+        "qk_norm": True,
+        "torch_dtype": "bfloat16",
+        "skip_tokenizer_init": True,
+    }
+
+    config_path = os.path.join(temp_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(minimal_config, f, indent=2)
+
+    print(f"Created temporary model config at: {temp_dir}")
+    print(f"Using checkpoint: {args.model}")
+
+    print("=" * 80)
+    print("INITIALIZING vLLM WITH TORCHTITAN QWEN3 MODEL")
+    print("=" * 80)
+
+    # Build hf_overrides with checkpoint path
+    hf_overrides = {
+        "checkpoint_dir": args.model,
+    }
+
+    # Initialize vLLM with custom TorchTitan Qwen3 model
+    llm = LLM(
+        model=temp_dir,  # Use temporary directory with config.json
+        hf_overrides=hf_overrides,
+        dtype="bfloat16",
+        trust_remote_code=True,
+        enforce_eager=True,  # Use eager mode for debugging
     )
-    parser.add_argument(
-        "--tensor-parallel-size",
-        type=int,
-        default=1,
-        help="Number of GPUs for tensor parallelism",
-    )
 
-    args = parser.parse_args()
+    print("=" * 80)
+    print("vLLM ENGINE INITIALIZED - STARTING GENERATION")
+    print("=" * 80)
 
-    # Register the custom model
-    register_torchtitan_qwen3_model()
-
-    # Prepare prompts
-    if args.prompts_file:
-        prompts_path = Path(args.prompts_file)
-        if not prompts_path.exists():
-            raise FileNotFoundError(f"Prompts file not found: {prompts_path}")
-        prompts = prompts_path.read_text().strip().split("\n")
-        logger.info(f"Loaded {len(prompts)} prompts from {prompts_path}")
-    else:
-        prompts = [args.prompt]
-
-    # Run inference
-    run_inference(
-        model=args.model,
-        prompts=prompts,
-        max_tokens=args.max_tokens,
+    # Prepare prompt
+    prompts = [args.prompt]
+    sampling_params = SamplingParams(
         temperature=args.temperature,
-        top_p=args.top_p,
-        tensor_parallel_size=args.tensor_parallel_size,
+        top_p=0.95,
+        max_tokens=args.max_tokens,
     )
+
+    # Generate
+    outputs = llm.generate(
+        prompts=prompts,
+        sampling_params=sampling_params,
+    )
+
+    # Print results
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+
+        print(f"\nPrompt: {prompt}")
+        print(f"Generated text: {generated_text!r}")
+
+    # Clean up temporary directory
+    try:
+        shutil.rmtree(temp_dir)
+        print(f"\nCleaned up temporary directory: {temp_dir}")
+    except Exception as e:
+        print(f"Warning: Could not clean up temporary directory {temp_dir}: {e}")
 
 
 if __name__ == "__main__":
