@@ -16,6 +16,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
@@ -380,11 +381,19 @@ def build_optimizers_with_moe_load_balancing(
         tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
         if dp_cp_mesh is not None:
-            # Perform single all-reduce to get global statistics across all processes
-            pg = dp_cp_mesh.get_group()
-            torch.distributed.all_reduce(
-                tokens_per_expert_by_layer, group=pg, op=torch.distributed.ReduceOp.SUM
-            )
+            if isinstance(tokens_per_expert_by_layer, torch.distributed.tensor.DTensor):
+                tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
+                    placements=[Replicate()]
+                    * tokens_per_expert_by_layer.device_mesh.ndim
+                )
+            else:
+                # Perform single all-reduce to get global statistics across all processes
+                pg = dp_cp_mesh.get_group()
+                torch.distributed.all_reduce(
+                    tokens_per_expert_by_layer,
+                    group=pg,
+                    op=torch.distributed.ReduceOp.SUM,
+                )
 
         moe_layer_idx = 0
         with torch.no_grad():

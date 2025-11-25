@@ -13,5 +13,7 @@ _supported_experiments = frozenset(
         "compiler_toolkit.deepseek_v3",
         "compiler_toolkit.llama3",
         "transformers_modeling_backend",
+        "auto_parallel.llama3",
+        "auto_parallel.deepseek_v3",
     ]
 )
