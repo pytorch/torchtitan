@@ -21,6 +21,7 @@ enable_wandb = false
 [model]
 name = "flux"
 flavor = "flux-debug"
+hf_assets_path = "tests/assets/tokenizer"
 
 [optimizer]
 name = "AdamW"
@@ -48,6 +49,7 @@ autoencoder_path = "assets/hf/FLUX.1-dev/ae.safetensors"  # Autoencoder to use f
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
+context_parallel_degree = 1
 
 [activation_checkpoint]
 mode = "full"
