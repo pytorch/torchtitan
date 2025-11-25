@@ -19,8 +19,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 
-# BASELINE = "fsdp2_tp1_cp1_pp1"
-BASELINE = "fsdp1_tp1_cp1_pp1"
+BASELINE = "fsdp2_tp1_cp1_pp1"
+# BASELINE = "fsdp1_tp1_cp1_pp1"
 
 console = Console()
 
@@ -74,6 +74,7 @@ def _create_slurm_script(
     job_name: str,
     initial_load_path: str = None,
     repo_id: str = None,
+    model_type: str = "transformers_modeling_backend",
 ):
     with open(config_path, "r") as file:
         config = toml.load(file)
@@ -103,7 +104,8 @@ def _create_slurm_script(
         "config_path": config_path,
         "initial_load_path": initial_load_path,
         "repo_id": repo_id,
-        "qos": "high" if nodes > 1 else "normal",  # Example logic for qos
+        "qos": "high" if nodes > 1 else "normal",
+        "model_type": model_type,  # NEW FIELD
     }
 
     with open(script_path, "w") as file:
@@ -112,7 +114,7 @@ def _create_slurm_script(
     print(f"Slurm script created at {script_path}")
 
 
-def create_configs(model_name: str, out_dir: str, flavor: str):
+def create_configs(model_name: str, out_dir: str, flavor: str, model_type: str = "transformers_modeling_backend"):
     """
     results/
         |_ meta-llama
@@ -156,30 +158,37 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
     with open(base_config, "r") as f:
         config = toml.load(f)
 
-    config["model"]["name"] = "transformers_modeling_backend"
-    # creeate a new hf_transformers section
-    config["hf_transformers"] = {}
-    config["hf_transformers"]["model"] = model_name
-    config["model"]["flavor"] = flavor
-    
-    # Extract just the model name from repo_id (e.g., "Llama-3.2-1B" from "meta-llama/Llama-3.2-1B")
-    # download_hf_assets.py creates directories using only the model name part
-    model_name_only = model_name.split("/")[-1] if "/" in model_name else model_name
-    config["model"]["hf_assets_path"] = f"./{out_dir}/{model_name}/assets/hf/{model_name_only}"
+    # Configure based on model_type
+    if model_type == "transformers_modeling_backend":
+        config["model"]["name"] = "transformers_modeling_backend"
+        # Create a new hf_transformers section
+        config["hf_transformers"] = {}
+        config["hf_transformers"]["model"] = model_name
+        config["model"]["flavor"] = flavor
+        
+        # Extract just the model name from repo_id (e.g., "Llama-3.2-1B" from "meta-llama/Llama-3.2-1B")
+        model_name_only = model_name.split("/")[-1] if "/" in model_name else model_name
+        config["model"]["hf_assets_path"] = f"./{out_dir}/{model_name}/assets/hf/{model_name_only}"
+    elif model_type == "torchtitan":
+        config["model"]["name"] = model_name
+        config["model"]["flavor"] = flavor
+        config["model"]["hf_assets_path"] = f"/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/tokenizer"
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}. Must be 'transformers_modeling_backend' or 'torchtitan'")
     
     # Set absolute path to dataset to avoid path resolution issues
     config["training"]["dataset_path"] = "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/c4_test"
 
-    # parallelism_configs = [
-    #     BASELINE, # baseline
-    #     "fsdp2_tp2_cp1_pp1",
-    #     "fsdp2_tp1_cp1_pp2",
-    #     "fsdp2_tp1_cp2_pp1",
-    #     "fsdp2_tp1_cp2_pp2",
-    #     "fsdp2_tp2_cp2_pp1",
-    #     "fsdp2_tp2_cp1_pp2",
-    #     "fsdp2_tp2_cp2_pp2",
-    # ]
+    parallelism_configs = [
+        BASELINE, # baseline
+        "fsdp2_tp2_cp1_pp1",
+        "fsdp2_tp1_cp1_pp2",
+        "fsdp2_tp1_cp2_pp1",
+        "fsdp2_tp1_cp2_pp2",
+        "fsdp2_tp2_cp2_pp1",
+        "fsdp2_tp2_cp1_pp2",
+        "fsdp2_tp2_cp2_pp2",
+    ]
 
     # parallelism_configs = [
     #     BASELINE, # baseline
@@ -192,10 +201,11 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
     #     # "fsdp1_tp2_cp2_pp2",
     # ]
 
-    parallelism_configs = [
-        BASELINE, # baseline
-        "fsdp1_tp1_cp1_pp2",
-    ]
+    # parallelism_configs = [
+    #     BASELINE, # baseline
+    #     # "fsdp2_tp1_cp1_pp2",
+    #     # "fsdp1_tp1_cp1_pp2",
+    # ]
 
     out_path = Path(out_dir) / model_name / flavor
     out_path.mkdir(parents=True, exist_ok=True)
@@ -218,7 +228,8 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
         seed_config_path,
         seed_checkpoint_dir / "seed.slurm",
         "seed_checkpoint",
-        repo_id=model_name,
+        repo_id=model_name if model_type == "transformers_modeling_backend" else None,
+        model_type=model_type,
     )
 
     # Create parallelism configs
@@ -258,7 +269,8 @@ def create_configs(model_name: str, out_dir: str, flavor: str):
             pc_dir / "nd_parallelism.slurm",
             pc,
             initial_load_path=str(seed_checkpoint_dir / "checkpoint/step-0"),
-            repo_id=model_name,
+            repo_id=model_name if model_type == "transformers_modeling_backend" else None,
+            model_type=model_type,
         )
 
 class Status(Enum):
@@ -698,7 +710,7 @@ def report(inp_dir: str, only: str = None):
     
     # Find all directories that contain a baseline (fsdp2_tp1_cp1_pp1) subdirectory
     flavor_dirs = []
-    for root, dirs, files in os.walk(inp_path):
+    for root, dirs, files in os.walk(inp_dir):
         if BASELINE in dirs:
             flavor_dirs.append(Path(root))
     
@@ -761,6 +773,409 @@ def report(inp_dir: str, only: str = None):
     
     log_message(LogLevel.SUCCESS, "Diff generation complete!")
 
+def compare_throughput(torchtitan_dir: str, hf_dir: str, only: str = None):
+    """
+    Compare throughput and metrics between torchtitan native and transformers_modeling_backend runs.
+    
+    Expects directory structure:
+        torchtitan_dir/
+            |_ model_name/flavor/
+                |_ fsdp2_tp1_cp1_pp1/
+                |_ fsdp2_tp2_cp1_pp1/
+                ...
+        hf_dir/
+            |_ model_name/flavor/
+                |_ fsdp2_tp1_cp1_pp1/
+                |_ fsdp2_tp2_cp1_pp1/
+                ...
+    
+    Generates diffs comparing equivalent parallelism configs between the two model types.
+    """
+    import torch
+    from dataclasses import dataclass, field
+    from typing import List, Optional
+    
+    @dataclass
+    class ThroughputMetrics:
+        """Throughput metrics extracted from logs."""
+        steps: List[int] = field(default_factory=list)
+        loss: List[float] = field(default_factory=list)
+        grad_norm: List[float] = field(default_factory=list)
+        memory_gib: List[float] = field(default_factory=list)  # memory in GiB
+        tps: List[float] = field(default_factory=list)  # tokens per second
+        tflops: List[float] = field(default_factory=list)  # teraflops
+        mfu: List[float] = field(default_factory=list)  # model flops utilization %
+    
+    def _extract_throughput_metrics(log_file: Path) -> ThroughputMetrics:
+        """Extract throughput metrics from log file."""
+        metrics = ThroughputMetrics()
+        
+        try:
+            with open(log_file, 'r') as f:
+                content = f.read()
+
+            # Regex to capture metrics from a log line, ignoring ANSI color codes
+            # Pattern matches: step: X ... loss: Y ... grad_norm: Z ... memory: MGiB(...) ... tps: T ... tflops: F ... mfu: U%
+            pattern = re.compile(
+                r"step:\s*(\d+)\s*"
+                r".*?loss:\s*(-?[0-9]+\.?[0-9]*)\s*"
+                r".*?grad_norm:\s*([0-9]+\.?[0-9]*)\s*"
+                r".*?memory:\s*([0-9]+\.?[0-9]*)GiB"
+                r".*?tps:\s*([0-9,]+)"
+                r".*?tflops:\s*([0-9]+\.?[0-9]*)"
+                r".*?mfu:\s*([0-9]+\.?[0-9]*)%"
+            )
+
+            for match in pattern.finditer(content):
+                loss = float(match.group(2))
+                if loss == -1.0:
+                    continue
+                metrics.steps.append(int(match.group(1)))
+                metrics.loss.append(loss)
+                metrics.grad_norm.append(float(match.group(3)))
+                metrics.memory_gib.append(float(match.group(4)))
+                
+                # Parse tps (may have commas as thousand separators)
+                tps_str = match.group(5).replace(',', '')
+                metrics.tps.append(float(tps_str))
+                
+                metrics.tflops.append(float(match.group(6)))
+                metrics.mfu.append(float(match.group(7)))
+                    
+        except Exception as e:
+            log_message(LogLevel.WARNING, f"Could not extract metrics: {e}", indent=3, dim=True)
+        
+        return metrics
+    
+    def _filter_log_for_comparison(log_file: Path) -> Path:
+        """Filter log file to normalize volatile information for comparison."""
+        filtered_file = log_file.with_suffix(log_file.suffix + '.compare_filtered')
+        
+        with open(log_file, 'r') as infile, open(filtered_file, 'w') as outfile:
+            for line in infile:
+                # Remove timestamps
+                line = re.sub(r'([0-9]{4}-[0-9]{2}-[0-9]{2} )?[0-9]{2}:[0-9]{2}:[0-9]{2}(,[0-9]+)?', 
+                            'TIMESTAMP', line)
+                # Normalize torchrun commands
+                line = re.sub(r'torchrun.*--master_port[= ]([0-9]+)', 
+                            'torchrun ... --master_port=XXXX', line)
+                # Normalize PIDs
+                line = re.sub(r'PID [0-9]+', 'PID XXXX', line)
+                # Normalize localhost ports
+                line = re.sub(r'localhost:[0-9]+', 'localhost:XXXX', line)
+                # Normalize SLURM job IDs
+                line = re.sub(r'slurm_[0-9]+\.out', 'slurm_XXXX.out', line)
+                # Normalize model paths (to make HF and torchtitan comparable)
+                line = re.sub(r'model\.name\s*=\s*["\']?[\w_/-]+["\']?', 'model.name = MODEL', line)
+                outfile.write(line)
+        
+        return filtered_file
+
+    def _generate_comparison_diff(torchtitan_log: Path, hf_log: Path, diff_file: Path) -> tuple[bool, str]:
+        """Generate diff between torchtitan and HF logs using git diff."""
+        torchtitan_filtered = _filter_log_for_comparison(torchtitan_log)
+        hf_filtered = _filter_log_for_comparison(hf_log)
+        
+        try:
+            cmd = ["git", "diff", "--no-index", "--color=always", "--word-diff=color",
+                str(torchtitan_filtered), str(hf_filtered)]
+            
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            
+            if result.returncode not in [0, 1]:
+                error_msg = f"git diff failed with code {result.returncode}\n{result.stderr}"
+                return False, error_msg
+            
+            with open(diff_file, 'w') as f:
+                f.write(f"# Comparison: torchtitan vs transformers_modeling_backend\n")
+                f.write(f"# torchtitan: {torchtitan_log}\n")
+                f.write(f"# HF backend: {hf_log}\n")
+                f.write(f"# {'='*60}\n\n")
+                f.write(result.stdout)
+            
+            return True, result.stdout
+            
+        finally:
+            if torchtitan_filtered.exists():
+                torchtitan_filtered.unlink()
+            if hf_filtered.exists():
+                hf_filtered.unlink()
+
+    def _compare_throughput_metrics(tt_metrics: ThroughputMetrics, hf_metrics: ThroughputMetrics, 
+                                    config_name: str) -> tuple[bool, str, dict]:
+        """Compare throughput metrics between torchtitan and HF backend.
+        
+        Returns:
+            tuple[bool, str, dict]: (comparable, summary_message, detailed_stats)
+        """
+        if not tt_metrics.loss or not hf_metrics.loss:
+            return False, "Unable to extract metrics", {}
+        
+        # Convert to tensors for comparison
+        tt_loss = torch.tensor(tt_metrics.loss)
+        hf_loss = torch.tensor(hf_metrics.loss)
+        
+        # Calculate differences
+        min_len = min(len(tt_loss), len(hf_loss))
+        tt_loss = tt_loss[:min_len]
+        hf_loss = hf_loss[:min_len]
+        
+        loss_diff = torch.abs(tt_loss - hf_loss)
+        loss_max_diff = loss_diff.max().item()
+        loss_mean_diff = loss_diff.mean().item()
+        
+        stats = {
+            "loss_max_diff": loss_max_diff,
+            "loss_mean_diff": loss_mean_diff,
+            "tt_steps": len(tt_metrics.steps),
+            "hf_steps": len(hf_metrics.steps),
+        }
+        
+        # Compare memory if available (min/avg/max)
+        if tt_metrics.memory_gib and hf_metrics.memory_gib:
+            stats["tt_memory_min"] = min(tt_metrics.memory_gib)
+            stats["tt_memory_avg"] = sum(tt_metrics.memory_gib) / len(tt_metrics.memory_gib)
+            stats["tt_memory_max"] = max(tt_metrics.memory_gib)
+            stats["hf_memory_min"] = min(hf_metrics.memory_gib)
+            stats["hf_memory_avg"] = sum(hf_metrics.memory_gib) / len(hf_metrics.memory_gib)
+            stats["hf_memory_max"] = max(hf_metrics.memory_gib)
+        
+        # Compare TPS if available (min/avg/max)
+        if tt_metrics.tps and hf_metrics.tps:
+            stats["tt_tps_min"] = min(tt_metrics.tps)
+            stats["tt_tps_avg"] = sum(tt_metrics.tps) / len(tt_metrics.tps)
+            stats["tt_tps_max"] = max(tt_metrics.tps)
+            stats["hf_tps_min"] = min(hf_metrics.tps)
+            stats["hf_tps_avg"] = sum(hf_metrics.tps) / len(hf_metrics.tps)
+            stats["hf_tps_max"] = max(hf_metrics.tps)
+            # Keep ratio using avg
+            tps_ratio = stats["hf_tps_avg"] / stats["tt_tps_avg"] if stats["tt_tps_avg"] > 0 else 0
+            stats["tps_ratio"] = tps_ratio
+        
+        # Compare MFU if available (min/avg/max)
+        if tt_metrics.mfu and hf_metrics.mfu:
+            stats["tt_mfu_min"] = min(tt_metrics.mfu)
+            stats["tt_mfu_avg"] = sum(tt_metrics.mfu) / len(tt_metrics.mfu)
+            stats["tt_mfu_max"] = max(tt_metrics.mfu)
+            stats["hf_mfu_min"] = min(hf_metrics.mfu)
+            stats["hf_mfu_avg"] = sum(hf_metrics.mfu) / len(hf_metrics.mfu)
+            stats["hf_mfu_max"] = max(hf_metrics.mfu)
+        
+        # Build summary
+        summary_parts = [f"Loss diff: {loss_max_diff:.2e}"]
+        if "tps_ratio" in stats:
+            summary_parts.append(f"TPS ratio: {stats['tps_ratio']:.2f}x")
+        
+        summary = ", ".join(summary_parts)
+        
+        # Consider "comparable" if loss differences are small (within tolerance)
+        DEFAULT_LOSS_ATOL = 5e-2
+        comparable = loss_max_diff < DEFAULT_LOSS_ATOL
+        
+        return comparable, summary, stats
+
+    # Main logic
+    tt_path = Path(torchtitan_dir)
+    hf_path = Path(hf_dir)
+    
+    if not tt_path.exists():
+        console.print(f"[bold red]Error:[/bold red] torchtitan directory not found: {tt_path}")
+        return
+    if not hf_path.exists():
+        console.print(f"[bold red]Error:[/bold red] HF backend directory not found: {hf_path}")
+        return
+    
+    console.print(
+        Panel(
+            "[bold cyan]Throughput Comparison: torchtitan vs transformers_modeling_backend[/bold cyan]",
+            expand=False,
+            border_style="blue",
+            padding=(1, 2),
+        )
+    )
+    console.print()
+    
+    log_message(LogLevel.INFO, f"torchtitan dir: {tt_path}")
+    log_message(LogLevel.INFO, f"HF backend dir: {hf_path}")
+    console.print()
+    
+    # Find all parallelism config directories in both paths
+    def find_parallelism_dirs(base_path: Path) -> dict[str, Path]:
+        """Find all parallelism config directories (fsdp*_tp*_cp*_pp*) under base_path."""
+        configs = {}
+        for root, dirs, files in os.walk(base_path):
+            root_path = Path(root)
+            # Check if this directory matches parallelism pattern
+            if re.match(r"fsdp\d+_tp\d+_cp\d+_pp\d+", root_path.name):
+                # Check if it has an .out file
+                out_files = list(root_path.glob("*.out"))
+                if out_files:
+                    configs[root_path.name] = root_path
+        return configs
+    
+    tt_configs = find_parallelism_dirs(tt_path)
+    hf_configs = find_parallelism_dirs(hf_path)
+    
+    # Find common configs
+    common_configs = set(tt_configs.keys()) & set(hf_configs.keys())
+    
+    if only:
+        common_configs = {c for c in common_configs if only in c}
+        log_message(LogLevel.INFO, f"Filtered to configs matching '{only}'")
+    
+    if not common_configs:
+        log_message(LogLevel.ERROR, "No matching parallelism configurations found in both directories")
+        console.print(f"[yellow]torchtitan configs: {list(tt_configs.keys())}[/yellow]")
+        console.print(f"[yellow]HF configs: {list(hf_configs.keys())}[/yellow]")
+        return
+    
+    log_message(LogLevel.INFO, f"Found {len(common_configs)} common configuration(s) to compare:")
+    for config in sorted(common_configs):
+        console.print(f"  [cyan]•[/cyan] {config}")
+    console.print()
+    
+    # Compare each configuration
+    results = []
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("[cyan]Comparing configurations...", total=len(common_configs))
+        
+        for config_name in sorted(common_configs):
+            progress.update(task, description=f"[cyan]Comparing [bold]{config_name}[/bold]")
+            
+            tt_dir = tt_configs[config_name]
+            hf_dir_config = hf_configs[config_name]
+            
+            # Find .out files
+            tt_out_files = list(tt_dir.glob("*.out"))
+            hf_out_files = list(hf_dir_config.glob("*.out"))
+            
+            if not tt_out_files or not hf_out_files:
+                log_message(LogLevel.WARNING, f"{config_name}: Missing .out file(s)", indent=1)
+                results.append((config_name, False, "Missing .out files", {}))
+                progress.advance(task)
+                continue
+            
+            tt_out = tt_out_files[0]
+            hf_out = hf_out_files[0]
+            
+            # Extract metrics
+            tt_metrics = _extract_throughput_metrics(tt_out)
+            hf_metrics = _extract_throughput_metrics(hf_out)
+            
+            # Compare metrics
+            comparable, summary, stats = _compare_throughput_metrics(tt_metrics, hf_metrics, config_name)
+            
+            if comparable:
+                log_message(LogLevel.TEST_PASS, f"{config_name} - {summary}", indent=1)
+            else:
+                log_message(LogLevel.TEST_FAIL, f"{config_name} - {summary}", indent=1)
+            
+            results.append((config_name, comparable, summary, stats))
+            
+            # Generate diff file in HF directory (or a comparison output directory)
+            diff_file = hf_dir_config / f"diff_torchtitan_vs_hf.log"
+            try:
+                success, output = _generate_comparison_diff(tt_out, hf_out, diff_file)
+                if success:
+                    log_message(LogLevel.INFO, f"Diff saved to: {diff_file}", indent=2, dim=True)
+                else:
+                    log_message(LogLevel.WARNING, f"Failed to generate diff: {output}", indent=2, dim=True)
+            except Exception as e:
+                log_message(LogLevel.WARNING, f"Failed to generate diff - {e}", indent=2, dim=True)
+            
+            progress.advance(task)
+    
+    # Summary table
+    console.print()
+    summary_table = Table(
+        title="[bold]Throughput Comparison Summary[/bold]",
+        show_header=True,
+        header_style="bold magenta"
+    )
+    summary_table.add_column("Configuration", style="cyan")
+    summary_table.add_column("Status", justify="center")
+    summary_table.add_column("Loss Diff", justify="right")
+    summary_table.add_column("TPS Ratio", justify="right")
+    summary_table.add_column("TT TPS\n(min/avg/max)", justify="right")
+    summary_table.add_column("HF TPS\n(min/avg/max)", justify="right")
+    summary_table.add_column("TT Mem\n(min/avg/max)", justify="right")
+    summary_table.add_column("HF Mem\n(min/avg/max)", justify="right")
+    summary_table.add_column("TT MFU\n(min/avg/max)", justify="right")
+    summary_table.add_column("HF MFU\n(min/avg/max)", justify="right")
+    
+    def fmt_min_avg_max(min_v, avg_v, max_v, fmt="{:.2f}"):
+        min_str = fmt.format(min_v)
+        avg_str = fmt.format(avg_v)
+        max_str = fmt.format(max_v)
+        return f"[red]{min_str}[/red]/[blue]{avg_str}[/blue]/[green]{max_str}[/green]"
+    
+    for name, comparable, summary, stats in results:
+        status = "[bold green]✅ MATCH[/bold green]" if comparable else "[bold yellow]⚠️ DIFF[/bold yellow]"
+        loss_diff = f"{stats.get('loss_max_diff', 0):.2e}" if stats else "N/A"
+        tps_ratio = f"{stats.get('tps_ratio', 0):.2f}x" if 'tps_ratio' in stats else "N/A"
+        
+        # TPS (min/avg/max)
+        if 'tt_tps_min' in stats:
+            tt_tps = fmt_min_avg_max(stats['tt_tps_min'], stats['tt_tps_avg'], stats['tt_tps_max'], "{:,.0f}")
+        else:
+            tt_tps = "N/A"
+        if 'hf_tps_min' in stats:
+            hf_tps = fmt_min_avg_max(stats['hf_tps_min'], stats['hf_tps_avg'], stats['hf_tps_max'], "{:,.0f}")
+        else:
+            hf_tps = "N/A"
+        
+        # Memory (min/avg/max)
+        if 'tt_memory_min' in stats:
+            tt_mem = fmt_min_avg_max(stats['tt_memory_min'], stats['tt_memory_avg'], stats['tt_memory_max'], "{:.2f}")
+        else:
+            tt_mem = "N/A"
+        if 'hf_memory_min' in stats:
+            hf_mem = fmt_min_avg_max(stats['hf_memory_min'], stats['hf_memory_avg'], stats['hf_memory_max'], "{:.2f}")
+        else:
+            hf_mem = "N/A"
+        
+        # MFU (min/avg/max)
+        if 'tt_mfu_min' in stats:
+            tt_mfu = fmt_min_avg_max(stats['tt_mfu_min'], stats['tt_mfu_avg'], stats['tt_mfu_max'], "{:.2f}")
+        else:
+            tt_mfu = "N/A"
+        if 'hf_mfu_min' in stats:
+            hf_mfu = fmt_min_avg_max(stats['hf_mfu_min'], stats['hf_mfu_avg'], stats['hf_mfu_max'], "{:.2f}")
+        else:
+            hf_mfu = "N/A"
+        
+        summary_table.add_row(name, status, loss_diff, tps_ratio, tt_tps, hf_tps, tt_mem, hf_mem, tt_mfu, hf_mfu)
+    
+    console.print(summary_table)
+    console.print()
+    
+    # Print legend for TPS Ratio
+    console.print("[dim]TPS Ratio = HF TPS (avg) / TT TPS (avg)[/dim]")
+    console.print("[dim]  • 1.0x = same throughput[/dim]")
+    console.print("[dim]  • >1.0x = HF is faster (e.g., 1.22x = HF is 22% faster)[/dim]")
+    console.print("[dim]  • <1.0x = torchtitan is faster (e.g., 0.8x = HF is 20% slower)[/dim]")
+    console.print()
+    console.print("[dim]Values format: [red]min[/red]/[blue]avg[/blue]/[green]max[/green][/dim]")
+    console.print()
+    
+    matched = sum(1 for _, comparable, _, _ in results if comparable)
+    total = len(results)
+    
+    if matched == total and total > 0:
+        log_message(LogLevel.SUCCESS, f"All {total} configurations match! 🎉")
+    elif total > 0:
+        log_message(LogLevel.INFO, f"{matched}/{total} configurations match (differences may be expected due to implementation details)")
+    
+    log_message(LogLevel.SUCCESS, "Throughput comparison complete!")
+
 if __name__ == "__main__":
     parser = ArgumentParser()
     subparsers = parser.add_subparsers(dest="action")
@@ -769,6 +1184,9 @@ if __name__ == "__main__":
     create_configs_parser.add_argument("--model_name", type=str, required=True)
     create_configs_parser.add_argument("--out_dir", type=str, required=True)
     create_configs_parser.add_argument("--flavor", type=str, required=True)
+    create_configs_parser.add_argument("--model_type", type=str, default="transformers_modeling_backend",
+                                       choices=["transformers_modeling_backend", "torchtitan"],
+                                       help="Model type: 'transformers_modeling_backend' for HF models, 'torchtitan' for torchtitan native")
 
     submit_jobs_parser = subparsers.add_parser("submit_jobs")
     submit_jobs_parser.add_argument("--inp_dir", type=str, required=True)
@@ -782,13 +1200,25 @@ if __name__ == "__main__":
     check_status_parser = subparsers.add_parser("check_status")
     check_status_parser.add_argument("--inp_dir", type=str, required=True)
 
+    # NEW: compare_throughput subcommand
+    compare_throughput_parser = subparsers.add_parser("compare_throughput",
+        help="Compare throughput between torchtitan native and transformers_modeling_backend runs")
+    compare_throughput_parser.add_argument("--torchtitan_dir", type=str, required=True,
+        help="Directory containing torchtitan native results")
+    compare_throughput_parser.add_argument("--hf_dir", type=str, required=True,
+        help="Directory containing transformers_modeling_backend results")
+    compare_throughput_parser.add_argument("--only", type=str, default=None,
+        help="Filter to configs matching this string (e.g., 'tp2' to only compare TP=2 configs)")
+
     args = parser.parse_args()
 
     if args.action == "create_configs":
-        create_configs(args.model_name, args.out_dir, args.flavor)
+        create_configs(args.model_name, args.out_dir, args.flavor, args.model_type)
     elif args.action == "submit_jobs":
         submit_jobs(args.inp_dir, args.qos, args.only)
     elif args.action == "report":
         report(args.inp_dir, args.only)
     elif args.action == "check_status":
         check_status(args.inp_dir)
+    elif args.action == "compare_throughput":
+        compare_throughput(args.torchtitan_dir, args.hf_dir, args.only)

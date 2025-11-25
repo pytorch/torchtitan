@@ -102,7 +102,7 @@ CMD="torchrun \
    {% if name == "seed_checkpoint" %} --checkpoint.create_seed_checkpoint {% else %} --checkpoint.initial_load_path {{ initial_load_path }} {% endif %} \
    --debug.seed 42 \
    --debug.deterministic \
-   --job.custom_config_module=torchtitan.experiments.transformers_modeling_backend.job_config \
+   {% if model_type == "transformers_modeling_backend" %}--job.custom_config_module=torchtitan.experiments.transformers_modeling_backend.job_config {% endif %}
    --job.config_file {{ config_path }}"
 
 # Run the main command
