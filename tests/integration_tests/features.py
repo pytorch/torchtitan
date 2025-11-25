@@ -357,6 +357,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "FSDP+VARLEN_ATTN",
             "fsdp+varlen_attn",
             ngpu=4,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
