@@ -15,6 +15,9 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
     FlexAttentionWrapper,
+    VarlenAttentionWrapper,
+    create_varlen_metadata_for_document,
+    VarlenMetadata,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_fixed_block_mask_mod,
@@ -206,8 +209,12 @@ class Attention(nn.Module):
         match self.attn_type:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
-            case _:
+            case "varlen":
+                self.inner_attention = VarlenAttentionWrapper()
+            case "sdpa":
                 self.inner_attention = ScaledDotProductAttentionWrapper()
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -253,13 +260,25 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        if self.attn_type == "flex":
-            assert isinstance(attention_masks, dict), attention_masks
-            attention_mask = attention_masks["rope" if self.use_rope else "nope"]
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_mask)
-        else:
-            assert attention_masks is None
-            output = self.inner_attention(xq, xk, xv)
+        match self.attn_type:
+            case "flex":
+                assert isinstance(attention_masks, dict), attention_masks
+                attention_mask = attention_masks["rope" if self.use_rope else "nope"]
+                output = self.inner_attention(xq, xk, xv, block_mask=attention_mask)
+            case "varlen":
+                assert isinstance(attention_masks, VarlenMetadata), attention_masks
+                output = self.inner_attention(
+                    xq,
+                    xk,
+                    xv,
+                    self.head_dim,
+                    attention_masks,
+                )
+            case "sdpa":
+                assert attention_masks is None
+                output = self.inner_attention(xq, xk, xv)
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
         output = output.transpose(
             1, 2
@@ -506,7 +525,7 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.rope_scaling_args,
         )
 
-    def get_attention_masks(
+    def _get_flex_attention_masks(
         self,
         input_batch: torch.Tensor,
         tokenizer: BaseTokenizer,
@@ -535,6 +554,31 @@ class Transformer(nn.Module, ModelProtocol):
             "rope": create_attention_mask(rope_mask_mod, B, None, seqlen, seqlen),
             "nope": create_attention_mask(nope_mask_mod, B, None, seqlen, seqlen),
         }
+
+    def get_attention_masks(
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
+    ) -> AttentionMasksType:
+        match self.model_args.attn_type:
+            case "flex":
+                return self._get_flex_attention_masks(
+                    input_batch, tokenizer, extra_inputs
+                )
+            case "varlen":
+                if self.model_args.attn_mask_type != "block_causal":
+                    raise ValueError(
+                        f"varlen attention is only supported with block_causal \
+                        attention mask type, got {self.model_args.attn_mask_type}"
+                    )
+                return create_varlen_metadata_for_document(
+                    input_batch, tokenizer.eos_id
+                )
+            case _:
+                raise NotImplementedError(
+                    "Only varlen and flex attn masks are supported"
+                )
 
     def forward(
         self,
