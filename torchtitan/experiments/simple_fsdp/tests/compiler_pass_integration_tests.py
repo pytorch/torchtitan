@@ -22,11 +22,11 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name simple_fsdp.llama3",
-                    "--model.flavor 8B",
                     "--compile.enable",
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes auto_bucketing",
+                    "--comm.mode fake_backend",
                 ],
             ],
             "1D+autobucketing",
@@ -37,11 +37,11 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name simple_fsdp.llama3",
-                    "--model.flavor 8B",
                     "--compile.enable",
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes transformer_block_bucketing",
+                    "--comm.mode fake_backend",
                 ],
             ],
             "1D+transformer_block_bucketing",
@@ -52,12 +52,12 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name simple_fsdp.llama3",
-                    "--model.flavor 8B",
                     "--parallelism.tensor_parallel_degree 2",
                     "--compile.enable",
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes auto_bucketing",
+                    "--comm.mode fake_backend",
                 ],
             ],
             "2D+autobucketing",
@@ -68,12 +68,12 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name simple_fsdp.llama3",
-                    "--model.flavor 8B",
                     "--parallelism.tensor_parallel_degree 2",
                     "--compile.enable",
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes transformer_block_bucketing",
+                    "--comm.mode fake_backend",
                 ],
             ],
             "2D+transformer_block_bucketing",
@@ -85,13 +85,13 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         #     [
         #         [
         #             "--model.name simple_fsdp.llama3",
-        #             "--model.flavor 8B",
         #             "--parallelism.tensor_parallel_degree 2",
         #             "--parallelism.pipeline_parallel_degree 2",
         #             "--compile.enable",
         #             "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
         #             "--compile.backend aot_eager",
         #             "--compile.graph_passes auto_bucketing",
+        #             "--comm.mode fake_backend",
         #         ],
         #     ],
         #     "3D+autobucketing",
@@ -102,13 +102,13 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         #     [
         #         [
         #             "--model.name simple_fsdp.llama3",
-        #             "--model.flavor 8B",
         #             "--parallelism.tensor_parallel_degree 2",
         #             "--parallelism.pipeline_parallel_degree 2",
         #             "--compile.enable",
         #             "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
         #             "--compile.backend aot_eager",
         #             "--compile.graph_passes transformer_block_bucketing",
+        #             "--comm.mode fake_backend",
         #         ],
         #     ],
         #     "3D+transformer_block_bucketing",
@@ -119,13 +119,13 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         #     [
         #         [
         #             "--model.name simple_fsdp.llama3",
-        #             "--model.flavor 8B",
         #             "--parallelism.tensor_parallel_degree 2",
         #             "--parallelism.context_parallel_degree 2",
         #             "--compile.enable",
         #             "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
         #             "--compile.backend aot_eager",
         #             "--compile.graph_passes auto_bucketing",
+        #             "--comm.mode fake_backend",
         #         ],
         #     ],
         #     "FSDP+TP+CP+autobucketing",
@@ -136,13 +136,13 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name simple_fsdp.llama3",
-                    "--model.flavor 8B",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
                     "--compile.enable",
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes transformer_block_bucketing",
+                    "--comm.mode fake_backend",
                 ],
             ],
             "FSDP+TP+CP+transformer_block_bucketing",
@@ -153,12 +153,12 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name simple_fsdp.deepseek_v3",
-                    "--model.flavor 16B",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes auto_bucketing",
+                    "--comm.mode fake_backend",
                 ],
             ],
             "FSDP+EP+autobucketing",
@@ -169,12 +169,12 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name simple_fsdp.deepseek_v3",
-                    "--model.flavor 16B",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes transformer_block_bucketing",
+                    "--comm.mode fake_backend",
                 ],
             ],
             "FSDP+EP+transformer_block_bucketing",
@@ -185,7 +185,6 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name simple_fsdp.deepseek_v3",
-                    "--model.flavor 16B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
@@ -193,6 +192,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes auto_bucketing",
+                    "--comm.mode fake_backend",
                 ],
             ],
             "FSDP+TP+EP+autobucketing",
@@ -203,7 +203,6 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name simple_fsdp.deepseek_v3",
-                    "--model.flavor 16B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
@@ -211,6 +210,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes transformer_block_bucketing",
+                    "--comm.mode fake_backend",
                 ],
             ],
             "FSDP+TP+EP+transformer_block_bucketing",
@@ -229,12 +229,6 @@ _TEST_SUITES_FUNCTION = {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
-    parser.add_argument(
-        "--comm_mode",
-        default="default",
-        choices=["default", "fake_backend", "local_tensor"],
-        help="Communication mode to validate tests",
-    )
     parser.add_argument(
         "--config_path",
         default="./tests/integration_tests/base_config.toml",

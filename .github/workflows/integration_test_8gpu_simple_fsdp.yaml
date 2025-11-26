@@ -54,7 +54,7 @@ jobs:
         python -m torchtitan.experiments.simple_fsdp.tests.frontend_integration_tests artifacts-to-be-uploaded --ngpu 8
 
         # Run backend pass integration tests of SimpleFSDP
-        python -m torchtitan.experiments.simple_fsdp.tests.compiler_pass_integration_tests artifacts-to-be-uploaded --ngpu 8 --comm_mode local_tensor
+        python -m torchtitan.experiments.simple_fsdp.tests.compiler_pass_integration_tests artifacts-to-be-uploaded --ngpu 8
 
         # Run the numerics unit tests of SimpleFSDP
         torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/simple_fsdp/tests/test_numerics.py -v
