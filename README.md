@@ -157,9 +157,9 @@ srun torchrun --nnodes 2
 If your gpu count per node is not 8, adjust `--nproc_per_node` in the torchrun command and `#SBATCH --gpus-per-task` in the SBATCH command section.
 
 
-## SFT Training
+## SFT
 
-For supervised fine-tuning jobs on SLURM clusters, use `submit_sft.py`:
+We expose a `submit_sft.py` for SFT on slurm.
 
 ```bash
 python submit_sft.py \
@@ -189,6 +189,7 @@ python submit_sft.py \
 
 Additional SLURM options can be passed with the `slurm_` prefix (e.g., `--slurm_account=myaccount`).
 
+See `python submit_sft.py --help` for more details.
 
 ## Citation
 
