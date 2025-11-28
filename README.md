@@ -157,6 +157,39 @@ srun torchrun --nnodes 2
 If your gpu count per node is not 8, adjust `--nproc_per_node` in the torchrun command and `#SBATCH --gpus-per-task` in the SBATCH command section.
 
 
+## SFT Training
+
+For supervised fine-tuning jobs on SLURM clusters, use `submit_sft.py`:
+
+```bash
+python submit_sft.py \
+  --config_file torchtitan/models/qwen3/train_configs/qwen3_30b_a3b_sft.toml \
+  --n_nodes 4 \
+  --job_name my-sft-run \
+  --wandb_team nous_research \
+  --wandb_project my_project
+```
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--config_file` | (required) | Path to training config TOML |
+| `--n_nodes` | 1 | Number of training nodes |
+| `--partition` | batch | SLURM partition |
+| `--gpus_per_node` | 8 | GPUs per node |
+| `--time` | 72:00:00 | Wall-clock limit |
+| `--job_name` | sft-train | SLURM job name |
+| `--conda` | torchtitan | Conda environment to activate |
+| `--venv` | None | Path to venv to activate (mutually exclusive with `--conda`) |
+| `--dry_run` | False | Print command without submitting |
+| `--wandb_team` | None | WandB team/entity |
+| `--wandb_project` | None | WandB project name |
+| `--wandb_run_name` | None | WandB run name (defaults to `{model}-sft-{date}`) |
+
+Additional SLURM options can be passed with the `slurm_` prefix (e.g., `--slurm_account=myaccount`).
+
+
 ## Citation
 
 We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques.
