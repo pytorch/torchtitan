@@ -79,12 +79,6 @@ def build_qwen3_torchtitan(vllm_config, parallel_context: ParallelContext) -> nn
     return model
 
 
-# Register with vLLM's ModelRegistry
-from vllm import ModelRegistry
-
-ModelRegistry.register_model("Qwen3TorchTitan", build_qwen3_torchtitan)
-
-
 def register_torchtitan_model():
     """
     Register the TorchTitan Qwen3 custom model with vLLM using factory function pattern.
@@ -138,6 +132,12 @@ def parse_args():
         default=0.8,
         help="Sampling temperature",
     )
+    parser.add_argument(
+        "--tensor-parallel-size",
+        type=int,
+        default=1,
+        help="Number of GPUs for tensor parallelism (default: 1 for single GPU)",
+    )
     return parser.parse_args()
 
 
@@ -171,6 +171,7 @@ def main():
         dtype="bfloat16",
         trust_remote_code=True,
         enforce_eager=True,  # Use eager mode for debugging
+        tensor_parallel_size=args.tensor_parallel_size,  # Multi-GPU support
     )
 
     print("=" * 80)

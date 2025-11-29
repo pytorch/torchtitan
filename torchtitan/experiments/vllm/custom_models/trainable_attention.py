@@ -225,8 +225,9 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        freqs_cis: torch.Tensor
-        | None = None,  # RoPE frequencies (TorchTitan compatibility)
+        freqs_cis: (
+            torch.Tensor | None
+        ) = None,  # RoPE frequencies (TorchTitan compatibility)
         attention_mask: torch.Tensor | None = None,
         **kwargs: Any,  # Accept any additional vLLM-specific kwargs
     ) -> torch.Tensor:

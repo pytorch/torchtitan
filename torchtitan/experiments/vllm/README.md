@@ -1,6 +1,6 @@
 # TorchTitan Qwen3 Model with vLLM Inference
 
-This directory contains code to run vLLM inference on models trained with TorchTitan.
+This directory contains code to run TorchTitan model definition with vLLM inference engine.
 
 ## Overview
 

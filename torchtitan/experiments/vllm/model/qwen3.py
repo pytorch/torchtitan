@@ -28,10 +28,10 @@ import torch
 # Import from local custom_models directory
 from torchtitan.experiments.vllm.custom_models import (
     # load_external_weights,
-    replace_with_trainable_attention,
     store_positions_in_context,
     VLLMModelForCausalLM,
 )
+from torchtitan.experiments.vllm.model.attention import VLLMCompatibleFlashAttention
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -95,9 +95,32 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
         self.config = model_args
         self.parallel_context = parallel_context
 
-        # Replace attention with vLLM's TrainableFlashAttention
-        # (This happens before TP so TP can shard the attention weights)
-        replace_with_trainable_attention(self.model, use_mla=False)
+        # Replace inner_attention with vLLM compatible Flash Attention
+        # NOTE: We replace `inner_attention` (the attention kernel), NOT the whole `Attention` module
+        # The `Attention` module handles QKV projection, RoPE, etc., and calls `inner_attention`
+        if not hasattr(self.model, "layers"):
+            raise AttributeError(
+                f"Model {type(self.model).__name__} must have .layers attribute"
+            )
+
+        for layer_name, layer in self.model.layers.items():
+            if not hasattr(layer, "attention"):
+                raise ValueError(f"Layer {layer_name} must have .attention attribute")
+
+            if not hasattr(layer.attention, "inner_attention"):
+                raise ValueError(
+                    f"Layer {layer_name}.attention must have .inner_attention attribute"
+                )
+
+            # NOTE(jianiw): Attention implementation 1: Add backward for vllm FlashAttn
+            # Replace only the inner attention kernel, not the whole Attention module
+            layer.attention.inner_attention = VLLMCompatibleFlashAttention(
+                hidden_size=model_args.dim,
+                num_heads=model_args.n_heads,
+                num_kv_heads=model_args.n_kv_heads,
+                head_dim=model_args.head_dim,
+                causal=True,
+            )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings."""
@@ -114,26 +137,42 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
         Forward pass with vLLM interface.
 
         Args:
-            input_ids: Token IDs [batch, seq_len] (optional if inputs_embeds provided)
-            positions: Position indices from vLLM for RoPE
+            input_ids: Token IDs from vLLM [total_tokens] (1D varlen format)
+            positions: Position indices from vLLM [total_tokens] (1D varlen format)
             inputs_embeds: Pre-computed embeddings (optional, used by vLLM)
             **kwargs: Additional vLLM kwargs
 
         Returns:
-            hidden_states: Final hidden states before LM head
+            hidden_states: Final hidden states [total_tokens, hidden_size]
         """
-        # Store positions in forward context for attention layers
-        store_positions_in_context(positions)
+        # Handle inputs_embeds vs input_ids properly
+        if inputs_embeds is not None:
+            raise NotImplementedError(
+                "inputs_embeds is not yet supported by TorchTitan Qwen3. "
+                "The model expects token IDs and computes embeddings internally. "
+                "Please provide input_ids instead."
+            )
 
-        # Get embeddings
-        h = (
-            inputs_embeds
-            if inputs_embeds is not None
-            else self.model.tok_embeddings(input_ids)
-        )
+        if input_ids is None:
+            raise ValueError("Either input_ids or inputs_embeds must be provided")
+
+        # Convert vLLM interface to TorchTitan interface
+        # vLLM passes input_ids as [total_tokens] but TorchTitan expects [batch_size, seq_len]
+        # For now, reshape to [1, total_tokens] as a simple batch of 1
+        # TODO: In future, use attn_metadata.seq_lens to properly reconstruct batch structure
+        tokens_2d = input_ids.unsqueeze(0)  # [total_tokens] -> [1, total_tokens]
+
+        # Store positions in forward context for attention layers
+        # Also convert positions to 2D format
+        if positions is not None:
+            positions_2d = positions.unsqueeze(0)  # [total_tokens] -> [1, total_tokens]
+            store_positions_in_context(positions_2d)
+
+        # Get embeddings from 2D tokens
+        h = self.model.tok_embeddings(tokens_2d)  # [1, total_tokens, hidden_size]
 
         # Get RoPE cache
-        seqlen = h.shape[1] if h.dim() == 3 else h.shape[0]
+        seqlen = h.shape[1]  # seq_len dimension
         rope_cache = self.model.rope_cache[:seqlen]
 
         # Pass through transformer layers
@@ -141,7 +180,16 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
             h = layer(h, rope_cache, attention_masks=None)
 
         # Final norm
-        return self.model.norm(h)
+        h = self.model.norm(h)  # [1, total_tokens, hidden_size]
+
+        # Convert output format back to vLLM expectations
+        # vLLM expects hidden_states in [total_tokens, hidden_size] format
+        # TorchTitan returns [batch_size, seq_len, hidden_size], so we need to flatten
+        if h.dim() == 3:  # [batch_size, seq_len, hidden_size]
+            batch_size, seq_len, hidden_size = h.shape
+            h = h.view(batch_size * seq_len, hidden_size)  # [total_tokens, hidden_size]
+
+        return h
 
     def compute_logits(
         self,
