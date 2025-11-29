@@ -660,7 +660,12 @@ class Compile:
         default_factory=lambda: ["model", "loss"]
     )
     """Which components to compile"""
+
     backend: str = "inductor"
+    """Which backend to compile with"""
+
+    enable_precompilation: bool = False
+    """Enable AOT precompilation to save compiled function to disk"""
 
 
 @dataclass

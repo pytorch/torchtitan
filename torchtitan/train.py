@@ -74,6 +74,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         self.job_config = job_config
 
+        if job_config.compile.enable_precompilation:
+            torch._dynamo.config.enable_aot_compile = True
+
         logger.info(f"Starting job: {job_config.job.description}")
 
         if job_config.experimental.custom_import:
@@ -380,6 +383,53 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             world_size=world_size,
         )
 
+    def _get_precompiled_function_path(self) -> str:
+        """
+        Generate a unique path for the precompiled function based on model configuration.
+
+        Returns:
+            Path to the precompiled function file.
+        """
+        rank = int(os.environ["RANK"])
+        model_name = self.job_config.model.name
+        model_flavor = self.job_config.model.flavor
+
+        # Create a unique filename based on model configuration and rank
+        filename = f"compiled_fn_{model_name}_{model_flavor}_rank_{rank}.pt"
+        return os.path.join("/tmp", filename)
+
+    def _load_or_compile_model(
+        self,
+        model: torch.nn.Module,
+        inputs: torch.Tensor,
+        extra_inputs: dict[str, torch.Tensor],
+        extra_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        """
+        Load a precompiled model function or compile and save it if not available.
+
+        Args:
+            model: The model to compile.
+            inputs: Main input tensor.
+            extra_inputs: Additional input tensors.
+            extra_kwargs: Additional keyword arguments.
+
+        Returns:
+            Model output predictions.
+        """
+        compiled_fn_path = self._get_precompiled_function_path()
+
+        if not os.path.exists(compiled_fn_path):
+            logger.info(f"Compiling model and saving to {compiled_fn_path}")
+            model.forward \
+                .aot_compile(((inputs,), {**extra_inputs, **extra_kwargs})) \
+                .save_compiled_function(compiled_fn_path)
+
+        with open(compiled_fn_path, "rb") as f:
+            return torch.compiler.load_compiled_function(f)(
+                model._orig_mod, inputs, **extra_inputs, **extra_kwargs
+            )
+
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
@@ -524,8 +574,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                    loss = self.loss_fn(pred, labels)
+                    if self.job_config.compile.enable_precompilation:
+                        pred = self._load_or_compile_model(
+                            model_parts[0], inputs, extra_inputs, extra_kwargs
+                        )
+                        loss = self.loss_fn(pred, labels)
+                    else:
+                        pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                        loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
                 del pred
                 loss.backward()
