@@ -188,7 +188,7 @@ def _register_parametrization(
     module.__class__ = module_cls
     module_cls.__module__ = module.__class__.__module__
     # Expose the dynamically created subclass as a real, importable symbol in its module.
-    # This is necessary fo precompilation.
+    # This is necessary for precompilation to work.
     setattr(
         sys.modules[module_cls.__module__],
         module_cls.__name__,
