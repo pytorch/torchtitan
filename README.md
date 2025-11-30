@@ -193,7 +193,7 @@ See `python submit_sft.py --help` for more details.
 
 ### Block Causal Attention
 
-For packed sequence training, enable block causal attention to prevent cross-document attention. Set both `use_flex_attn=True` and `attn_mask_type="block_causal"` in the model's `__init__.py`:
+For packed sequence training, enable block causal attention to prevent cross-document attention. Set both `use_flex_attn=True` and `attn_mask_type="block_causal"` in the model's `__init__.py`. This uses flex attention with EOS token detection to identify document boundaries.
 
 ```python
 # torchtitan/models/qwen3/__init__.py
@@ -205,9 +205,7 @@ For packed sequence training, enable block causal attention to prevent cross-doc
 ),
 ```
 
-Llama3 has pre-configured `*_flex_attn` flavor variants (`8B_flex_attn`, `70B_flex_attn`, etc.) with this already set.
-
-This uses flex attention with EOS token detection to identify document boundaries.
+Llama3 has pre-configured `*_flex_attn` flavor variants (`8B_flex_attn`, `70B_flex_attn`, etc.) with these already set.
 
 
 ## Citation
