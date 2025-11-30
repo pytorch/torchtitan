@@ -191,6 +191,25 @@ Additional SLURM options can be passed with the `slurm_` prefix (e.g., `--slurm_
 
 See `python submit_sft.py --help` for more details.
 
+### Block Causal Attention
+
+For packed sequence training, enable block causal attention to prevent cross-document attention. Set both `use_flex_attn=True` and `attn_mask_type="block_causal"` in the model's `__init__.py`:
+
+```python
+# torchtitan/models/qwen3/__init__.py
+"30B-A3B": Qwen3ModelArgs(
+    ...
+    use_flex_attn=True,
+    attn_mask_type="block_causal",
+    ...
+),
+```
+
+Llama3 has pre-configured `*_flex_attn` flavor variants (`8B_flex_attn`, `70B_flex_attn`, etc.) with this already set.
+
+This uses flex attention with EOS token detection to identify document boundaries.
+
+
 ## Citation
 
 We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques.
