@@ -13,7 +13,6 @@ python torchtitan/experiments/vllm/infer.py
 """
 
 import argparse
-import shutil
 
 import torch.nn as nn
 from vllm import LLM, SamplingParams
@@ -199,13 +198,6 @@ def main():
 
         print(f"\nPrompt: {prompt}")
         print(f"Generated text: {generated_text!r}")
-
-    # Clean up temporary directory
-    try:
-        shutil.rmtree(temp_dir)
-        print(f"\nCleaned up temporary directory: {temp_dir}")
-    except Exception as e:
-        print(f"Warning: Could not clean up temporary directory {temp_dir}: {e}")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ The integration consists of two main components:
 
 ### Prerequisites
 
-1. Install vLLM from source:
+1. Install vLLM from source [vllm-use-an-existing-pytorch-installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#use-an-existing-pytorch-installation):
 ```bash
 # install PyTorch first, either from PyPI or from source
 git clone https://github.com/vllm-project/vllm.git
@@ -23,5 +23,23 @@ python use_existing_torch.py
 uv pip install -r requirements/build.txt
 uv pip install --no-build-isolation -e .
 ```
-Using following command
-https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#use-an-existing-pytorch-installation
+
+
+NOTE: If `flash_attn_varlen_func` hits error "torch.AcceleratorError: CUDA error: the provided PTX was compiled with an unsupported toolchain" during forward path, this is due to GPU driver version is not compatible with vLLM/PyTorch compiled version. Use the following command to recompile vLLM.
+
+```
+# Set CUDA version environment variable
+export CUDA_HOME=/usr/local/cuda-12.4
+export PATH=/usr/local/cuda-12.4/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+
+# Clean previous build
+rm -rf build dist *.egg-info
+pip uninstall -y vllm
+
+# Rebuild vLLM from source with CUDA 12.4
+pip install -e .
+
+```
+
+2. Download Qwen3/Qwen3-0.6b checkpoint from HuggingFace and put into `example_checkpoint` folder.

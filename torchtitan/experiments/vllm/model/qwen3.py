@@ -112,8 +112,6 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
                     f"Layer {layer_name}.attention must have .inner_attention attribute"
                 )
 
-            # NOTE(jianiw): Attention implementation 1: Add backward for vllm FlashAttn
-            # Replace only the inner attention kernel, not the whole Attention module
             layer.attention.inner_attention = VLLMCompatibleFlashAttention(
                 hidden_size=model_args.dim,
                 num_heads=model_args.n_heads,
