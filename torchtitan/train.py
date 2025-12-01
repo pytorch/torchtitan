@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import importlib
+import json
 import os
 import time
 from datetime import timedelta
@@ -135,7 +137,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.model_args = model_args
 
         logger.info(
-            f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
+            f"Building {job_config.model.name} {job_config.model.flavor}"
+            f"with {json.dumps(dataclasses.asdict(model_args), indent=2, ensure_ascii=False)}"
         )
         with (
             torch.device("meta"),
