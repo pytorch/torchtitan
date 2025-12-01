@@ -174,6 +174,15 @@ class GroupedExperts(nn.Module):
             w2 = self.w2
             w3 = self.w3
 
+        # Apply routing scores BEFORE expert computation if score_before_experts=True
+        # Only for DeepEP: routed_prob is passed from ExpertParallelDeepEP._token_dispatch
+        if (
+            self.deepep_dispatcher is not None
+            and routed_prob is not None
+            and self.score_before_experts
+        ):
+            x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
+
         if self.use_grouped_mm:
             # NOTE: If EP is not used, we need to pad the indices
             #       to prepare for grouped_mm;
@@ -188,6 +197,15 @@ class GroupedExperts(nn.Module):
             out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
         else:
             out = _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+
+        # Apply routing scores AFTER expert computation if score_before_experts=False
+        # Only for DeepEP: routed_prob is passed from ExpertParallelDeepEP._token_dispatch
+        if (
+            self.deepep_dispatcher is not None
+            and routed_prob is not None
+            and not self.score_before_experts
+        ):
+            out = (out.to(torch.float32) * routed_prob.reshape(-1, 1)).to(out.dtype)
 
         return out
 

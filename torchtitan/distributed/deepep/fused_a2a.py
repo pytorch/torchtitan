@@ -124,6 +124,40 @@ class FusedDispatch(torch.autograd.Function):
         if async_finish:
             after_event_overlap.current_stream_wait()
 
+        # WORKAROUND: DeepEP communication stream synchronization
+        # ============================================================
+        # PROBLEM: The standard deep_ep.Buffer uses a SEPARATE communication stream
+        # for dispatch/combine operations. The primus_turbo fork has a parameter
+        # `use_default_stream_as_comm_stream=True` that makes all ops run on the
+        # default stream, but our deep_ep version lacks this parameter.
+        #
+        # WITHOUT THIS FIX: Race conditions occur between consecutive DeepEP ops.
+        # Symptoms observed:
+        #   - 1x small batch → full batch: grad_norm 10.39x explosion
+        #   - 2-6x small batches → full batch: NaN gradients
+        #   - 10x small batches → full batch: 1.00x OK (by random timing!)
+        # The cyclic behavior proves it's a stream sync issue, not data corruption.
+        #
+        # WHY torch.cuda.synchronize() ALONE IS NOT ENOUGH:
+        # synchronize() waits for ALL streams, but doesn't establish proper
+        # ordering between the comm stream and current stream for subsequent ops.
+        #
+        # THE FIX: Explicit event-based synchronization:
+        #   1. Get DeepEP's internal comm stream via buffer.get_comm_stream()
+        #   2. Record a CUDA event on the comm stream (marks completion point)
+        #   3. Make current stream wait for that event (establishes ordering)
+        #   4. Full device sync as final safety barrier
+        #
+        # PERFORMANCE NOTE: This adds overhead. For optimal perf, either:
+        #   - Fork DeepEP and add use_default_stream_as_comm_stream support
+        #   - Use primus_turbo's DeepEP directly
+        # ============================================================
+        comm_stream = buffer.get_comm_stream()
+        event = torch.cuda.Event()
+        event.record(comm_stream)
+        torch.cuda.current_stream().wait_event(event)
+        torch.cuda.synchronize()
+
         # Save for backward
         ctx.group = group
         ctx.handle = handle
@@ -185,6 +219,14 @@ class FusedDispatch(torch.autograd.Function):
         # Make sure current stream is synchronized
         if ctx.async_finish:
             after_event.current_stream_wait()
+
+        # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
+        comm_stream = buffer.get_comm_stream()
+        event = torch.cuda.Event()
+        event.record(comm_stream)
+        torch.cuda.current_stream().wait_event(event)
+        torch.cuda.synchronize()
+
         return grad_x, None, grad_token_probs, None, None, None, None, None, None
 
 
@@ -211,6 +253,13 @@ class FusedCombine(torch.autograd.Function):
         if async_finish:
             after_event.current_stream_wait()
 
+        # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
+        comm_stream = buffer.get_comm_stream()
+        event = torch.cuda.Event()
+        event.record(comm_stream)
+        torch.cuda.current_stream().wait_event(event)
+        torch.cuda.synchronize()
+
         ctx.handle = handle
         ctx.group = group
         ctx.async_finish = async_finish
@@ -234,6 +283,14 @@ class FusedCombine(torch.autograd.Function):
         # Make sure current stream is synchronized
         if ctx.async_finish:
             after_event.current_stream_wait()
+
+        # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
+        comm_stream = buffer.get_comm_stream()
+        event = torch.cuda.Event()
+        event.record(comm_stream)
+        torch.cuda.current_stream().wait_event(event)
+        torch.cuda.synchronize()
+
         return grad_x, None, None, None, None
 
 
