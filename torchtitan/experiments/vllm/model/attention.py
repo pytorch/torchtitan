@@ -185,6 +185,23 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         class VLLMForwardCustomBackward(torch.autograd.Function):
             @staticmethod
             def forward(ctx, q, k, v, scale, batch_size, seq_len, causal, fa_version):
+                # Flash Attention only supports fp16 and bf16
+                # Store original dtype for conversion back
+                original_dtype = q.dtype
+
+                # Convert to bf16 if not already fp16/bf16
+                if original_dtype not in [torch.float16, torch.bfloat16]:
+                    target_dtype = (
+                        torch.bfloat16
+                        if torch.cuda.is_bf16_supported()
+                        else torch.float16
+                    )
+                    q = q.to(target_dtype)
+                    k = k.to(target_dtype)
+                    v = v.to(target_dtype)
+                else:
+                    target_dtype = original_dtype
+
                 # Use flash_attn_varlen_func directly for fast forward pass
                 # This is the SAME kernel vLLM uses internally!
                 cu_seqlens_q = torch.arange(
@@ -209,12 +226,17 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                     fa_version=fa_version,
                 )
 
+                # Convert output back to original dtype if needed
+                if original_dtype not in [torch.float16, torch.bfloat16]:
+                    output = output.to(original_dtype)
+
                 # Save for backward
                 ctx.save_for_backward(q, k, v, output)
                 ctx.scale = scale
                 ctx.seq_len = seq_len
                 ctx.batch_size = batch_size
                 ctx.causal = causal
+                ctx.original_dtype = original_dtype
 
                 return output
 
@@ -225,6 +247,11 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 seq_len = ctx.seq_len
                 batch_size = ctx.batch_size
                 causal = ctx.causal
+                original_dtype = ctx.original_dtype
+
+                # Convert grad_output to match saved tensor dtype
+                if grad_output.dtype != q.dtype:
+                    grad_output = grad_output.to(q.dtype)
 
                 # Reshape from varlen to batch format
                 total_tokens = q.shape[0]
@@ -292,6 +319,12 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 grad_v = grad_v_t.transpose(1, 2).reshape(
                     total_tokens, num_heads, head_dim
                 )
+
+                # Convert gradients back to original dtype if needed
+                if original_dtype not in [torch.float16, torch.bfloat16]:
+                    grad_q = grad_q.to(original_dtype)
+                    grad_k = grad_k.to(original_dtype)
+                    grad_v = grad_v.to(original_dtype)
 
                 return grad_q, grad_k, grad_v, None, None, None, None, None
 

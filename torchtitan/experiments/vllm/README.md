@@ -42,4 +42,10 @@ pip install -e .
 
 ```
 
-2. Download Qwen3/Qwen3-0.6b checkpoint from HuggingFace and put into `example_checkpoint` folder.
+2. Download Qwen3/Qwen3-0.6b checkpoint from HuggingFace and put into `example_checkpoint` folder. Make sure to change the "architecture" field in `config.json` to be `Qwen3TorchTitanForCausalLM` so vllm engine could use torchtitan model.
+
+
+3. Run inference:
+```
+python torchtitan/experiments/vllm/infer.py --model torchtitan/experiments/vllm/example_checkpoint/qwen3-0.6B
+```
