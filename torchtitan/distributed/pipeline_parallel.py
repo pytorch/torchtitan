@@ -11,7 +11,6 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
-from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (

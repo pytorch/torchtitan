@@ -97,7 +97,7 @@ deepseekv3_args = {
         qk_rope_head_dim=64,
         v_head_dim=128,
         mscale=0.70,
-        attn_type="flex",
+        # attn_type="flex",
         # attn_mask_type="block_causal",
     ),
     "236B": DeepSeekV3ModelArgs(
