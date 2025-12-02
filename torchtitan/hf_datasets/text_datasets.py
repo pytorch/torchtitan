@@ -172,7 +172,15 @@ def build_text_dataloader(
     job_config: JobConfig,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
-    """Build a data loader for HuggingFace datasets."""
+    """Build a data loader for HuggingFace datasets.
+
+    Args:
+        dp_world_size: Data parallelism world size.
+        dp_rank: Data parallelism rank.
+        tokenizer: Tokenizer to use for encoding text.
+        job_config: Job configuration containing dataset and DataLoader settings.
+        infinite: Whether to loop the dataset infinitely.
+    """
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.local_batch_size
@@ -193,6 +201,10 @@ def build_text_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         batch_size=batch_size,
+        num_workers=job_config.training.dataloader.num_workers,
+        persistent_workers=job_config.training.dataloader.persistent_workers,
+        prefetch_factor=job_config.training.dataloader.prefetch_factor,
+        pin_memory=job_config.training.dataloader.pin_memory,
     )
 
 
@@ -203,7 +215,15 @@ def build_text_validation_dataloader(
     job_config: JobConfig,
     infinite: bool = False,
 ) -> ParallelAwareDataloader:
-    """Build a validation data loader for HuggingFace datasets."""
+    """Build a validation data loader for HuggingFace datasets.
+
+    Args:
+        dp_world_size: Data parallelism world size.
+        dp_rank: Data parallelism rank.
+        tokenizer: Tokenizer to use for encoding text.
+        job_config: Job configuration containing dataset and DataLoader settings.
+        infinite: Whether to loop the dataset infinitely.
+    """
     dataset_name = job_config.validation.dataset
     dataset_path = job_config.validation.dataset_path
     batch_size = job_config.validation.local_batch_size
@@ -224,4 +244,8 @@ def build_text_validation_dataloader(
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         batch_size=batch_size,
+        num_workers=job_config.validation.dataloader.num_workers,
+        persistent_workers=job_config.validation.dataloader.persistent_workers,
+        prefetch_factor=job_config.validation.dataloader.prefetch_factor,
+        pin_memory=job_config.validation.dataloader.pin_memory,
     )
