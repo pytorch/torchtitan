@@ -710,6 +710,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
 
 if __name__ == "__main__":
+    # Apply DeepEP empty expert gradient fix (must be before any DeepEP imports)
+    from torchtitan.distributed.deepep.patches import apply_deepep_empty_expert_fix
+
+    apply_deepep_empty_expert_fix()
+
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
