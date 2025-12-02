@@ -199,6 +199,31 @@ class LRScheduler:
 
 
 @dataclass
+class DataLoader:
+    """
+    Configuration for PyTorch DataLoader settings.
+    """
+
+    num_workers: int = 0
+    """Number of worker processes for data loading. 0 means data will be loaded in the main process."""
+
+    persistent_workers: bool = False
+    """
+    If True, the data loader will not shutdown the worker processes after a dataset has been consumed once.
+    This allows to maintain the workers Dataset instances alive. Only applicable when num_workers > 0.
+    """
+
+    prefetch_factor: int | None = None
+    """
+    Number of batches loaded in advance by each worker. If None, the default value (2) is used.
+    Only applicable when num_workers > 0.
+    """
+
+    pin_memory: bool = False
+    """If True, the data loader will copy Tensors into CUDA pinned memory before returning them."""
+
+
+@dataclass
 class Training:
     dataset: str = "c4_test"
     """Dataset to use"""
@@ -262,6 +287,9 @@ class Training:
     Note that you may want to lower the training steps to avoid generating too
     many temporary files.
     """
+
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
 
 
 @dataclass
@@ -913,6 +941,9 @@ class Validation:
     Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset
     WARNING: When setting to -1 there could be hangs due to mismatch among ranks
     """
+
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
 
     def __post_init__(self):
         assert (

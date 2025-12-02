@@ -54,7 +54,14 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         dp_rank: Data parallelism rank for this dataloader.
         dp_world_size: The world size of the data parallelism.
         batch_size: The batch size to use for each iteration.
-        collate_fn: Optional function to collate samples in a batch.
+        collate_fn (Callable, optional): A function that takes a list of samples from the
+            dataset and collates them into a batch. Defaults to ``None``.
+        num_workers: Number of worker processes for data loading. Defaults to 0.
+        persistent_workers: If True, keep workers alive between dataset iterations.
+            Only applicable when num_workers > 0. Defaults to False.
+        prefetch_factor: Number of batches to prefetch per worker. Only applicable
+            when num_workers > 0. Defaults to None (uses PyTorch default of 2).
+        pin_memory: If True, copy tensors to CUDA pinned memory. Defaults to False.
     """
 
     dp_rank: int
@@ -68,11 +75,23 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         dp_world_size: int,
         batch_size: int,
         collate_fn: Callable | None = None,
+        num_workers: int = 0,
+        persistent_workers: bool = False,
+        prefetch_factor: int | None = None,
+        pin_memory: bool = False,
     ):
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         self.batch_size = batch_size
-        super().__init__(dataset, batch_size, collate_fn=collate_fn)
+        super().__init__(
+            dataset,
+            batch_size,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            persistent_workers=persistent_workers,
+            prefetch_factor=prefetch_factor,
+            pin_memory=pin_memory,
+        )
         self._rank_id = f"dp_rank_{dp_rank}"
 
     def state_dict(self) -> dict[str, Any]:
