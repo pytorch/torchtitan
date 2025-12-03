@@ -19,7 +19,7 @@ from vllm.attention.utils.fa_utils import flash_attn_varlen_func, get_flash_attn
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
 
-class VLLMCompatibleFlashAttention(torch.nn.Module):
+class VLLMPagedFlashAttention(torch.nn.Module):
     """
     Wrapper around vLLM's Attention with custom backward pass.
 
@@ -42,6 +42,44 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         super().__init__()
 
         self.hidden_size = hidden_size
+
+        # Handle tensor parallelism: adjust num_heads and num_kv_heads for TP
+        # NOTE(jianiw): As we use local tensor for this region, we need to manually
+        try:
+            from vllm.config import get_current_vllm_config
+            from vllm.logger import init_logger
+
+            logger = init_logger(__name__)
+            vllm_config = get_current_vllm_config()
+            tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+            if tp_size > 1:
+                if num_kv_heads % tp_size != 0:
+                    # Pad num_kv_heads and num_heads to be divisible by tp_size
+                    assert num_heads % num_kv_heads == 0
+                    padded_size = tp_size - num_kv_heads % tp_size
+                    padded_num_kv_heads = num_kv_heads + padded_size
+                    padded_num_heads = (
+                        num_heads + padded_size * num_heads // num_kv_heads
+                    )
+                    assert padded_num_heads % tp_size == 0
+                    assert padded_num_kv_heads % tp_size == 0
+
+                    logger.info(
+                        f"Padding attention heads for tensor parallelism: "
+                        f"{num_heads=}, {padded_num_heads=}, "
+                        f"{num_kv_heads=}, {padded_num_kv_heads=}"
+                    )
+
+                    num_heads = padded_num_heads // tp_size
+                    num_kv_heads = padded_num_kv_heads // tp_size
+                else:
+                    num_heads //= tp_size
+                    num_kv_heads //= tp_size
+        except (ImportError, RuntimeError, AttributeError):
+            # Not in vLLM context - use original values
+            pass
+
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -63,7 +101,7 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
 
             # Generate unique prefix for this attention layer
             # vLLM expects format "layers.X" for layer index extraction
-            layer_idx = next(VLLMCompatibleFlashAttention._layer_counter)
+            layer_idx = next(VLLMPagedFlashAttention._layer_counter)
             prefix = f"layers.{layer_idx}"
 
             self.vllm_attn = Attention(
@@ -75,6 +113,7 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 quant_config=None,
                 prefix=prefix,
             )
+
         except (ImportError, RuntimeError, AttributeError):
             # Not in vLLM context - will need to set up manually
             self.vllm_attn = None
@@ -103,7 +142,7 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
 
             # Generate unique layer name using class counter
             # Format: "layers.{index}" for compatibility with extract_layer_index()
-            layer_name = f"layers.{next(VLLMCompatibleFlashAttention._layer_counter)}"
+            layer_name = f"layers.{next(VLLMPagedFlashAttention._layer_counter)}"
 
             # Register this layer in static forward context
             if layer_name in compilation_config.static_forward_context:
@@ -149,25 +188,29 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
 
-            # Flatten to (total_tokens, num_heads, head_dim)
-            q_varlen = q.reshape(-1, num_heads, head_dim)
-            k_varlen = k.reshape(-1, k.shape[2], head_dim)
-            v_varlen = v.reshape(-1, v.shape[2], head_dim)
+            # # Flatten to (total_tokens, num_heads, head_dim)
+            # NOTE(jianiw): vllm_attention can also take input as shape (batch, seq_len, num_heads, head_dim) and do internally
+
+            # q_varlen = q.reshape(-1, num_heads, head_dim)
+            # k_varlen = k.reshape(-1, k.shape[2], head_dim)  #  k.shape[2] = num_kv_head
+            # v_varlen = v.reshape(-1, v.shape[2], head_dim)
 
             try:
                 # Use vLLM's Attention layer (requires forward context)
-                output_varlen = self.vllm_attn(q_varlen, k_varlen, v_varlen)
+                output_varlen = self.vllm_attn(q, k, v)
 
+                print(f"[jianiw] vllm_attn output is: {output_varlen}")
                 # Reshape back to batch format
-                output = output_varlen.reshape(batch_size, seq_len, num_heads, head_dim)
+                output = output_varlen.view(batch_size, seq_len, num_heads, head_dim)
 
                 # Transpose back to TorchTitan format
                 output = output.transpose(1, 2)
 
                 return output
-            except (AssertionError, RuntimeError):
+            except (AssertionError, RuntimeError) as e:
                 # Forward context not available, fall through to training mode
-                pass
+                print(f"Error when calling self.vllm_attn during Inference, {str(e)}")
+                raise
 
         # TRAINING MODE: Use flash_attn_varlen_func with custom backward
         # Transpose to (batch, seq_len, num_heads, head_dim) for vLLM
@@ -175,11 +218,16 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
+        # After to_local(), use actual tensor shapes (TP may have sharded heads)
+        # Shape: (batch, seq_len, num_heads_local, head_dim)
+        _, _, num_heads_local, _ = q.shape
+        _, _, num_kv_heads_local, _ = k.shape
+
         # Convert to varlen format for vLLM: flatten batch and sequence
         # (batch, seq_len, num_heads, head_dim) -> (total_tokens, num_heads, head_dim)
-        q_varlen = q.reshape(-1, num_heads, head_dim)
-        k_varlen = k.reshape(-1, k.shape[2], head_dim)
-        v_varlen = v.reshape(-1, v.shape[2], head_dim)
+        q_varlen = q.reshape(-1, num_heads_local, head_dim)
+        k_varlen = k.reshape(-1, num_kv_heads_local, head_dim)
+        v_varlen = v.reshape(-1, num_kv_heads_local, head_dim)
 
         # Use custom autograd function with flash_attn_varlen_func forward and manual backward
         class VLLMForwardCustomBackward(torch.autograd.Function):
@@ -204,6 +252,7 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
 
                 # Use flash_attn_varlen_func directly for fast forward pass
                 # This is the SAME kernel vLLM uses internally!
+                # TODO(jianiw): Need to double-check
                 cu_seqlens_q = torch.arange(
                     0,
                     (batch_size + 1) * seq_len,

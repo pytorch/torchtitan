@@ -61,13 +61,7 @@ def reshape_for_broadcast(
     rope_cache: torch.Tensor, x: torch.Tensor, positions: torch.Tensor | None = None
 ) -> torch.Tensor:
     """
-    Reshape frequency tensor (represented by cos, sin) for broadcasting it with another tensor.
-
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    The input freqs_cis tensor is assumed to be of shape (max_seqlen, head_dim * 2),
-    and the first seqlen elements will be sliced, but dim must match x.
+    Reshapes the RoPE frequency tensor to be broadcastable with the input tensor.
 
     Args:
         rope_cache (torch.Tensor): RoPE tensor (cos and sin) to be reshaped.
@@ -263,6 +257,8 @@ class Attention(nn.Module):
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
         values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+
+        # NOTE(jianiw)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
