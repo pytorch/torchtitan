@@ -86,10 +86,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
-        job_config.maybe_log()
-
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
+
+        # Logging needs to happen after distributed initialized
+        job_config.maybe_log()
 
         world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
