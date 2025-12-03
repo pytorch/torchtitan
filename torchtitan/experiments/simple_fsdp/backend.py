@@ -52,9 +52,7 @@ def get_compile_backend_with_passes(
             def aot_eager_autobucketing_reordering_pass(
                 gm: torch.fx.GraphModule, example_inputs: Any
             ) -> torch.fx.GraphModule:
-                schedule_overlap_bucketing(
-                    gm, collective_bucketing=True, insert_overlap_deps=True
-                )
+                schedule_overlap_bucketing(gm, collective_bucketing=True)
                 gm.recompile()
                 return gm
 
