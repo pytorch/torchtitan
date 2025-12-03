@@ -130,7 +130,7 @@ def parallelize_llama(
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, job_config.compile)
+        apply_compile(model, job_config.compile, parallel_dims.ep_enabled)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -507,7 +507,7 @@ def apply_moe_ep_tp(
         )
 
 
-def apply_compile(model: nn.Module, compile_config: CompileConfig):
+def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: bool):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
@@ -577,6 +577,22 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
         backend=compile_config.backend,
         fullgraph=True,
     )
+
+    if ep_enabled:
+        compiled_fn = moe_module._run_experts_grouped_mm
+
+        def _run_experts_grouped_mm_dynamic(
+            w1: torch.Tensor,
+            w2: torch.Tensor,
+            w3: torch.Tensor,
+            x: torch.Tensor,
+            num_tokens_per_expert: torch.Tensor,
+        ) -> torch.Tensor:
+            # dynamic number of tokens in expert parallel
+            torch._dynamo.mark_dynamic(x, 0)
+            return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)
+
+        moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
 
     # NOTE: We don't compile for loop code path due to an issue with unbacked symints:
     # https://github.com/pytorch/pytorch/issues/166460
