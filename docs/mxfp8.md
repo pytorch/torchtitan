@@ -151,7 +151,7 @@ Single-node training on 8x power limited B200 GPUs, batch size 1, sequence lengt
 
 Training runs on 64 node GB200 cluster with TorchTitan Llama4 Scout show that MXFP8 MoE training has equivalent convergence to bfloat16 training baseline. In fact, after 3,000 steps it finishes with slightly *lower* loss than bfloat16! This is consistent with our scaling experiments with [MXFP8 training for dense models](https://pytorch.org/blog/accelerating-2k-scale-pre-training-up-to-1-28x-with-torchao-mxfp8-and-torchtitan-on-crusoe-b200-cluster/).
 
-![MXFP8 vs BF16 Training Loss Curves](static/mxfp8_with_loss.png)
+![MXFP8 vs BF16 Training Loss Curves](../assets/images/mxfp8_with_loss.png)
 
 *Training loss curves over 3,000 steps showing MXFP8 achieves equivalent convergence to bfloat16 baseline.*
 
