@@ -24,6 +24,7 @@ before vLLM's multiprocessing fork.
 """
 
 import torch
+from torch.distributed.tensor import DTensor
 
 # Import from local custom_models directory
 from torchtitan.experiments.vllm.custom_models import (
@@ -31,7 +32,7 @@ from torchtitan.experiments.vllm.custom_models import (
     store_positions_in_context,
     VLLMModelForCausalLM,
 )
-from torchtitan.experiments.vllm.model.attention import VLLMCompatibleFlashAttention
+from torchtitan.experiments.vllm.model.attention import VLLMPagedFlashAttention
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -73,9 +74,9 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
         from torchtitan.models.qwen3.model.model import Qwen3Model
 
         # Map HuggingFace config to TorchTitan ModelArgs
-        logger.info("vllm config: ", vllm_config.__class__)
+        logger.info("vllm config: " + str(vllm_config.__class__))
         hf_config = vllm_config.model_config.hf_config
-        logger.info("hf_config: ", hf_config)
+        logger.info("hf_config: " + str(hf_config))
         model_args = Qwen3ModelArgs(
             vocab_size=getattr(hf_config, "vocab_size", 151936),
             dim=getattr(hf_config, "hidden_size", 2048),
@@ -90,14 +91,14 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
             qk_norm=getattr(hf_config, "qk_norm", True),
         )
 
+        print(f"In attention initialization, model args are : {model_args}")
+
         # Create TorchTitan model
         self.model = Qwen3Model(model_args)
         self.config = model_args
         self.parallel_context = parallel_context
 
-        # Replace inner_attention with vLLM compatible Flash Attention
-        # NOTE: We replace `inner_attention` (the attention kernel), NOT the whole `Attention` module
-        # The `Attention` module handles QKV projection, RoPE, etc., and calls `inner_attention`
+        # The `vllm.Attention` module handles QKV projection, RoPE, etc., and calls `inner_attention`
         if not hasattr(self.model, "layers"):
             raise AttributeError(
                 f"Model {type(self.model).__name__} must have .layers attribute"
@@ -107,18 +108,16 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
             if not hasattr(layer, "attention"):
                 raise ValueError(f"Layer {layer_name} must have .attention attribute")
 
-            if not hasattr(layer.attention, "inner_attention"):
-                raise ValueError(
-                    f"Layer {layer_name}.attention must have .inner_attention attribute"
-                )
-
-            layer.attention.inner_attention = VLLMCompatibleFlashAttention(
+            vllm_attn = VLLMPagedFlashAttention(
                 hidden_size=model_args.dim,
-                num_heads=model_args.n_heads,
-                num_kv_heads=model_args.n_kv_heads,
+                num_heads=model_args.n_heads,  # 16 (8 when TP =2)
+                # NOTE(jianiw): Before feeding into inner_attention, the n_kv_heads has been replicated -> num_heads
+                num_kv_heads=model_args.n_heads,  # 16 (8 When TP=2)
                 head_dim=model_args.head_dim,
                 causal=True,
             )
+
+            layer.attention.inner_attention = vllm_attn
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings."""
@@ -177,9 +176,6 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
         for layer in self.model.layers.values():
             h = layer(h, rope_cache, attention_masks=None)
 
-        # Final norm
-        h = self.model.norm(h)  # [1, total_tokens, hidden_size]
-
         # Convert output format back to vLLM expectations
         # vLLM expects hidden_states in [total_tokens, hidden_size] format
         # TorchTitan returns [batch_size, seq_len, hidden_size], so we need to flatten
@@ -187,6 +183,9 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
             batch_size, seq_len, hidden_size = h.shape
             h = h.view(batch_size * seq_len, hidden_size)  # [total_tokens, hidden_size]
 
+        # NOTE(jianiw): explicitly insert communication and return full tensor to vLLM Engine
+        if isinstance(h, DTensor):
+            h = h.full_tensor()
         return h
 
     def compute_logits(
@@ -195,14 +194,20 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
         sampling_metadata=None,
     ) -> torch.Tensor:
         """Compute logits from hidden states."""
+        # hidden states is the output from
+        # NOTE(jianiw): When TP is enabled, self.model.norm isself.model.output is ColumnParallel() annotated
+
+        # Current hidden_states is replicate()
+
+        h = self.model.norm(hidden_states)  # [1, total_tokens, hidden_size]
+        output = self.model.output(h)
+
         return self.model.output(hidden_states)
 
     def load_weights(self, weights_iter):
         """
-        Load weights from HuggingFace checkpoint.
-
-        Maps HF Qwen weight names → TorchTitan naming convention.
-        This uses the same mapping as TorchTitan's Qwen3StateDictAdapter.
+        Uses TorchTitan's Qwen3StateDictAdapter to map HF → TorchTitan naming,
+        then uses set_model_state_dict for proper distributed tensor handling.
 
         Args:
             weights_iter: Iterator of (name, tensor) pairs from HF checkpoint
@@ -210,101 +215,60 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
         Returns:
             Set of loaded parameter names (for vLLM compatibility)
         """
-        # HF → TorchTitan name mapping (from Qwen3StateDictAdapter)
-        hf_to_tt = {
-            "model.embed_tokens.weight": "tok_embeddings.weight",
-            "lm_head.weight": "output.weight",
-            "model.norm.weight": "norm.weight",
-            # Attention weights
-            "model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.wq.weight",
-            "model.layers.{}.self_attn.k_proj.weight": "layers.{}.attention.wk.weight",
-            "model.layers.{}.self_attn.v_proj.weight": "layers.{}.attention.wv.weight",
-            "model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
-            "model.layers.{}.self_attn.q_norm.weight": (
-                "layers.{}.attention.q_norm.weight"
-            ),
-            "model.layers.{}.self_attn.k_norm.weight": (
-                "layers.{}.attention.k_norm.weight"
-            ),
-            # Skip rotary_emb.inv_freq (not used in TorchTitan)
-            "model.layers.{}.self_attn.rotary_emb.inv_freq": None,
-            # MLP weights
-            "model.layers.{}.mlp.gate_proj.weight": "layers.{}.feed_forward.w1.weight",
-            "model.layers.{}.mlp.up_proj.weight": "layers.{}.feed_forward.w3.weight",
-            "model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
-            # Layer norms
-            "model.layers.{}.input_layernorm.weight": (
-                "layers.{}.attention_norm.weight"
-            ),
-            "model.layers.{}.post_attention_layernorm.weight": (
-                "layers.{}.ffn_norm.weight"
-            ),
-        }
+        from torch.distributed._tensor import DTensor, Replicate
+        from torch.distributed.checkpoint.state_dict import (
+            set_model_state_dict,
+            StateDictOptions,
+        )
+        from torchtitan.models.qwen3.model.state_dict_adapter import (
+            Qwen3StateDictAdapter,
+        )
 
-        # Track loaded parameter names
-        loaded_params = set()
+        # Collect weights from iterator into a dict
+        hf_state_dict = {}
+        for name, tensor in weights_iter:
+            hf_state_dict[name] = tensor
 
-        # Convert iterator to list for processing
-        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+        # Use TorchTitan's adapter to convert HF → TorchTitan format
+        adapter = Qwen3StateDictAdapter(
+            model_args=self.config,
+            hf_assets_path=None,  # Not needed for from_hf conversion
+        )
 
-        # Get parameters from model
-        params_dict = dict(self.model.named_parameters())
+        # Convert the entire state dict at once
+        torchtitan_state_dict = adapter.from_hf(hf_state_dict)
 
-        weights_list = list(weights_iter)
+        # Get model state dict to check which tensors are DTensors
+        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
 
-        for hf_name, loaded_weight in weights_list:
-            # Try to find matching pattern in name_mapping
-            target_name = None
-
-            # Check if it's a layer-specific weight
-            if "layers" in hf_name:
-                # Extract layer number
-                import regex as re
-
-                layer_match = re.search(r"layers\.(\d+)\.", hf_name)
-                if layer_match:
-                    layer_num = layer_match.group(1)
-
-                    # Try to find matching pattern
-                    for hf_pattern, target_pattern in hf_to_tt.items():
-                        if "{}" in hf_pattern and target_pattern is not None:
-                            hf_concrete = hf_pattern.format(layer_num)
-                            if hf_name == hf_concrete:
-                                target_name = target_pattern.format(layer_num)
-                                break
-            else:
-                # Non-layer weight (embeddings, norms, output)
-                target_name = hf_to_tt.get(hf_name)
-
-            # Skip if no mapping or explicitly marked as None
-            if target_name is None:
-                continue
-
-            # Check if parameter exists in model
-            if target_name not in params_dict:
-                continue
-
-            # Load the weight into model parameter
-            param = params_dict[target_name]
-
-            # Verify shapes match
-            if param.shape != loaded_weight.shape:
-                logger.warning(
-                    f"Shape mismatch for {target_name}: "
-                    f"Model: {param.shape}, Checkpoint: {loaded_weight.shape}"
+        # Convert HF tensors to replicate DTensor if target is DTensor
+        for name, tensor in torchtitan_state_dict.items():
+            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
+                # Get the device mesh from the target DTensor
+                target_dtensor = model_state_dict[name]
+                device_mesh = target_dtensor.device_mesh
+                # Convert to replicate DTensor
+                torchtitan_state_dict[name] = DTensor.from_local(
+                    tensor.to(device_mesh.device_type),
+                    device_mesh=device_mesh,
+                    placements=[Replicate()],
                 )
-                continue
 
-            # Load the weight
-            default_weight_loader(param, loaded_weight)
+        # Use TorchTitan's distributed state dict loading
+        # This handles TP/PP sharding automatically
+        set_model_state_dict(
+            model=self.model,
+            model_state_dict=torchtitan_state_dict,
+            options=StateDictOptions(
+                strict=False,  # Allow missing keys
+            ),
+        )
 
-            # Add the parameter name to loaded set
-            # Since CallableModelWrapper overrides named_parameters(),
-            # the names returned here already match what vLLM expects
-            loaded_params.add(target_name)
+        # Get loaded parameter names for vLLM compatibility
+        loaded_params = set(torchtitan_state_dict.keys())
 
         logger.info(
-            f"✅ Loaded {len(loaded_params)} parameters, loaded weights are: {loaded_params}"
+            f"Loaded {len(loaded_params)} parameters from checkpoint using distributed-aware loading"
         )
 
         return loaded_params
