@@ -152,11 +152,11 @@ class FusedDispatch(torch.autograd.Function):
         #   - Fork DeepEP and add use_default_stream_as_comm_stream support
         #   - Use primus_turbo's DeepEP directly
         # ============================================================
-        comm_stream = buffer.get_comm_stream()
-        event = torch.cuda.Event()
-        event.record(comm_stream)
-        torch.cuda.current_stream().wait_event(event)
-        torch.cuda.synchronize()
+        # comm_stream = buffer.get_comm_stream()
+        # event = torch.cuda.Event()
+        # event.record(comm_stream)
+        # torch.cuda.current_stream().wait_event(event)
+        # torch.cuda.synchronize()
 
         # Save for backward
         ctx.group = group
@@ -221,11 +221,11 @@ class FusedDispatch(torch.autograd.Function):
             after_event.current_stream_wait()
 
         # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
-        comm_stream = buffer.get_comm_stream()
-        event = torch.cuda.Event()
-        event.record(comm_stream)
-        torch.cuda.current_stream().wait_event(event)
-        torch.cuda.synchronize()
+        # comm_stream = buffer.get_comm_stream()
+        # event = torch.cuda.Event()
+        # event.record(comm_stream)
+        # torch.cuda.current_stream().wait_event(event)
+        # torch.cuda.synchronize()
 
         return grad_x, None, grad_token_probs, None, None, None, None, None, None
 
@@ -253,12 +253,12 @@ class FusedCombine(torch.autograd.Function):
         if async_finish:
             after_event.current_stream_wait()
 
-        # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
-        comm_stream = buffer.get_comm_stream()
-        event = torch.cuda.Event()
-        event.record(comm_stream)
-        torch.cuda.current_stream().wait_event(event)
-        torch.cuda.synchronize()
+        # # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
+        # comm_stream = buffer.get_comm_stream()
+        # event = torch.cuda.Event()
+        # event.record(comm_stream)
+        # torch.cuda.current_stream().wait_event(event)
+        # torch.cuda.synchronize()
 
         ctx.handle = handle
         ctx.group = group
@@ -284,12 +284,12 @@ class FusedCombine(torch.autograd.Function):
         if ctx.async_finish:
             after_event.current_stream_wait()
 
-        # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
-        comm_stream = buffer.get_comm_stream()
-        event = torch.cuda.Event()
-        event.record(comm_stream)
-        torch.cuda.current_stream().wait_event(event)
-        torch.cuda.synchronize()
+        # # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
+        # comm_stream = buffer.get_comm_stream()
+        # event = torch.cuda.Event()
+        # event.record(comm_stream)
+        # torch.cuda.current_stream().wait_event(event)
+        # torch.cuda.synchronize()
 
         return grad_x, None, None, None, None
 

@@ -327,6 +327,7 @@ class TokenChoiceTopKRouter(nn.Module):
             min=0,
             max=self.num_experts,
         )
+        # num_tokens_per_expert = torch.clamp(num_tokens_per_expert, min=8)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
