@@ -475,6 +475,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        **kwargs,
     ):
         """
         Forward pass for the Transformer model.

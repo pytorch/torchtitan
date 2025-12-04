@@ -90,6 +90,11 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
         self.max_seq_len = seq_len
 
+        # Allow use_flex_attn to be set from config
+        if hasattr(job_config.model, 'use_flex_attn') and job_config.model.use_flex_attn is not None:
+            self.use_flex_attn = job_config.model.use_flex_attn
+            logger.info(f"Setting use_flex_attn={self.use_flex_attn} from config")
+
         if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
                 "Failed to use grouped mm, which is only supported on SM90 or later",

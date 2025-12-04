@@ -124,6 +124,12 @@ class Model:
     which can be found here: https://github.com/pytorch/ao
     """
 
+    use_flex_attn: bool | None = None
+    """
+    Whether to use FlexAttention. If None, uses model's default.
+    For DeepEP, should be False to avoid OOM (FlexAttention compilation fails with DeepEP).
+    """
+
     print_after_conversion: bool = False
     """
     If true, model definition will be printed to stdout after all model
