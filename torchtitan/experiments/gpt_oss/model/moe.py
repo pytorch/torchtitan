@@ -37,6 +37,28 @@ class ScaleBiasForward(torch.autograd.Function):
         return grad_output, None
 
 
+class ScaleProductBackward(torch.autograd.Function):
+    """
+    Custom autograd function that scales bias in forward pass but not in backward.
+
+    For tensor parallel MoE, we need to scale the bias by 1/tp_degree in forward
+    to cancel the extra reduction effect, but keep the gradient unchanged in backward.
+    """
+
+    @staticmethod
+    def forward(ctx, activation, tp_degree):
+        ctx.tp_degree = tp_degree
+        return activation
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Don't scale the gradient - pass it through as-is
+        tp_degree = ctx.tp_degree
+        if tp_degree > 1:
+            grad_output = grad_output / tp_degree
+        return grad_output, None
+
+
 def indices_padding_wrapper(func: Callable) -> Callable:
     """
     In order to use torch._grouped_mm, we need to make sure the number of
@@ -122,7 +144,9 @@ def _run_experts_for_loop(
         h = swiglu(h, limit=swiglu_limit)
         # Apply custom autograd function to scale bias in forward but not in backward
         b2 = ScaleBiasForward.apply(mlp2_bias[expert_idx], tp_degree)
-        h = torch.matmul(h, mlp2_weight[expert_idx].transpose(-2, -1)) + b2
+        h = torch.matmul(h, mlp2_weight[expert_idx].transpose(-2, -1))
+        h = ScaleProductBackward.apply(h, tp_degree)
+        h = h + b2
         out_experts_splits.append(h)
     out = torch.cat(out_experts_splits, dim=0)
 
@@ -157,6 +181,7 @@ def _run_experts_grouped_mm(
 
     h = swiglu(h, limit=swiglu_limit)
     h = torch._grouped_mm(h, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets)
+    h = ScaleProductBackward.apply(h, tp_degree)
 
     # Apply custom autograd function to scale bias in forward but not in backward
     b2_base = mlp2_bias.repeat_interleave(num_tokens_per_expert_long, dim=0)
