@@ -470,7 +470,7 @@ def get_moe_model_nparams_and_flops(
     return nparams, num_flops_per_token
 
 
-def validate_tokenizer_model_alignment(
+def validate_tokenizer_model_compatibility(
     tokenizer: "BaseTokenizer | None",
     model_args: "BaseModelArgs",
 ) -> None:
