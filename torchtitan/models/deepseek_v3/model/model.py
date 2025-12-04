@@ -411,6 +411,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
+        **kwargs,
     ):
         """
         Forward pass for the Transformer model.
