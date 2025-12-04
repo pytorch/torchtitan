@@ -710,14 +710,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
 
 if __name__ == "__main__":
-    # Apply DeepEP empty expert gradient fix (must be before any DeepEP imports)
-    from torchtitan.distributed.deepep.patches import apply_deepep_empty_expert_fix
-
-    apply_deepep_empty_expert_fix()
-
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
+
+    # Apply DeepEP empty expert gradient fix
+    # This patch fixes torch._grouped_mm producing garbage gradients for experts with 0 tokens
+    # Harmless if DeepEP isn't used (the monkey-patched class won't be instantiated)
+    from torchtitan.distributed.deepep.patches import apply_deepep_empty_expert_fix
+
+    # # Use assume_load_balanced=True for ~6% overhead (vs ~12% without)
+    # # This is safe when debug_moe_force_load_balance is enabled
+    # assume_balanced = getattr(config.training, "debug_moe_force_load_balance", False)
+    # apply_deepep_empty_expert_fix(assume_load_balanced=assume_balanced)
+
     trainer: Optional[Trainer] = None
 
     try:
