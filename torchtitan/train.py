@@ -721,8 +721,8 @@ if __name__ == "__main__":
 
     # # Use assume_load_balanced=True for ~6% overhead (vs ~12% without)
     # # This is safe when debug_moe_force_load_balance is enabled
-    # assume_balanced = getattr(config.training, "debug_moe_force_load_balance", False)
-    # apply_deepep_empty_expert_fix(assume_load_balanced=assume_balanced)
+    assume_balanced = getattr(config.training, "debug_moe_force_load_balance", False)
+    apply_deepep_empty_expert_fix(assume_load_balanced=assume_balanced)
 
     trainer: Optional[Trainer] = None
 

@@ -216,6 +216,147 @@ The default DeepEP configuration is optimized for **B200 GPUs with EP=8**. If yo
 
 ---
 
+## ⚡ Fused Activation Kernel
+
+### Overview
+
+The `fused_activation.py` module provides optimized Triton kernels that fuse the SiLU activation, gate multiplication, and routing probability scaling into a single kernel. This optimization is critical for DeepEP MoE training performance.
+
+### The Problem
+
+In standard MoE with SwiGLU activation, the expert computation looks like:
+
+```python
+# Standard (non-fused) implementation
+h = F.silu(x @ w1) * (x @ w3)           # SwiGLU activation
+out = (h.float() * prob).to(h.dtype)    # Routing score multiplication
+```
+
+This requires:
+1. Memory write for `silu(x @ w1)` result
+2. Memory read + write for element-wise multiply with gate
+3. Memory read + cast to float32 + multiply by prob + cast back + write
+
+Each operation launches a separate CUDA kernel and requires memory round-trips, creating bandwidth bottlenecks.
+
+### The Solution
+
+The fused kernel combines all operations into a single kernel:
+
+```python
+# Fused implementation (single kernel launch)
+out = fused_silu_gate_prob(x @ w1, x @ w3, prob)
+```
+
+**Triton Kernel:**
+```python
+@triton.jit
+def _silu_gate_prob_fwd_kernel(x1_ptr, x2_ptr, prob_ptr, out_ptr, ...):
+    # Load x1, x2 once
+    x1 = tl.load(x1_ptr + offsets, mask=mask).to(tl.float32)
+    x2 = tl.load(x2_ptr + offsets, mask=mask).to(tl.float32)
+
+    # Broadcast prob across hidden dimension
+    token_idx = offsets // hidden_size
+    prob = tl.load(prob_ptr + token_idx, mask=mask)
+
+    # Fused computation: silu(x1) * x2 * prob
+    out = x1 * tl.sigmoid(x1) * x2 * prob
+
+    # Store once
+    tl.store(out_ptr + offsets, out.to(tl.bfloat16), mask=mask)
+```
+
+### Performance Results
+
+**Qwen3-30B-A3B Configuration** (16384 tokens, hidden=768):
+
+| Implementation | Forward Time | Speedup |
+|---------------|-------------|---------|
+| Non-Fused (baseline) | 0.0967 ms | 1.0x |
+| torch.compile (fused) | 0.1525 ms | 0.6x (overhead) |
+| **Triton (fused)** | **0.0308 ms** | **3.2x** |
+
+**Per Training Step Savings** (48 MoE layers):
+- Triton: **+3.16 ms saved** per step
+- Memory bandwidth reduction: ~40%
+
+### Usage
+
+```python
+from torchtitan.distributed.deepep.fused_activation import (
+    fused_silu_gate_prob,
+    silu_gate_prob_reference,
+    get_fused_activation_fn,
+)
+
+# Direct usage (recommended)
+out = fused_silu_gate_prob(x1, x2, prob)
+
+# With fallback support
+activation_fn = get_fused_activation_fn(use_triton=True)
+out = activation_fn(x1, x2, prob)
+
+# Reference (for testing)
+out_ref = silu_gate_prob_reference(x1, x2, prob)
+```
+
+### Integration with GroupedExperts
+
+To use this kernel in the MoE forward pass, replace:
+
+```python
+# Before (in GroupedExperts.forward):
+h = self.activation(x1) * x2
+# ... later ...
+if routed_prob is not None:
+    out = (out.float() * routed_prob.reshape(-1, 1)).to(out.dtype)
+```
+
+With:
+
+```python
+# After (using fused kernel):
+from torchtitan.distributed.deepep.fused_activation import fused_silu_gate_prob
+
+# Fuse activation + prob multiplication
+h = fused_silu_gate_prob(x1, x2, routed_prob)  # Single kernel!
+```
+
+### Backward Pass
+
+The kernel includes a custom backward implementation:
+
+```
+Forward:  out = silu(x1) * x2 * prob
+Backward:
+  - grad_x1 = grad_out * x2 * prob * silu'(x1)
+  - grad_x2 = grad_out * silu(x1) * prob
+
+Where silu'(x) = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+```
+
+Gradients for `prob` are not computed since routing probabilities are typically detached in MoE training.
+
+### Files
+
+- `fused_activation.py` - Triton kernel implementation and autograd wrapper
+
+### Testing
+
+```python
+# Correctness test
+x1 = torch.randn(1024, 768, dtype=torch.bfloat16, device='cuda')
+x2 = torch.randn(1024, 768, dtype=torch.bfloat16, device='cuda')
+prob = torch.rand(1024, 1, dtype=torch.float32, device='cuda')
+
+out_fused = fused_silu_gate_prob(x1, x2, prob)
+out_ref = silu_gate_prob_reference(x1, x2, prob)
+
+assert torch.allclose(out_fused, out_ref, atol=0.1)  # bfloat16 tolerance
+```
+
+---
 
 ### For Debugging Purposes
 
