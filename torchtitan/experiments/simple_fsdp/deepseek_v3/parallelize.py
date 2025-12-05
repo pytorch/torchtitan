@@ -38,9 +38,11 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
         result = []
         for m in modules:
             if isinstance(m, list):
-                result.append(convert_modules_to_fqns(m, module_to_fqn_mapping))
+                if fqn_list := convert_modules_to_fqns(m, module_to_fqn_mapping):
+                    result.append(fqn_list)
             else:
-                result.append(module_to_fqn_mapping.get(m, None))
+                if fqn := module_to_fqn_mapping.get(m):
+                    result.append(fqn)
         return result
 
     module_to_name = {m: n for n, m in model.named_modules()}
