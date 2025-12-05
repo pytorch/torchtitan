@@ -1,0 +1,5 @@
+tracking_issue: 24422
+ciflow_tracking_issue: 64124
+ciflow_push_tags:
+- ciflow/8gpu
+- ciflow/rocm
