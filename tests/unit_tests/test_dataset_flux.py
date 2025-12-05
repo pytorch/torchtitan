@@ -45,9 +45,10 @@ class TestFluxDataLoader(unittest.TestCase):
         for world_size in [2]:
             for rank in range(world_size):
                 dataset_name = "cc12m-test-iterable"
-                batch_size = 1
 
+                batch_size = 1
                 num_steps = 15
+                num_workers = 4
 
                 # TODO: if num_steps * batch_size * world_size is larger than the number of samples
                 # in the dataset, then the test will fail, due to huggingface's
@@ -64,6 +65,8 @@ class TestFluxDataLoader(unittest.TestCase):
                         dataset_name,
                         "--training.local_batch_size",
                         str(batch_size),
+                        "--training.dataloader.num_workers",
+                        str(num_workers),
                         "--training.classifier_free_guidance_prob",
                         "0.447",
                         "--training.test_mode",
@@ -81,6 +84,8 @@ class TestFluxDataLoader(unittest.TestCase):
                     tokenizer=None,
                     infinite=True,
                 )
+
+                assert dl.num_workers == num_workers
 
                 it = iter(dl)
 
