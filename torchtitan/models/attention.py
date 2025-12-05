@@ -234,6 +234,30 @@ def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
     return blocked_mask_mod
 
 
+def _sliding_window_mask(
+    window_size: int,
+    b: torch.Tensor,
+    h: torch.Tensor,
+    q_idx: torch.Tensor,
+    kv_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Sliding window mask implementation.
+
+    Args:
+        window_size: The maximum number of tokens to attend to (including current token)
+        b: Batch indices
+        h: Head indices
+        q_idx: Query position indices
+        kv_idx: Key/Value position indices
+
+    Returns:
+        Boolean mask tensor where True means attention is allowed
+    """
+    # Window mask: can only attend within the window
+    # q_idx - kv_idx < window_size ensures we look at most window_size-1 tokens back
+    return (kv_idx <= q_idx) & (q_idx - kv_idx < window_size)
+
+
 def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     """Creates a sliding window mask that only attends to tokens within a fixed window size.
 
@@ -253,13 +277,8 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
             f"window_size must be >= 1 for sliding window attention mask, got {window_size}"
         )
 
-    def sliding_window_mod(
-        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
-    ) -> torch.Tensor:
-        # Window mask: can only attend within the window
-        # q_idx - kv_idx < window_size ensures we look at most window_size-1 tokens back
-        return (kv_idx <= q_idx) & (q_idx - kv_idx < window_size)
-
+    # Use functools.partial to bind window_size while keeping the function cacheable
+    sliding_window_mod = functools.partial(_sliding_window_mask, window_size)
     sliding_window_mod.__name__ = f"sliding_window_mod_window_size_{window_size}"
 
     return sliding_window_mod
