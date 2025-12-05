@@ -194,12 +194,16 @@ class Attention(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Forward pass of the attention module.
 
         Args:
             x (torch.Tensor): Input tensor.
+            rope_cache (torch.Tensor): Precomputed cosine and sine frequencies.
+            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
+            positions (torch.Tensor | None): Position indices used to access RoPE cache. Defaults to None.
 
         Returns:
             torch.Tensor: Output tensor after attention.
@@ -224,6 +228,8 @@ class Attention(nn.Module):
             xk = self.k_norm(xk)
 
         # Apply rotary embedding
+        if positions is not None:
+            rope_cache = rope_cache[positions]
         xq, xk = apply_rotary_emb(xq, xk, rope_cache)
 
         # repeat k/v heads if n_kv_heads < n_heads
@@ -350,6 +356,7 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -357,12 +364,14 @@ class TransformerBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor.
             rope_cache (torch.Tensor): Precomputed cosine and sine frequencies.
+            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
+            positions (torch.Tensor | None): Position indices used to access RoPE cache. Defaults to None.
 
         Returns:
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        x = x + self.attention(self.attention_norm(x), rope_cache, attention_masks)
+        x = x + self.attention(self.attention_norm(x), rope_cache, attention_masks, positions)
 
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
@@ -515,6 +524,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Perform a forward pass through the Transformer model.
@@ -524,6 +534,8 @@ class Qwen3Model(nn.Module, ModelProtocol):
                 If pipeline parallelism is enabled, this will be the input token indices
                 for the ranks on the first pipeline stage. This will be the activation of the
                 previous pipeline stage if the current rank is not on the first stage.
+            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
+            positions (torch.Tensor | None): Position indices used to access RoPE cache. Defaults to None.
 
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
@@ -533,7 +545,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.rope_cache, attention_masks)
+            h = layer(h, self.rope_cache, attention_masks, positions)
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
