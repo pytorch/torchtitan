@@ -8,6 +8,6 @@
 Models for deterministic vLLM RL training.
 """
 
-from .attention import VLLMCompatibleFlashAttention
+from .attention import VLLMCompatibleFlashAttention, VLLMPagedFlashAttention
 
-__all__ = ["VLLMCompatibleFlashAttention"]
+__all__ = ["VLLMCompatibleFlashAttention", "VLLMPagedFlashAttention"]

@@ -16,8 +16,11 @@ def register():
     - Qwen3TorchTitanForCausalLM: Qwen3 models trained with TorchTitan
 
     """
-    from torchtitan.experiments.vllm.model.qwen3 import TorchTitanQwen3ForCausalLM
     from vllm.model_executor.models.registry import ModelRegistry
+
+    from torchtitan.experiments.deterministic_vllm_rl.models.qwen3 import (
+        TorchTitanQwen3ForCausalLM,
+    )
 
     # Register Qwen3TorchTitanForCausalLM with vLLM's ModelRegistry
     # This maps the architecture name from config.json to the model class
