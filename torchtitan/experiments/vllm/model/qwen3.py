@@ -24,6 +24,7 @@ before vLLM's multiprocessing fork.
 """
 
 import torch
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 
 # Import from local custom_models directory
@@ -33,10 +34,13 @@ from torchtitan.experiments.vllm.custom_models import (
     VLLMModelForCausalLM,
 )
 from torchtitan.experiments.vllm.model.attention import VLLMPagedFlashAttention
+from torchtitan.models.qwen3.infra.parallelize import apply_non_moe_tp
+from torchtitan.tools.utils import device_type
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.parallel_context import ParallelContext
+
+# from vllm.model_executor.parallel_context import ParallelContext
 
 logger = init_logger(__name__)
 
@@ -54,6 +58,7 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
     with RoPE positional embeddings and optional QK normalization.
     """
 
+    is_text_generation_model = True  # Required for vLLM runner validation
     supports_pp = False  # Pipeline parallelism not supported yet
     supports_multimodal = False
 
@@ -61,8 +66,7 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
         self,
         *,
         vllm_config: VllmConfig,
-        prefix: str = "",
-        parallel_context: ParallelContext | None = None,
+        prefix: str = "",  # This is required for vLLM interface
     ):
         super().__init__()
 
@@ -96,8 +100,26 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
         # Create TorchTitan model
         self.model = Qwen3Model(model_args)
         self.config = model_args
-        self.parallel_context = parallel_context
+        # self.parallel_context = parallel_context
 
+        self._replice_with_vllm_paged_attention(model_args)
+
+        (
+            dp_size,
+            mp_size,
+            cp_size,
+            pp_size,
+            ep_size,
+            etp_size,
+        ) = self._process_parallelism_settings(vllm_config)
+
+        # Build device mesh and apply parallelization
+        if mp_size > 1 or ep_size > 1:
+            self._build_device_mesh_and_parallelize(
+                dp_size, mp_size, cp_size, pp_size, ep_size, etp_size
+            )
+
+    def _replice_with_vllm_paged_attention(self, model_args):
         # The `vllm.Attention` module handles QKV projection, RoPE, etc., and calls `inner_attention`
         if not hasattr(self.model, "layers"):
             raise AttributeError(
@@ -118,10 +140,108 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
             )
 
             layer.attention.inner_attention = vllm_attn
+        logger.info(
+            "Successfully replaced TorchTitan attention with vLLM PagedFlashAttention"
+        )
+
+    def _process_parallelism_settings(
+        self, vllm_config: VllmConfig, use_token_shuffling_moe: bool = False
+    ):
+        """
+        Parse parallel config from vllm config
+        """
+        world_size = (
+            vllm_config.parallel_config.data_parallel_size
+            * vllm_config.parallel_config.tensor_parallel_size
+        )
+        ep_size = (
+            world_size if vllm_config.parallel_config.enable_expert_parallel else 1
+        )
+        etp_size = (
+            1 if vllm_config.parallel_config.enable_expert_parallel else world_size
+        )
+        dp_size = vllm_config.parallel_config.data_parallel_size
+
+        mp_size = vllm_config.parallel_config.tensor_parallel_size
+        cp_size = vllm_config.parallel_config.decode_context_parallel_size
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.pp_size = pp_size
+
+        return dp_size, mp_size, cp_size, pp_size, ep_size, etp_size
+
+    def _build_device_mesh_and_parallelize(
+        self,
+        dp_size: int,
+        mp_size: int,
+        cp_size: int,
+        pp_size: int,
+        ep_size: int,
+        etp_size: int,
+    ):
+        """
+        Build device mesh in TorchTitan style and apply parallelization to the model.
+
+        This follows the same approach as TorchTitan's ParallelDims.build_mesh()
+        and parallelize_qwen3() functions.
+        """
+        import torch.distributed as dist
+
+        # Get world size and validate
+        world_size = dist.get_world_size()
+
+        # For now, assume dp_shard=1 (no data parallel sharding)
+        # In full implementation, you may need to calculate dp_replicate and dp_shard
+        dp_replicate = dp_size
+        dp_shard = 1
+
+        # Validate parallelism settings
+        assert dp_replicate * dp_shard * cp_size * mp_size * pp_size == world_size, (
+            f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
+            f"cp({cp_size}) * tp({mp_size}) * pp({pp_size}) != WORLD_SIZE({world_size})"
+        )
+
+        # Build device mesh following TorchTitan's _build_mesh_without_ep pattern
+        # (assuming no EP for now)
+        dims = []
+        names = []
+        for d, name in zip(
+            [pp_size, dp_replicate, dp_shard, cp_size, mp_size],
+            ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
+        ):
+            if d > 1:
+                dims.append(d)
+                names.append(name)
+
+        logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
+        world_mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+
+        logger.info(f"Build torchtitan device mesh: {world_mesh}")
+
+        # Apply tensor parallelism if enabled
+        if mp_size > 1:
+            tp_mesh = world_mesh["tp"]
+            apply_non_moe_tp(
+                model=self.model,
+                tp_mesh=tp_mesh,
+                loss_parallel=False,  # vLLM handles loss computation separately
+                enable_float8_tensorwise_tp=False,  # Can be enabled if needed
+                enable_async_tp=False,  # Can be enabled if needed
+            )
+            logger.info(f"Applied Tensor Parallelism with TP={mp_size}")
+
+        # Store the mesh for future use
+        self.world_mesh = world_mesh
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Convert input token IDs to embeddings.
+
+        This is the vLLM-standard method name for embedding tokens.
+        """
+        return self.model.tok_embeddings(input_ids)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Convert input token IDs to embeddings."""
-        return self.model.tok_embeddings(input_ids)
+        """Convert input token IDs to embeddings (deprecated vLLM interface)."""
+        return self.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -183,7 +303,7 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
             batch_size, seq_len, hidden_size = h.shape
             h = h.view(batch_size * seq_len, hidden_size)  # [total_tokens, hidden_size]
 
-        # NOTE(jianiw): explicitly insert communication and return full tensor to vLLM Engine
+        # TODO(jianiw): explicitly insert communication and return full tensor to vLLM Engine. To be checked.
         if isinstance(h, DTensor):
             h = h.full_tensor()
         return h
@@ -192,17 +312,25 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
         self,
         hidden_states: torch.Tensor,
         sampling_metadata=None,
-    ) -> torch.Tensor:
-        """Compute logits from hidden states."""
-        # hidden states is the output from
-        # NOTE(jianiw): When TP is enabled, self.model.norm isself.model.output is ColumnParallel() annotated
+    ) -> torch.Tensor | None:
+        """Compute logits from hidden states.
 
-        # Current hidden_states is replicate()
+        Returns:
+            Logits tensor, or None if TP rank > 0
+        """
+        # Apply final layer norm
+        h = self.model.norm(hidden_states)
 
-        h = self.model.norm(hidden_states)  # [1, total_tokens, hidden_size]
-        output = self.model.output(h)
+        # Apply output projection to get logits
+        logits = self.model.output(h)
 
-        return self.model.output(hidden_states)
+        # When using TP, only rank 0 returns logits
+        # vLLM expects None from other ranks
+        if isinstance(logits, DTensor):
+            # Convert DTensor to local tensor for vLLM
+            logits = logits.full_tensor()
+
+        return logits
 
     def load_weights(self, weights_iter):
         """
@@ -235,10 +363,7 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
             hf_assets_path=None,  # Not needed for from_hf conversion
         )
 
-        # Convert the entire state dict at once
         torchtitan_state_dict = adapter.from_hf(hf_state_dict)
-
-        # Get model state dict to check which tensors are DTensors
         model_state_dict = {k: v for k, v in self.model.state_dict().items()}
 
         # Convert HF tensors to replicate DTensor if target is DTensor
@@ -264,9 +389,8 @@ class TorchTitanQwen3ForCausalLM(VLLMModelForCausalLM):
             ),
         )
 
-        # Get loaded parameter names for vLLM compatibility
-        loaded_params = set(torchtitan_state_dict.keys())
-
+        # manually patch the loaded
+        loaded_params = {f"model.{name}" for name in torchtitan_state_dict.keys()}
         logger.info(
             f"Loaded {len(loaded_params)} parameters from checkpoint using distributed-aware loading"
         )
