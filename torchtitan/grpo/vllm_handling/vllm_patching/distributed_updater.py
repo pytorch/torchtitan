@@ -297,6 +297,7 @@ def weight_updater_process(state_dict, q_heads, kv_heads, tp_rank, tp_size, gpu_
         qkv_buffer = {}
         gate_up_buffer = {}
         qkv_bias_buffer = {}
+        w1w3_buffer = {}
         while True:
             object_list = [
                 None,
@@ -360,13 +361,32 @@ def weight_updater_process(state_dict, q_heads, kv_heads, tp_rank, tp_size, gpu_
             if tensor.dtype != state_dict[name].dtype:
                 tensor = tensor.to(state_dict[name].dtype)
 
+            def _debug_diff(name, old, new):
+                if SGLANG_UPDATE_PROC_DEBUG:
+                    diff = (new.float() - old.float()).abs()
+                    print(
+                        f"[WEIGHT DIFF] {name}: mean={diff.mean().item():.6e}, std={diff.std().item():.6e}, "
+                        f"old_mean={old.float().mean().item():.6e}, new_mean={new.float().mean().item():.6e}",
+                        flush=True,
+                    )
+                    print(
+                        f"[STRIDE COMP] {name}: new: {new.stride()}, old: {old.stride()}",
+                        flush=True,
+                    )
+
             if "qkv_proj.weight" in name:
                 key_val = (
                     "q" if ".wq." in tt_name else "v" if ".wv." in tt_name else "k"
                 )
-                if key_val == "q":
+                if (
+                    key_val == "q"
+                    and json_data["param_mappings"][tt_name]["needs_permute"]
+                ):
                     tensor = permute(tensor, q_heads)
-                elif key_val == "k":
+                elif (
+                    key_val == "k"
+                    and json_data["param_mappings"][tt_name]["needs_permute"]
+                ):
                     tensor = permute(tensor, kv_heads)
                 qkv_buffer[key_val] = tensor
                 if len(qkv_buffer) == 3:
@@ -375,6 +395,7 @@ def weight_updater_process(state_dict, q_heads, kv_heads, tp_rank, tp_size, gpu_
                         [qkv_buffer["q"], qkv_buffer["k"], qkv_buffer["v"]], dim=0
                     ).contiguous()
                     qkv_buffer = {}
+                    _debug_diff(name, state_dict[name].data, tensor)
                     state_dict[name].data.copy_(tensor)
             elif "gate_up_proj.weight" in name:
                 key_val = "w1" if ".w1." in tt_name else "w3"
@@ -385,14 +406,31 @@ def weight_updater_process(state_dict, q_heads, kv_heads, tp_rank, tp_size, gpu_
                         [gate_up_buffer["w1"], gate_up_buffer["w3"]], dim=0
                     ).contiguous()
                     gate_up_buffer = {}
+                    _debug_diff(name, state_dict[name].data, tensor)
+                    state_dict[name].data.copy_(tensor)
+            elif "w13_weight" in name:
+                key_val = "w1" if ".w1" in tt_name else "w3"
+                w1w3_buffer[key_val] = tensor
+                if len(w1w3_buffer) == 2:
+                    tensor = torch.cat(
+                        [w1w3_buffer["w1"], w1w3_buffer["w3"]], dim=1
+                    ).contiguous()
+                    w1w3_buffer = {}
+                    _debug_diff(name, state_dict[name].data, tensor)
                     state_dict[name].data.copy_(tensor)
             elif "qkv_proj.bias" in name:
                 key_val = (
                     "q" if ".wq." in tt_name else "v" if ".wv." in tt_name else "k"
                 )
-                if key_val == "q":
+                if (
+                    key_val == "q"
+                    and json_data["param_mappings"][tt_name]["needs_permute"]
+                ):
                     tensor = permute_1d(tensor, q_heads)
-                elif key_val == "k":
+                elif (
+                    key_val == "k"
+                    and json_data["param_mappings"][tt_name]["needs_permute"]
+                ):
                     tensor = permute_1d(tensor, kv_heads)
                 qkv_bias_buffer[key_val] = tensor
                 if len(qkv_bias_buffer) == 3:
@@ -406,12 +444,15 @@ def weight_updater_process(state_dict, q_heads, kv_heads, tp_rank, tp_size, gpu_
                         dim=0,
                     ).contiguous()
                     qkv_bias_buffer = {}
+                    _debug_diff(name, state_dict[name].data, tensor)
                     state_dict[name].data.copy_(tensor)
             elif json_data["param_mappings"][tt_name]["needs_permute"]:
                 if len(shape) == 2:
                     tensor = permute(tensor, shape[0]).contiguous()
                 elif len(shape) == 1:
-                    if "q_norm" in name or "k_norm" in name:
+                    if ("q_norm" in name or "k_norm" in name) and json_data[
+                        "param_mappings"
+                    ][tt_name]["needs_permute"]:
                         tensor = permute_1d(tensor, 1).contiguous()
                     else:
                         tensor = permute_1d(tensor, shape[0]).contiguous()
@@ -419,6 +460,8 @@ def weight_updater_process(state_dict, q_heads, kv_heads, tp_rank, tp_size, gpu_
                     raise ValueError(
                         f"Tensor {name} has shape {shape} and needs permute, but is not 1D or 2D"
                     )
+                _debug_diff(name, state_dict[name].data, tensor)
                 state_dict[name].data.copy_(tensor)
             else:
+                _debug_diff(name, state_dict[name].data, tensor)
                 state_dict[name].data.copy_(tensor)
