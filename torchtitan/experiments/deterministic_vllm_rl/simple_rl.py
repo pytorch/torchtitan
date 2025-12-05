@@ -332,7 +332,6 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
         max_seq_len=getattr(hf_config, "max_position_embeddings", 32768),
         qk_norm=True,
         depth_init=True,
-        eos_id=getattr(hf_config, "eos_token_id", 151645),
     )
 
     # state_dict is in standard TorchTitan format (w1, w2, w3)
