@@ -656,9 +656,7 @@ class Compile:
     enable: bool = False
     """Whether to apply torch.compile"""
 
-    components: list[Literal["model", "loss"]] = field(
-        default_factory=lambda: ["model", "loss"]
-    )
+    components: list[str] = field(default_factory=lambda: ["model", "loss"])
     """Which components to compile"""
     backend: str = "inductor"
 
