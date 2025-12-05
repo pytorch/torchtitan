@@ -9,14 +9,15 @@
 Example CLI to run TorchTitan Qwen3 model inference with vLLM:
 
 # Run inference
-python torchtitan/experiments/vllm/infer.py
+python torchtitan/experiments/deterministic_vllm_rl/infer.py
 """
 
 import argparse
 
-# Import and register the TorchTitan vLLM plugin
-from torchtitan.experiments.vllm.register import register
 from vllm import LLM, SamplingParams
+
+# Import and register the TorchTitan vLLM plugin
+from torchtitan.experiments.deterministic_vllm_rl.register import register
 
 # Register TorchTitan models with vLLM.
 # NOTE(jianiw): We could use plug-in system instead: https://docs.vllm.ai/en/latest/design/plugin_system/
@@ -31,7 +32,7 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default="torchtitan/experiments/vllm/example_checkpoint/qwen3-0.6B",
+        default="torchtitan/experiments/deterministic_vllm_rl/example_checkpoint/qwen3-0.6B",
         help="Path to TorchTitan checkpoint directory",
     )
     parser.add_argument(
