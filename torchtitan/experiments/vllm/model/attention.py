@@ -14,7 +14,7 @@ import itertools
 
 import torch
 
-from vllm.attention import Attention
+from vllm.attention.layer import Attention
 from vllm.attention.utils.fa_utils import flash_attn_varlen_func, get_flash_attn_version
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
@@ -199,7 +199,7 @@ class VLLMPagedFlashAttention(torch.nn.Module):
                 # Use vLLM's Attention layer (requires forward context)
                 output_varlen = self.vllm_attn(q, k, v)
 
-                print(f"[jianiw] vllm_attn output is: {output_varlen}")
+                # print(f"[jianiw] vllm_attn output is: {output_varlen}")
                 # Reshape back to batch format
                 output = output_varlen.view(batch_size, seq_len, num_heads, head_dim)
 
