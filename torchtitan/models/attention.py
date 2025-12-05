@@ -97,7 +97,13 @@ class FlexAttentionWrapper(torch.nn.Module):
     """
 
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="max-autotune-no-cudagraphs"
+        flex_attention,
+        options={
+            "wrap_inductor_compiled_regions": True,
+            "max_autotune": True,
+            "coordinate_descent_tuning": True,
+            "triton.cudagraphs": False,
+        },
     )
 
     def forward(
