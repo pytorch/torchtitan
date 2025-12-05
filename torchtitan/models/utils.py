@@ -10,6 +10,8 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
 
+from torchtitan.components.tokenizer import BaseTokenizer
+
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
@@ -471,8 +473,8 @@ def get_moe_model_nparams_and_flops(
 
 
 def validate_tokenizer_model_compatibility(
-    tokenizer: "BaseTokenizer | None",
-    model_args: "BaseModelArgs",
+    tokenizer: BaseTokenizer | None,
+    model_args: BaseModelArgs,
 ) -> None:
     """
     Validate that tokenizer configuration is compatible with model configuration.
