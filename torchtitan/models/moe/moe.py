@@ -26,7 +26,9 @@ class MoEArgs:
     route_scale: float = 1.0
     score_before_experts: bool = True
 
-    # token-choice
+    # token-choice with node limited routing support
+    num_groups: int | None = None  # must be a divisor of num_experts
+    top_k_group: int | None = None
     top_k: int = 1
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
     load_balance_coeff: float | None = 1e-3
@@ -180,9 +182,17 @@ class TokenChoiceTopKRouter(nn.Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
         routed to top K experts based on the router scores.
 
+    Optionally supports node-limited (group-limited) routing where experts are divided into groups
+    (e.g., by node), and only top_k_group groups are considered before selecting top_k experts.
+    This reduces cross-node communication in distributed settings.
+
     Args:
         dim (int): Dimension of input tokens.
         num_experts (int): Number of experts in each moe layer.
+        num_groups (int | None): Number of expert groups for node-limited routing. If None, standard
+            top-k routing is used. Must be a divisor of num_experts.
+        top_k_group (int | None): Number of groups to select in node-limited routing. Required when
+            num_groups is set.
         top_k (int): Number of experts each token will be routed to in token-choice routing.
         score_func (Literal["softmax", "sigmoid"]): Whether to use sigmoid or softmax for router scores.
         route_norm (bool): Whether to normalize the routing scores when using sigmoid.
@@ -193,6 +203,8 @@ class TokenChoiceTopKRouter(nn.Module):
         self,
         dim: int,
         num_experts: int,
+        num_groups: int | None,
+        top_k_group: int | None,
         top_k: int,
         score_func: Literal["softmax", "sigmoid"],
         route_norm: bool,
@@ -202,6 +214,8 @@ class TokenChoiceTopKRouter(nn.Module):
         super().__init__()
         self.gate = nn.Linear(dim, num_experts, bias=False)
         self.num_experts = num_experts
+        self.num_groups = num_groups
+        self.top_k_group = top_k_group
         self.top_k = top_k
         self.score_func = score_func
         self.route_norm = route_norm
@@ -223,6 +237,60 @@ class TokenChoiceTopKRouter(nn.Module):
             % self.num_experts
         )
         top_scores = scores.gather(dim=1, index=selected_experts_indices)  # [N,K]
+        return selected_experts_indices, top_scores
+
+    def _node_limited_routing(
+        self,
+        scores: torch.Tensor,
+        expert_bias: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Node-limited (group-limited) routing.
+
+        This method first selects top_k_group groups based on group scores,
+        then selects top_k experts from only those selected groups.
+
+        Args:
+            scores: Router scores after sigmoid or softmax, shape (bs*slen, num_experts)
+            expert_bias: Optional bias for load balancing, shape (num_experts,)
+
+        Returns:
+            tuple of (selected_experts_indices, top_scores)
+                - selected_experts_indices: shape (bs*slen, top_k)
+                - top_scores: shape (bs*slen, top_k)
+        """
+        if expert_bias is not None:
+            scores_for_choice = scores + expert_bias
+        else:
+            scores_for_choice = scores
+
+        # Calculate group scores by taking top-2 experts per group and summing
+        experts_per_group = self.num_experts // self.num_groups
+        group_scores = (
+            scores_for_choice.view(-1, self.num_groups, experts_per_group)
+            .topk(2, dim=-1)[0]
+            .sum(dim=-1)
+        )
+        group_idx = torch.topk(group_scores, k=self.top_k_group, dim=-1, sorted=False)[
+            1
+        ]
+        group_mask = torch.zeros_like(group_scores)
+        group_mask.scatter_(1, group_idx, 1)
+        score_mask = (
+            group_mask.unsqueeze(-1)
+            .expand(-1, self.num_groups, experts_per_group)
+            .reshape(-1, self.num_experts)
+        )  # shape (bs*slen, num_experts)
+        # Mask out experts from non-selected groups
+        scores_for_choice = scores_for_choice.masked_fill(
+            ~score_mask.bool(), float("-inf")
+        )
+        # Select top_k experts from masked scores
+        selected_experts_indices = torch.topk(
+            scores_for_choice, k=self.top_k, dim=-1, sorted=False
+        )[1]
+        # Get actual scores (without bias) for the selected experts
+        top_scores = scores.gather(1, selected_experts_indices)
+
         return selected_experts_indices, top_scores
 
     def forward(
@@ -257,7 +325,17 @@ class TokenChoiceTopKRouter(nn.Module):
         # top scores shape (bs*slen, top_k)
         # NOTE: The expert_bias is only used for routing. The gating value
         #       top_scores is still derived from the original scores.
-        if expert_bias is not None:
+        if self.num_groups is not None:
+            assert (
+                self.top_k_group is not None
+            ), "top_k_group must be set when num_groups is set"
+            assert (
+                self.num_experts % self.num_groups == 0
+            ), f"num_experts ({self.num_experts}) must be divisible by num_groups ({self.num_groups})"
+            selected_experts_indices, top_scores = self._node_limited_routing(
+                scores, expert_bias
+            )
+        elif expert_bias is not None:
             _, selected_experts_indices = torch.topk(
                 scores + expert_bias, k=self.top_k, dim=1
             )
@@ -367,6 +445,8 @@ class MoE(nn.Module):
         self.router = TokenChoiceTopKRouter(
             dim=dim,
             num_experts=num_experts,
+            num_groups=moe_args.num_groups,
+            top_k_group=moe_args.top_k_group,
             top_k=moe_args.top_k,
             score_func=moe_args.score_func,
             route_norm=moe_args.route_norm,
