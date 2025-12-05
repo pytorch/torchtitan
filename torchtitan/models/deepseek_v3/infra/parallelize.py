@@ -104,6 +104,9 @@ def parallelize_deepseekv3(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            dual_pipe_v=job_config.parallelism.pipeline_parallel_expert_parallel_overlap
+            and job_config.parallelism.pipeline_parallel_schedule.lower()
+            == "dualpipev",
         )
 
     model_compile_enabled = (
