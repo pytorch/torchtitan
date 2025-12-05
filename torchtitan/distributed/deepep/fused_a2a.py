@@ -235,9 +235,21 @@ class FusedCombine(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx, x, group, handle, async_finish=False, allocate_on_comm_stream=False
+        ctx,
+        x,
+        group,
+        handle,
+        async_finish=False,
+        allocate_on_comm_stream=False,
+        expert_weights=None,
     ):
-        """Forward pass of fused combine."""
+        """Forward pass of fused combine.
+
+        Args:
+            expert_weights: Optional per-token weights for fused weighted combine.
+                           When provided, performs: y = Σ(x_i * weight_i) instead of y = Σ(x_i)
+                           This fuses the routing probability multiplication into the combine kernel.
+        """
         previous_event = None
         if async_finish:
             previous_event = EventOverlap(EventHandle())
@@ -248,6 +260,7 @@ class FusedCombine(torch.autograd.Function):
             async_finish=async_finish,
             previous_event=previous_event,
             allocate_on_comm_stream=allocate_on_comm_stream,
+            expert_weights=expert_weights,  # Pass to fused weighted combine
         )
         # Make sure current stream is synchronized
         if async_finish:
@@ -264,11 +277,16 @@ class FusedCombine(torch.autograd.Function):
         ctx.group = group
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
+        ctx.expert_weights = expert_weights  # Save for backward (weighted dispatch)
         return combined_x, None
 
     @staticmethod
     def backward(ctx, grad_output, previous_event=None):
-        """Backward pass of fused combine."""
+        """Backward pass of fused combine.
+
+        Uses fused weighted dispatch when expert_weights were provided in forward.
+        This computes: grad_x = dispatch(grad_y) * weight (fused in kernel)
+        """
         previous_event = None
         if ctx.async_finish:
             previous_event = EventOverlap(EventHandle())
@@ -279,6 +297,7 @@ class FusedCombine(torch.autograd.Function):
             previous_event=previous_event,
             async_finish=ctx.async_finish,
             allocate_on_comm_stream=ctx.allocate_on_comm_stream,
+            expert_weights=ctx.expert_weights,  # Fused weighted dispatch for backward
         )
         # Make sure current stream is synchronized
         if ctx.async_finish:
@@ -291,7 +310,14 @@ class FusedCombine(torch.autograd.Function):
         # torch.cuda.current_stream().wait_event(event)
         # torch.cuda.synchronize()
 
-        return grad_x, None, None, None, None
+        return (
+            grad_x,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )  # Added None for expert_weights grad
 
 
 def fused_dispatch(
@@ -329,17 +355,29 @@ def fused_dispatch(
     )
 
 
-def fused_combine(x, group, handle, async_finish=False, allocate_on_comm_stream=False):
+def fused_combine(
+    x,
+    group,
+    handle,
+    async_finish=False,
+    allocate_on_comm_stream=False,
+    expert_weights=None,
+):
     """Perform fused combine operation if deep_ep is available.
     Args:
         x: Input tensor
         group: Process group
         handle: Communication handle
-        previous_event: Previous CUDA event
+        async_finish: Whether to finish asynchronously
+        allocate_on_comm_stream: Whether to allocate on comm stream
+        expert_weights: Optional per-token weights for fused weighted combine.
+                       When provided, performs: y = Σ(x_i * weight_i) instead of y = Σ(x_i)
     Returns:
         Result of FusedCombine
     """
-    return FusedCombine.apply(x, group, handle, async_finish, allocate_on_comm_stream)
+    return FusedCombine.apply(
+        x, group, handle, async_finish, allocate_on_comm_stream, expert_weights
+    )
 
 
 def set_deepep_num_sms(num_sms):

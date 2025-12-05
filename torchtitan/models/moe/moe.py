@@ -121,8 +121,7 @@ def _run_experts_grouped_mm(
     w2: torch.Tensor,
     w3: torch.Tensor,
     x: torch.Tensor,
-    num_tokens_per_expert: torch.Tensor | None,
-    routed_prob: torch.Tensor | None = None,
+    num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
     """
     Run grouped matrix multiplication for MoE experts with SwiGLU activation.
@@ -133,68 +132,23 @@ def _run_experts_grouped_mm(
         w3: Gate expert weights [num_experts, hidden_dim, dim]
         x: Input tensor [total_tokens, dim]
         num_tokens_per_expert: Number of tokens per expert [num_experts]
-        routed_prob: Routing probabilities [total_tokens, 1] or [total_tokens] (optional)
-                     When provided with fused kernel, enables fused silu-gate-prob computation.
 
     Returns:
         Output tensor [total_tokens, dim]
+
+    Note:
+        Routing probability multiplication is now handled by fused weighted combine
+        in the DeepEP kernel, not here. See buffer.combine(expert_weights=prob).
     """
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
-    # ============================================================================
-    # FUSED ACTIVATION KERNEL (Triton-optimized)
-    # ============================================================================
-    # When routed_prob is provided, we use the fused kernel that combines:
-    #   - SiLU activation: silu(x @ w1)
-    #   - Gate multiplication: * (x @ w3)
-    #   - Routing probability scaling: * prob
-    #
-    # This provides ~3.2x speedup over the non-fused version by:
-    #   1. Reducing memory bandwidth (single kernel launch vs 3 separate ops)
-    #   2. Avoiding intermediate tensor allocations
-    #   3. Fusing dtype conversions
-    #
-    # Performance (Qwen3-30B-A3B, 16384 tokens, hidden=768):
-    #   - Non-fused: 0.0967 ms
-    #   - Fused:     0.0308 ms (3.2x faster)
-    #   - Per-step savings: ~2.79 ms (48 layers)
-    #
-    # See: torchtitan/distributed/deepep/fused_activation.py for kernel details
-    # ============================================================================
-    if routed_prob is not None:
-        # Compute x @ w1 and x @ w3 (no activation yet)
-        x1 = torch._grouped_mm(
-            x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
-        )
-        x3 = torch._grouped_mm(
-            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
-        )
-
-        # Fused: silu(x1) * x3 * prob (single Triton kernel)
-        h = fused_silu_gate_prob(x1, x3, routed_prob)
-
-        # Final projection: h @ w2
-        out = torch._grouped_mm(
-            h, w2.bfloat16().transpose(-2, -1), offs=offsets
-        ).type_as(x)
-    else:
-        # ============================================================================
-        # NON-FUSED PATH (original implementation)
-        # ============================================================================
-        # Used when routed_prob is not provided (standard EP path without DeepEP).
-        # The routing score multiplication happens separately in MoE.forward().
-        # ============================================================================
-        h = F.silu(
-            torch._grouped_mm(
-                x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
-            )
-        )
-        h = h * torch._grouped_mm(
-            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
-        )
-        out = torch._grouped_mm(
-            h, w2.bfloat16().transpose(-2, -1), offs=offsets
-        ).type_as(x)
+    h = F.silu(
+        torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
+    )
+    h = h * torch._grouped_mm(
+        x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+    )
+    out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
 
     return out
 
@@ -226,8 +180,13 @@ class GroupedExperts(nn.Module):
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
-        routed_prob: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Forward pass through grouped experts.
+
+        Note: Routing probability multiplication is now handled by fused weighted
+        combine in the DeepEP kernel (buffer.combine with expert_weights parameter),
+        not here. This provides ~1.57x speedup over separate multiply + combine.
+        """
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
@@ -238,51 +197,6 @@ class GroupedExperts(nn.Module):
             w1 = self.w1
             w2 = self.w2
             w3 = self.w3
-
-        # ============================================================================
-        # NOTE(phuc): CRITICAL: Routing Score Multiplication for DeepEP
-        # ============================================================================
-        # This code multiplies expert outputs by their routing probabilities (top_scores).
-        # DO NOT COMMENT OUT - removing this causes an 8x gradient explosion bug.
-        #
-        # WHY THIS IS NECESSARY:
-        # In MoE with top_k routing, each token is sent to K experts. The final output
-        # should be a weighted sum: output = sum(expert_i(x) * prob_i) for i in top_k
-        #
-        # Standard EP vs DeepEP paths handle this differently:
-        #
-        # STANDARD EP PATH (MoE.forward):
-        #   1. Router computes top_scores [bs*slen, top_k]
-        #   2. TokenReorderer sorts tokens by expert
-        #   3. Experts compute outputs
-        #   4. MoE.forward() multiplies: routed_output *= top_scores  <-- SCALING HERE
-        #   5. scatter_add combines outputs back to original positions
-        #
-        # DEEPEP PATH (MoE.forward:
-        #   1. Router computes top_scores [bs*slen, top_k]
-        #   2. dispatch_preprocess stores scores in dispatcher
-        #   3. ExpertParallelDeepEP._token_dispatch returns routed_prob
-        #   4. GroupedExperts.forward() must multiply: out *= routed_prob  <-- HERE
-        #   5. DeepEP combine operation aggregates results
-        #
-        # WITHOUT THIS MULTIPLICATION:
-        #   - Each token's output from K experts is summed without weighting
-        #   - Output magnitude is ~K times larger (K=8 for Qwen3-30B-A3B)
-        #   - Gradients are ~8x larger, causing training instability
-        #   - Gate gradients become zero (router doesn't learn)
-        #
-        # VERIFIED: test_full_comparison_table.py shows:
-        #   - With scaling:    grad_norm_ratio = 1.00x ✓
-        #   - Without scaling: grad_norm_ratio = 7.66x ✗ (≈ top_k)
-        #
-        # Performance note: This adds ~20% overhead but is mathematically required.
-        # ============================================================================
-        if (
-            self.deepep_dispatcher is not None
-            and routed_prob is not None
-            and self.score_before_experts
-        ):
-            x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
 
         if self.use_grouped_mm:
             # NOTE: If EP is not used, we need to pad the indices
@@ -296,55 +210,48 @@ class GroupedExperts(nn.Module):
             else:
                 run_experts_fn = _run_experts_grouped_mm
 
-            # ============================================================================
-            # FUSED KERNEL PATH (DeepEP + score_before_experts=False)
-            # ============================================================================
-            # When using DeepEP with score_before_experts=False (default), we pass
-            # routed_prob to _run_experts_grouped_mm to enable the fused Triton kernel.
-            #
-            # The fused kernel combines: silu(x @ w1) * (x @ w3) * prob
-            # into a single kernel, providing ~3.2x speedup over separate operations.
-            #
-            # This replaces the separate multiplication that was done after experts:
-            #   OLD: out = (out.float() * routed_prob.reshape(-1, 1)).to(out.dtype)
-            #   NEW: Fused inside _run_experts_grouped_mm via fused_silu_gate_prob()
-            #
-            # For other paths (standard EP, score_before_experts=True), routed_prob
-            # is not passed, and the non-fused path is used.
-            # ============================================================================
-            use_fused_kernel = (
-                self.deepep_dispatcher is not None
-                and routed_prob is not None
-                and not self.score_before_experts
-            )
-
-            if use_fused_kernel:
-                out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert, routed_prob)
-            else:
-                out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+            out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
         else:
             out = _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
+        return out
+
         # ============================================================================
-        # OLD CODE (commented out - replaced by fused kernel above)
+        # OLD CODE (kept for reference - replaced by fused weighted combine)
         # ============================================================================
-        # NOTE(phuc): Apply routing scores AFTER expert computation if score_before_experts=False
-        # Only for DeepEP: routed_prob is passed from ExpertParallelDeepEP._token_dispatch
+        # NOTE(phuc): The old implementation multiplied routing probabilities here.
+        # This is now handled by the fused weighted combine kernel in DeepEP.
         #
-        # This separate multiplication is now FUSED into _run_experts_grouped_mm when
-        # use_fused_kernel=True. The fused kernel combines silu + gate + prob multiply
-        # into a single Triton kernel for ~3.2x speedup.
+        # OLD forward() signature:
+        #   def forward(self, x, num_tokens_per_expert, routed_prob=None)
         #
-        # KEEP THIS COMMENTED CODE for reference and rollback if needed:
-        # ============================================================================
+        # OLD score_before_experts logic:
+        # if (
+        #     self.deepep_dispatcher is not None
+        #     and routed_prob is not None
+        #     and self.score_before_experts
+        # ):
+        #     x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
+        #
+        # OLD fused triton kernel logic:
+        # use_fused_kernel = (
+        #     self.deepep_dispatcher is not None
+        #     and routed_prob is not None
+        #     and not self.score_before_experts
+        # )
+        # if use_fused_kernel:
+        #     out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert, routed_prob)
+        # else:
+        #     out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+        #
+        # OLD score_after_experts logic:
         # if (
         #     self.deepep_dispatcher is not None
         #     and routed_prob is not None
         #     and not self.score_before_experts
         # ):
         #     out = (out.to(torch.float32) * routed_prob.reshape(-1, 1)).to(out.dtype)
-
-        return out
+        # ============================================================================
 
     def init_weights(self, init_std: float, n_layers: int):
         std_in = moe_init_std(self.w1.shape[-1], n_layers)
