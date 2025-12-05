@@ -254,6 +254,7 @@ class FluxDataset(IterableDataset, Stateful):
         infinite: bool = False,
         include_sample_id: bool = False,
         subset_size: int | None = None,
+        dropout_prob: float = 0.0,
     ) -> None:
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
@@ -285,7 +286,7 @@ class FluxDataset(IterableDataset, Stateful):
 
         self.infinite = infinite
         self.include_sample_id = include_sample_id
-
+        self.dropout_prob = dropout_prob
         # Variables for checkpointing
         self._sample_idx = 0
         self._epoch = 0
@@ -348,8 +349,7 @@ class FluxDataset(IterableDataset, Stateful):
 
             # Classifier-free guidance: Replace some of the strings with empty strings.
             # Distinct random seed is initialized at the beginning of training for each FSDP rank.
-            dropout_prob = self.job_config.training.classifer_free_guidance_prob
-            if dropout_prob > 0.0 and random.random() < dropout_prob:
+            if self.dropout_prob > 0.0 and random.random() < self.dropout_prob:
                 if "t5_tokens" in sample_dict:
                     if self._t5_empty_token is None or self._clip_empty_token is None:
                         raise ValueError("Tokenizers must be provided.")
@@ -397,6 +397,7 @@ def build_flux_train_dataloader(
         infinite=infinite,
         batch_size=job_config.training.batch_size,
         subset_size=job_config.training.subset_size,
+        dropout_prob=job_config.training.classifer_free_guidance_prob,
     )
 
 
@@ -418,6 +419,7 @@ def build_flux_val_dataloader(
         tokenizer=tokenizer,
         infinite=infinite,
         batch_size=job_config.eval.batch_size,
+        dropout_prob=0
     )
 
 
