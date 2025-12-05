@@ -28,7 +28,7 @@ Note: Currently supports single-device training only.
    - Implements custom backward pass for gradient computation
    - Uses `num_splits=1` for deterministic behavior
 
-2. `models/qwen3/model_vllm_compat.py`: Qwen3VLLMCompatModel
+2. `models/qwen3/model_batch_invariant.py`: Qwen3VLLMCompatModel
    - Qwen3 model with merged gate/up projections matching vLLM format
    - Uses VLLMRMSNorm with gradient support
 
@@ -211,7 +211,72 @@ This implementation uses the same kernels for both rollouts (vLLM) and training 
 2. Only causal attention is supported
 3. Requires NVIDIA GPUs with Flash Attention support
 
-## Project Structure
+
+# Run vLLM inference with TorchTitan Qwen3 Model
+
+This directory contains code to run TorchTitan model definition with vLLM inference engine (not batch-invariant yet, working in progress).
+This work is inspired by https://github.com/vllm-project/vllm/pull/28685.
+
+## Overview
+The integration consists of two main components:
+
+1. **Model Adapter** (`model/qwen3.py`): A custom model class that extends vLLM's `Qwen3ForCausalLM` to handle TorchTitan checkpoint naming conventions
+2. **Inference Script** (`infer.py`): A simple script to register the model and run inference
+
+
+## Quick Start
+### Prerequisites
+
+1. Install PyTorch nightly for torchtitan:
+```
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
+```
+
+
+2. Install vLLM from source [vllm-use-an-existing-pytorch-installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#use-an-existing-pytorch-installation):
+```bash
+# install PyTorch first, either from PyPI or from source
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+python use_existing_torch.py
+uv pip install -r requirements/build.txt
+uv pip install --no-build-isolation -e .
+```
+
+
+NOTE: If `flash_attn_varlen_func` hits error "torch.AcceleratorError: CUDA error: the provided PTX was compiled with an unsupported toolchain" during forward path, this is due to GPU driver version is not compatible with vLLM/PyTorch compiled version. Use the following command to recompile vLLM.
+
+```
+# Set CUDA version environment variable
+export CUDA_HOME=/usr/local/cuda-12.4
+export PATH=/usr/local/cuda-12.4/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
+
+# Clean previous build
+rm -rf build dist *.egg-info
+pip uninstall -y vllm
+
+# Rebuild vLLM from source with CUDA 12.4
+pip install -e .
+
+```
+
+3. Download Qwen3/Qwen3-0.6b checkpoint from HuggingFace and put into `example_checkpoint` folder. Make sure to change the "architecture" field in `config.json` to be `Qwen3TorchTitanForCausalLM` so vllm engine could use torchtitan model.
+
+
+4. Run inference:
+```
+python torchtitan/experiments/deterministic_vllm_rl/infer.py --model torchtitan/experiments/deterministic_vllm_rl/example_checkpoint/qwen3-0.6B
+```
+
+Run with TP: (work in progress)
+```
+python torchtitan/experiments/deterministic_vllm_rl/infer.py --model torchtitan/experiments/deterministic_vllm_rl/example_checkpoint/qwen3-0.6B --tensor-parallel-size 2
+
+```
+
+
+# Project Structure
 
 ```
 deterministic_vllm_rl/
@@ -225,7 +290,7 @@ deterministic_vllm_rl/
 │   ├── attention.py                   # VLLMCompatibleFlashAttention
 │   └── qwen3/
 │       ├── __init__.py
-│       └── model_vllm_compat.py       # vLLM-compatible Qwen3 model
+│       └── model_batch_invariant.py   # Batch-invariant Qwen3 model
 ├── weights/
 │   ├── __init__.py
 │   ├── converter.py                   # Weight conversion script
