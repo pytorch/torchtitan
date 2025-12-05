@@ -1,3 +1,2 @@
 ciflow_push_tags:
 - ciflow/8gpu
-- ciflow/rocm
