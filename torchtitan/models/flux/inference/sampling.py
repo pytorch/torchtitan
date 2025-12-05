@@ -93,10 +93,13 @@ def generate_image(
         prompt = [prompt]
 
     # allow for packing and conversion to latent space. Use the same resolution as training time.
+    # pyrefly: ignore [missing-attribute]
     img_height = 16 * (job_config.training.img_size // 16)
+    # pyrefly: ignore [missing-attribute]
     img_width = 16 * (job_config.training.img_size // 16)
 
     enable_classifier_free_guidance = (
+        # pyrefly: ignore [missing-attribute]
         job_config.validation.enable_classifier_free_guidance
     )
 
@@ -104,7 +107,9 @@ def generate_image(
     clip_tokens = clip_tokenizer.encode(prompt)
     t5_tokens = t5_tokenizer.encode(prompt)
     if len(prompt) == 1:
+        # pyrefly: ignore [missing-attribute]
         clip_tokens = clip_tokens.unsqueeze(0)
+        # pyrefly: ignore [missing-attribute]
         t5_tokens = t5_tokens.unsqueeze(0)
 
     batch = preprocess_data(
@@ -113,6 +118,7 @@ def generate_image(
         autoencoder=None,
         clip_encoder=clip_encoder,
         t5_encoder=t5_encoder,
+        # pyrefly: ignore [bad-argument-type]
         batch={
             "clip_tokens": clip_tokens,
             "t5_tokens": t5_tokens,
@@ -124,7 +130,9 @@ def generate_image(
 
         empty_clip_tokens = clip_tokenizer.encode("")
         empty_t5_tokens = t5_tokenizer.encode("")
+        # pyrefly: ignore [missing-attribute]
         empty_clip_tokens = empty_clip_tokens.repeat(num_images, 1)
+        # pyrefly: ignore [missing-attribute]
         empty_t5_tokens = empty_t5_tokens.repeat(num_images, 1)
 
         empty_batch = preprocess_data(
@@ -145,16 +153,24 @@ def generate_image(
         model=model,
         img_width=img_width,
         img_height=img_height,
+        # pyrefly: ignore [missing-attribute]
         denoising_steps=job_config.validation.denoising_steps,
         clip_encodings=batch["clip_encodings"],
         t5_encodings=batch["t5_encodings"],
         enable_classifier_free_guidance=enable_classifier_free_guidance,
         empty_t5_encodings=(
-            empty_batch["t5_encodings"] if enable_classifier_free_guidance else None
+            # pyrefly: ignore [unbound-name]
+            empty_batch["t5_encodings"]
+            if enable_classifier_free_guidance
+            else None
         ),
         empty_clip_encodings=(
-            empty_batch["clip_encodings"] if enable_classifier_free_guidance else None
+            # pyrefly: ignore [unbound-name]
+            empty_batch["clip_encodings"]
+            if enable_classifier_free_guidance
+            else None
         ),
+        # pyrefly: ignore [missing-attribute]
         classifier_free_guidance_scale=job_config.validation.classifier_free_guidance_scale,
     )
 
@@ -190,7 +206,9 @@ def denoise(
     if enable_classifier_free_guidance:
         # Double batch size for CFG: [unconditional, conditional]
         latents = torch.cat([latents, latents], dim=0)
+        # pyrefly: ignore [no-matching-overload]
         t5_encodings = torch.cat([empty_t5_encodings, t5_encodings], dim=0)
+        # pyrefly: ignore [no-matching-overload]
         clip_encodings = torch.cat([empty_clip_encodings, clip_encodings], dim=0)
         bsz *= 2
 

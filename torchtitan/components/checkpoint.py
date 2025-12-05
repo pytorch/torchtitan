@@ -208,12 +208,14 @@ class CheckpointManager:
         )
 
         if self.ft_manager and not self.enable_ft_dataloader_checkpoints:
+            # pyrefly: ignore [deprecated]
             logger.warn(
                 "Fault tolerance is enabled but enable_ft_dataloader_checkpoints is False. "
                 "This means replicas can retrain over the same data multiple times, which can result in overfitting."
             )
 
         if self.ft_manager:
+            # pyrefly: ignore [missing-attribute]
             optimizers.init_cache_state_dict()
 
             def state_dict():
@@ -234,6 +236,7 @@ class CheckpointManager:
                     self.states[k].load_state_dict(v)
 
             self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
+            # pyrefly: ignore [missing-attribute]
             self.ft_replica_id = ft_manager.replica_id
 
         async_mode = checkpoint_config.async_mode.lower()
@@ -297,6 +300,7 @@ class CheckpointManager:
             )
             self.purge_thread.start()
         else:
+            # pyrefly: ignore [bad-assignment]
             self.purge_thread = None
 
         self.mp = None
@@ -323,6 +327,7 @@ class CheckpointManager:
     def close(self):
         if hasattr(self, "enable") and self.enable:
             if hasattr(self, "mp") and self.mp and self.mp.is_alive():
+                # pyrefly: ignore [missing-attribute]
                 self.mp_queue_send.put(Terminate())
                 self.mp.join()
             if (
@@ -367,6 +372,7 @@ class CheckpointManager:
             ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
             state_dict = self.sd_adapter.to_hf(state_dict)
 
+            # pyrefly: ignore [missing-attribute]
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
             if fqn_to_index_mapping:
                 storage_writer = HuggingFaceStorageWriter(
@@ -390,17 +396,21 @@ class CheckpointManager:
             checkpoint_save_id = checkpoint_id
 
         if async_mode == AsyncMode.ASYNC:
+            # pyrefly: ignore [bad-assignment]
             ret = dcp.async_save(
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
+                # pyrefly: ignore [bad-argument-type]
                 process_group=self.pg,
             )
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
+            # pyrefly: ignore [bad-assignment]
             ret = dcp.async_save(
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
+                # pyrefly: ignore [bad-argument-type]
                 process_group=self.pg,
                 async_checkpointer_type=AsyncCheckpointerType.PROCESS,
                 async_stager=self.stager,
@@ -412,10 +422,12 @@ class CheckpointManager:
                 checkpoint_id=checkpoint_save_id,
             )
 
+        # pyrefly: ignore [missing-attribute]
         if to_hf and self.sd_adapter.fqn_to_index_mapping:
             consolidate_safetensors_files_on_every_rank(
                 input_dir=os.path.join(checkpoint_id, "sharded"),
                 output_dir=checkpoint_id,
+                # pyrefly: ignore [bad-argument-type]
                 fqn_to_index_mapping=self.sd_adapter.fqn_to_index_mapping,
                 num_threads=5,
             )
@@ -511,7 +523,9 @@ class CheckpointManager:
                     checkpoint_id=checkpoint_id,
                     async_mode=self.async_mode,
                 )
+                # pyrefly: ignore [missing-attribute]
                 self.save_future = result.upload_completion
+                # pyrefly: ignore [missing-attribute]
                 self.staging_future = result.staging_completion
                 self.staging = True
             elif self.async_mode == AsyncMode.ASYNC:
@@ -589,6 +603,7 @@ class CheckpointManager:
                         f"loading from HF safetensors from --checkpoint.initial_load_path: {self.initial_load_path}"
                     )
             elif from_hf:
+                # pyrefly: ignore [missing-attribute]
                 checkpoint_id = self.sd_adapter.hf_assets_path
                 if not os.path.isdir(checkpoint_id):
                     raise ValueError(
@@ -596,6 +611,7 @@ class CheckpointManager:
                         Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
                     )
                 logger.info(
+                    # pyrefly: ignore [missing-attribute]
                     f"loading HF safetensors from --model.hf_assets_path: {self.sd_adapter.hf_assets_path}"
                 )
             else:
@@ -644,6 +660,7 @@ class CheckpointManager:
         with ``async_checkpoint_with_pinned_memory``.
         """
         if self.enable_staging and self.staging:
+            # pyrefly: ignore [missing-attribute]
             self.staging_future.result()
             self.staging = False
 

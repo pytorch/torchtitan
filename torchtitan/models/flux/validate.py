@@ -63,6 +63,7 @@ class FluxValidator(Validator):
         self.job_config = job_config
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
+        # pyrefly: ignore [missing-attribute]
         self.all_timesteps = self.job_config.validation.all_timesteps
         self.validation_dataloader = build_flux_validation_dataloader(
             job_config=job_config,
@@ -74,6 +75,7 @@ class FluxValidator(Validator):
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
+        # pyrefly: ignore [bad-assignment]
         self.metrics_processor = metrics_processor
         self.t5_tokenizer, self.clip_tokenizer = build_flux_tokenizer(self.job_config)
 
@@ -91,6 +93,7 @@ class FluxValidator(Validator):
         t5_encoder: FluxEmbedder,
         clip_encoder: FluxEmbedder,
     ):
+        # pyrefly: ignore [read-only]
         self.device = device
         self._dtype = _dtype
         self.autoencoder = autoencoder
@@ -109,9 +112,12 @@ class FluxValidator(Validator):
         model.eval()
 
         # Disable cfg dropout during validation
+        # pyrefly: ignore [missing-attribute]
         training_cfg_prob = self.job_config.training.classifier_free_guidance_prob
+        # pyrefly: ignore [missing-attribute]
         self.job_config.training.classifier_free_guidance_prob = 0.0
 
+        # pyrefly: ignore [missing-attribute]
         save_img_count = self.job_config.validation.save_img_count
 
         parallel_dims = self.parallel_dims
@@ -120,6 +126,7 @@ class FluxValidator(Validator):
         device_type = dist_utils.device_type
         num_steps = 0
 
+        # pyrefly: ignore [not-iterable]
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
@@ -137,6 +144,7 @@ class FluxValidator(Validator):
                     device=self.device,
                     dtype=self._dtype,
                     job_config=self.job_config,
+                    # pyrefly: ignore [bad-argument-type]
                     model=model,
                     prompt=p,
                     autoencoder=self.autoencoder,
@@ -150,6 +158,7 @@ class FluxValidator(Validator):
                     name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
                     output_dir=os.path.join(
                         self.job_config.job.dump_folder,
+                        # pyrefly: ignore [missing-attribute]
                         self.job_config.validation.save_img_folder,
                     ),
                     x=image,
@@ -235,7 +244,9 @@ class FluxValidator(Validator):
                     else None
                 )
 
+                # pyrefly: ignore [not-callable]
                 with self.validation_context(optional_context_parallel_ctx):
+                    # pyrefly: ignore [bad-context-manager]
                     with self.maybe_enable_amp:
                         latent_noise_pred = model(
                             img=latents,
@@ -270,6 +281,7 @@ class FluxValidator(Validator):
         model.train()
 
         # re-enable cfg dropout for training
+        # pyrefly: ignore [missing-attribute]
         self.job_config.training.classifier_free_guidance_prob = training_cfg_prob
 
 

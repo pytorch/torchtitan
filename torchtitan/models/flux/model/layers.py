@@ -213,7 +213,9 @@ class DoubleStreamBlock(nn.Module):
             self.txt_mlp[0],
             self.txt_mlp[2],
         ):
+            # pyrefly: ignore [bad-argument-type]
             nn.init.xavier_uniform_(layer.weight)
+            # pyrefly: ignore [bad-argument-type]
             nn.init.constant_(layer.bias, 0)
 
         # initialize Modulation layers, SelfAttention layers
@@ -346,7 +348,9 @@ class LastLayer(nn.Module):
         )
 
     def init_weights(self):
+        # pyrefly: ignore [bad-argument-type]
         nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
+        # pyrefly: ignore [bad-argument-type]
         nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.linear.weight, 0)
         nn.init.constant_(self.linear.bias, 0)

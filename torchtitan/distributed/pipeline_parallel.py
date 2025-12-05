@@ -198,7 +198,9 @@ def build_pipeline_schedule(
             f"of stages ({num_total_stages}) which may result in a bubble in the pipeline."
         )
 
+    # pyrefly: ignore [bad-instantiation]
     schedule = schedule_class(
+        # pyrefly: ignore [bad-argument-type]
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
         loss_fn=rescale_accumulated_loss(loss_fn, n_microbatches),
@@ -218,6 +220,7 @@ def build_pipeline_schedule(
             "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
             "and _PipelineScheduleRuntime support csv schedules"
         )
+        # pyrefly: ignore [missing-attribute]
         schedule._load_csv(pp_schedule_csv)
 
     return schedule
@@ -438,6 +441,7 @@ def pipeline_module_split(
         "v" if schedule_class in (ScheduleZBVZeroBubble, ScheduleDualPipeV) else "loop"
     )
 
+    # pyrefly: ignore [bad-return]
     def _get_stage_indices() -> tuple[int]:
         """
         Compute the stage ids for the stages that will run on this pp rank
@@ -448,6 +452,7 @@ def pipeline_module_split(
         ), f"num_stages {num_stages} must be evenly divisible by pp_degree {pp_degree}"
         stages_per_rank = num_stages // pp_degree
         if style == "loop":
+            # pyrefly: ignore [bad-return]
             return tuple(pp_rank + s * pp_degree for s in range(stages_per_rank))
         elif style == "v":
             assert (
@@ -456,6 +461,7 @@ def pipeline_module_split(
             stage_v_pairs = list(
                 zip(range(pp_degree), range(num_stages - 1, pp_degree - 1, -1))
             )
+            # pyrefly: ignore [bad-return]
             return stage_v_pairs[pp_rank]
 
     for stage_idx in _get_stage_indices():

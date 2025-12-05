@@ -174,11 +174,15 @@ def set_determinism(
         # Filter out all distinct dimensions to get duplicate_seed_mesh
         duplicate_seed_mesh_dims = [
             name
+            # pyrefly: ignore [not-iterable]
             for name in world_mesh.mesh_dim_names
             if name not in distinct_dims_in_mesh
         ]
         duplicate_seed_mesh = (
-            world_mesh[duplicate_seed_mesh_dims] if duplicate_seed_mesh_dims else None
+            # pyrefly: ignore [bad-index]
+            world_mesh[duplicate_seed_mesh_dims]
+            if duplicate_seed_mesh_dims
+            else None
         )
     else:
         duplicate_seed_mesh = world_mesh
@@ -192,6 +196,7 @@ def set_determinism(
     # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
     # IF PP is also used, this seed is unique per PP rank.
     if duplicate_seed_mesh and duplicate_seed_mesh.get_coordinate() is not None:
+        # pyrefly: ignore [bad-argument-type, implicit-import]
         torch.distributed.tensor._random.manual_seed(seed, duplicate_seed_mesh)
 
 
@@ -211,7 +216,9 @@ def create_context_parallel_ctx(
             "Context Parallel API. Please update to a newer version."
         )
 
+    # pyrefly: ignore [unbound-name]
     set_rotate_method(cp_rotate_method)
+    # pyrefly: ignore [unbound-name]
     return context_parallel(
         cp_mesh,
         buffers=cp_buffers,
@@ -225,13 +232,16 @@ def get_train_context(enable_loss_parallel: bool) -> Generator[None, None, None]
     def context(cp_context: Generator[None, None, None] | None = None):
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
+                # pyrefly: ignore [implicit-import]
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
 
             if cp_context:
+                # pyrefly: ignore [bad-argument-type]
                 stack.enter_context(cp_context)
 
             yield
 
+    # pyrefly: ignore [bad-return]
     return context
 
 
@@ -241,6 +251,7 @@ def maybe_enable_amp(
     if parallel_dims.fsdp_enabled:
         # FSDP handles mixed precision internally
         logger.info("Mixed precision training is handled by fully_shard")
+        # pyrefly: ignore [bad-return]
         return contextlib.nullcontext()
     else:
         if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
@@ -248,11 +259,14 @@ def maybe_enable_amp(
                 "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP is enabled."
             )
             logger.info("Mixed precision training is disabled")
+            # pyrefly: ignore [bad-return]
             return contextlib.nullcontext()
         else:
             # the following code will only be executed for DDP or single-device training
             logger.info("Mixed precision training is handled by AMP")
+            # pyrefly: ignore [bad-return]
             return torch.autocast(
+                # pyrefly: ignore [bad-argument-type]
                 device_type,
                 dtype=TORCH_DTYPE_MAP[mixed_precision_param],
             )
@@ -367,7 +381,9 @@ def set_pg_timeouts(timeout, world_mesh):
     # otherwise, some ranks may issue collectives with the new/shorter timeout and
     # those may time out, before other ranks have finished with initialization done
     # under the old/slow timeout.
+    # pyrefly: ignore [missing-attribute]
     torch.distributed.barrier(device_ids=[device_module.current_device()])
+    # pyrefly: ignore [missing-attribute]
     device_module.synchronize()
 
     groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
@@ -477,6 +493,7 @@ def _clip_grad_norm_with_ep(
         if p.grad is None:
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
+        # pyrefly: ignore [not-iterable]
         if "ep" in p.device_mesh.mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)
@@ -491,6 +508,7 @@ def _clip_grad_norm_with_ep(
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
 
+    # pyrefly: ignore [missing-attribute]
     non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
         non_ep_grads, norm_type, error_if_nonfinite, foreach
     ).full_tensor()

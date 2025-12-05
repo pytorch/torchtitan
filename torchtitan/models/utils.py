@@ -102,6 +102,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         dim_i_placements = []
 
         # Find all the device mesh dimensios that shard on dim-i
+        # pyrefly: ignore [bad-argument-type]
         for i, name in enumerate(device_mesh.mesh_dim_names):
             placement = dtensor_placements[i]
             if placement.dim == dim:
@@ -149,6 +150,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         elif len(dim_i_placements) == 0:
             # No need to split on this dimension
+            # pyrefly: ignore [bad-return]
             return start_index, end_index
 
         else:
@@ -181,7 +183,9 @@ class MoEStateDictAdapter(StateDictAdapter):
         Returns:
             Dictionary mapping individual expert keys to their DTensor weights
         """
+        # pyrefly: ignore [missing-attribute]
         device_mesh = grouped_expert_weight.device_mesh
+        # pyrefly: ignore [missing-attribute]
         dtensor_placements = grouped_expert_weight.placements
 
         # Step 1: Extract dimension-0 placement information
@@ -212,6 +216,7 @@ class MoEStateDictAdapter(StateDictAdapter):
             elif isinstance(placement, _StridedShard):
                 # Keep strided shard with same parameters
                 new_placements.append(
+                    # pyrefly: ignore [unexpected-positional-argument]
                     _StridedShard(placement.dim, placement.split_factor)
                 )
             else:
@@ -284,6 +289,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         sorted_expert_ids = sorted(experts.keys())
         sorted_experts = [experts[i] for i in sorted_expert_ids]
+        # pyrefly: ignore [missing-attribute]
         local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor
 
         assert (
@@ -315,6 +321,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         """
         split_weight = torch.split(weight, weight.shape[0] // n_experts, dim=0)
+        # pyrefly: ignore [bad-return]
         return split_weight
 
     def _concatenate_expert_weights(
@@ -395,6 +402,7 @@ def get_dense_model_nparams_and_flops(
     # 4. we follow the convention and do not account for sparsity in causal attention
     num_flops_per_token = (
         6 * (nparams - nparams_embedding)
+        # pyrefly: ignore [missing-attribute]
         + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
     )
 
@@ -450,6 +458,7 @@ def get_moe_model_nparams_and_flops(
     nparams_sparse_active = (
         nparams_moe_router
         + nparams_shared_experts
+        # pyrefly: ignore [missing-attribute]
         + nparams_experts * model_args.moe_args.top_k // model_args.moe_args.num_experts
     )
 
@@ -460,6 +469,7 @@ def get_moe_model_nparams_and_flops(
 
     num_flops_per_token = (
         6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
+        # pyrefly: ignore [missing-attribute]
         + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
     )
 

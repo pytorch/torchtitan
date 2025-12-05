@@ -101,6 +101,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
+        # pyrefly: ignore [unknown-name]
         if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
             raise NotImplementedError("CP support is only supported for SDPA.")
 

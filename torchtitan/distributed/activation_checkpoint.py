@@ -314,12 +314,16 @@ def apply_ac(
             pareto_dir = os.path.join(base_folder, "memory_budget_pareto")
             if not os.path.exists(pareto_dir):
                 os.makedirs(pareto_dir, exist_ok=True)
+            # pyrefly: ignore [implicit-import]
             torch._functorch.config.memory_budget_pareto_dir = pareto_dir
+            # pyrefly: ignore [implicit-import]
             torch._functorch.config.visualize_memory_budget_pareto = True
 
+        # pyrefly: ignore [implicit-import]
         torch._functorch.config.activation_memory_budget = ac_config.memory_budget
         logger.info(f"Selected {ac_config.memory_budget} budget option")
     else:
+        # pyrefly: ignore [missing-attribute]
         for layer_id, transformer_block in model.layers.named_children():
             transformer_block = _apply_ac_to_transformer_block(
                 transformer_block,
@@ -329,6 +333,7 @@ def apply_ac(
                 use_flex_attn=use_flex_attn,
                 op_sac_save_list=op_sac_save_list,
             )
+            # pyrefly: ignore [missing-attribute]
             model.layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")

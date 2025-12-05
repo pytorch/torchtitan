@@ -29,6 +29,7 @@ from torchtitan.tools.logging import logger
 
 
 def _process_cc12m_image(
+    # pyrefly: ignore [implicit-import]
     img: PIL.Image.Image,
     output_size: int = 256,
 ) -> Optional[torch.Tensor]:
@@ -271,6 +272,7 @@ class FluxDataset(IterableDataset, Stateful):
 
             # skip low quality image or image with color channel = 1
             if sample_dict["image"] is None:
+                # pyrefly: ignore [missing-attribute]
                 sample = sample.get("__key__", "unknown")
                 logger.warning(
                     f"Low quality image {sample} is skipped in Flux Dataloader."
@@ -279,6 +281,7 @@ class FluxDataset(IterableDataset, Stateful):
 
             # Classifier-free guidance: Replace some of the strings with empty strings.
             # Distinct random seed is initialized at the beginning of training for each FSDP rank.
+            # pyrefly: ignore [missing-attribute]
             dropout_prob = self.job_config.training.classifier_free_guidance_prob
             if dropout_prob > 0.0:
                 if torch.rand(1).item() < dropout_prob:

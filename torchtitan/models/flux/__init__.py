@@ -44,6 +44,7 @@ flux_args = {
             in_channels=3,
             ch=128,
             out_ch=3,
+            # pyrefly: ignore [bad-argument-type]
             ch_mult=(1, 2, 4, 4),
             num_res_blocks=2,
             z_channels=16,
@@ -69,6 +70,7 @@ flux_args = {
             in_channels=3,
             ch=128,
             out_ch=3,
+            # pyrefly: ignore [bad-argument-type]
             ch_mult=(1, 2, 4, 4),
             num_res_blocks=2,
             z_channels=16,
@@ -94,6 +96,7 @@ flux_args = {
             in_channels=3,
             ch=128,
             out_ch=3,
+            # pyrefly: ignore [bad-argument-type]
             ch_mult=(1, 2, 4, 4),
             num_res_blocks=2,
             z_channels=16,

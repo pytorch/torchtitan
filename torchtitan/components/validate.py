@@ -83,6 +83,7 @@ class Validator(BaseValidator):
             )
 
     @torch.no_grad()
+    # pyrefly: ignore [bad-override]
     def validate(
         self,
         model_parts: list[nn.Module],
@@ -98,6 +99,7 @@ class Validator(BaseValidator):
         device_type = utils.device_type
         num_steps = 0
 
+        # pyrefly: ignore [not-iterable]
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
@@ -128,6 +130,7 @@ class Validator(BaseValidator):
                 assert self.pp_has_first_stage is not None
                 assert self.pp_has_last_stage is not None
                 # Pipeline Parallel forward inside eval() call
+                # pyrefly: ignore [not-callable]
                 with self.validation_context(optional_context_parallel_ctx):
                     targets, losses = (
                         (labels, []) if self.pp_has_last_stage else (None, None)
@@ -152,8 +155,10 @@ class Validator(BaseValidator):
                     else torch.tensor([-1.0], device=device_type)
                 )
             else:
+                # pyrefly: ignore [not-callable]
                 with self.validation_context(optional_context_parallel_ctx):
                     assert len(model_parts) == 1
+                    # pyrefly: ignore [bad-context-manager]
                     with self.maybe_enable_amp:
                         predictions = model_parts[0](inputs)
                         loss = self.loss_fn(predictions, labels)
@@ -203,6 +208,7 @@ def build_validator(
         loss_fn=loss_fn,
         validation_context=validation_context,
         maybe_enable_amp=maybe_enable_amp,
+        # pyrefly: ignore [bad-argument-type]
         metrics_processor=metrics_processor,
         pp_schedule=pp_schedule,
         pp_has_first_stage=pp_has_first_stage,

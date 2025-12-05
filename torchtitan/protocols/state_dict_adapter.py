@@ -98,9 +98,11 @@ class StateDictAdapter(BaseStateDictAdapter):
             if hf_safetensors_indx:
                 self.fqn_to_index_mapping = {}
                 for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
+                    # pyrefly: ignore [missing-attribute]
                     indx = re.search(r"\d+", raw_indx).group(0)
                     self.fqn_to_index_mapping[hf_key] = int(indx)
             else:
+                # pyrefly: ignore [bad-assignment]
                 self.fqn_to_index_mapping = None
 
     def get_hf_storage_reader(

@@ -156,6 +156,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         _state_dict = {"token_buffer": self._token_buffer}
 
         if isinstance(self._data, Dataset):
+            # pyrefly: ignore [bad-typed-dict-key]
             _state_dict["sample_idx"] = self._sample_idx
         else:
             # Save the iterable dataset's state to later efficiently resume from it

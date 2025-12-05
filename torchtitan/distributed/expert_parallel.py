@@ -60,6 +60,7 @@ class TensorParallel(ParallelStyle):
             module,
             device_mesh,
             self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
             self._prepare_input_fn,
         )
 
@@ -163,7 +164,9 @@ class ExpertParallel(ParallelStyle):
             module,
             device_mesh,
             partition_fn=ExpertParallel._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
             output_fn=self._token_combine,
         )
 
@@ -213,7 +216,9 @@ class ExpertTensorParallel(ExpertParallel):
             module,
             device_mesh,
             partition_fn=self._partition_fn_2d,
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
             output_fn=self._token_combine,
         )
 
@@ -275,6 +280,8 @@ class ReordererSequenceParallel(ParallelStyle):
             module,
             device_mesh,
             partition_fn=None,
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._prepare_inputput_fn,
+            # pyrefly: ignore [bad-argument-type]
             output_fn=self._prepare_output_fn,
         )

@@ -189,6 +189,7 @@ class Attention(nn.Module):
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
             case _:
+                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def forward(
@@ -374,6 +375,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
+                # pyrefly: ignore [not-callable]
                 layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()

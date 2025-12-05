@@ -35,3 +35,7 @@ jobs:
         uses: tj-actions/changed-files@d6e91a2266cdb9d62096cebf1e8546899c6aa18f # v45.0.6
       - name: Lint modified files
         run: pre-commit run --files ${{ steps.changed-files.outputs.all_changed_files }}
+      - name: Install type checking dependencies
+        run: .github/scripts/setup_pyrefly.sh --system
+      - name: Type check
+        run: pyrefly check

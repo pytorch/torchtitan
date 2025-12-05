@@ -77,6 +77,7 @@ class Float8LinearConverter(QuantizationConverter):
 
             # short-term solution for https://github.com/pytorch/pytorch/issues/150859
             if float8_config.recipe_name == "rowwise":
+                # pyrefly: ignore [implicit-import]
                 torch._inductor.config.emulate_precision_casts = True
                 logger.debug(
                     "Set torch._inductor.config.emulate_precision_casts to True"

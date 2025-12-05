@@ -67,8 +67,11 @@ class VarlenAttentionWrapper(torch.nn.Module):
         max_k = attention_masks.max_k
 
         n_local_heads = xq.shape[1]
+        # pyrefly: ignore [no-matching-overload]
         xq_packed = xq.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        # pyrefly: ignore [no-matching-overload]
         xk_packed = xk.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        # pyrefly: ignore [no-matching-overload]
         xv_packed = xv.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
 
         return VarlenAttentionWrapper._compiled_varlen_attn(
@@ -145,6 +148,7 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         if not self.sdpa_backends:
+            # pyrefly: ignore [read-only]
             self.sdpa_backends = [
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.FLASH_ATTENTION,
@@ -330,6 +334,8 @@ def create_varlen_metadata_for_document(
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,
+        # pyrefly: ignore [bad-argument-type]
         max_q=max_seqlen,
+        # pyrefly: ignore [bad-argument-type]
         max_k=max_seqlen,
     )

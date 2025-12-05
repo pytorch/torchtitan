@@ -26,6 +26,7 @@ class ParallelDims:
     etp: int
     world_size: int
 
+    # pyrefly: ignore [bad-assignment]
     _world_mesh: DeviceMesh = None
 
     def __post_init__(self):
@@ -105,6 +106,7 @@ class ParallelDims:
                 names.append(name)
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
+        # pyrefly: ignore [bad-argument-type]
         mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
 
         # Create all the submesh here to ensure all required process groups are
@@ -156,6 +158,7 @@ class ParallelDims:
                 names.append(name)
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
+        # pyrefly: ignore [bad-argument-type]
         mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
 
         # Create all the submesh here to ensure all required process groups are

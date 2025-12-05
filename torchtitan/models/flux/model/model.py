@@ -51,7 +51,10 @@ class FluxModel(nn.Module, ModelProtocol):
         self.hidden_size = model_args.hidden_size
         self.num_heads = model_args.num_heads
         self.pe_embedder = EmbedND(
-            dim=pe_dim, theta=model_args.theta, axes_dim=model_args.axes_dim
+            dim=pe_dim,
+            theta=model_args.theta,
+            # pyrefly: ignore [bad-argument-type]
+            axes_dim=model_args.axes_dim,
         )
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
@@ -95,8 +98,10 @@ class FluxModel(nn.Module, ModelProtocol):
 
         # Initialize transformer blocks:
         for block in self.single_blocks:
+            # pyrefly: ignore [not-callable]
             block.init_weights()
         for block in self.double_blocks:
+            # pyrefly: ignore [not-callable]
             block.init_weights()
 
         # Zero-out output layers:

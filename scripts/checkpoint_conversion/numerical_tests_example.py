@@ -25,6 +25,7 @@ def loss_fn(logits1, logits2):
     probs2 = F.softmax(logits2, dim=-1)
 
     # Calculate KL Divergence
+    # pyrefly: ignore [bad-argument-type]
     kl_loss = F.kl_div(probs1, probs2, "mean")
     return kl_loss
 
@@ -75,10 +76,13 @@ def forward_tt(config_path, checkpoint_path, test_set):
 
     # materalize model
     device = torch.device(device_type)
+    # pyrefly: ignore [missing-attribute]
     model.to_empty(device=device)
     model.init_weights(buffer_device=device)
+    # pyrefly: ignore [missing-attribute]
     model.eval()
 
+    # pyrefly: ignore [bad-argument-type]
     modelWrapper = ModelWrapper(model)
     state_dict = modelWrapper._get_state_dict()
 
@@ -94,6 +98,7 @@ def forward_tt(config_path, checkpoint_path, test_set):
             input_ids = input_ids.unsqueeze(0)
 
         # obtains the logits of only the last token in the predictions
+        # pyrefly: ignore [not-callable]
         predictions = model(input_ids)[:, -1, :].unsqueeze(1)
         output_list.append(predictions)
 
@@ -120,6 +125,7 @@ if __name__ == "__main__":
     config_manager = ConfigManager()
     config = config_manager.parse_args([f"--job.config_file={config_path}"])
     train_spec = get_train_spec(config.model.name)
+    # pyrefly: ignore [not-callable]
     tokenizer = train_spec.build_tokenizer_fn(config)
 
     # Build test set of randomly generated token ids
@@ -151,9 +157,11 @@ if __name__ == "__main__":
 
     for test_name, (baseline_outputs, conversion_outputs) in test_configs.items():
         total_loss = 0
+        # pyrefly: ignore [bad-assignment]
         for baseline, outputs in zip(baseline_outputs, conversion_outputs):
             total_loss += loss_fn(baseline, outputs)
         avg_loss = total_loss / len(test_set)
+        # pyrefly: ignore [missing-attribute]
         avg_losses[test_name] = avg_loss.item()
 
     for test_name, avg_loss in avg_losses.items():

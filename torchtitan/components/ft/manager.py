@@ -18,6 +18,7 @@ from torch.distributed.distributed_c10d import ReduceOp
 from torchtitan.components.ft.config import FaultTolerance as FTConfig
 from torchtitan.tools.logging import logger
 
+# pyrefly: ignore [implicit-import]
 if importlib.util.find_spec("torchft") is not None:
     import torchft as ft
 
@@ -165,4 +166,5 @@ def maybe_semi_sync_training(
             raise ValueError(
                 f"Unknown training method: {semi_sync_method}, only 'diloco' and 'local_sgd' are supported."
             )
+    # pyrefly: ignore [no-matching-overload]
     return nullcontext()

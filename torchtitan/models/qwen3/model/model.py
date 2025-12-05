@@ -158,7 +158,9 @@ class Attention(nn.Module):
                 self.head_dim, eps=model_args.norm_eps, elementwise_affine=True
             )
         else:
+            # pyrefly: ignore [bad-assignment]
             self.q_norm = None
+            # pyrefly: ignore [bad-assignment]
             self.k_norm = None
 
         self.wq = nn.Linear(
@@ -174,8 +176,10 @@ class Attention(nn.Module):
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
             case "varlen":
+                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = VarlenAttentionWrapper()
             case "sdpa":
+                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
@@ -442,6 +446,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
+                # pyrefly: ignore [not-callable]
                 layer.init_weights(buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
@@ -530,11 +535,14 @@ class Qwen3Model(nn.Module, ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        # pyrefly: ignore [not-callable]
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.rope_cache, attention_masks)
 
+        # pyrefly: ignore [not-callable]
         h = self.norm(h) if self.norm else h
+        # pyrefly: ignore [not-callable]
         output = self.output(h) if self.output else h
         return output

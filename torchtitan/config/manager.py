@@ -16,6 +16,7 @@ import tyro
 try:
     import tomllib
 except ModuleNotFoundError:
+    # pyrefly: ignore [missing-import]
     import tomli as tomllib
 
 from torchtitan.tools.logging import logger

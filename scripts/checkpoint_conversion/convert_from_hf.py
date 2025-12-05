@@ -17,6 +17,7 @@ from torchtitan.components.checkpoint import ModelWrapper
 @torch.inference_mode()
 def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
     if model_name == "flux":
+        # pyrefly: ignore [missing-import]
         import torchtitan.experiments.flux  # noqa: F401
     # initialize model to allocate memory for state dict
     train_spec = train_spec_module.get_train_spec(model_name)
@@ -24,8 +25,10 @@ def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
 
     with torch.device("cpu"):
         model = train_spec.model_cls(model_args)
+    # pyrefly: ignore [bad-argument-type]
     model = ModelWrapper(model)
 
+    # pyrefly: ignore [not-callable]
     sd_adapter = train_spec.state_dict_adapter(model_args, None)
     assert (
         sd_adapter is not None

@@ -77,6 +77,7 @@ def _run_experts_for_loop(
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
     # NOTE: this would incur a synchronization between device and host
+    # pyrefly: ignore [bad-assignment]
     num_tokens_per_expert = num_tokens_per_expert.tolist()
 
     # side-effect code due to the usage of generate_permute_indices
@@ -84,8 +85,10 @@ def _run_experts_for_loop(
 
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
+    # pyrefly: ignore [bad-assignment]
     x = torch.split(
         x[: sum(num_tokens_per_expert)],
+        # pyrefly: ignore [bad-argument-type]
         split_size_or_sections=num_tokens_per_expert,
         dim=0,
     )
@@ -99,6 +102,7 @@ def _run_experts_for_loop(
     out = torch.cat(out_experts_splits, dim=0)
 
     # side-effect code due to the usage of generate_permute_indices
+    # pyrefly: ignore [no-matching-overload]
     out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
 
     return out
@@ -148,7 +152,9 @@ class GroupedExperts(nn.Module):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
             w1 = self.w1.to_local()
+            # pyrefly: ignore [missing-attribute]
             w2 = self.w2.to_local()
+            # pyrefly: ignore [missing-attribute]
             w3 = self.w3.to_local()
         else:
             w1 = self.w1
@@ -161,6 +167,7 @@ class GroupedExperts(nn.Module):
             #       otherwise, EP will handle the padding.
             if (
                 not isinstance(self.w1, DTensor)
+                # pyrefly: ignore [not-iterable]
                 or "ep" not in self.w1.device_mesh.mesh_dim_names
             ):
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
