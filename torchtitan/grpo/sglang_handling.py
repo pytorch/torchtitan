@@ -181,7 +181,7 @@ def get_hostname_url():
         return None
 
 
-def param_to_sglang_data(name):
+def param_to_sglang_data(name, needs_permute=False):
     out_permute = False
     # check if name is weird
     if "attention." in name and any(
@@ -208,6 +208,13 @@ def param_to_sglang_data(name):
         # QK Norm
         out_name = "model." + name.replace("attention", "self_attn")
         out_permute = True
+    elif "moe" in name:
+
+        out_name = "model." + name.replace("moe", "mlp").replace(
+            ".w1", ".w13_weight"
+        ).replace(".w3", ".w13_weight").replace(".w2", ".w2_weight").replace(
+            ".router.gate", ".gate"
+        )
     elif (".w1." in name) or (".w3" in name):
         out_name = "model." + name.replace("feed_forward", "mlp").replace(
             ".w1.", ".gate_up_proj."
@@ -232,7 +239,11 @@ def param_to_sglang_data(name):
         out_name = "model." + name.replace("tok_embeddings", "embed_tokens").replace(
             "output", "lm_head"
         )
-    out_name = out_name.replace("._checkpoint_wrapped_module.", ".")
+    out_name = out_name.replace("._checkpoint_wrapped_module.", ".").replace(
+        "._orig_mod.", "."
+    )
+    if not needs_permute:
+        return out_name, False
     return out_name, out_permute
 
 

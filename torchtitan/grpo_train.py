@@ -188,8 +188,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         dist_utils.set_determinism(
             world_mesh,
             self.device,
-            job_config.training.seed,
-            job_config.training.deterministic,
+            job_config.debug,
+            distinct_seed_mesh_dims=["pp"],
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
@@ -421,7 +421,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         self.train_context = dist_utils.get_train_context(
             loss_parallel_enabled,
-            parallelism_config.enable_compiled_autograd,
         )
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
             parallel_dims,
@@ -488,7 +487,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.model_parts[0].named_parameters(), key=lambda item: item[0]
         ):  # type: str, DTensor
             if param.requires_grad:
-                new_name, needs_permute = param_to_sglang_data(param_name)
+                new_name, needs_permute = param_to_sglang_data(
+                    param_name, self.job_config.model.name != "qwen3"
+                )
                 self.param_name_to_send_list.append(param_name)
                 local_shape = list(param.to_local().shape)
                 sglang_json["param_mappings"][param_name] = {

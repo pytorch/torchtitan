@@ -2,8 +2,8 @@
 # NOTE: this toml config is a preset for 64 A100 GPUs.
 
 [job]
-dump_folder = "/home/dakota/7b_qwen_base_debug"
-description = "qwen_7b_grpo"
+dump_folder = "/home/dakota/training/1ba_10b_base_debug"
+description = "1ba_10b_base_7b_grpo"
 
 [profiling]
 enable_profiling = false
@@ -17,9 +17,9 @@ save_tb_folder = "tb"
 enable_wandb = true
 
 [model]
-name = "qwen2"
-flavor = "7B"
-tokenizer_path = "Qwen/Qwen2.5-7B"
+name = "qwen3"
+flavor = "10B-A1B"
+hf_assets_path = "/home/shared/torchtitan/assets/q3-10ba1b-8k-lr3e4-900b"
 # converters = "float8"
 
 [optimizer]
@@ -44,9 +44,8 @@ max_norm = 0.25  # grad norm clipping
 steps = 1000
 dataset = "c4"
 
-
 [compile]
-enable=false
+enable=true
 components = ["model", "loss"]
 
 [parallelism]
@@ -82,10 +81,11 @@ rollout_is_threshold = 4.0
 [checkpoint]
 enable = true
 folder = "checkpoints"
-initial_load_path = "/home/shared/torchtitan-conversions/qwen_2-5_7b"
-initial_load_legacy = true
 interval = 1000
-export_dtype = "float32"
+initial_load_in_hf = true
+last_save_model_only = true
+last_save_in_hf = true
+export_dtype = "bfloat16"
 async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]

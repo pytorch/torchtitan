@@ -43,7 +43,7 @@ global_batch_size = 256
 max_norm = 1.0  # grad norm clipping
 steps = 1000
 dataset = "pretrain_mixin"
-seed = 42
+
 
 [compile]
 enable=false
