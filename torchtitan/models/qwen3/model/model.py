@@ -57,7 +57,9 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor, positions: torch.Tensor | None = None) -> torch.Tensor:
+def reshape_for_broadcast(
+    rope_cache: torch.Tensor, x: torch.Tensor, positions: torch.Tensor | None = None
+) -> torch.Tensor:
     """
     Reshape frequency tensor (represented by cos, sin) for broadcasting it with another tensor.
 
@@ -98,9 +100,7 @@ def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor, positions: 
         rope_cache = torch.gather(
             rope_cache_expanded,
             dim=1,
-            index=positions.view(bz, seqlen, 1, 1).expand(
-                bz, seqlen, 1, head_dim * 2
-            ),
+            index=positions.view(bz, seqlen, 1, 1).expand(bz, seqlen, 1, head_dim * 2),
         )
         # The shape of rope_cache is (bz, seqlen, 1, head_dim * 2)
         assert rope_cache.shape == (bz, seqlen, 1, head_dim * 2)
@@ -108,7 +108,10 @@ def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor, positions: 
 
 
 def apply_rotary_emb(
-    xq: torch.Tensor, xk: torch.Tensor, rope_cache: torch.Tensor, positions: torch.Tensor | None = None,
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    rope_cache: torch.Tensor,
+    positions: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # input tensor x has shape [bsz, seq_len, num_heads, head_dim]
     head_dim = xq.shape[-1]
@@ -391,7 +394,9 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        x = x + self.attention(self.attention_norm(x), rope_cache, attention_masks, positions)
+        x = x + self.attention(
+            self.attention_norm(x), rope_cache, attention_masks, positions
+        )
 
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
