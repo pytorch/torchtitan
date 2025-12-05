@@ -16,6 +16,7 @@ from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
+    PrepareModuleOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -242,14 +243,23 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate(), None),
-                desired_input_layouts=(Replicate(), Replicate(), None),
+                # x, rope, attention_mask
+                input_layouts=(Shard(1), None, None),
+                desired_input_layouts=(Replicate(), None, None),
             ),
-            "attention.wq": colwise_parallel(use_local_output=False),
+            "attention.wq": colwise_parallel(
+                use_local_output=False
+            ),  # NOTE(jianiw): Try using Tensor instead of DTensor
             "attention.wk": colwise_parallel(use_local_output=False),
-            "attention.wv": colwise_parallel(use_local_output=False),
-            "attention.q_norm": SequenceParallel(sequence_dim=2),
-            "attention.k_norm": SequenceParallel(sequence_dim=2),
+            "attention.wv": colwise_parallel(use_local_output=True),
+            "attention.q_norm": SequenceParallel(sequence_dim=2, use_local_output=True),
+            "attention.k_norm": SequenceParallel(sequence_dim=2, use_local_output=True),
+            # NOTE(jianiw): manually convert the output to be Shard(1)
+            "attention.inner_attention": PrepareModuleOutput(
+                output_layouts=(Shard(1),),
+                desired_output_layouts=(Shard(1),),
+                use_local_output=False,
+            ),  # NOTE(jianiw): inner_attention output shape (batch, num_heads, seq_len, head_dim)
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }

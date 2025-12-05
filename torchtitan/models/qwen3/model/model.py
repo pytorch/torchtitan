@@ -59,17 +59,11 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """
-    Reshape frequency tensor (represented by cos, sin) for broadcasting it with another tensor.
-
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    The input freqs_cis tensor is assumed to be of shape (max_seqlen, head_dim * 2),
-    and the first seqlen elements will be sliced, but dim must match x.
+    Reshapes the RoPE frequency tensor to be broadcastable with the input tensor.
 
     Args:
         rope_cache (torch.Tensor): RoPE tensor (cos and sin) to be reshaped.
-        x (torch.Tensor): Target tensor for broadcasting compatibility.
+        x (torch.Tensor): Input tensor whose shape will determine the reshaping.
 
     Returns:
         torch.Tensor: Reshaped frequency tensor.
@@ -77,6 +71,42 @@ def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Te
     ndim = x.ndim
     assert ndim > 1
     _, seqlen, _, head_dim = x.shape
+
+    # Extend rope_cache if needed (e.g., during vLLM profiling with 2x max_seq_len)
+    if seqlen > rope_cache.shape[0]:
+        # Handle DTensor case - convert to local tensor first
+        from torch.distributed._tensor import DTensor, Replicate
+
+        is_dtensor = isinstance(rope_cache, DTensor)
+        if is_dtensor:
+            # Get the local tensor and device mesh
+            device_mesh = rope_cache.device_mesh
+            local_rope_cache = rope_cache.to_local()
+            device = local_rope_cache.device
+            dtype = local_rope_cache.dtype
+        else:
+            device = rope_cache.device
+            dtype = rope_cache.dtype
+
+        # Precompute additional RoPE frequencies on-the-fly
+        rope_theta = 1000000.0  # Default theta value
+        extended_cache = precompute_rope_cache(
+            dim=head_dim,
+            max_seq_len=seqlen,
+            base=rope_theta,
+        )
+        extended_cache = extended_cache.to(device=device, dtype=dtype)
+
+        # If original was DTensor, convert extended cache to DTensor too
+        if is_dtensor:
+            rope_cache = DTensor.from_local(
+                extended_cache,
+                device_mesh=device_mesh,
+                placements=[Replicate()],
+            )
+        else:
+            rope_cache = extended_cache
+
     rope_cache = rope_cache[0:seqlen]
     # The shape of rope_cache is (seqlen, head_dim * 2) because we concate cos and sin
     assert rope_cache.shape == (seqlen, head_dim * 2)
@@ -229,6 +259,8 @@ class Attention(nn.Module):
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
         values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
+
+        # NOTE(jianiw)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)

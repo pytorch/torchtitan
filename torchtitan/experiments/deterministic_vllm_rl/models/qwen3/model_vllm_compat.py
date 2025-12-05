@@ -3,366 +3,370 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-#
-# Qwen3 model compatible with vLLM's implementation
-# Uses merged gate_up projections and vLLM Flash Attention
 
 import torch
-from torch import nn
 
-from torchtitan.components.tokenizer import BaseTokenizer
+import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor
 
-# Import gradient-enabled operations from experiment utilities
-from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
-    rms_norm_with_gradients,
-    silu_and_mul_with_gradients,
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
+
+from torchtitan.experiments.deterministic_vllm_rl.models.attention import (
+    VLLMPagedFlashAttention,
 )
-
-# Import from main torchtitan
-from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
-from torchtitan.protocols.model import AttentionMasksType
-from torchtitan.protocols.train_spec import ModelProtocol
-
-# Import from local experiment's models
-from ..attention import VLLMCompatibleFlashAttention
+from torchtitan.models.qwen3.infra.parallelize import apply_non_moe_tp
+from torchtitan.tools.utils import device_type
 
 
-# RoPE functions (same as original)
-def precompute_rope_cache(
-    dim: int, max_seq_len: int, base: float = 1_000_000.0
-) -> torch.Tensor:
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(max_seq_len, dtype=freqs.dtype, device=freqs.device)
-    idx_theta = torch.outer(t, freqs).float()
-    freqs = torch.cat([idx_theta, idx_theta], dim=-1)
-    rope_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
-    return rope_cache
+logger = init_logger(__name__)
 
 
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    """Reshape frequency tensor for broadcasting."""
-    ndim = x.ndim
-    assert ndim > 1
-    _, seqlen, _, head_dim = x.shape
-    rope_cache = rope_cache[0:seqlen]
-    assert rope_cache.shape == (seqlen, head_dim * 2)
-    shape = [-1, seqlen, 1, head_dim * 2]
-    return rope_cache.view(*shape)
-
-
-def apply_rotary_emb(
-    xq: torch.Tensor, xk: torch.Tensor, rope_cache: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    head_dim = xq.shape[-1]
-    rope_cache = reshape_for_broadcast(rope_cache, xq)
-    cos = rope_cache[..., :head_dim].to(dtype=xq.dtype, device=xq.device)
-    sin = rope_cache[..., head_dim:].to(dtype=xq.dtype, device=xq.device)
-    xq_out = (xq * cos) + (rotate_half(xq) * sin)
-    xk_out = (xk * cos) + (rotate_half(xk) * sin)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
-
-
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
-class VLLMRMSNorm(nn.Module):
+class TorchTitanQwen3ForCausalLM(nn.Module):
     """
-    RMSNorm using vLLM's exact Triton kernel for bitwise determinism.
-    Compatible with PyTorch's nn.RMSNorm interface but uses vLLM's implementation.
+    vLLM-compatible wrapper for TorchTitan's Qwen3 model.
 
-    Supports gradients through a custom autograd function that uses vLLM's
-    kernel for forward and batch-invariant PyTorch ops for backward.
+    This class integrates TorchTitan's Qwen3Model with vLLM by:
+    1. Importing TorchTitan's model architecture
+    2. Replacing attention with vLLM's Attention with PagedAttention and kv cache capability.
+    3. Implementing the vLLM model interface
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Use vLLM's RMSNorm with gradient support for training
-        return rms_norm_with_gradients(x, self.weight, self.eps)
-
-    def reset_parameters(self):
-        nn.init.ones_(self.weight)
-
-
-class FeedForwardVLLMCompat(nn.Module):
-    """
-    FeedForward module compatible with vLLM implementation.
-    Uses merged gate_up projection like vLLM.
-    """
+    is_text_generation_model = True  # Required for vLLM runner validation
+    supports_pp = False  # Pipeline parallelism not supported yet
+    supports_multimodal = False
 
     def __init__(
         self,
-        dim: int,
-        hidden_dim: int,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",  # This is required for vLLM interface
     ):
         super().__init__()
 
-        # Merged gate and up projections (like vLLM's gate_up_proj)
-        self.gate_up_proj = nn.Linear(dim, hidden_dim * 2, bias=False)
+        # vLLM config is required
+        assert vllm_config is not None, "vllm_config is required"
 
-        # Down projection (like vLLM's down_proj)
-        self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
+        # Import TorchTitan's Qwen3 model (deferred import to avoid CUDA init issues)
+        from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
+        from torchtitan.models.qwen3.model.model import Qwen3Model
 
-    def forward(self, x):
-        # Project to gate and up in one go
-        gate_up = self.gate_up_proj(x)
-        # Apply SiluAndMul activation with gradient support
-        activated = silu_and_mul_with_gradients(gate_up)
-        # Project down
-        output = self.down_proj(activated)
-        return output
-
-    def init_weights(self, init_std: float):
-        # Initialize like vLLM
-        nn.init.trunc_normal_(self.gate_up_proj.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.down_proj.weight, mean=0.0, std=init_std)
-
-
-class Attention(nn.Module):
-    """
-    Multi-head attention module compatible with vLLM.
-    """
-
-    def __init__(self, model_args: Qwen3ModelArgs):
-        super().__init__()
-        self.n_heads = model_args.n_heads
-        self.n_kv_heads = (
-            model_args.n_heads
-            if model_args.n_kv_heads is None
-            else model_args.n_kv_heads
-        )
-        self.n_rep = self.n_heads // self.n_kv_heads
-        self.head_dim = model_args.head_dim
-        self.scaling = self.head_dim**-0.5
-
-        # QK norm (Qwen3 specific) - use vLLM's RMSNorm
-        if model_args.qk_norm:
-            self.q_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm_eps)
-            self.k_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm_eps)
-        else:
-            self.q_norm = None
-            self.k_norm = None
-
-        # QKV projections
-        self.wq = nn.Linear(
-            model_args.dim, model_args.n_heads * self.head_dim, bias=False
-        )
-        self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(
-            model_args.n_heads * self.head_dim, model_args.dim, bias=False
+        # Map HuggingFace config to TorchTitan ModelArgs
+        logger.info("vllm config: " + str(vllm_config.__class__))
+        hf_config = vllm_config.model_config.hf_config
+        logger.info("hf_config: " + str(hf_config))
+        model_args = Qwen3ModelArgs(
+            vocab_size=getattr(hf_config, "vocab_size", 151936),
+            dim=getattr(hf_config, "hidden_size", 2048),
+            n_layers=getattr(hf_config, "num_hidden_layers", 4),
+            n_heads=getattr(hf_config, "num_attention_heads", 16),
+            n_kv_heads=getattr(hf_config, "num_key_value_heads", 2),
+            head_dim=getattr(hf_config, "head_dim", 128),
+            hidden_dim=getattr(hf_config, "intermediate_size", 11008),
+            norm_eps=getattr(hf_config, "rms_norm_eps", 1e-6),
+            max_seq_len=getattr(hf_config, "max_position_embeddings", 8192),
+            rope_theta=getattr(hf_config, "rope_theta", 1000000.0),
+            qk_norm=getattr(hf_config, "qk_norm", True),
         )
 
-        # Always use vLLM compatible flash attention
-        self.inner_attention = VLLMCompatibleFlashAttention()
+        print(f"In attention initialization, model args are : {model_args}")
 
-    def init_weights(self, init_std: float):
-        for linear in (self.wq, self.wk, self.wv):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-        if self.q_norm is not None:
-            self.q_norm.reset_parameters()
-        if self.k_norm is not None:
-            self.k_norm.reset_parameters()
+        # Create TorchTitan model
+        self.model = Qwen3Model(model_args)
+        self.config = model_args
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        rope_cache: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
-    ):
-        bs, seqlen, _ = x.shape
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        self._replice_with_vllm_paged_attention(model_args)
 
-        # Reshape to heads
-        xq = xq.view(bs, seqlen, -1, self.head_dim)
-        xk = xk.view(bs, seqlen, -1, self.head_dim)
-        xv = xv.view(bs, seqlen, -1, self.head_dim)
+        (
+            dp_size,
+            mp_size,
+            cp_size,
+            pp_size,
+            ep_size,
+            etp_size,
+        ) = self._process_parallelism_settings(vllm_config)
 
-        # Apply QK norm
-        if self.q_norm:
-            xq = self.q_norm(xq)
-        if self.k_norm:
-            xk = self.k_norm(xk)
-
-        # Apply rotary embedding
-        xq, xk = apply_rotary_emb(xq, xk, rope_cache)
-
-        # Repeat k/v heads if needed
-        keys = repeat_kv(xk, self.n_rep)
-        values = repeat_kv(xv, self.n_rep)
-
-        # Transpose for attention
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)
-        xv = values.transpose(1, 2)
-
-        # Apply flash attention (vLLM compatible, no flex attention)
-        assert (
-            attention_masks is None
-        ), "vLLM compat mode doesn't use flex attention masks"
-        output = self.inner_attention(xq, xk, xv, scale=self.scaling)
-
-        # Transpose back
-        output = output.transpose(1, 2).contiguous()
-        output = output.view(bs, seqlen, -1)
-
-        return self.wo(output)
-
-
-class TransformerBlock(nn.Module):
-    """
-    TransformerBlock with vLLM-compatible FFN.
-    """
-
-    def __init__(self, layer_id: int, model_args: Qwen3ModelArgs):
-        super().__init__()
-        self.n_heads = model_args.n_heads
-        self.dim = model_args.dim
-
-        self.attention = Attention(model_args)
-
-        # Use vLLM-compatible FFN with merged projections
-        self.feed_forward = FeedForwardVLLMCompat(
-            dim=model_args.dim, hidden_dim=model_args.hidden_dim
-        )
-
-        self.attention_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
-
-        if model_args.depth_init:
-            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        else:
-            self.weight_init_std = 0.02 / (2 * model_args.n_layers) ** 0.5
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        rope_cache: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
-    ):
-        # Self attention with residual
-        attn_norm_out = self.attention_norm(x)
-        x = x + self.attention(attn_norm_out, rope_cache, attention_masks)
-
-        # FFN with residual
-        ffn_norm_out = self.ffn_norm(x)
-        x = x + self.feed_forward(ffn_norm_out)
-
-        return x
-
-    def init_weights(self, buffer_device: torch.device):
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.reset_parameters()
-        self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
-
-
-class Qwen3VLLMCompatModel(nn.Module, ModelProtocol):
-    """
-    Qwen3 model with vLLM-compatible implementation.
-    Uses merged gate_up projections and vLLM Flash Attention.
-    """
-
-    def __init__(self, model_args: Qwen3ModelArgs):
-        super().__init__()
-        self.model_args = model_args
-        self.vocab_size = model_args.vocab_size
-        self.n_layers = model_args.n_layers
-        self.eos_id = model_args.eos_id
-        self.head_dim = model_args.head_dim
-
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
-
-        self.register_buffer(
-            "rope_cache", self._precompute_rope_cache(), persistent=False
-        )
-
-        self.layers = torch.nn.ModuleDict()
-        for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
-
-        self.norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
-
-        # IMPORTANT: To match vLLM's behavior and Qwen3's config
-        # (tie_word_embeddings: true), tie output layer weights to
-        # embedding weights. When either weight updates during training,
-        # both update together
-        self.output.weight = self.tok_embeddings.weight
-
-    def init_weights(
-        self,
-        buffer_device: torch.device | None = None,
-    ):
-        buffer_device = buffer_device or self.rope_cache.device
-        with torch.device(buffer_device):
-            self.rope_cache = self._precompute_rope_cache()
-        if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight)
-        for layer in self.layers.values():
-            if layer is not None:
-                layer.init_weights(buffer_device)
-        if self.norm is not None:
-            self.norm.reset_parameters()
-        final_out_std = self.model_args.dim**-0.5
-        cutoff_factor = 3
-
-        if self.output is not None:
-            nn.init.trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
+        # Build device mesh and apply parallelization
+        if mp_size > 1 or ep_size > 1:
+            self._build_device_mesh_and_parallelize(
+                dp_size, mp_size, cp_size, pp_size, ep_size, etp_size
             )
 
-    def _precompute_rope_cache(self) -> torch.Tensor:
-        return precompute_rope_cache(
-            self.model_args.head_dim,
-            self.model_args.max_seq_len,
-            self.model_args.rope_theta,
+    def _replice_with_vllm_paged_attention(self, model_args):
+        # The `vllm.Attention` module handles QKV projection, RoPE, etc., and calls `inner_attention`
+        if not hasattr(self.model, "layers"):
+            raise AttributeError(
+                f"Model {type(self.model).__name__} must have .layers attribute"
+            )
+
+        for layer_name, layer in self.model.layers.items():
+            if not hasattr(layer, "attention"):
+                raise ValueError(f"Layer {layer_name} must have .attention attribute")
+
+            vllm_attn = VLLMPagedFlashAttention(
+                hidden_size=model_args.dim,
+                num_heads=model_args.n_heads,  # 16 (8 when TP =2)
+                # NOTE(jianiw): Before feeding into inner_attention, the n_kv_heads has been replicated -> num_heads
+                num_kv_heads=model_args.n_heads,  # 16 (8 When TP=2)
+                head_dim=model_args.head_dim,
+                causal=True,
+            )
+
+            layer.attention.inner_attention = vllm_attn
+        logger.info(
+            "Successfully replaced TorchTitan attention with vLLM PagedFlashAttention"
         )
 
-    def get_attention_masks(
+    def _process_parallelism_settings(
+        self, vllm_config: VllmConfig, use_token_shuffling_moe: bool = False
+    ):
+        """
+        Parse parallel config from vllm config
+        """
+        world_size = (
+            vllm_config.parallel_config.data_parallel_size
+            * vllm_config.parallel_config.tensor_parallel_size
+        )
+        ep_size = (
+            world_size if vllm_config.parallel_config.enable_expert_parallel else 1
+        )
+        etp_size = (
+            1 if vllm_config.parallel_config.enable_expert_parallel else world_size
+        )
+        dp_size = vllm_config.parallel_config.data_parallel_size
+
+        mp_size = vllm_config.parallel_config.tensor_parallel_size
+        cp_size = vllm_config.parallel_config.decode_context_parallel_size
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        self.pp_size = pp_size
+
+        return dp_size, mp_size, cp_size, pp_size, ep_size, etp_size
+
+    def _build_device_mesh_and_parallelize(
         self,
-        input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
-    ) -> AttentionMasksType | None:
-        # vLLM compat mode: no flex attention masks
-        return None
+        dp_size: int,
+        mp_size: int,
+        cp_size: int,
+        pp_size: int,
+        ep_size: int,
+        etp_size: int,
+    ):
+        """
+        Build device mesh in TorchTitan style and apply parallelization to the model.
+
+        This follows the same approach as TorchTitan's ParallelDims.build_mesh()
+        and parallelize_qwen3() functions.
+        """
+        import torch.distributed as dist
+
+        # Get world size and validate
+        world_size = dist.get_world_size()
+
+        # For now, assume dp_shard=1 (no data parallel sharding)
+        # In full implementation, you may need to calculate dp_replicate and dp_shard
+        dp_replicate = dp_size
+        dp_shard = 1
+
+        # Validate parallelism settings
+        assert dp_replicate * dp_shard * cp_size * mp_size * pp_size == world_size, (
+            f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
+            f"cp({cp_size}) * tp({mp_size}) * pp({pp_size}) != WORLD_SIZE({world_size})"
+        )
+
+        # Build device mesh following TorchTitan's _build_mesh_without_ep pattern
+        # (assuming no EP for now)
+        dims = []
+        names = []
+        for d, name in zip(
+            [pp_size, dp_replicate, dp_shard, cp_size, mp_size],
+            ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
+        ):
+            if d > 1:
+                dims.append(d)
+                names.append(name)
+
+        logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
+        world_mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+
+        logger.info(f"Build torchtitan device mesh: {world_mesh}")
+
+        # Apply tensor parallelism if enabled
+        if mp_size > 1:
+            tp_mesh = world_mesh["tp"]
+            apply_non_moe_tp(
+                model=self.model,
+                tp_mesh=tp_mesh,
+                loss_parallel=False,  # vLLM handles loss computation separately
+                enable_float8_tensorwise_tp=False,  # Can be enabled if needed
+                enable_async_tp=False,  # Can be enabled if needed
+            )
+            logger.info(f"Applied Tensor Parallelism with TP={mp_size}")
+
+        # Store the mesh for future use
+        self.world_mesh = world_mesh
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Convert input token IDs to embeddings.
+
+        This is the vLLM-standard method name for embedding tokens.
+        """
+        return self.model.tok_embeddings(input_ids)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Convert input token IDs to embeddings (deprecated vLLM interface)."""
+        return self.embed_input_ids(input_ids)
 
     def forward(
         self,
-        tokens: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
-    ):
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Forward pass with vLLM interface.
 
-        for layer in self.layers.values():
-            h = layer(h, self.rope_cache, attention_masks)
+        Args:
+            input_ids: Token IDs from vLLM [total_tokens] (1D varlen format)
+            positions: Position indices from vLLM [total_tokens] (1D varlen format)
+            inputs_embeds: Pre-computed embeddings (optional, used by vLLM)
+            **kwargs: Additional vLLM kwargs
 
-        h = self.norm(h) if self.norm else h
-        output = self.output(h) if self.output else h
+        Returns:
+            hidden_states: Final hidden states [total_tokens, hidden_size]
+        """
+        # Handle inputs_embeds vs input_ids properly
+        if inputs_embeds is not None:
+            raise NotImplementedError(
+                "inputs_embeds is not yet supported by TorchTitan Qwen3. "
+                "The model expects token IDs and computes embeddings internally. "
+                "Please provide input_ids instead."
+            )
 
-        return output
+        if input_ids is None:
+            raise ValueError("Either input_ids or inputs_embeds must be provided")
+
+        # Convert vLLM interface to TorchTitan interface
+        # vLLM passes input_ids as [total_tokens] but TorchTitan expects [batch_size, seq_len]
+        # For now, reshape to [1, total_tokens] as a simple batch of 1
+        # TODO: In future, use attn_metadata.seq_lens to properly reconstruct batch structure
+        tokens_2d = input_ids.unsqueeze(0)  # [total_tokens] -> [1, total_tokens]
+
+        # Store positions in forward context for attention layers
+        # Also convert positions to 2D format
+        # TODO: The position id information is not properly used yet
+        if positions is not None:
+            positions_2d = positions.unsqueeze(0)  # [total_tokens] -> [1, total_tokens]
+
+        # Get embeddings from 2D tokens
+        h = self.model.tok_embeddings(tokens_2d)  # [1, total_tokens, hidden_size]
+
+        # Get RoPE cache indexed by positions
+        rope_cache = self.model.rope_cache[positions]
+
+        # Pass through transformer layers
+        for layer in self.model.layers.values():
+            h = layer(h, rope_cache, attention_masks=None)
+
+        # Convert output format back to vLLM expectations
+        # vLLM expects hidden_states in [total_tokens, hidden_size] format
+        # TorchTitan returns [batch_size, seq_len, hidden_size], so we need to flatten
+        if h.dim() == 3:  # [batch_size, seq_len, hidden_size]
+            batch_size, seq_len, hidden_size = h.shape
+            h = h.view(batch_size * seq_len, hidden_size)  # [total_tokens, hidden_size]
+
+        # TODO(jianiw): explicitly insert communication and return full tensor to vLLM Engine. To be checked.
+        if isinstance(h, DTensor):
+            h = h.full_tensor()
+        return h
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata=None,
+    ) -> torch.Tensor | None:
+        """Compute logits from hidden states.
+
+        Returns:
+            Logits tensor, or None if TP rank > 0
+        """
+        # Apply final layer norm
+        h = self.model.norm(hidden_states)
+
+        # Apply output projection to get logits
+        logits = self.model.output(h)
+
+        # When using TP, only rank 0 returns logits
+        # vLLM expects None from other ranks
+        if isinstance(logits, DTensor):
+            # Convert DTensor to local tensor for vLLM
+            logits = logits.full_tensor()
+
+        return logits
+
+    def load_weights(self, weights_iter):
+        """
+        Uses TorchTitan's Qwen3StateDictAdapter to map HF → TorchTitan naming,
+        then uses set_model_state_dict for proper distributed tensor handling.
+
+        Args:
+            weights_iter: Iterator of (name, tensor) pairs from HF checkpoint
+
+        Returns:
+            Set of loaded parameter names (for vLLM compatibility)
+        """
+        from torch.distributed._tensor import DTensor, Replicate
+        from torch.distributed.checkpoint.state_dict import (
+            set_model_state_dict,
+            StateDictOptions,
+        )
+
+        from torchtitan.models.qwen3.model.state_dict_adapter import (
+            Qwen3StateDictAdapter,
+        )
+
+        # Collect weights from iterator into a dict
+        hf_state_dict = {}
+        for name, tensor in weights_iter:
+            hf_state_dict[name] = tensor
+
+        # Use TorchTitan's adapter to convert HF → TorchTitan format
+        adapter = Qwen3StateDictAdapter(
+            model_args=self.config,
+            hf_assets_path=None,  # Not needed for from_hf conversion
+        )
+
+        torchtitan_state_dict = adapter.from_hf(hf_state_dict)
+        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
+
+        # Convert HF tensors to replicate DTensor if target is DTensor
+        for name, tensor in torchtitan_state_dict.items():
+            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
+                # Get the device mesh from the target DTensor
+                target_dtensor = model_state_dict[name]
+                device_mesh = target_dtensor.device_mesh
+                # Convert to replicate DTensor
+                torchtitan_state_dict[name] = DTensor.from_local(
+                    tensor.to(device_mesh.device_type),
+                    device_mesh=device_mesh,
+                    placements=[Replicate()],
+                )
+
+        # Use TorchTitan's distributed state dict loading
+        # This handles TP/PP sharding automatically
+        set_model_state_dict(
+            model=self.model,
+            model_state_dict=torchtitan_state_dict,
+            options=StateDictOptions(
+                strict=False,  # Allow missing keys
+            ),
+        )
+
+        # manually patch the loaded
+        loaded_params = {f"model.{name}" for name in torchtitan_state_dict.keys()}
+        logger.info(
+            f"Loaded {len(loaded_params)} parameters from checkpoint using distributed-aware loading"
+        )
+
+        return loaded_params
