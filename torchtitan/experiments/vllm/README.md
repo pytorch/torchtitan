@@ -14,7 +14,14 @@ The integration consists of two main components:
 
 ### Prerequisites
 
-1. Install vLLM from source [vllm-use-an-existing-pytorch-installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#use-an-existing-pytorch-installation):
+
+1. Install PyTorch nightly for torchtitan:
+```
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
+```
+
+
+2. Install vLLM from source [vllm-use-an-existing-pytorch-installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#use-an-existing-pytorch-installation):
 ```bash
 # install PyTorch first, either from PyPI or from source
 git clone https://github.com/vllm-project/vllm.git
@@ -42,10 +49,16 @@ pip install -e .
 
 ```
 
-2. Download Qwen3/Qwen3-0.6b checkpoint from HuggingFace and put into `example_checkpoint` folder. Make sure to change the "architecture" field in `config.json` to be `Qwen3TorchTitanForCausalLM` so vllm engine could use torchtitan model.
+3. Download Qwen3/Qwen3-0.6b checkpoint from HuggingFace and put into `example_checkpoint` folder. Make sure to change the "architecture" field in `config.json` to be `Qwen3TorchTitanForCausalLM` so vllm engine could use torchtitan model.
 
 
-3. Run inference:
+4. Run inference:
 ```
 python torchtitan/experiments/vllm/infer.py --model torchtitan/experiments/vllm/example_checkpoint/qwen3-0.6B
+```
+
+Run with TP: (work in progress)
+```
+python torchtitan/experiments/vllm/infer.py --model torchtitan/experiments/vllm/example_checkpoint/qwen3-0.6B --tensor-parallel-size 2
+
 ```
