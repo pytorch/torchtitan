@@ -63,6 +63,38 @@ def unpermute(
     return output_tokens.to(dtype=input_dtype)
 
 
+def unpermute_probs(
+    permuted_probs: torch.Tensor,
+    sorted_indices: torch.Tensor,
+    num_tokens: int,
+) -> torch.Tensor:
+    """
+    Unpermute 1D probability tensor from permuted order back to original token order.
+
+    This is the 1D equivalent of unpermute() for probability weights.
+    Used for fused weighted combine where expert_weights must match hidden_states shape.
+
+    Args:
+        permuted_probs: Probabilities in permuted order [num_routed]
+        sorted_indices: Mapping from permuted positions to original positions
+        num_tokens: Original number of tokens (before permutation)
+
+    Returns:
+        Probabilities in original token order [num_tokens]
+    """
+    input_dtype = permuted_probs.dtype
+
+    # Create output tensor
+    output_probs = torch.zeros(
+        num_tokens, dtype=permuted_probs.dtype, device=permuted_probs.device
+    )
+
+    # Scatter add the permuted probs back to original positions
+    output_probs.scatter_add_(0, sorted_indices, permuted_probs)
+
+    return output_probs.to(dtype=input_dtype)
+
+
 class PrimusTurboDeepepManager:
 
     _supported_backend_type = ["deepep", "mori"]
@@ -241,13 +273,41 @@ class PrimusTurboDeepepManager:
         group: torch.distributed.ProcessGroup,
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
+        expert_weights: torch.Tensor = None,
     ) -> torch.Tensor:
+        # Use stored permuted_probs if expert_weights not explicitly provided
+        if expert_weights is None and hasattr(self, "permuted_probs_for_combine"):
+            expert_weights = self.permuted_probs_for_combine
+
+        # DEBUG: Check if expert_weights is being passed to fused weighted combine
+        import torch.distributed as dist
+
+        if dist.is_initialized() and dist.get_rank() == 0:
+            has_attr = hasattr(self, "permuted_probs_for_combine")
+            attr_val = (
+                getattr(self, "permuted_probs_for_combine", "NO_ATTR")
+                if has_attr
+                else "NO_ATTR"
+            )
+            print(
+                f"[DEBUG combine] id(self)={id(self)}, hasattr={has_attr}, attr_is_none={attr_val is None if has_attr else 'N/A'}"
+            )
+            print(f"[DEBUG combine] expert_weights is None: {expert_weights is None}")
+            if expert_weights is not None:
+                print(
+                    f"[DEBUG combine] expert_weights shape: {expert_weights.shape}, dtype: {expert_weights.dtype}"
+                )
+                print(
+                    f"[DEBUG combine] expert_weights mean: {expert_weights.mean().item():.4f}, min: {expert_weights.min().item():.4f}, max: {expert_weights.max().item():.4f}"
+                )
+
         hidden_states, event = fused_combine(
             hidden_states,
             group,
             self.handle,
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
+            expert_weights=expert_weights,  # Pass to fused weighted combine
         )
 
         # ============================================================================
@@ -306,6 +366,9 @@ class PrimusTurboDeepepManager:
         # ============================================================================
         self.reversed_mapping_for_combine = None  # ~50-100 MB per layer
         self.hidden_shape_before_permute = None  # Tiny, freed for completeness
+        self.permuted_probs_for_combine = (
+            None  # Free stored probs after weighted combine
+        )
 
         # Note: dispatched_routing_map already freed in get_permuted_hidden_states_by_experts
         # Total memory freed: ~230-300 MB per GPU per layer
@@ -323,6 +386,21 @@ class PrimusTurboDeepepManager:
     def get_restored_hidden_states_by_experts(
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
+        # Apply routing probability weights BEFORE unpermute (scatter_add)
+        # This is mathematically equivalent to: out = scatter_add(expert_output * prob)
+        # The unpermute does scatter_add which SUMS outputs from multiple experts,
+        # so weights must be applied before the sum, not after.
+        if (
+            hasattr(self, "permuted_probs_for_combine")
+            and self.permuted_probs_for_combine is not None
+        ):
+            # hidden_states: [num_routed, hidden], permuted_probs: [num_routed]
+            hidden_states = (
+                hidden_states.float() * self.permuted_probs_for_combine.unsqueeze(1)
+            ).to(hidden_states.dtype)
+            # Clear the stored probs after use (we won't use fused weighted combine)
+            self.permuted_probs_for_combine = None
+
         hidden_states = unpermute(
             hidden_states,
             self.reversed_mapping_for_combine,
@@ -380,6 +458,16 @@ class PrimusTurboDeepepManager:
             self.dispatched_routing_map,
             probs=self.dispatched_probs,
         )
+        # Store permuted_probs for fused weighted combine
+        self.permuted_probs_for_combine = permuted_probs
+
+        # DEBUG: Verify probs are being stored
+        import torch.distributed as dist
+
+        if dist.is_initialized() and dist.get_rank() == 0:
+            print(
+                f"[DEBUG get_permuted] STORING permuted_probs_for_combine: shape={permuted_probs.shape}, id(self)={id(self)}"
+            )
 
         # ============================================================================
         # MEMORY OPTIMIZATION: Release dispatched_routing_map early
@@ -511,9 +599,14 @@ class DeepEPTokenDispatcher:
         group: torch.distributed.ProcessGroup = None,
         async_finish: bool = True,
         allocate_on_comm_stream: bool = True,
+        expert_weights: torch.Tensor = None,
     ):
         return self._comm_manager.combine(
-            hidden_states, group, async_finish, allocate_on_comm_stream
+            hidden_states,
+            group,
+            async_finish,
+            allocate_on_comm_stream,
+            expert_weights=expert_weights,  # Pass to fused weighted combine
         )
 
     def combine_postprocess(self, hidden_states: torch.Tensor):

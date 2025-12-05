@@ -292,19 +292,30 @@ class ExpertParallelDeepEP(ParallelStyle):
 
     # performing all-to-all dispatch on the input
     def _token_dispatch(self, mod, inputs, device_mesh):
+        # DEBUG: Verify _token_dispatch is being called
+        import torch.distributed as dist
+
+        if dist.is_initialized() and dist.get_rank() == 0:
+            print(
+                f"[DEBUG _token_dispatch] CALLED! mod={type(mod).__name__}, has_dispatcher={hasattr(mod, 'deepep_dispatcher')}"
+            )
+
         # annotate module input placements/sharding with input_layouts
         routed_input, num_tokens_per_expert = inputs
 
-        routed_input, routed_prob = mod.deepep_dispatcher.token_dispatch(
+        # NOTE(phuc): routed_prob is now automatically stored in the dispatcher
+        # (permuted_probs_for_combine) and used by fused weighted combine.
+        # We no longer need to pass it to GroupedExperts.forward().
+        routed_input, _routed_prob = mod.deepep_dispatcher.token_dispatch(
             routed_input, group=device_mesh.get_group()
         )
         (
             routed_input,
             num_tokens_per_expert,
-            routed_prob,
+            _routed_prob,  # Stored in dispatcher for fused weighted combine
         ) = mod.deepep_dispatcher.dispatch_postprocess(routed_input, None)
 
-        return routed_input, num_tokens_per_expert, routed_prob
+        return routed_input, num_tokens_per_expert
 
     @staticmethod
     def _partition_fn(name, mod, device_mesh):
