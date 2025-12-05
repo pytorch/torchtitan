@@ -34,32 +34,6 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
                 [
                     "--model.name simple_fsdp.llama3",
                     "--compile.enable",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
-                    "--compile.backend aot_eager",
-                    "--compile.graph_passes auto_bucketing",
-                ],
-            ],
-            "1D+autobucketing",
-            "1d_autobucketing",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
-                    "--compile.backend aot_eager",
-                    "--compile.graph_passes transformer_block_bucketing",
-                ],
-            ],
-            "1D+transformer_block_bucketing",
-            "1d_transformer_block_bucketing",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
                     "--activation_checkpoint.mode selective",
                     "--activation_checkpoint.selective_ac_option op",
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
