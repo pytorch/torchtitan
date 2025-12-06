@@ -89,6 +89,9 @@ def parallelize_deepseekv3(
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        # Check if DeepEP is enabled for MoE communication
+        use_deepep = job_config.parallelism.moe_comm_backend == "deep_ep"
+        
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -101,6 +104,7 @@ def parallelize_deepseekv3(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            use_deepep=use_deepep,
         )
 
     model_compile_enabled = (
