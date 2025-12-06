@@ -61,7 +61,7 @@ class DionOptimizerConfig:
     scalar_optimizer: str = "adamw"  # For 1D parameters (biases, layer norms)
     embedding_optimizer: str = "adamw"  # For embedding layers
     head_optimizer: str = "adamw"  # For model head/output layers
-    routing_optimizer: str = "adamw"  # For routing layers (DeepSeek MoE)
+    routing_optimizer: Optional[str] = None  # For routing layers (DeepSeek MoE)
     expert_optimizer: Optional[str] = None  # For expert weights (MoE experts)
 
     # Additional optimizer options
