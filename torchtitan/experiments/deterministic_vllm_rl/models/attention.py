@@ -13,8 +13,7 @@ import itertools
 import torch
 
 from vllm.attention.layer import Attention
-from vllm.attention.utils.fa_utils import flash_attn_varlen_func, get_flash_attn_version
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+from vllm.attention.utils.fa_utils import flash_attn_varlen_func
 
 
 class VLLMCompatibleFlashAttention(torch.nn.Module):
@@ -348,16 +347,13 @@ class VLLMPagedFlashAttention(torch.nn.Module):
         scale: float | None = None,
     ) -> torch.Tensor:
         """
-        Forward with dual-mode behavior:
-        - Inference (model.training=False): Use vLLM's Attention layer (KV cache, etc.)
-        - Training (model.training=True): Use flash_attn_varlen_func with custom backward
-        - vLLM's Attention used flash_attn_varlen_func kernel by default.
+        Forward pass using vLLM's Attention layer for inference.
 
         Args:
             q: Query tensor [batch, num_heads, seq_len, head_dim]
             k: Key tensor [batch, num_kv_heads, seq_len, head_dim]
             v: Value tensor [batch, num_kv_heads, seq_len, head_dim]
-            scale: Optional attention scale override
+            scale: Optional attention scale override (unused, vLLM uses internal scale)
 
         Returns:
             output: [batch, num_heads, seq_len, head_dim]
@@ -365,220 +361,23 @@ class VLLMPagedFlashAttention(torch.nn.Module):
         # Input is (batch, num_heads, seq_len, head_dim)
         batch_size, num_heads, seq_len, head_dim = q.shape
 
-        # INFERENCE MODE: Use vLLM's Attention layer
-        if not self.training and self.vllm_attn is not None:
-            # Transpose to (batch, seq_len, num_heads, head_dim) for vLLM
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
+        if self.vllm_attn is None:
+            raise RuntimeError(
+                "vLLM attention not initialized. This module requires vLLM context."
+            )
 
-            # # Flatten to (total_tokens, num_heads, head_dim)
-            # NOTE(jianiw): vllm_attention can also take input as shape (batch, seq_len, num_heads, head_dim) and do internally
-
-            # q_varlen = q.reshape(-1, num_heads, head_dim)
-            # k_varlen = k.reshape(-1, k.shape[2], head_dim)  #  k.shape[2] = num_kv_head
-            # v_varlen = v.reshape(-1, v.shape[2], head_dim)
-
-            try:
-                # Use vLLM's Attention layer (requires forward context)
-                output_varlen = self.vllm_attn(q, k, v)
-
-                # print(f"[jianiw] vllm_attn output is: {output_varlen}")
-                # Reshape back to batch format
-                output = output_varlen.view(batch_size, seq_len, num_heads, head_dim)
-
-                # Transpose back to TorchTitan format
-                output = output.transpose(1, 2)
-
-                return output
-            except (AssertionError, RuntimeError) as e:
-                # Forward context not available, fall through to training mode
-                print(f"Error when calling self.vllm_attn during Inference, {str(e)}")
-                raise
-
-        # TRAINING MODE: Use flash_attn_varlen_func with custom backward
         # Transpose to (batch, seq_len, num_heads, head_dim) for vLLM
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        # After to_local(), use actual tensor shapes (TP may have sharded heads)
-        # Shape: (batch, seq_len, num_heads_local, head_dim)
-        _, _, num_heads_local, _ = q.shape
-        _, _, num_kv_heads_local, _ = k.shape
+        # NOTE(jianiw): vllm_attention can take input as shape (batch, seq_len, num_heads, head_dim)
+        # and handle the reshaping internally
+        # Use vLLM's Attention layer for paged attention and
+        output_varlen = self.vllm_attn(q, k, v)
 
-        # Convert to varlen format for vLLM: flatten batch and sequence
-        # (batch, seq_len, num_heads, head_dim) -> (total_tokens, num_heads, head_dim)
-        q_varlen = q.reshape(-1, num_heads_local, head_dim)
-        k_varlen = k.reshape(-1, num_kv_heads_local, head_dim)
-        v_varlen = v.reshape(-1, num_kv_heads_local, head_dim)
-
-        # Use custom autograd function with flash_attn_varlen_func forward and manual backward
-        class VLLMForwardCustomBackward(torch.autograd.Function):
-            @staticmethod
-            def forward(ctx, q, k, v, scale, batch_size, seq_len, causal, fa_version):
-                # Flash Attention only supports fp16 and bf16
-                # Store original dtype for conversion back
-                original_dtype = q.dtype
-
-                # Convert to bf16 if not already fp16/bf16
-                if original_dtype not in [torch.float16, torch.bfloat16]:
-                    target_dtype = (
-                        torch.bfloat16
-                        if torch.cuda.is_bf16_supported()
-                        else torch.float16
-                    )
-                    q = q.to(target_dtype)
-                    k = k.to(target_dtype)
-                    v = v.to(target_dtype)
-                else:
-                    target_dtype = original_dtype
-
-                # Use flash_attn_varlen_func directly for fast forward pass
-                # This is the SAME kernel vLLM uses internally!
-                # TODO(jianiw): Need to double-check
-                cu_seqlens_q = torch.arange(
-                    0,
-                    (batch_size + 1) * seq_len,
-                    seq_len,
-                    dtype=torch.int32,
-                    device=q.device,
-                )
-
-                output = flash_attn_varlen_func(
-                    q=q,
-                    k=k,
-                    v=v,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k=cu_seqlens_q,
-                    max_seqlen_q=seq_len,
-                    max_seqlen_k=seq_len,
-                    softmax_scale=scale,
-                    causal=causal,
-                    num_splits=1 if vllm_is_batch_invariant() else 0,
-                    fa_version=fa_version,
-                )
-
-                # Convert output back to original dtype if needed
-                if original_dtype not in [torch.float16, torch.bfloat16]:
-                    output = output.to(original_dtype)
-
-                # Save for backward
-                ctx.save_for_backward(q, k, v, output)
-                ctx.scale = scale
-                ctx.seq_len = seq_len
-                ctx.batch_size = batch_size
-                ctx.causal = causal
-                ctx.original_dtype = original_dtype
-
-                return output
-
-            @staticmethod
-            def backward(ctx, grad_output):
-                q, k, v, output = ctx.saved_tensors
-                scale = ctx.scale
-                seq_len = ctx.seq_len
-                batch_size = ctx.batch_size
-                causal = ctx.causal
-                original_dtype = ctx.original_dtype
-
-                # Convert grad_output to match saved tensor dtype
-                if grad_output.dtype != q.dtype:
-                    grad_output = grad_output.to(q.dtype)
-
-                # Reshape from varlen to batch format
-                total_tokens = q.shape[0]
-                num_heads = q.shape[1]
-                head_dim = q.shape[2]
-
-                q_batch = q.reshape(batch_size, seq_len, num_heads, head_dim)
-                k_batch = k.reshape(batch_size, seq_len, num_heads, head_dim)
-                v_batch = v.reshape(batch_size, seq_len, num_heads, head_dim)
-                grad_out_batch = grad_output.reshape(
-                    batch_size, seq_len, num_heads, head_dim
-                )
-
-                # Transpose to (batch, num_heads, seq_len, head_dim)
-                q_t = q_batch.transpose(1, 2)
-                k_t = k_batch.transpose(1, 2)
-                v_t = v_batch.transpose(1, 2)
-                grad_out_t = grad_out_batch.transpose(1, 2)
-
-                # Compute attention scores: QK^T
-                scores = torch.matmul(q_t, k_t.transpose(-2, -1)) * scale
-
-                # Apply causal mask if needed
-                if causal:
-                    causal_mask = torch.triu(
-                        torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool),
-                        diagonal=1,
-                    )
-                    scores = scores.masked_fill(causal_mask, float("-inf"))
-
-                # Softmax
-                attn_weights = torch.nn.functional.softmax(scores, dim=-1)
-
-                # Backward through attention
-                # grad_v = attn_weights^T @ grad_out
-                grad_v_t = torch.matmul(attn_weights.transpose(-2, -1), grad_out_t)
-
-                # grad_attn_weights = grad_out @ v^T
-                grad_attn_weights = torch.matmul(grad_out_t, v_t.transpose(-2, -1))
-
-                # Backward through softmax
-                sum_term = (grad_attn_weights * attn_weights).sum(dim=-1, keepdim=True)
-                grad_scores = attn_weights * (grad_attn_weights - sum_term)
-
-                # Apply causal mask to gradients
-                if causal:
-                    grad_scores = grad_scores.masked_fill(causal_mask, 0.0)
-
-                # Backward through scale
-                grad_scores = grad_scores * scale
-
-                # grad_q = grad_scores @ K
-                grad_q_t = torch.matmul(grad_scores, k_t)
-
-                # grad_k = grad_scores^T @ Q
-                grad_k_t = torch.matmul(grad_scores.transpose(-2, -1), q_t)
-
-                # Transpose back and reshape to varlen format
-                grad_q = grad_q_t.transpose(1, 2).reshape(
-                    total_tokens, num_heads, head_dim
-                )
-                grad_k = grad_k_t.transpose(1, 2).reshape(
-                    total_tokens, num_heads, head_dim
-                )
-                grad_v = grad_v_t.transpose(1, 2).reshape(
-                    total_tokens, num_heads, head_dim
-                )
-
-                # Convert gradients back to original dtype if needed
-                if original_dtype not in [torch.float16, torch.bfloat16]:
-                    grad_q = grad_q.to(original_dtype)
-                    grad_k = grad_k.to(original_dtype)
-                    grad_v = grad_v.to(original_dtype)
-
-                return grad_q, grad_k, grad_v, None, None, None, None, None
-
-        # Get flash attention version
-        fa_version = get_flash_attn_version()
-
-        # Apply custom autograd function
-        output_varlen = VLLMForwardCustomBackward.apply(
-            q_varlen,
-            k_varlen,
-            v_varlen,
-            scale or self.scale,
-            batch_size,
-            seq_len,
-            self.causal,
-            fa_version,
-        )
-
-        # Convert back to batch format
-        # (total_tokens, num_heads, head_dim) -> (batch, seq_len, num_heads, head_dim)
-        output = output_varlen.reshape(batch_size, seq_len, num_heads, head_dim)
+        # Reshape back to batch format
+        output = output_varlen.view(batch_size, seq_len, num_heads, head_dim)
 
         # Transpose back to TorchTitan format: (batch, num_heads, seq_len, head_dim)
         output = output.transpose(1, 2)

@@ -72,41 +72,6 @@ def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Te
     assert ndim > 1
     _, seqlen, _, head_dim = x.shape
 
-    # Extend rope_cache if needed (e.g., during vLLM profiling with 2x max_seq_len)
-    if seqlen > rope_cache.shape[0]:
-        # Handle DTensor case - convert to local tensor first
-        from torch.distributed._tensor import DTensor, Replicate
-
-        is_dtensor = isinstance(rope_cache, DTensor)
-        if is_dtensor:
-            # Get the local tensor and device mesh
-            device_mesh = rope_cache.device_mesh
-            local_rope_cache = rope_cache.to_local()
-            device = local_rope_cache.device
-            dtype = local_rope_cache.dtype
-        else:
-            device = rope_cache.device
-            dtype = rope_cache.dtype
-
-        # Precompute additional RoPE frequencies on-the-fly
-        rope_theta = 1000000.0  # Default theta value
-        extended_cache = precompute_rope_cache(
-            dim=head_dim,
-            max_seq_len=seqlen,
-            base=rope_theta,
-        )
-        extended_cache = extended_cache.to(device=device, dtype=dtype)
-
-        # If original was DTensor, convert extended cache to DTensor too
-        if is_dtensor:
-            rope_cache = DTensor.from_local(
-                extended_cache,
-                device_mesh=device_mesh,
-                placements=[Replicate()],
-            )
-        else:
-            rope_cache = extended_cache
-
     rope_cache = rope_cache[0:seqlen]
     # The shape of rope_cache is (seqlen, head_dim * 2) because we concate cos and sin
     assert rope_cache.shape == (seqlen, head_dim * 2)
