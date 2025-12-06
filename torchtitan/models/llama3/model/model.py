@@ -95,7 +95,7 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor, positions: t
     This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
     for the purpose of broadcasting the frequency tensor during element-wise operations.
 
-    The input freqs_cis tensor is assumed to be of shape (max_seqlen, dim),
+    The input freqs_cis tensor is assumed to be of shape (max_seqlen, dim // 2),
     and the first seqlen elements will be sliced, but dim must match x.
 
     Args:
@@ -566,7 +566,7 @@ class Transformer(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, attention_masks=attention_masks, positions)
+            h = layer(h, self.freqs_cis, attention_masks=attention_masks, positions=positions)
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h
         return output
