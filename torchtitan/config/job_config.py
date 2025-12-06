@@ -416,6 +416,17 @@ class Parallelism:
     Note that this is still an experimental feature.
     """
 
+    moe_comm_backend: Literal["standard", "deep_ep"] = "standard"
+    """
+    MoE expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
+    
+    - "standard": Uses PyTorch all-to-all collectives (default)
+    - "deep_ep": Uses DeepEP custom kernels for more efficient communication
+    
+    DeepEP requires installation:
+    https://github.com/deepseek-ai/DeepEP.
+    """
+
 
 @dataclass
 class Checkpoint:
