@@ -69,6 +69,9 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     # TODO: node-limited routing is not supported yet
     n_expert_groups: int = 1
     n_limited_groups: int = 1
+    
+    # MoE communication backend (set from config)
+    moe_comm_backend: str = "standard"  # "standard" or "deep_ep"
 
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
@@ -102,7 +105,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
 
         if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(
-                "Failed to use grouped mm, which is only supported on SM90 or later",
+                "Failed to use grouped_mm, which is only supported on SM90 or later",
             )
             self.moe_args.use_grouped_mm = False
 
@@ -112,6 +115,11 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
         )
+        
+        # Configure MoE communication backend from config
+        if hasattr(job_config.parallelism, 'moe_comm_backend'):
+            self.moe_comm_backend = job_config.parallelism.moe_comm_backend
+            logger.info(f"Setting moe_comm_backend={self.moe_comm_backend} from config")
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
