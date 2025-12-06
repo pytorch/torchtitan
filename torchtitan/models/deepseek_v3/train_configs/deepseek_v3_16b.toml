@@ -15,7 +15,7 @@ log_freq = 10
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
-enable_wandb = true
+enable_wandb = false
 
 [model]
 name = "deepseek_v3"
@@ -45,7 +45,7 @@ dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default" # default / never / always
-tensor_parallel_degree = 2
+tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "Interleaved1F1B"
@@ -61,7 +61,7 @@ export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
 
 [activation_checkpoint]
-mode = "full"  # ["none", "selective", "full"]
+mode = "selective"  # ["none", "selective", "full"]
 selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
 [compile]

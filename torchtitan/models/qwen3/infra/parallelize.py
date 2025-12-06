@@ -242,8 +242,8 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate(), None),
-                desired_input_layouts=(Replicate(), Replicate(), None),
+                input_layouts=(Shard(1), Replicate(), None, None),
+                desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
             "attention.wq": colwise_parallel(use_local_output=False),
             "attention.wk": colwise_parallel(use_local_output=False),

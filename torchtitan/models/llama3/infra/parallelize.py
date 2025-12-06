@@ -208,8 +208,8 @@ def apply_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None, None),
-                desired_input_layouts=(Replicate(), None, None),
+                input_layouts=(Shard(1), None, None, None),
+                desired_input_layouts=(Replicate(), None, None, None),
             ),
             "attention.wq": colwise_parallel(),
             "attention.wk": colwise_parallel(),
