@@ -44,7 +44,6 @@ class TransformerModelArgs(BaseModelArgs):
 
     attn_type: str = "sdpa"
     attn_mask_type: str = "causal"
-    eos_id: int = 0
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
