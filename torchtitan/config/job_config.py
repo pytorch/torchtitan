@@ -124,12 +124,6 @@ class Model:
     which can be found here: https://github.com/pytorch/ao
     """
 
-    use_flex_attn: bool | None = None
-    """
-    Whether to use FlexAttention. If None, uses model's default.
-    For DeepEP, should be False to avoid OOM (FlexAttention compilation fails with DeepEP).
-    """
-
     print_after_conversion: bool = False
     """
     If true, model definition will be printed to stdout after all model
@@ -428,6 +422,17 @@ class Parallelism:
     - [partial dp -> ep] etp = tp
     - [partial dp + all tp -> ep] etp = 1
     Note that this is still an experimental feature.
+    """
+
+    moe_comm_backend: Literal["standard", "deep_ep"] = "standard"
+    """
+    MoE expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
+    
+    - "standard": Uses PyTorch all-to-all collectives (default)
+    - "deep_ep": Uses DeepEP custom kernels for more efficient communication
+    
+    DeepEP requires installation:
+    https://github.com/deepseek-ai/DeepEP.
     """
 
 

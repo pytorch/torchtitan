@@ -309,3 +309,41 @@ class ReordererSequenceParallel(ParallelStyle):
             # pyrefly: ignore [bad-argument-type]
             output_fn=self._prepare_output_fn,
         )
+
+
+class ExpertParallelDeepEP(ExpertParallel):
+    """Expert Parallel using DeepEP dispatcher attached to GroupedExperts."""
+    
+    def _token_dispatch(self, mod, inputs, device_mesh):
+        """Dispatch tokens via attached DeepEP dispatcher."""
+        routed_input, num_tokens_per_expert = inputs
+        
+        if not hasattr(mod, 'deepep_dispatcher'):
+            raise RuntimeError("GroupedExperts missing 'deepep_dispatcher'. Ensure MoEWithDeepEP attaches it.")
+        
+        ep_group = device_mesh.get_group()
+        routed_input, routed_prob = mod.deepep_dispatcher.token_dispatch(routed_input, ep_group)
+        routed_input, num_tokens_per_expert, routed_prob = mod.deepep_dispatcher.dispatch_postprocess(routed_input, None)
+        return routed_input, num_tokens_per_expert
+    
+    @staticmethod
+    def _partition_fn(name, mod, device_mesh):
+        """Shard expert weights on expert dimension."""
+        for param_name, param in mod.named_parameters(recurse=False):
+            mod.register_parameter(param_name, nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)])))
+    
+    def _token_combine(self, mod, routed_output, device_mesh):
+        """Combine tokens via attached DeepEP dispatcher."""
+        ep_group = device_mesh.get_group()
+        routed_output = mod.deepep_dispatcher.combine_preprocess(routed_output)
+        routed_output = mod.deepep_dispatcher.token_combine(routed_output, ep_group)
+        return routed_output
+    
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        """Apply DeepEP parallelization using attached dispatcher."""
+        return distribute_module(
+            module, device_mesh,
+            partition_fn=ExpertParallelDeepEP._partition_fn,
+            input_fn=self._token_dispatch,
+            output_fn=self._token_combine,
+        )

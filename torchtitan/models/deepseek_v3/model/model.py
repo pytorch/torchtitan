@@ -351,10 +351,14 @@ class TransformerBlock(nn.Module):
 
         self.moe_enabled = layer_id >= model_args.n_dense_layers
         if self.moe_enabled:
-            self.moe = MoE(
-                model_args.moe_args,
+            # Use build_moe factory to support different communication backends
+            from torchtitan.models.moe import build_moe
+            self.moe = build_moe(
+                args=model_args.moe_args,
                 dim=model_args.dim,
                 hidden_dim=model_args.moe_inter_dim,
+                communication_backend=model_args.moe_comm_backend,
+                score_before_experts=model_args.moe_args.score_before_experts,
             )
         else:
             self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)

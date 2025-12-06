@@ -479,7 +479,19 @@ def apply_moe_ep_tp(
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
     dual_pipe_v: bool = False,
+    use_deepep: bool = False,
 ):
+    """
+    Apply MoE Expert Parallelism and Tensor Parallelism.
+    
+    Args:
+        model: The model to parallelize
+        tp_mesh: Tensor parallel mesh
+        ep_mesh: Expert parallel mesh
+        ep_tp_mesh: Combined expert + tensor parallel mesh
+        etp_enabled: Whether expert tensor parallelism is enabled
+        use_deepep: Whether to use DeepEP for expert communication
+    """
     assert ep_mesh is not None or tp_mesh is not None
 
     # pyrefly: ignore [not-callable]
@@ -537,7 +549,14 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            # Select parallelism style based on use_deepep flag
+            if use_deepep:
+                from torchtitan.distributed import ExpertParallelDeepEP
+                from torchtitan.tools.logging import logger as parallelism_logger
+                experts_plan = ExpertParallelDeepEP()
+                parallelism_logger.info(f"  Applying DeepEP to MoE layer")
+            else:
+                experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel()
