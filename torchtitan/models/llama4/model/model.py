@@ -86,7 +86,9 @@ def precompute_freqs_cis(
     return freqs_cis
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor, positions: torch.Tensor | None = None) -> torch.Tensor:
+def reshape_for_broadcast(
+    freqs_cis: torch.Tensor, x: torch.Tensor, positions: torch.Tensor | None = None
+) -> torch.Tensor:
     """
     Reshape frequency tensor for broadcasting it with another tensor.
 
@@ -125,7 +127,9 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor, positions: t
         freqs_cis = torch.gather(
             freqs_cis_expanded,
             dim=1,
-            index=positions.view(x.shape[0], seqlen, 1, 1).expand(x.shape[0], seqlen, 1, freqs_cis_expanded.shape[-1]),
+            index=positions.view(x.shape[0], seqlen, 1, 1).expand(
+                x.shape[0], seqlen, 1, freqs_cis_expanded.shape[-1]
+            ),
         )
         return freqs_cis
 
@@ -431,7 +435,9 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks, positions)
+        h = x + self.attention(
+            self.attention_norm(x), freqs_cis, attention_masks, positions
+        )
         if self.moe_enabled:
             out = h + self.moe(self.ffn_norm(h))
         else:
