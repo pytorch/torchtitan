@@ -206,6 +206,65 @@ class TorchTitanQwen3ForCausalLM(nn.Module):
         # Store the mesh for future use
         self.world_mesh = world_mesh
 
+    def _extend_rope_cache_if_needed(
+        self, rope_cache: torch.Tensor, max_position: int
+    ) -> torch.Tensor:
+        """
+        Extend rope_cache if needed (e.g., during vLLM profiling with 2x max_seq_len).
+
+        Args:
+            rope_cache: Current RoPE cache tensor
+            max_position: Maximum position index needed
+
+        Returns:
+            Extended rope_cache if needed, otherwise original rope_cache
+        """
+        required_len = max_position + 1
+
+        # No extension needed
+        if required_len <= rope_cache.shape[0]:
+            return rope_cache
+
+        # Handle DTensor case - convert to local tensor first
+        from torch.distributed._tensor import DTensor, Replicate
+
+        is_dtensor = isinstance(rope_cache, DTensor)
+        if is_dtensor:
+            # Get the local tensor and device mesh
+            device_mesh = rope_cache.device_mesh
+            local_rope_cache = rope_cache.to_local()
+            device = local_rope_cache.device
+            dtype = local_rope_cache.dtype
+        else:
+            device = rope_cache.device
+            dtype = rope_cache.dtype
+
+        # Import precompute_rope_cache from the model module
+        from torchtitan.models.qwen3.model.model import precompute_rope_cache
+
+        # Precompute additional RoPE frequencies on-the-fly
+        # TODO: This also has strong assumptions on config names
+        rope_theta = self.config.rope_theta
+        head_dim = self.config.head_dim
+        extended_cache = precompute_rope_cache(
+            dim=head_dim,
+            max_seq_len=required_len,
+            base=rope_theta,
+        )
+        extended_cache = extended_cache.to(device=device, dtype=dtype)
+
+        # If original was DTensor, convert extended cache to DTensor too
+        if is_dtensor:
+            rope_cache = DTensor.from_local(
+                extended_cache,
+                device_mesh=device_mesh,
+                placements=[Replicate()],
+            )
+        else:
+            rope_cache = extended_cache
+
+        return rope_cache
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings.
 
@@ -256,14 +315,21 @@ class TorchTitanQwen3ForCausalLM(nn.Module):
         # Store positions in forward context for attention layers
         # Also convert positions to 2D format
         # TODO: The position id information is not properly used yet
+        # TODO: The batch_size might not be 1, need double check
         if positions is not None:
             positions_2d = positions.unsqueeze(0)  # [total_tokens] -> [1, total_tokens]
 
         # Get embeddings from 2D tokens
         h = self.model.tok_embeddings(tokens_2d)  # [1, total_tokens, hidden_size]
 
+        # Extend RoPE cache if needed (vLLM profiling may use 2x max_seq_len)
+        max_position = positions.max().item() if positions is not None else 0
+        rope_cache = self._extend_rope_cache_if_needed(
+            self.model.rope_cache, max_position
+        )
+
         # Get RoPE cache indexed by positions
-        rope_cache = self.model.rope_cache[positions]
+        rope_cache = rope_cache[positions]
 
         # Pass through transformer layers
         for layer in self.model.layers.values():
