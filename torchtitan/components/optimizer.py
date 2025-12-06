@@ -354,7 +354,7 @@ def build_optimizers(
                 optimizer_config, "embedding_optimizer", "adamw"
             ),
             head_optimizer=getattr(optimizer_config, "head_optimizer", "adamw"),
-            routing_optimizer=getattr(optimizer_config, "routing_optimizer", "adamw"),
+            routing_optimizer=getattr(optimizer_config, "routing_optimizer", None),
             expert_optimizer=getattr(optimizer_config, "expert_optimizer", None),
             # Additional optimizer options
             head_lr_scaling=getattr(optimizer_config, "head_lr_scaling", True),
@@ -427,7 +427,7 @@ def build_optimizers(
                 optimizer_config, "embedding_optimizer", "adamw"
             ),
             head_optimizer=getattr(optimizer_config, "head_optimizer", "adamw"),
-            routing_optimizer=getattr(optimizer_config, "routing_optimizer", "adamw"),
+            routing_optimizer=getattr(optimizer_config, "routing_optimizer", None),
             expert_optimizer=getattr(optimizer_config, "expert_optimizer", None),
             # Additional optimizer options
             head_lr_scaling=getattr(optimizer_config, "head_lr_scaling", True),

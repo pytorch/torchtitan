@@ -213,10 +213,10 @@ class Optimizer:
     head_optimizer: Literal["adamw", "lion"] = "adamw"
     """Optimizer to use for model head/output layers when using Dion."""
 
-    expert_optimizer: Literal["adamw", "lion"] = "adamw"
+    expert_optimizer: Literal["adamw", "lion"] | None = None
     """Optimizer to use for model expert layers when using Dion."""
 
-    routing_optimizer: Literal["adamw", "lion"] = "adamw"
+    routing_optimizer: Literal["adamw", "lion"] | None = None
     """Optimizer to use for model router parameters when using Dion."""
 
     head_lr_scaling: bool = True

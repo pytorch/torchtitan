@@ -53,6 +53,10 @@ def create_parameter_groups(
             []
         )  # Separate list for expert parameters when expert_optimizer is set
 
+        # Expert weights can use either DION (for 2D matrices only) or a dedicated expert optimizer
+        expert_optimizer = getattr(dion_config, "expert_optimizer", None)
+        routing_optimizer = getattr(dion_config, "routing_optimizer", None)
+
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
@@ -64,9 +68,6 @@ def create_parameter_groups(
             if is_expert_param(name, param, model):
                 expert_type = classify_expert_param(name, param)
                 param_stats["expert"].append((name, param.shape, expert_type))
-
-                # Expert weights can use either DION (for 2D matrices only) or a dedicated expert optimizer
-                expert_optimizer = getattr(dion_config, "expert_optimizer", None)
 
                 if expert_optimizer is not None:
                     # Use dedicated expert optimizer if specified
@@ -100,7 +101,10 @@ def create_parameter_groups(
             # Classify parameter based on shape and module type
             if is_routing_param(name, param, model):
                 param_stats["routing"].append((name, param.shape))
-                routing_params.append(param)
+                if routing_optimizer is not None:
+                    routing_params.append(param)
+                else:
+                    dion_params.append(param)
             elif is_embedding_param(name, param, model):
                 param_stats["embedding"].append((name, param.shape))
                 embedding_params.append(param)
@@ -121,23 +125,29 @@ def create_parameter_groups(
         # Create parameter groups for each type
         if dion_params:
             param_groups.append(create_matrix_param_group(dion_params, dion_config))
+            logger.info(f"dion lr: {param_groups[-1]['lr']}")
 
         if scalar_params:
             param_groups.append(create_scalar_param_group(scalar_params, dion_config))
+            logger.info(f"scalar lr: {param_groups[-1]['lr']}")
 
         if embedding_params:
             param_groups.append(
                 create_embedding_param_group(embedding_params, dion_config)
             )
+            logger.info(f"embedding lr: {param_groups[-1]['lr']}")
 
         if head_params:
             param_groups.append(create_head_param_group(head_params, dion_config))
+            logger.info(f"head lr: {param_groups[-1]['lr']}")
 
         if routing_params:
             param_groups.append(create_routing_param_group(routing_params, dion_config))
+            logger.info(f"routing lr: {param_groups[-1]['lr']}")
 
         if expert_params:
             param_groups.append(create_expert_param_group(expert_params, dion_config))
+            logger.info(f"expert lr: {param_groups[-1]['lr']}")
 
     # Enhanced logging summary
     logger.info("=" * 80)
@@ -148,7 +158,7 @@ def create_parameter_groups(
     scalar_opt = getattr(dion_config, "scalar_optimizer", "adamw").upper()
     embedding_opt = getattr(dion_config, "embedding_optimizer", "adamw").upper()
     head_opt = getattr(dion_config, "head_optimizer", "adamw").upper()
-    routing_opt = getattr(dion_config, "routing_optimizer", "adamw").upper()
+    routing_opt = getattr(dion_config, "routing_optimizer", None)
 
     algorithm_name = dion_config.algorithm.upper()
     logger.info(f"{algorithm_name} algorithm parameters: {len(param_stats['dion'])}")
@@ -167,7 +177,7 @@ def create_parameter_groups(
     for name, shape in param_stats["head"]:
         logger.info(f"  - {name}: {shape}")
 
-    logger.info(f"Routing parameters ({routing_opt}): {len(param_stats['routing'])}")
+    logger.info(f"Routing parameters ({routing_opt.upper() if routing_opt is not None else algorithm_name}): {len(param_stats['routing'])}")
     for name, shape in param_stats["routing"]:
         logger.info(f"  - {name}: {shape}")
 
