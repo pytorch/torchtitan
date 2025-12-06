@@ -212,6 +212,12 @@ This implementation uses the same kernels for both rollouts (vLLM) and training 
 3. Requires NVIDIA GPUs with Flash Attention support
 
 
+## TODO
+
+- `FlashAttnWithBackward` will need to become more composable and should not live exclusively within this directory.
+- vLLM integration will need to become more generic with a provided Attention operator that is KV-cache compatible.
+- vLLM parallelism will need to add generic parallelism initialization to support Monarch managed TP/DP.
+
 # Run vLLM inference with TorchTitan Qwen3 Model
 
 This directory contains code to run a single canonical model definition (TorchTitan model definition) with vLLM inference engine (not batch-invariant yet, working in progress).
@@ -275,53 +281,12 @@ python torchtitan/experiments/deterministic_vllm_rl/infer.py --model torchtitan/
 
 ```
 
-## TODOs
+## TODO
 1. Rewrite attention part to use vllm.Attention() with backward as the only attention path.
 2. Integrate with simple_rl.py to run end-to-end RL with one canonical model definition.
 3.  Leverage batch-invariant kernels into model definition.
 
 
-
-# Project Structure
-
-```
-deterministic_vllm_rl/
-├── README.md                          # This documentation
-├── __init__.py                        # Package initialization
-├── batch_invariant_backward.py        # Backward passes for vLLM ops
-├── weights_vllm_compat.py             # Weight conversion utilities
-├── simple_rl.py                       # RL training loop
-├── infer.py                           # vLLM Inference script to run with torchtitan model definition
-├── register.py                        # Register torchtitan model to vLLM Engine
-├── models/
-│   ├── __init__.py
-│   ├── attention.py                   # VLLMCompatibleFlashAttention
-│   └── qwen3/
-│       ├── __init__.py
-│       ├── model_batch_invariant.py   # Batch-invariant Qwen3 model
-│       └── model_vllm_compat.py       # vLLM-compatible Qwen3 model
-├── weights/
-│   ├── __init__.py
-│   ├── converter.py                   # Weight conversion script
-│   └── README.md                      # Weight conversion documentation
-├── tests/
-│   ├── __init__.py
-│   ├── test_batch_invariant_backward.py  # Test backward passes
-│   └── test_exact_determinism.py         # Test determinism
-└── example_checkpoint/                # Example checkpoint directory (to be moved)
-    └── qwen3-0.6B/
-        ├── config.json                # Model configuration
-        ├── model.safetensors          # Model weights
-        ├── tokenizer.json             # Tokenizer
-        ├── vocab.json                 # Vocabulary
-        └── merges.txt                 # BPE merges
-```
-
-## TODO
-
-- `FlashAttnWithBackward` will need to become more composable and should not live exclusively within this directory.
-- vLLM integration will need to become more generic with a provided Attention operator that is KV-cache compatible.
-- vLLM parallelism will need to add generic parallelism initialization to support Monarch managed TP/DP.
 
 ## Contributing
 
