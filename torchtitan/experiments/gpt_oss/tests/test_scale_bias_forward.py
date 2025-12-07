@@ -30,10 +30,7 @@ from torch.distributed._tensor import (
     Shard,
 )
 from torch.utils._debug_mode import DebugMode
-from torchtitan.experiments.gpt_oss.model.moe import (
-    ScaleBiasForward,
-    ScaleProductBackward,
-)
+from torchtitan.experiments.gpt_oss.model.moe import ScaleBiasForward
 
 
 def init_distributed():
@@ -115,35 +112,39 @@ def linear_with_scale_bias_forward(verbose=False):
     x_dtensor = distribute_tensor(x, mesh, [Shard(1)])
     x_dtensor.retain_grad()
 
+    x_local = x_dtensor.to_local()
+    x_local.retain_grad()
+
     w = torch.arange(N * O, dtype=torch.float32).reshape(N, O).requires_grad_(True)
     w_dtensor = distribute_tensor(w, mesh, [Shard(0)])
     w_dtensor.retain_grad()
+
+    w_local = w_dtensor.to_local()
+    w_local.retain_grad()
 
     b = torch.arange(O, dtype=torch.float32, requires_grad=True)
     b_dtensor = distribute_tensor(b, mesh, [Replicate()])
     b_dtensor.retain_grad()
 
-    # Forward computation
-    # x_dtensor @ w_dtensor produces Partial() placement
-    z_dtensor = x_dtensor @ w_dtensor
-    z_dtensor.retain_grad()
-
-    # Convert to local tensors (loses placement info)
-    z_local = z_dtensor.to_local()
-    z_local.retain_grad()
-
     b_local = b_dtensor.to_local()
     b_local.retain_grad()
+
+    # Forward computation
+
+    # Convert to local tensors (loses placement info)
+    z_local = x_local @ w_local  # the meaning of the tensor should be Partial()
+    z_local.retain_grad()
 
     # Use ScaleBiasForward to scale bias in forward but not in backward
     b_scaled = ScaleBiasForward.apply(b_local, world_size)
     b_scaled.retain_grad()
 
-    z_scaled = ScaleProductBackward.apply(z_local, world_size)
-    z_scaled.retain_grad()
+    # # z_scaled = ScaleProductBackward.apply(z_local, world_size)
+    # z_scaled = z_local
+    # z_scaled.retain_grad()
 
     # Add scaled bias to partial sum
-    o_local = z_scaled + b_scaled
+    o_local = z_local + b_scaled
     o_local.retain_grad()
 
     # Convert back to DTensor with Partial placement
@@ -161,7 +162,7 @@ def linear_with_scale_bias_forward(verbose=False):
     verbose_map = {
         "loss_dtensor": p_fmt(loss_dtensor) + f", norm={norm_fmt(loss_dtensor)}",
         "o_dtensor": p_fmt(o_dtensor) + f", norm={norm_fmt(o_dtensor)}",
-        "z_dtensor": p_fmt(z_dtensor) + f", norm={norm_fmt(z_dtensor)}",
+        # "z_dtensor": p_fmt(z_dtensor) + f", norm={norm_fmt(z_dtensor)}",
         "x_dtensor": p_fmt(x_dtensor) + f", norm={norm_fmt(x_dtensor)}",
         "w_dtensor": p_fmt(w_dtensor) + f", norm={norm_fmt(w_dtensor)}",
         "b_dtensor": p_fmt(b_dtensor) + f", norm={norm_fmt(b_dtensor)}",
@@ -175,9 +176,9 @@ def linear_with_scale_bias_forward(verbose=False):
         print("=" * 50 + "\nManual: Partial() + Replicate() \n" + "=" * 50)
         print("Loss: " + verbose_map["loss_dtensor"])
         print("Output: " + verbose_map["o_dtensor"])
-        print(" (z): " + verbose_map["z_dtensor"])
+        # print(" (z): " + verbose_map["z_dtensor"])
         print("Operands:\n (x): " + verbose_map["x_dtensor"])
-        print(" (w): " + verbose_map["x_dtensor"])
+        print(" (w): " + verbose_map["w_dtensor"])
         print(" (b): " + verbose_map["b_dtensor"])
         print(
             f"Local Operands:\n (z_local): shape={z_local.shape}, norm={norm_fmt(z_local)}"
