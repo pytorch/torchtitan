@@ -65,8 +65,6 @@ class TestFluxDataLoader(unittest.TestCase):
                         dataset_name,
                         "--training.local_batch_size",
                         str(batch_size),
-                        "--training.dataloader.num_workers",
-                        str(num_workers),
                         "--training.classifier_free_guidance_prob",
                         "0.447",
                         "--training.test_mode",
@@ -76,6 +74,9 @@ class TestFluxDataLoader(unittest.TestCase):
                         "tests/assets/flux_test_encoders/clip-vit-large-patch14",
                     ]
                 )
+
+                # Set num_workers via the kwargs dict
+                config.training.dataloader.kwargs["num_workers"] = num_workers
 
                 dl = build_flux_dataloader(
                     dp_world_size=world_size,
