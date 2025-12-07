@@ -7,9 +7,13 @@
 """
 DeepEP Flexible Token Dispatcher for MoE.
 
-This module provides a clean dispatcher architecture following Megatron-LM patterns:
-- _DeepepManager: Low-level DeepEP communication manager
-- MoEFlexTokenDispatcher: High-level flexible token dispatcher interface
+This module provides async-enabled token dispatch/combine for MoE layers using DeepEP.
+Follows Megatron-LM async communication patterns for optimal PP+EP performance.
+
+Architecture:
+- DeepEPDispatch/DeepEPCombine: Autograd functions with async support
+- _DeepepManager: Low-level communication manager (handles dispatch/combine)
+- MoEFlexTokenDispatcher: High-level API for MoE layers
 """
 
 import os
@@ -21,13 +25,27 @@ from torchtitan.tools.logging import logger
 # Import DeepEP primitives
 try:
     from deep_ep import Buffer
+    from deep_ep.utils import EventOverlap, EventHandle
     HAS_DEEPEP = True
 except ImportError:
     HAS_DEEPEP = False
     Buffer = None
+    EventOverlap = None
+    EventHandle = None
 
 # Global buffer cache
 _deepep_buffers: dict[ProcessGroup, Buffer] = {}
+
+
+def _create_event_if_async(async_finish: bool):
+    """Create EventOverlap handle if async mode is enabled."""
+    return EventOverlap(EventHandle()) if async_finish else None
+
+
+def _sync_stream_if_async(async_finish: bool, after_event):
+    """Synchronize current stream with communication stream if async mode is enabled."""
+    if async_finish and after_event is not None:
+        after_event.current_stream_wait()
 
 
 def get_deepep_buffer(group: ProcessGroup, hidden_bytes: int) -> Buffer:
@@ -104,21 +122,34 @@ class DeepEPDispatch(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, x, topk_idx, topk_weights, buffer, num_tokens_per_rank,
-                num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert):
+                num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
+                async_finish=True, allocate_on_comm_stream=True):
         """Dispatch tokens to expert ranks via buffer.dispatch()."""
-        recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, _ = \
+        previous_event = _create_event_if_async(async_finish)
+        
+        recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_list, handle, after_event = \
             buffer.dispatch(
                 x=x.to(torch.bfloat16), topk_idx=topk_idx, topk_weights=topk_weights.to(torch.float32),
                 num_tokens_per_rank=num_tokens_per_rank, num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
                 is_token_in_rank=is_token_in_rank, num_tokens_per_expert=num_tokens_per_expert,
-                async_finish=False, allocate_on_comm_stream=False,
+                previous_event=previous_event,
+                async_finish=async_finish, 
+                allocate_on_comm_stream=allocate_on_comm_stream,
             )
+        
+        _sync_stream_if_async(async_finish, after_event)
         
         num_recv_tokens_per_expert_tensor = torch.tensor(
             num_recv_tokens_per_expert_list, dtype=torch.int64, device='cpu'
         ).to(recv_x.device, non_blocking=True)
         
-        ctx.handle, ctx.buffer, ctx.input_dtype, ctx.hidden_dim, ctx.top_k = handle, buffer, x.dtype, x.shape[1], topk_weights.shape[1]
+        # Save for backward
+        ctx.handle = handle
+        ctx.buffer = buffer
+        ctx.input_dtype = x.dtype
+        ctx.async_finish = async_finish
+        ctx.allocate_on_comm_stream = allocate_on_comm_stream
+        
         return recv_x, recv_topk_idx, recv_topk_weights, num_recv_tokens_per_expert_tensor, handle
     
     @staticmethod
@@ -128,18 +159,25 @@ class DeepEPDispatch(torch.autograd.Function):
         grad_topk_weights = None
         
         if grad_recv_x is not None:
-            grad_x_combined, grad_token_probs, _ = ctx.buffer.combine(
+            previous_event = _create_event_if_async(ctx.async_finish)
+            
+            grad_x_combined, grad_token_probs, after_event = ctx.buffer.combine(
                 x=grad_recv_x.to(torch.bfloat16), handle=ctx.handle,
-                topk_weights=grad_recv_topk_weights.float(),
-                async_finish=False, allocate_on_comm_stream=False
+                topk_weights=grad_recv_topk_weights.float() if grad_recv_topk_weights is not None else None,
+                previous_event=previous_event,
+                async_finish=ctx.async_finish, 
+                allocate_on_comm_stream=ctx.allocate_on_comm_stream
             )
+            
+            _sync_stream_if_async(ctx.async_finish, after_event)
+            
             grad_x = grad_x_combined.to(ctx.input_dtype)
             
             # If DeepEP returns gradients for token probs, use them
             if grad_token_probs is not None:
                 grad_topk_weights = grad_token_probs.to(ctx.input_dtype)
         
-        return grad_x, None, grad_topk_weights, None, None, None, None, None
+        return grad_x, None, grad_topk_weights, None, None, None, None, None, None, None
 
 
 class DeepEPCombine(torch.autograd.Function):
@@ -147,25 +185,60 @@ class DeepEPCombine(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, x, handle, buffer, topk_idx, topk_weights, num_tokens_per_rank,
-                num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert):
+                num_tokens_per_rdma_rank, is_token_in_rank, num_tokens_per_expert,
+                async_finish=True, allocate_on_comm_stream=True):
         """Combine tokens back to original ranks via buffer.combine()."""
-        combined, _, _ = buffer.combine(x=x.to(torch.bfloat16), handle=handle, async_finish=False, allocate_on_comm_stream=False)
-        ctx.handle, ctx.buffer, ctx.input_dtype = handle, buffer, x.dtype
+        previous_event = _create_event_if_async(async_finish)
+        
+        combined, _, after_event = buffer.combine(
+            x=x.to(torch.bfloat16), handle=handle,
+            previous_event=previous_event,
+            async_finish=async_finish, 
+            allocate_on_comm_stream=allocate_on_comm_stream
+        )
+        
+        _sync_stream_if_async(async_finish, after_event)
+        
+        # Save for backward
+        ctx.handle = handle
+        ctx.buffer = buffer
+        ctx.input_dtype = x.dtype
+        ctx.async_finish = async_finish
+        ctx.allocate_on_comm_stream = allocate_on_comm_stream
+        
         return combined
     
     @staticmethod
     def backward(ctx, grad_combined):
         """Reverse combine using buffer.dispatch()."""
-        grad_x, _, _, _, _, _ = ctx.buffer.dispatch(
+        previous_event = _create_event_if_async(ctx.async_finish)
+        
+        grad_x, _, _, _, _, after_event = ctx.buffer.dispatch(
             x=grad_combined.to(torch.bfloat16), topk_idx=None, topk_weights=None,
             num_tokens_per_rank=None, num_tokens_per_rdma_rank=None, is_token_in_rank=None,
-            num_tokens_per_expert=None, handle=ctx.handle, async_finish=False, allocate_on_comm_stream=False
+            num_tokens_per_expert=None, handle=ctx.handle,
+            previous_event=previous_event,
+            async_finish=ctx.async_finish, 
+            allocate_on_comm_stream=ctx.allocate_on_comm_stream
         )
-        return grad_x.to(ctx.input_dtype), None, None, None, None, None, None, None, None
+        
+        _sync_stream_if_async(ctx.async_finish, after_event)
+        
+        return grad_x.to(ctx.input_dtype), None, None, None, None, None, None, None, None, None, None
 
 
 class _DeepepManager:
-    """Low-level manager for DeepEP communication (dispatch/combine with permutation)."""
+    """
+    Low-level manager for DeepEP communication (dispatch/combine with permutation).
+    
+    Args:
+        num_local_experts: Number of experts on this rank
+        router_topk: Number of experts each token routes to
+        num_experts: Total number of experts across all ranks
+        hidden_dim: Hidden dimension size
+        async_finish: Enable async communication (recommended for PP+EP)
+        allocate_on_comm_stream: Use separate CUDA stream for communication
+    """
 
     def __init__(
         self,
@@ -173,14 +246,18 @@ class _DeepepManager:
         router_topk: int,
         num_experts: int,
         hidden_dim: int,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ):
-        if Buffer is None:
+        if not HAS_DEEPEP:
             raise ImportError("DeepEP is not installed. Install from https://github.com/deepseek-ai/deepep")
         
         self.num_local_experts = num_local_experts
         self.router_topk = router_topk
         self.num_experts = num_experts
         self.hidden_dim = hidden_dim
+        self.async_finish = async_finish
+        self.allocate_on_comm_stream = allocate_on_comm_stream
         self.token_indices: Optional[torch.Tensor] = None
         self.token_probs: Optional[torch.Tensor] = None
         self.handle = None
@@ -203,8 +280,7 @@ class _DeepepManager:
         
         self.token_indices = self.token_indices.masked_fill(self.token_probs == 0, -1)
 
-    def dispatch(self, hidden_states: torch.Tensor, group: ProcessGroup, 
-                 async_finish: bool = False, allocate_on_comm_stream: bool = False) -> torch.Tensor:
+    def dispatch(self, hidden_states: torch.Tensor, group: ProcessGroup) -> torch.Tensor:
         """Execute DeepEP dispatch (fused permute + all-to-all)."""
         if self.token_probs.dtype != torch.float32:
             if self.token_probs.dtype in [torch.bfloat16, torch.float16]:
@@ -221,6 +297,7 @@ class _DeepepManager:
                 hidden_states, self.token_indices, self.token_probs, buffer,
                 self.num_tokens_per_rank, self.num_tokens_per_rdma_rank,
                 self.is_token_in_rank, self.num_tokens_per_expert_dispatch,
+                self.async_finish, self.allocate_on_comm_stream,
             )
         
         return hidden_states
@@ -259,28 +336,45 @@ class _DeepepManager:
         """Reverse permutation to restore dispatch order."""
         return deepep_unpermute(hidden_states, self.reversed_mapping_for_combine, restore_shape=self.hidden_shape_before_permute)
 
-    def combine(self, hidden_states: torch.Tensor, group: ProcessGroup,
-                async_finish: bool = False, allocate_on_comm_stream: bool = False) -> torch.Tensor:
+    def combine(self, hidden_states: torch.Tensor, group: ProcessGroup) -> torch.Tensor:
         """Execute DeepEP combine (fused unpermute + all-to-all)."""
         buffer = get_deepep_buffer(group, self.hidden_dim * 2)
         hidden_states = DeepEPCombine.apply(
             hidden_states, self.handle, buffer, self.token_indices, self.token_probs,
             self.num_tokens_per_rank, self.num_tokens_per_rdma_rank,
             self.is_token_in_rank, self.num_tokens_per_expert_dispatch,
+            self.async_finish, self.allocate_on_comm_stream,
         )
         self.handle = None
         return hidden_states
 
 
 class MoEFlexTokenDispatcher:
-    """High-level token dispatcher interface using DeepEP for efficient MoE communication."""
+    """
+    High-level token dispatcher interface using DeepEP for efficient MoE communication.
+    
+    Provides async-enabled dispatch/combine operations for MoE layers. Default configuration
+    uses async communication which is critical for good PP+EP performance.
+    
+    Args:
+        num_local_experts: Number of experts on this rank
+        router_topk: Number of experts each token routes to
+        num_experts: Total number of experts across all ranks
+        hidden_dim: Hidden dimension size
+        async_finish: Enable async communication (default: True, recommended)
+        allocate_on_comm_stream: Use separate CUDA stream (default: True, recommended)
+    """
 
-    def __init__(self, num_local_experts: int, router_topk: int, num_experts: int, hidden_dim: int):
+    def __init__(self, num_local_experts: int, router_topk: int, num_experts: int, hidden_dim: int,
+                 async_finish: bool = True, allocate_on_comm_stream: bool = True):
         self.num_local_experts = num_local_experts
         self.router_topk = router_topk
         self.num_experts = num_experts
         self.hidden_dim = hidden_dim
-        self._comm_manager = _DeepepManager(num_local_experts, router_topk, num_experts, hidden_dim)
+        self._comm_manager = _DeepepManager(
+            num_local_experts, router_topk, num_experts, hidden_dim,
+            async_finish=async_finish, allocate_on_comm_stream=allocate_on_comm_stream
+        )
         self.hidden_shape: Optional[Tuple] = None
 
     def dispatch_preprocess(self, hidden_states: torch.Tensor, token_indices: torch.Tensor, 
@@ -291,10 +385,9 @@ class MoEFlexTokenDispatcher:
         self._comm_manager.setup_metadata(token_indices, token_probs)
         return hidden_states, self._comm_manager.token_probs
 
-    def token_dispatch(self, hidden_states: torch.Tensor, group: ProcessGroup, probs: torch.Tensor = None,
-                      async_finish: bool = False, allocate_on_comm_stream: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+    def token_dispatch(self, hidden_states: torch.Tensor, group: ProcessGroup, probs: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Execute fused dispatch (permute + all-to-all)."""
-        dispatched_states = self._comm_manager.dispatch(hidden_states, group, async_finish, allocate_on_comm_stream)
+        dispatched_states = self._comm_manager.dispatch(hidden_states, group)
         return dispatched_states, self._comm_manager.dispatched_probs
 
     def dispatch_postprocess(self, hidden_states: torch.Tensor, probs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -307,10 +400,9 @@ class MoEFlexTokenDispatcher:
         """Restore dispatch order before combine."""
         return self._comm_manager.get_restored_hidden_states_by_experts(hidden_states)
 
-    def token_combine(self, hidden_states: torch.Tensor, group: ProcessGroup,
-                     async_finish: bool = False, allocate_on_comm_stream: bool = False) -> torch.Tensor:
+    def token_combine(self, hidden_states: torch.Tensor, group: ProcessGroup) -> torch.Tensor:
         """Execute fused combine (unpermute + all-to-all)."""
-        return self._comm_manager.combine(hidden_states, group, async_finish, allocate_on_comm_stream)
+        return self._comm_manager.combine(hidden_states, group)
 
     def combine_postprocess(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Restore original shape."""
