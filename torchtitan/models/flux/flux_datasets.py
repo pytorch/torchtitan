@@ -342,15 +342,17 @@ def build_flux_dataloader(
         infinite=infinite,
     )
 
+    # Merge config kwargs with explicit args (explicit args take precedence)
+    dataloader_kwargs = {
+        **job_config.training.dataloader.kwargs,
+        "batch_size": batch_size,
+    }
+
     return ParallelAwareDataloader(
         dataset=ds,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        batch_size=batch_size,
-        num_workers=job_config.training.dataloader.num_workers,
-        persistent_workers=job_config.training.dataloader.persistent_workers,
-        prefetch_factor=job_config.training.dataloader.prefetch_factor,
-        pin_memory=job_config.training.dataloader.pin_memory,
+        **dataloader_kwargs,
     )
 
 
@@ -442,13 +444,15 @@ def build_flux_validation_dataloader(
         infinite=infinite,
     )
 
+    # Merge config kwargs with explicit args (explicit args take precedence)
+    dataloader_kwargs = {
+        **job_config.validation.dataloader.kwargs,
+        "batch_size": batch_size,
+    }
+
     return ParallelAwareDataloader(
-        dataset=ds,
+        ds,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        batch_size=batch_size,
-        num_workers=job_config.validation.dataloader.num_workers,
-        persistent_workers=job_config.validation.dataloader.persistent_workers,
-        prefetch_factor=job_config.validation.dataloader.prefetch_factor,
-        pin_memory=job_config.validation.dataloader.pin_memory,
+        **dataloader_kwargs,
     )

@@ -6,15 +6,16 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import inspect
 import pickle
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from typing import Any
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.tools.logging import logger
+
 
 # NOTE: This class deliberately inherits from `Exception` and not `StopIteration`.
 # According to PEP 479, raising a `StopIteration` or its subclass from within a
@@ -53,46 +54,58 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         dataset (IterableDataset): The dataset to iterate over.
         dp_rank: Data parallelism rank for this dataloader.
         dp_world_size: The world size of the data parallelism.
-        batch_size: The batch size to use for each iteration.
-        collate_fn (Callable, optional): A function that takes a list of samples from the
-            dataset and collates them into a batch. Defaults to ``None``.
-        num_workers: Number of worker processes for data loading. Defaults to 0.
-        persistent_workers: If True, keep workers alive between dataset iterations.
-            Only applicable when num_workers > 0. Defaults to False.
-        prefetch_factor: Number of batches to prefetch per worker. Only applicable
-            when num_workers > 0. Defaults to None (uses PyTorch default of 2).
-        pin_memory: If True, copy tensors to CUDA pinned memory. Defaults to False.
+        **kwargs: Additional keyword arguments passed to StatefulDataLoader (e.g.,
+            batch_size, collate_fn, num_workers, persistent_workers, prefetch_factor,
+            pin_memory).
     """
 
     dp_rank: int
     dp_world_size: int
-    batch_size: int | None
 
     def __init__(
         self,
         dataset: IterableDataset,
         dp_rank: int,
         dp_world_size: int,
-        batch_size: int,
-        collate_fn: Callable | None = None,
-        num_workers: int = 0,
-        persistent_workers: bool = False,
-        prefetch_factor: int | None = None,
-        pin_memory: bool = False,
+        **kwargs,
     ):
+        self._validate_kwargs(kwargs)
+
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
-        self.batch_size = batch_size
-        super().__init__(
-            dataset,
-            batch_size,
-            collate_fn=collate_fn,
-            num_workers=num_workers,
-            persistent_workers=persistent_workers,
-            prefetch_factor=prefetch_factor,
-            pin_memory=pin_memory,
-        )
         self._rank_id = f"dp_rank_{dp_rank}"
+
+        super().__init__(dataset, **kwargs)
+
+    @classmethod
+    def _get_valid_dataloader_kwargs(cls) -> frozenset[str]:
+        """Get valid kwargs from StatefulDataLoader's signature using inspect."""
+        sig = inspect.signature(StatefulDataLoader.__init__)
+        # Exclude 'self' and 'dataset' (which we handle explicitly)
+        return frozenset(
+            name for name in sig.parameters.keys() if name not in ("self", "dataset")
+        )
+
+    @classmethod
+    def _validate_kwargs(cls, kwargs: dict[str, Any]) -> None:
+        """Validate kwargs passed to the dataloader.
+
+        Raises:
+            ValueError: If 'dataset' is in kwargs or if any invalid kwargs are passed.
+        """
+        if "dataset" in kwargs:
+            raise ValueError(
+                "'dataset' should not be passed in kwargs; "
+                "it must be provided as the first positional argument."
+            )
+
+        valid_kwargs = cls._get_valid_dataloader_kwargs()
+        invalid_kwargs = set(kwargs.keys()) - valid_kwargs
+        if invalid_kwargs:
+            raise ValueError(
+                f"Invalid dataloader kwargs: {invalid_kwargs}. "
+                f"Valid kwargs are: {sorted(valid_kwargs)}"
+            )
 
     def state_dict(self) -> dict[str, Any]:
         # Store state only for dp rank to avoid replicating the same state across other dimensions.
