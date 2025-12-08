@@ -4,12 +4,12 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'torchtitan/experiments/auto_parallel/**'
-      - '.github/workflows/integration_test_8gpu_auto_parallel.yaml'
+      - 'torchtitan/experiments/autoparallel/**'
+      - '.github/workflows/integration_test_8gpu_autoparallel.yaml'
   pull_request:
     paths:
-      - 'torchtitan/experiments/auto_parallel/**'
-      - '.github/workflows/integration_test_8gpu_auto_parallel.yaml'
+      - 'torchtitan/experiments/autoparallel/**'
+      - '.github/workflows/integration_test_8gpu_autoparallel.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -49,8 +49,8 @@ jobs:
 
         python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
 
-        # Install autoparallel - required dependency for auto_parallel experiment
+        # Install autoparallel - required dependency for autoparallel experiment
         python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
 
         mkdir artifacts-to-be-uploaded
-        python -m torchtitan.experiments.auto_parallel.tests.integration_tests artifacts-to-be-uploaded --ngpu 4
+        python -m torchtitan.experiments.autoparallel.tests.integration_tests artifacts-to-be-uploaded --ngpu 4
