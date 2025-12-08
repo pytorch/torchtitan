@@ -435,6 +435,7 @@ def _build_flux_dataloader(
     include_sample_id: bool = False,
     batch_size: int = 4,
     subset_size: int | None = None,
+    dropout_prob: float = 0.0,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets."""
     if job_config.encoder.t5_encoder and job_config.encoder.clip_encoder:
@@ -453,6 +454,7 @@ def _build_flux_dataloader(
         infinite=infinite,
         include_sample_id=include_sample_id,
         subset_size=subset_size,
+        dropout_prob=dropout_prob,
     )
 
     return ParallelAwareDataloader(
