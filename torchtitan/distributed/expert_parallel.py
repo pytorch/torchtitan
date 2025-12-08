@@ -295,19 +295,20 @@ class ExpertParallelDeepEP(ParallelStyle):
         # annotate module input placements/sharding with input_layouts
         routed_input, num_tokens_per_expert = inputs
 
-        # NOTE(phuc): routed_prob is now automatically stored in the dispatcher
-        # (permuted_probs_for_combine) and used by fused weighted combine.
-        # We no longer need to pass it to GroupedExperts.forward().
-        routed_input, _routed_prob = mod.deepep_dispatcher.token_dispatch(
+        routed_input, routed_prob = mod.deepep_dispatcher.token_dispatch(
             routed_input, group=device_mesh.get_group()
         )
         (
             routed_input,
             num_tokens_per_expert,
-            _routed_prob,  # Stored in dispatcher for fused weighted combine
+            routed_prob,
         ) = mod.deepep_dispatcher.dispatch_postprocess(routed_input, None)
 
-        return routed_input, num_tokens_per_expert
+        # NOTE: routed_prob is returned and passed to GroupedExperts.forward().
+        # When fused_weighted_scatter_add=True, probs are also stored in dispatcher
+        # for use in unpermute(). When False, GroupedExperts.forward() handles
+        # the multiplication directly.
+        return routed_input, num_tokens_per_expert, routed_prob
 
     @staticmethod
     def _partition_fn(name, mod, device_mesh):

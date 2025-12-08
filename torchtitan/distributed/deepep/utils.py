@@ -42,6 +42,15 @@ def permute(
     return permuted_input, permuted_probs, sorted_indices
 
 
+@torch.compiler.disable
+def _fused_weighted_scatter_add(output, indices, values, weights):
+    """Wrapper to prevent torch.compile from tracing through Triton kernel.
+
+    Must be defined at module level (not nested) to work with torch.compile.
+    """
+    return fused_weighted_scatter_add(output, indices, values, weights)
+
+
 @torch.compile(fullgraph=True)
 def unpermute(
     permuted_tokens: torch.Tensor,
@@ -62,12 +71,6 @@ def unpermute(
     Returns:
         output_tokens: Tokens in original order [num_tokens, hidden]
     """
-
-    @torch.compiler.disable
-    def _fused_weighted_scatter_add(output, indices, values, weights):
-        """Wrapper to prevent torch.compile from tracing through Triton kernel."""
-        return fused_weighted_scatter_add(output, indices, values, weights)
-
     _, hidden = restore_shape
     input_dtype = permuted_tokens.dtype
 
