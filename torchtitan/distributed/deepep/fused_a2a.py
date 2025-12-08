@@ -5,6 +5,48 @@ from deep_ep.utils import EventHandle, EventOverlap
 _buffer = None
 
 
+def _sync_comm_stream(buffer: Buffer) -> None:
+    """Synchronize the DeepEP comm stream with the current (default) stream.
+
+    This function implements explicit event-based synchronization between
+    DeepEP's internal communication stream and the current CUDA stream.
+
+    Why this is needed:
+        The standard deep_ep.Buffer uses a SEPARATE communication stream
+        for dispatch/combine operations. The primus_turbo fork has a parameter
+        `use_default_stream_as_comm_stream=True` that makes all ops run on the
+        default stream, but our deep_ep version lacks this parameter.
+
+    Without this fix:
+        Race conditions can occur between consecutive DeepEP ops.
+        Symptoms observed:
+        - 1x small batch → full batch: grad_norm 10.39x explosion
+        - 2-6x small batches → full batch: NaN gradients
+        - 10x small batches → full batch: 1.00x OK (by random timing!)
+        The cyclic behavior proves it's a stream sync issue, not data corruption.
+
+    Why torch.cuda.synchronize() alone is not enough:
+        synchronize() waits for ALL streams, but doesn't establish proper
+        ordering between the comm stream and current stream for subsequent ops.
+
+    The fix:
+        1. Get DeepEP's internal comm stream via buffer.get_comm_stream()
+        2. Record a CUDA event on the comm stream (marks completion point)
+        3. Make current stream wait for that event (establishes ordering)
+        4. Full device sync as final safety barrier
+
+    Performance note:
+        This adds overhead. For optimal perf, either:
+        - Fork DeepEP and add use_default_stream_as_comm_stream support
+        - Use primus_turbo's DeepEP directly
+    """
+    comm_stream = buffer.get_comm_stream()
+    event = torch.cuda.Event()
+    event.record(comm_stream)
+    torch.cuda.current_stream().wait_event(event)
+    torch.cuda.synchronize()
+
+
 def get_hidden_bytes(x: torch.Tensor) -> int:
     """Calculate the number of hidden bytes for a tensor.
     Args:
@@ -68,6 +110,7 @@ class FusedDispatch(torch.autograd.Function):
         allocate_on_comm_stream=False,
         use_cuda_num_token_per_expert: bool = False,
         num_worst_tokens: int = 0,
+        sync_comm_stream: bool = False,
     ):
         """Forward pass of fused dispatch."""
         previous_event = None
@@ -124,45 +167,18 @@ class FusedDispatch(torch.autograd.Function):
         if async_finish:
             after_event_overlap.current_stream_wait()
 
-        # WORKAROUND: DeepEP communication stream synchronization
-        # ============================================================
-        # PROBLEM: The standard deep_ep.Buffer uses a SEPARATE communication stream
-        # for dispatch/combine operations. The primus_turbo fork has a parameter
-        # `use_default_stream_as_comm_stream=True` that makes all ops run on the
-        # default stream, but our deep_ep version lacks this parameter.
-        #
-        # WITHOUT THIS FIX: Race conditions occur between consecutive DeepEP ops.
-        # Symptoms observed:
-        #   - 1x small batch → full batch: grad_norm 10.39x explosion
-        #   - 2-6x small batches → full batch: NaN gradients
-        #   - 10x small batches → full batch: 1.00x OK (by random timing!)
-        # The cyclic behavior proves it's a stream sync issue, not data corruption.
-        #
-        # WHY torch.cuda.synchronize() ALONE IS NOT ENOUGH:
-        # synchronize() waits for ALL streams, but doesn't establish proper
-        # ordering between the comm stream and current stream for subsequent ops.
-        #
-        # THE FIX: Explicit event-based synchronization:
-        #   1. Get DeepEP's internal comm stream via buffer.get_comm_stream()
-        #   2. Record a CUDA event on the comm stream (marks completion point)
-        #   3. Make current stream wait for that event (establishes ordering)
-        #   4. Full device sync as final safety barrier
-        #
-        # PERFORMANCE NOTE: This adds overhead. For optimal perf, either:
-        #   - Fork DeepEP and add use_default_stream_as_comm_stream support
-        #   - Use primus_turbo's DeepEP directly
-        # ============================================================
-        # comm_stream = buffer.get_comm_stream()
-        # event = torch.cuda.Event()
-        # event.record(comm_stream)
-        # torch.cuda.current_stream().wait_event(event)
-        # torch.cuda.synchronize()
+        # Optional: DeepEP communication stream synchronization
+        # Enabled via deepep.sync_comm_stream config
+        # See _sync_comm_stream() docstring for details on why this may be needed
+        if sync_comm_stream:
+            _sync_comm_stream(buffer)
 
         # Save for backward
         ctx.group = group
         ctx.handle = handle
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
+        ctx.sync_comm_stream = sync_comm_stream
 
         # WORKAROUND (phuc): for local DeepEP without num_recv_tokens_per_expert_as_cuda support:
         # The local DeepEP always returns num_recv_tokens_per_expert_list as a Python list.
@@ -220,14 +236,11 @@ class FusedDispatch(torch.autograd.Function):
         if ctx.async_finish:
             after_event.current_stream_wait()
 
-        # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
-        # comm_stream = buffer.get_comm_stream()
-        # event = torch.cuda.Event()
-        # event.record(comm_stream)
-        # torch.cuda.current_stream().wait_event(event)
-        # torch.cuda.synchronize()
+        # Optional: DeepEP communication stream synchronization
+        if ctx.sync_comm_stream:
+            _sync_comm_stream(buffer)
 
-        return grad_x, None, grad_token_probs, None, None, None, None, None, None
+        return grad_x, None, grad_token_probs, None, None, None, None, None, None, None
 
 
 class FusedCombine(torch.autograd.Function):
@@ -241,14 +254,12 @@ class FusedCombine(torch.autograd.Function):
         handle,
         async_finish=False,
         allocate_on_comm_stream=False,
-        expert_weights=None,
+        sync_comm_stream: bool = False,
     ):
         """Forward pass of fused combine.
 
         Args:
-            expert_weights: Optional per-token weights for fused weighted combine.
-                           When provided, performs: y = Σ(x_i * weight_i) instead of y = Σ(x_i)
-                           This fuses the routing probability multiplication into the combine kernel.
+            sync_comm_stream: Whether to sync comm stream after combine operation.
         """
         previous_event = None
         if async_finish:
@@ -260,33 +271,25 @@ class FusedCombine(torch.autograd.Function):
             async_finish=async_finish,
             previous_event=previous_event,
             allocate_on_comm_stream=allocate_on_comm_stream,
-            expert_weights=expert_weights,  # Pass to fused weighted combine
         )
         # Make sure current stream is synchronized
         if async_finish:
             after_event.current_stream_wait()
 
-        # # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
-        # comm_stream = buffer.get_comm_stream()
-        # event = torch.cuda.Event()
-        # event.record(comm_stream)
-        # torch.cuda.current_stream().wait_event(event)
-        # torch.cuda.synchronize()
+        # Optional: DeepEP communication stream synchronization
+        if sync_comm_stream:
+            _sync_comm_stream(buffer)
 
         ctx.handle = handle
         ctx.group = group
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
-        ctx.expert_weights = expert_weights  # Save for backward (weighted dispatch)
+        ctx.sync_comm_stream = sync_comm_stream
         return combined_x, None
 
     @staticmethod
     def backward(ctx, grad_output, previous_event=None):
-        """Backward pass of fused combine.
-
-        Uses fused weighted dispatch when expert_weights were provided in forward.
-        This computes: grad_x = dispatch(grad_y) * weight (fused in kernel)
-        """
+        """Backward pass of fused combine."""
         previous_event = None
         if ctx.async_finish:
             previous_event = EventOverlap(EventHandle())
@@ -297,18 +300,14 @@ class FusedCombine(torch.autograd.Function):
             previous_event=previous_event,
             async_finish=ctx.async_finish,
             allocate_on_comm_stream=ctx.allocate_on_comm_stream,
-            expert_weights=ctx.expert_weights,  # Fused weighted dispatch for backward
         )
         # Make sure current stream is synchronized
         if ctx.async_finish:
             after_event.current_stream_wait()
 
-        # # WORKAROUND: DeepEP comm stream sync (see FusedDispatch.forward for details)
-        # comm_stream = buffer.get_comm_stream()
-        # event = torch.cuda.Event()
-        # event.record(comm_stream)
-        # torch.cuda.current_stream().wait_event(event)
-        # torch.cuda.synchronize()
+        # Optional: DeepEP communication stream synchronization
+        if ctx.sync_comm_stream:
+            _sync_comm_stream(buffer)
 
         return (
             grad_x,
@@ -317,7 +316,7 @@ class FusedCombine(torch.autograd.Function):
             None,
             None,
             None,
-        )  # Added None for expert_weights grad
+        )  # None for: group, handle, async_finish, allocate_on_comm_stream, sync_comm_stream
 
 
 def fused_dispatch(
@@ -330,6 +329,7 @@ def fused_dispatch(
     allocate_on_comm_stream=False,
     use_cuda_num_token_per_expert: bool = False,
     num_worst_tokens: int = 0,
+    sync_comm_stream: bool = False,
 ):
     """Perform fused dispatch operation if deep_ep is available.
     Args:
@@ -338,7 +338,7 @@ def fused_dispatch(
         token_probs: Token routing probabilities [num_tokens, topk]
         num_experts: Number of experts
         group: Process group
-        previous_event: Previous CUDA event
+        sync_comm_stream: Whether to sync comm stream after dispatch operation
     Returns:
         Result of FusedDispatch
     """
@@ -352,6 +352,7 @@ def fused_dispatch(
         allocate_on_comm_stream,
         use_cuda_num_token_per_expert,
         num_worst_tokens,
+        sync_comm_stream,
     )
 
 
@@ -361,7 +362,7 @@ def fused_combine(
     handle,
     async_finish=False,
     allocate_on_comm_stream=False,
-    expert_weights=None,
+    sync_comm_stream: bool = False,
 ):
     """Perform fused combine operation if deep_ep is available.
     Args:
@@ -370,13 +371,17 @@ def fused_combine(
         handle: Communication handle
         async_finish: Whether to finish asynchronously
         allocate_on_comm_stream: Whether to allocate on comm stream
-        expert_weights: Optional per-token weights for fused weighted combine.
-                       When provided, performs: y = Σ(x_i * weight_i) instead of y = Σ(x_i)
+        sync_comm_stream: Whether to sync comm stream after combine operation
     Returns:
         Result of FusedCombine
     """
     return FusedCombine.apply(
-        x, group, handle, async_finish, allocate_on_comm_stream, expert_weights
+        x,
+        group,
+        handle,
+        async_finish,
+        allocate_on_comm_stream,
+        sync_comm_stream,
     )
 
 

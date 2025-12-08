@@ -292,14 +292,6 @@ class ExpertParallelDeepEP(ParallelStyle):
 
     # performing all-to-all dispatch on the input
     def _token_dispatch(self, mod, inputs, device_mesh):
-        # DEBUG: Verify _token_dispatch is being called
-        import torch.distributed as dist
-
-        if dist.is_initialized() and dist.get_rank() == 0:
-            print(
-                f"[DEBUG _token_dispatch] CALLED! mod={type(mod).__name__}, has_dispatcher={hasattr(mod, 'deepep_dispatcher')}"
-            )
-
         # annotate module input placements/sharding with input_layouts
         routed_input, num_tokens_per_expert = inputs
 
