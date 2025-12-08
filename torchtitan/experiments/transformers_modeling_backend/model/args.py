@@ -179,6 +179,7 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         self.mlp_bias = False
         self.use_cache = False
         self.initializer_range = 1.0  # use as std for normal init in embedding
+        self.tie_word_embeddings = job_config.hf_transformers.tie_word_embeddings
 
         if not hasattr(self, "inter_dim"):  # Only for llama model
             ffn_hidden_size = 4 * self.dim
