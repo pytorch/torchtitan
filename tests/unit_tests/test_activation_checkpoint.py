@@ -88,7 +88,6 @@ class TestApplyAC(unittest.TestCase):
             model_selective_ac,
             ac_config_no_force,
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
         flops_selective_ac = get_bw_flops(model_selective_ac)
@@ -106,7 +105,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_force_first,
             ac_config_with_force_first,
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
         flops_with_force_first = get_bw_flops(model_with_force_first)
@@ -123,7 +121,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_force_last,
             ac_config_with_force_last,
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
         flops_with_force_last = get_bw_flops(model_with_force_last)
@@ -138,7 +135,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_full_ac,
             ac_config_full_ac,
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
         flops_full_ac = get_bw_flops(model_with_full_ac)
@@ -181,7 +177,6 @@ class TestApplyAC(unittest.TestCase):
             model_selective_ac,
             ac_config_no_force,
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
         mem_selective_ac = get_act_mem(model_selective_ac)
@@ -198,7 +193,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_force_first,
             ac_config_with_force_first,
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
         mem_with_force_first = get_act_mem(model_with_force_first)
@@ -214,7 +208,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_force_last,
             ac_config_with_force_last,
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
         mem_with_force_last = get_act_mem(model_with_force_last)
@@ -228,7 +221,6 @@ class TestApplyAC(unittest.TestCase):
             model_with_full_ac,
             ac_config_full_ac,
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
         mem_full_ac = get_act_mem(model_with_full_ac)
@@ -255,7 +247,6 @@ class TestApplyAC(unittest.TestCase):
                 per_op_sac_force_recompute_mm_shapes_by_fqns=[],
             ),
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
         model_force_first = ToyModule()
@@ -268,7 +259,6 @@ class TestApplyAC(unittest.TestCase):
                 per_op_sac_force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
             ),
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
 
@@ -282,7 +272,6 @@ class TestApplyAC(unittest.TestCase):
                 per_op_sac_force_recompute_mm_shapes_by_fqns=["output"],
             ),
             model_compile_enabled=False,
-            use_flex_attn=False,
             op_sac_save_list=_op_sac_save_list,
         )
 

@@ -58,13 +58,11 @@ def parallelize_vlm(
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
-    use_flex_attn = attn_type == "flex"
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
         )
         apply_ac(model.encoder, job_config.activation_checkpoint)

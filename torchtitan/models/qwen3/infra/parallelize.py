@@ -47,6 +47,7 @@ _op_sac_save_list = {
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
     torch.ops.torch_attn._varlen_attn.default,
+    torch._higher_order_ops.inductor_compiled_code,
 }
 
 
@@ -116,7 +117,6 @@ def parallelize_qwen3(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=attn_type == "flex",
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
