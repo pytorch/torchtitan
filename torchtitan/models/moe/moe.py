@@ -13,8 +13,8 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.deepep.fused_activation import fused_silu_gate_prob
-
 from torchtitan.distributed.deepep.utils import DeepEPTokenDispatcher
+from torchtitan.tools.logging import logger
 
 from .utils import indices_padding_wrapper
 
@@ -48,6 +48,69 @@ class MoEArgs:
     # DeepEP configuration (set from job_config.deepep)
     # Type is Any to avoid import cycle, runtime type is DeepEP | None
     deepep_config: Any = None
+
+    def validate_deepep_config(self) -> None:
+        """Validate DeepEP configuration consistency.
+
+        Should be called after deepep_config is set in model args' update_from_config.
+        Raises ValueError if configuration is invalid.
+        """
+        if self.deepep_config is None:
+            return
+
+        # Validate fused_silu_gate_prob
+        if self.deepep_config.fused_silu_gate_prob:
+            if not self.use_deepep:
+                raise ValueError(
+                    "fused_silu_gate_prob requires use_deepep=True in the model config."
+                )
+            if self.score_before_experts:
+                raise ValueError(
+                    "fused_silu_gate_prob cannot be enabled when score_before_experts=True. "
+                    "The fused kernel applies routing probabilities inside the activation, "
+                    "which is incompatible with score_before_experts."
+                )
+
+        # Validate fused_weighted_scatter_add
+        if self.deepep_config.fused_weighted_scatter_add:
+            if not self.use_deepep:
+                raise ValueError(
+                    "fused_weighted_scatter_add requires use_deepep=True in the model config."
+                )
+            if self.score_before_experts:
+                raise ValueError(
+                    "fused_weighted_scatter_add cannot be enabled when score_before_experts=True. "
+                    "The fused kernel applies routing probabilities in scatter_add, "
+                    "which is incompatible with score_before_experts."
+                )
+
+        # Mutual exclusion: can't enable both fused kernels
+        if (
+            self.deepep_config.fused_silu_gate_prob
+            and self.deepep_config.fused_weighted_scatter_add
+        ):
+            raise ValueError(
+                "Cannot enable both fused_silu_gate_prob and fused_weighted_scatter_add. "
+                "Choose one: fused_silu_gate_prob applies probs in activation (before w2), "
+                "fused_weighted_scatter_add applies probs in scatter_add (after experts)."
+            )
+
+        # Log enabled DeepEP optimizations
+        if self.use_deepep:
+            enabled_opts = []
+            if self.deepep_config.fused_silu_gate_prob:
+                enabled_opts.append("fused_silu_gate_prob")
+            if self.deepep_config.fused_weighted_scatter_add:
+                enabled_opts.append("fused_weighted_scatter_add")
+            if self.deepep_config.sync_comm_stream:
+                enabled_opts.append("sync_comm_stream")
+
+            if enabled_opts:
+                logger.info(
+                    f"[DeepEP optimizations] enabled: {', '.join(enabled_opts)}"
+                )
+            else:
+                logger.info("[DeepEP optimizations] enabled: none (using defaults)")
 
 
 # can be used as dense FFN layer or shared experts in MoE layers
@@ -125,6 +188,8 @@ def _run_experts_grouped_mm(
     w3: torch.Tensor,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
+    routed_prob: torch.Tensor | None = None,
+    use_fused_silu_gate_prob: bool = False,
 ) -> torch.Tensor:
     """
     Run grouped matrix multiplication for MoE experts with SwiGLU activation.
@@ -135,23 +200,44 @@ def _run_experts_grouped_mm(
         w3: Gate expert weights [num_experts, hidden_dim, dim]
         x: Input tensor [total_tokens, dim]
         num_tokens_per_expert: Number of tokens per expert [num_experts]
+        routed_prob: Routing probabilities [total_tokens] (optional, for fused kernel)
+        use_fused_silu_gate_prob: Whether to use fused Triton kernel
 
     Returns:
         Output tensor [total_tokens, dim]
 
     Note:
-        Routing probability multiplication is now handled by fused weighted combine
-        in the DeepEP kernel, not here. See buffer.combine(expert_weights=prob).
+        When use_fused_silu_gate_prob=True, the routing probability is fused into
+        the activation computation: out = silu(x@w1) * (x@w3) * prob @ w2
+        This provides ~3.5x speedup but applies prob BEFORE w2 (vs after in unfused).
     """
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
-    h = F.silu(
-        torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
-    )
-    h = h * torch._grouped_mm(
-        x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
-    )
-    out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
+    if use_fused_silu_gate_prob and routed_prob is not None:
+        # Fused path: silu(x@w1) * (x@w3) * prob in one Triton kernel
+        x1 = torch._grouped_mm(
+            x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        x3 = torch._grouped_mm(
+            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        h = fused_silu_gate_prob(x1, x3, routed_prob.reshape(-1, 1))
+        out = torch._grouped_mm(
+            h, w2.bfloat16().transpose(-2, -1), offs=offsets
+        ).type_as(x)
+    else:
+        # Original unfused path (unchanged)
+        h = F.silu(
+            torch._grouped_mm(
+                x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
+            )
+        )
+        h = h * torch._grouped_mm(
+            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        out = torch._grouped_mm(
+            h, w2.bfloat16().transpose(-2, -1), offs=offsets
+        ).type_as(x)
 
     return out
 
@@ -166,6 +252,7 @@ class GroupedExperts(nn.Module):
         deepep_dispatcher: DeepEPTokenDispatcher = None,
         score_before_experts: bool = False,
         use_fused_weighted_scatter: bool = True,
+        use_fused_silu_gate_prob: bool = False,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -182,6 +269,9 @@ class GroupedExperts(nn.Module):
         # When True and score_before_experts=False, skip multiplication here and do it
         # in unpermute via fused_weighted_scatter_add kernel (2-3x faster)
         self.use_fused_weighted_scatter = use_fused_weighted_scatter
+        # When True, use fused Triton kernel for silu(x@w1) * (x@w3) * prob (~3.5x faster)
+        # Only effective when score_before_experts=False and DeepEP is enabled
+        self.use_fused_silu_gate_prob = use_fused_silu_gate_prob
 
     def forward(
         self,
@@ -215,6 +305,15 @@ class GroupedExperts(nn.Module):
         ):
             x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
 
+        # Determine if we should use fused silu-gate-prob kernel
+        # Only when: DeepEP enabled, score_before_experts=False, and config enabled
+        should_use_fused_silu = (
+            self.use_fused_silu_gate_prob
+            and self.deepep_dispatcher is not None
+            and routed_prob is not None
+            and not self.score_before_experts
+        )
+
         if self.use_grouped_mm:
             # NOTE: If EP is not used, we need to pad the indices
             #       to prepare for grouped_mm;
@@ -227,17 +326,32 @@ class GroupedExperts(nn.Module):
             else:
                 run_experts_fn = _run_experts_grouped_mm
 
-            out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+            if should_use_fused_silu:
+                # Fused path: prob multiplication happens inside the Triton kernel
+                out = run_experts_fn(
+                    w1,
+                    w2,
+                    w3,
+                    x,
+                    num_tokens_per_expert,
+                    routed_prob=routed_prob,
+                    use_fused_silu_gate_prob=True,
+                )
+            else:
+                # Original unfused path
+                out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
         else:
             out = _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
         # Apply routing scores AFTER expert computation if score_before_experts=False
         # Skip if use_fused_weighted_scatter=True (will be done in unpermute instead)
+        # Skip if use_fused_silu_gate_prob=True (already done in fused kernel)
         if (
             self.deepep_dispatcher is not None
             and routed_prob is not None
             and not self.score_before_experts
             and not self.use_fused_weighted_scatter
+            and not should_use_fused_silu
         ):
             out = (out.to(torch.float32) * routed_prob.reshape(-1, 1)).to(out.dtype)
 
@@ -494,11 +608,13 @@ class MoE(nn.Module):
 
         # Determine use_fused_weighted_scatter from config
         # Only relevant when DeepEP is enabled and score_before_experts=False
-        use_fused_weighted_scatter = True  # default
+        use_fused_weighted_scatter = False  # default
+        use_fused_silu_gate_prob = False  # default
         if self.use_deepep and moe_args.deepep_config is not None:
             use_fused_weighted_scatter = (
                 moe_args.deepep_config.fused_weighted_scatter_add
             )
+            use_fused_silu_gate_prob = moe_args.deepep_config.fused_silu_gate_prob
 
         self.experts = GroupedExperts(
             dim=dim,
@@ -513,6 +629,7 @@ class MoE(nn.Module):
             # expert computation when routed_prob is passed to forward()
             score_before_experts=moe_args.score_before_experts,
             use_fused_weighted_scatter=use_fused_weighted_scatter,
+            use_fused_silu_gate_prob=use_fused_silu_gate_prob,
         )
         self.router = TokenChoiceTopKRouter(
             dim=dim,

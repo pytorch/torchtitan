@@ -79,9 +79,9 @@ class Qwen3NextModelArgs(BaseModelArgs):
             job_config.training.debug_moe_force_load_balance
         )
 
-        # Pass DeepEP config to MoE layer only when DeepEP is enabled
-        if self.moe_args.use_deepep:
-            self.moe_args.deepep_config = job_config.deepep
+        # Pass DeepEP config to MoE layer and validate
+        self.moe_args.deepep_config = job_config.deepep
+        self.moe_args.validate_deepep_config()
 
         if self.layer_types == []:
             self.layer_types = [
