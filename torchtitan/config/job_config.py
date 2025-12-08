@@ -481,6 +481,20 @@ class DeepEP:
     expert computation (original behavior).
     """
 
+    fused_silu_gate_prob: bool = False
+    """
+    Whether to use fused SiLU-Gate-Prob Triton kernel for expert computation.
+
+    When enabled, fuses silu(x@w1) * (x@w3) * prob into a single Triton kernel,
+    providing ~3.5x speedup over separate operations. Requires score_before_experts=False.
+
+    The kernel computes intermediates in float32 for numerical stability,
+    with bfloat16 input/output.
+
+    Note: This may cause ~0.15% gradient difference compared to unfused version
+    due to different operation ordering (prob applied before w2 matmul vs after).
+    """
+
 
 @dataclass
 class Checkpoint:
