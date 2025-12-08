@@ -451,6 +451,38 @@ class Parallelism:
 
 
 @dataclass
+class DeepEP:
+    """Configuration for DeepEP (Deep Expert Parallelism) MoE communication.
+
+    DeepEP provides optimized all-to-all communication for MoE token dispatch/combine.
+    These settings only take effect when model.use_deepep is enabled.
+    """
+
+    sync_comm_stream: bool = False
+    """
+    Whether to synchronize the DeepEP communication stream with the default CUDA stream.
+
+    DeepEP uses a separate communication stream for dispatch/combine operations. Without sync (default): Better performance, but may cause race conditions if the
+    DeepEP version doesn't properly synchronize streams internally.
+
+    With sync enabled: Adds explicit CUDA event-based synchronization between the
+    comm stream and default stream after each dispatch/combine operation.
+    """
+
+    fused_weighted_scatter_add: bool = False
+    """
+    Whether to use fused weighted scatter_add kernel for combining expert outputs.
+
+    When enabled (default) and score_before_experts=False, the routing probability
+    multiplication is fused into the scatter_add operation in unpermute, providing
+    2-3x speedup over separate multiply + scatter_add.
+
+    When disabled, the multiplication happens in GroupedExperts.forward() after
+    expert computation (original behavior).
+    """
+
+
+@dataclass
 class Checkpoint:
     enable: bool = False
     """Whether to enable checkpoint"""
@@ -1024,6 +1056,7 @@ class JobConfig:
     lr_scheduler: LRScheduler = field(default_factory=LRScheduler)
     training: Training = field(default_factory=Training)
     parallelism: Parallelism = field(default_factory=Parallelism)
+    deepep: DeepEP = field(default_factory=DeepEP)
     checkpoint: Checkpoint = field(default_factory=Checkpoint)
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint

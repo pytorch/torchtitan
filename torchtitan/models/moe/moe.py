@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
@@ -44,7 +44,10 @@ class MoEArgs:
 
     # use deepep and fused all-to-all communication
     use_deepep: bool = False
-    # if True, we force each experts get same amount of token via round-robin
+
+    # DeepEP configuration (set from job_config.deepep)
+    # Type is Any to avoid import cycle, runtime type is DeepEP | None
+    deepep_config: Any = None
 
 
 # can be used as dense FFN layer or shared experts in MoE layers
@@ -162,6 +165,7 @@ class GroupedExperts(nn.Module):
         use_grouped_mm: bool,
         deepep_dispatcher: DeepEPTokenDispatcher = None,
         score_before_experts: bool = False,
+        use_fused_weighted_scatter: bool = True,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -175,17 +179,22 @@ class GroupedExperts(nn.Module):
         # with the input/output. This flag controls whether to apply the scaling before or after
         # the expert computation. See torchtitan-amd implementation for reference.
         self.score_before_experts = score_before_experts
+        # When True and score_before_experts=False, skip multiplication here and do it
+        # in unpermute via fused_weighted_scatter_add kernel (2-3x faster)
+        self.use_fused_weighted_scatter = use_fused_weighted_scatter
 
     def forward(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
+        routed_prob: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass through grouped experts.
 
-        Note: Routing probability multiplication is now handled by fused weighted
-        combine in the DeepEP kernel (buffer.combine with expert_weights parameter),
-        not here. This provides ~1.57x speedup over separate multiply + combine.
+        Args:
+            x: Input tensor [num_routed_tokens, hidden]
+            num_tokens_per_expert: Number of tokens per expert [num_experts]
+            routed_prob: Routing probabilities [num_routed_tokens] (optional, for DeepEP)
         """
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
@@ -197,6 +206,14 @@ class GroupedExperts(nn.Module):
             w1 = self.w1
             w2 = self.w2
             w3 = self.w3
+
+        # Apply routing scores BEFORE expert computation if score_before_experts=True
+        if (
+            self.deepep_dispatcher is not None
+            and routed_prob is not None
+            and self.score_before_experts
+        ):
+            x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
 
         if self.use_grouped_mm:
             # NOTE: If EP is not used, we need to pad the indices
@@ -214,10 +231,20 @@ class GroupedExperts(nn.Module):
         else:
             out = _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
+        # Apply routing scores AFTER expert computation if score_before_experts=False
+        # Skip if use_fused_weighted_scatter=True (will be done in unpermute instead)
+        if (
+            self.deepep_dispatcher is not None
+            and routed_prob is not None
+            and not self.score_before_experts
+            and not self.use_fused_weighted_scatter
+        ):
+            out = (out.to(torch.float32) * routed_prob.reshape(-1, 1)).to(out.dtype)
+
         return out
 
         # ============================================================================
-        # OLD CODE (kept for reference - replaced by fused weighted combine)
+        # OLD CODE (kept for reference)
         # ============================================================================
         # NOTE(phuc): The old implementation multiplied routing probabilities here.
         # This is now handled by the fused weighted combine kernel in DeepEP.
@@ -449,17 +476,28 @@ class TokenReorderer(nn.Module):
         )
 
 
+# TODO(phuc): would be more clean if separate MoEWithDeepEP, and MoEDefault classes,
+# because they have different forward logic
 class MoE(nn.Module):
     def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
         super().__init__()
 
         num_experts = moe_args.num_experts
-
         self.use_deepep = moe_args.use_deepep
         if self.use_deepep:
             self.deepep_dispatcher = DeepEPTokenDispatcher(
                 moe_router_topk=moe_args.top_k,
                 num_moe_experts=num_experts,
+                deepep_config=moe_args.deepep_config,
+                score_before_experts=moe_args.score_before_experts,
+            )
+
+        # Determine use_fused_weighted_scatter from config
+        # Only relevant when DeepEP is enabled and score_before_experts=False
+        use_fused_weighted_scatter = True  # default
+        if self.use_deepep and moe_args.deepep_config is not None:
+            use_fused_weighted_scatter = (
+                moe_args.deepep_config.fused_weighted_scatter_add
             )
 
         self.experts = GroupedExperts(
@@ -474,6 +512,7 @@ class MoE(nn.Module):
             # This ensures that GroupedExperts knows whether to apply routing scores before or after
             # expert computation when routed_prob is passed to forward()
             score_before_experts=moe_args.score_before_experts,
+            use_fused_weighted_scatter=use_fused_weighted_scatter,
         )
         self.router = TokenChoiceTopKRouter(
             dim=dim,
