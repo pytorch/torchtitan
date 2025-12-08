@@ -1,10 +1,18 @@
-# code here are adapted from https://github.com/microsoft/DeepSpeed/blob/5218177922a4be5c14cf0db893dbfcb139179ba5/deepspeed/profiling/flops_profiler/profiler.py
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+#
+# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
+import os
+import sys
 import time
 from collections import OrderedDict
 from functools import partial
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -20,12 +28,20 @@ old_functions = {}
 func_flops = {}
 
 
+# Adapted from https://github.com/microsoft/DeepSpeed/blob/5218177922a4be5c14cf0db893dbfcb139179ba5/deepspeed/profiling/flops_profiler/profiler.py
 class FlopsProfiler(object):
-    """Measures the latency, number of estimated floating-point operations and parameters of each module in a PyTorch model.
+    """Measures the latency, number of estimated floating-point operations and parameters of each module
+    in a PyTorch model.
 
-    The flops-profiler profiles the forward pass of a PyTorch model and prints the model graph with the measured profile attached to each module. It shows how latency, flops and parameters are spent in the model and which modules or layers could be the bottleneck. It also outputs the names of the top k modules in terms of aggregated latency, flops, and parameters at depth l with k and l specified by the user. The output profile is computed for each batch of input.
+    The flops-profiler profiles the forward pass of a PyTorch model and prints the model graph with the
+    measured profile attached to each module. It shows how latency, flops and parameters are spent in
+    the model and which modules or layers could be the bottleneck. It also outputs the names of the top
+    k modules in terms of aggregated latency, flops, and parameters at depth l with k and l specified
+    by the user. The output profile is computed for each batch of input.
+
     The DeepSpeed flops profiler can be used with the DeepSpeed runtime or as a standalone package.
-    When using DeepSpeed for model training, the flops profiler can be configured in the deepspeed_config file and no user code change is required.
+    When using DeepSpeed for model training, the flops profiler can be configured in the deepspeed_config
+    file and no user code change is required.
 
     If using the profiler as a standalone package, one imports the flops_profiler package and use the APIs.
 
@@ -66,7 +82,8 @@ class FlopsProfiler(object):
     def start_profile(self, ignore_list=None):
         """Starts profiling.
 
-        Extra attributes are added recursively to all the modules and the profiled torch.nn.functionals are monkey patched.
+        Extra attributes are added recursively to all the modules and the profiled torch.nn.functionals
+        are monkey patched.
 
         Args:
             ignore_list (list, optional): the list of modules to ignore while profiling. Defaults to None.
@@ -254,17 +271,18 @@ class FlopsProfiler(object):
         """Prints the model graph with the measured profile attached to each module.
 
         Args:
-            profile_step (int, optional): The global training step at which to profile. Note that warm up steps are needed for accurate time measurement.
-            module_depth (int, optional): The depth of the model to which to print the aggregated module information. When set to -1, it prints information from the top to the innermost modules (the maximum depth).
+            profile_step (int, optional):
+                The global training step at which to profile.
+                Note that warm up steps are needed for accurate time measurement.
+            module_depth (int, optional):
+                The depth of the model to which to print the aggregated module information.
+                When set to -1, it prints information from the top to the innermost modules (the maximum depth).
             top_modules (int, optional): Limits the aggregated profile output to the number of top modules specified.
             detailed (bool, optional): Whether to print the detailed model profile.
             output_file (str, optional): Path to the output file. If None, the profiler prints to stdout.
         """
         if not self.started:
             return
-        import os.path
-        import sys
-        from os import path
 
         original_stdout = None
         f = None
@@ -290,7 +308,11 @@ class FlopsProfiler(object):
         )
         print(f"Profile Summary at step {profile_step}:")
         print(
-            "Notations:\ndata parallel size (dp_size), model parallel size(mp_size),\nnumber of parameters (params), number of multiply-accumulate operations(MACs),\nnumber of floating-point operations (flops), floating-point operations per second (FLOPS),\nfwd latency (forward propagation latency), bwd latency (backward propagation latency),\nstep (weights update latency), iter latency (sum of fwd, bwd and step latency)\n"
+            "Notations:\ndata parallel size (dp_size), model parallel size(mp_size),"
+            "\nnumber of parameters (params), number of multiply-accumulate operations(MACs),"
+            "\nnumber of floating-point operations (flops), floating-point operations per second (FLOPS),"
+            "\nfwd latency (forward propagation latency), bwd latency (backward propagation latency),"
+            "\nstep (weights update latency), iter latency (sum of fwd, bwd and step latency)\n"
         )
         if self.ds_engine:
             print("{:<60}  {:<8}".format("world size: ", self.ds_engine.world_size))
@@ -450,10 +472,19 @@ class FlopsProfiler(object):
                 "\n------------------------------ Detailed Profile per GPU ------------------------------"
             )
             print(
-                "Each module profile is listed after its name in the following order: \nparams, percentage of total params, MACs, percentage of total MACs, fwd latency, percentage of total fwd latency, fwd FLOPS"
+                "Each module profile is listed after its name in the following order: "
+                "\nparams, percentage of total params, MACs, percentage of total MACs, fwd latency,"
+                "percentage of total fwd latency, fwd FLOPS"
             )
             print(
-                "\nNote: 1. A module can have torch.nn.module or torch.nn.functional to compute logits (e.g. CrossEntropyLoss). They are not counted as submodules, thus not to be printed out. However they make up the difference between a parent's MACs (or latency) and the sum of its submodules'.\n2. Number of floating-point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throughput.\n3. The fwd latency listed in the top module's profile is directly captured at the module forward function in PyTorch, thus it's less than the fwd latency shown above which is captured in DeepSpeed.\n"
+                "\nNote: 1. A module can have torch.nn.module or torch.nn.functional to compute logits"
+                "(e.g. CrossEntropyLoss). They are not counted as submodules, thus not to be printed out."
+                "However they make up the difference between "
+                "a parent's MACs (or latency) and the sum of its submodules'."
+                "\n2. Number of floating-point operations is a theoretical estimation, thus FLOPS computed"
+                "using that could be larger than the maximum system throughput."
+                "\n3. The fwd latency listed in the top module's profile is directly captured at the module forward"
+                "function in PyTorch, thus it's less than the fwd latency shown above which is captured in DeepSpeed.\n"
             )
             print(self.model)
 
@@ -468,7 +499,8 @@ class FlopsProfiler(object):
             f.close()
 
     def print_model_aggregated_profile(self, module_depth=-1, top_modules=1):
-        """Prints the names of the top top_modules modules in terms of aggregated time, flops, and parameters at depth module_depth.
+        """Prints the names of the top top_modules modules in terms of aggregated time, flops, and parameters
+        at depth module_depth.
 
         Args:
             module_depth (int, optional): the depth of the modules to show. Defaults to -1 (the innermost modules).
@@ -873,7 +905,7 @@ def wrapFunc(func, funcFlopCompute):
 
     def newFunc(*args, **kwds):
         flops, macs = funcFlopCompute(*args, **kwds)
-        global func_flops
+        global func_flops  # noqa: F824 # type: ignore
         if module_flop_count:
             if func_name not in func_flops:
                 func_flops[func_name] = flops

@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
-
 import math
 import os
 from typing import Callable
@@ -13,7 +12,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
-
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
@@ -23,17 +21,15 @@ from torch.distributed.pipelining.schedules import (
     ScheduleDualPipeV,
     ScheduleZBVZeroBubble,
 )
-
 from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
+from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.autopartition.infra.autopipe import pipeline
+from torchtitan.experiments.autopartition.infra.profiler import FlopsProfiler
+from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
-
-from torchtitan.experiments.autopartition.infra.profiler import FlopsProfiler
-from torchtitan.experiments.autopartition.infra.autopipe import pipeline
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.components.tokenizer import build_hf_tokenizer
 
 __all__ = [
     "pipeline_llm",
@@ -57,7 +53,6 @@ def autopipe_partition(model, num_stages, job_config):
     """
 
     # Prepare input for profiling
-    # inputs = (torch.randint(0, 100, (job_config.training.local_batch_size, job_config.training.seq_len)),)
     tokenizer = build_hf_tokenizer(job_config)
 
     # build dataloader
@@ -67,12 +62,12 @@ def autopipe_partition(model, num_stages, job_config):
         tokenizer=tokenizer,
         job_config=job_config,
     )
-    iterater = iter(dataloader)
-    inputs = next(iterater)[0].values()
+    iterator = iter(dataloader)
+    inputs = next(iterator)[0].values()
 
     # Profile each layer's FLOPS
     mflops_list = []
-    for idx, layer in enumerate(model):
+    for _, layer in enumerate(model):
         prof = FlopsProfiler(layer)
         prof.start_profile()
         nparams_dense = 0
@@ -90,20 +85,19 @@ def autopipe_partition(model, num_stages, job_config):
 
     parts = pipeline(
         mflops_list,
-        [
-            i * 3 for i in mflops_list
-        ],  # Assume backward is 3x forward
+        [i * 3 for i in mflops_list],  # Assume backward is 3x forward
         num_stages,
     )
     parts.append(len(model))  # Add the total number of layers
     return parts
+
 
 def _build_module_for_profile(model, flatten_module_names):
     # txd: merge autopipe
     module_names_for_profile = [[item] for item in flatten_module_names]
 
     def _build_sequential_module(
-        module_names: list[str]
+        module_names: list[str],
     ) -> tuple[PipelineStage, nn.Module]:
 
         # Create a set of modules to keep for faster lookup
@@ -113,7 +107,7 @@ def _build_module_for_profile(model, flatten_module_names):
             whole_model = copy.deepcopy(model)
             modules_to_keep = set(mtk)
             for module_name, module_value in whole_model.named_children():
-            # Handle layer-like structures (e.g., "layers.0", "layers.1")
+                # Handle layer-like structures (e.g., "layers.0", "layers.1")
                 if isinstance(module_value, (nn.ModuleDict, nn.ModuleList)):
                     layers_to_keep = {
                         name.split(".", 1)[1]
@@ -153,9 +147,8 @@ def _build_module_for_profile(model, flatten_module_names):
 
     seq_module = _build_sequential_module(module_names_for_profile)
 
-    # print(seq_module, len(seq_module))
-    # exit()
     return seq_module
+
 
 def pipeline_llm(
     model: nn.Module,
@@ -238,10 +231,14 @@ def pipeline_llm(
         )
 
     # if job_config.custom_config.auto_partition:
-    flatten_module_names = [item for sublist in module_names_per_stage for item in sublist]
+    flatten_module_names = [
+        item for sublist in module_names_per_stage for item in sublist
+    ]
     seq_modules = _build_module_for_profile(model, flatten_module_names)
     parts = autopipe_partition(seq_modules, parallel_dims.pp, job_config)
-    module_names_per_stage = [flatten_module_names[parts[i]:parts[i+1]] for i in range(parallel_dims.pp)]
+    module_names_per_stage = [
+        flatten_module_names[parts[i] : parts[i + 1]] for i in range(parallel_dims.pp)
+    ]
 
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")

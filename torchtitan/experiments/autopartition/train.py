@@ -9,19 +9,24 @@ import os
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
+
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.ft import FTManager
 from torchtitan.components.loss import rescale_accumulated_loss
-from torchtitan.components.metrics import (build_metrics_processor,
-                                           ensure_pp_loss_visible)
-from torchtitan.config import TORCH_DTYPE_MAP, ConfigManager, JobConfig
+from torchtitan.components.metrics import (
+    build_metrics_processor,
+    ensure_pp_loss_visible,
+)
+from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.train import Trainer
-
-from . import get_llama3_train_spec, get_deepseek_v3_train_spec
+from . import (  # noqa: F401  # type: ignore
+    get_deepseek_v3_train_spec,
+    get_llama3_train_spec,
+)
 
 
 class AotoPartitionTrainer(Trainer):

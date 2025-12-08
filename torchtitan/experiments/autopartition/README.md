@@ -3,7 +3,7 @@
 ## Overview
 
 This folder provides an automatic partitioning method that considers the computation cost of embedding layers. 
-Thsi method involves calculating the floating-point operations (FLOPs) of the embedding layers and constructing an array that incorporates the FLOPs of both the transformer and embedding layers. Subsequently, a heuristic algorithm is employed to identify a balanced pipeline partition.
+This method involves calculating the floating-point operations (FLOPs) of the embedding layers and constructing an array that incorporates the FLOPs of both the transformer and embedding layers. Subsequently, a heuristic algorithm is employed to identify a balanced pipeline partition.
 
 ## Quick Start
 
