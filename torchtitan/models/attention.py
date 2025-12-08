@@ -98,6 +98,7 @@ class FlexAttentionWrapper(torch.nn.Module):
 
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention,
+        # This options also encapsulate max-autotune-no-cudagraphs.
         options={
             "wrap_inductor_compiled_regions": True,
             "max_autotune": True,
