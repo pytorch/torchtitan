@@ -7,7 +7,8 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --qos={{ qos }}
 #SBATCH --cpus-per-task=12
-#SBATCH --partition=hopper-prod
+#SBATCH --partition=hopper-extra
+#SBATCH --time=00:30:00
 
 # Misc initializations.
 echo "========================"

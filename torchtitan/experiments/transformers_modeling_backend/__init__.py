@@ -23,6 +23,16 @@ __all__ = [
 
 
 flavors = {
+    "debugperf": HFTransformerModelArgs(
+        titan_dense_args=TitanDenseModelArgs(
+            dim=256,
+            n_layers=6,
+            n_heads=16,
+            n_kv_heads=16,
+            vocab_size=2048,
+            rope_theta=500000,
+        ),
+    ),
     "debugmodel": HFTransformerModelArgs(
         titan_dense_args=TitanDenseModelArgs(
             dim=256,

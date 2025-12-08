@@ -19,8 +19,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
 
-BASELINE = "fsdp2_tp1_cp1_pp1"
-# BASELINE = "fsdp1_tp1_cp1_pp1"
+# BASELINE = "fsdp2_tp1_cp1_pp1"
+BASELINE = "fsdp1_tp1_cp1_pp1"
 
 console = Console()
 
@@ -114,7 +114,7 @@ def _create_slurm_script(
     print(f"Slurm script created at {script_path}")
 
 
-def create_configs(model_name: str, out_dir: str, flavor: str, model_type: str = "transformers_modeling_backend"):
+def create_configs(model_name: str, out_dir: str, flavor: str, model_type: str = "transformers_modeling_backend", hf_assets_path: str = None):
     """
     results/
         |_ meta-llama
@@ -166,29 +166,33 @@ def create_configs(model_name: str, out_dir: str, flavor: str, model_type: str =
         config["hf_transformers"]["model"] = model_name
         config["model"]["flavor"] = flavor
         
-        # Extract just the model name from repo_id (e.g., "Llama-3.2-1B" from "meta-llama/Llama-3.2-1B")
-        model_name_only = model_name.split("/")[-1] if "/" in model_name else model_name
-        config["model"]["hf_assets_path"] = f"./{out_dir}/{model_name}/assets/hf/{model_name_only}"
+        # Use provided hf_assets_path or default
+        if hf_assets_path:
+            config["model"]["hf_assets_path"] = hf_assets_path
+        else:
+            # Extract just the model name from repo_id (e.g., "Llama-3.2-1B" from "meta-llama/Llama-3.2-1B")
+            model_name_only = model_name.split("/")[-1] if "/" in model_name else model_name
+            config["model"]["hf_assets_path"] = f"./{out_dir}/{model_name}/assets/hf/{model_name_only}"
     elif model_type == "torchtitan":
         config["model"]["name"] = model_name
         config["model"]["flavor"] = flavor
-        config["model"]["hf_assets_path"] = f"/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/tokenizer"
+        config["model"]["hf_assets_path"] = hf_assets_path or "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/tokenizer"
     else:
         raise ValueError(f"Unknown model_type: {model_type}. Must be 'transformers_modeling_backend' or 'torchtitan'")
     
     # Set absolute path to dataset to avoid path resolution issues
     config["training"]["dataset_path"] = "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/c4_test"
 
-    parallelism_configs = [
-        BASELINE, # baseline
-        "fsdp2_tp2_cp1_pp1",
-        "fsdp2_tp1_cp1_pp2",
-        "fsdp2_tp1_cp2_pp1",
-        "fsdp2_tp1_cp2_pp2",
-        "fsdp2_tp2_cp2_pp1",
-        "fsdp2_tp2_cp1_pp2",
-        "fsdp2_tp2_cp2_pp2",
-    ]
+    # parallelism_configs = [
+    #     BASELINE, # baseline
+    #     "fsdp2_tp2_cp1_pp1",
+    #     "fsdp2_tp1_cp1_pp2",
+    #     "fsdp2_tp1_cp2_pp1",
+    #     "fsdp2_tp1_cp2_pp2",
+    #     "fsdp2_tp2_cp2_pp1",
+    #     "fsdp2_tp2_cp1_pp2",
+    #     "fsdp2_tp2_cp2_pp2",
+    # ]
 
     # parallelism_configs = [
     #     BASELINE, # baseline
@@ -201,11 +205,11 @@ def create_configs(model_name: str, out_dir: str, flavor: str, model_type: str =
     #     # "fsdp1_tp2_cp2_pp2",
     # ]
 
-    # parallelism_configs = [
-    #     BASELINE, # baseline
-    #     # "fsdp2_tp1_cp1_pp2",
-    #     # "fsdp1_tp1_cp1_pp2",
-    # ]
+    parallelism_configs = [
+        BASELINE, # baseline
+        # "fsdp2_tp1_cp1_pp2",
+        # "fsdp1_tp1_cp1_pp2",
+    ]
 
     out_path = Path(out_dir) / model_name / flavor
     out_path.mkdir(parents=True, exist_ok=True)
@@ -1187,6 +1191,8 @@ if __name__ == "__main__":
     create_configs_parser.add_argument("--model_type", type=str, default="transformers_modeling_backend",
                                        choices=["transformers_modeling_backend", "torchtitan"],
                                        help="Model type: 'transformers_modeling_backend' for HF models, 'torchtitan' for torchtitan native")
+    create_configs_parser.add_argument("--hf_assets_path", type=str, default=None,
+                                       help="Override hf_assets_path (tokenizer path). If not provided, uses default based on model_type.")
 
     submit_jobs_parser = subparsers.add_parser("submit_jobs")
     submit_jobs_parser.add_argument("--inp_dir", type=str, required=True)
@@ -1213,7 +1219,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.action == "create_configs":
-        create_configs(args.model_name, args.out_dir, args.flavor, args.model_type)
+        create_configs(args.model_name, args.out_dir, args.flavor, args.model_type, args.hf_assets_path)
     elif args.action == "submit_jobs":
         submit_jobs(args.inp_dir, args.qos, args.only)
     elif args.action == "report":
