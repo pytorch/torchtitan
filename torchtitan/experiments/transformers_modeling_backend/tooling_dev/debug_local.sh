@@ -20,38 +20,38 @@ model_names=(
 for model_name in "${tt_model_names[@]}"; do
     rm -rf debug_local_results/${model_name}
 
-    python ./tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir debug_local_results --flavor debugperf --model_type torchtitan
-    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf/seed_checkpoint --qos high
-    while [ ! -f debug_local_results/${model_name}/debugperf/seed_checkpoint/status.txt ] || [ "$(cat debug_local_results/${model_name}/debugperf/seed_checkpoint/status.txt)" != "completed" ]; do
+    python ./tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir debug_local_results --flavor debugperf_large --model_type torchtitan --enable_profiling --profile_freq 5
+    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf_large/seed_checkpoint --qos high
+    while [ ! -f debug_local_results/${model_name}/debugperf_large/seed_checkpoint/status.txt ] || [ "$(cat debug_local_results/${model_name}/debugperf_large/seed_checkpoint/status.txt)" != "completed" ]; do
         echo "Waiting for seed checkpoint from ${model_name} to complete ..."
         sleep 1
     done
-    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf --qos high
+    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf_large --qos high
     echo "================"
 done
 
 for model_name in "${model_names[@]}"; do
     rm -rf debug_local_results/${model_name}
 
-    python ./tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir debug_local_results --flavor debugperf --model_type transformers_modeling_backend --hf_assets_path "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/tokenizer"
-    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf/seed_checkpoint --qos high
-    while [ ! -f debug_local_results/${model_name}/debugperf/seed_checkpoint/status.txt ] || [ "$(cat debug_local_results/${model_name}/debugperf/seed_checkpoint/status.txt)" != "completed" ]; do
+    python ./tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir debug_local_results --flavor debugperf_large --model_type transformers_modeling_backend --hf_assets_path "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/tokenizer" --enable_profiling --profile_freq 5
+    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf_large/seed_checkpoint --qos high
+    while [ ! -f debug_local_results/${model_name}/debugperf_large/seed_checkpoint/status.txt ] || [ "$(cat debug_local_results/${model_name}/debugperf_large/seed_checkpoint/status.txt)" != "completed" ]; do
         echo "Waiting for seed checkpoint from ${model_name} to complete ..."
         sleep 1
     done
-    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf --qos high
+    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf_large --qos high
     echo "================"
 done
 
 # for model_name in "${moe_model_names[@]}"; do
 #     rm -rf debug_local_results/${model_name}
 
-#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir debug_local_results --flavor debugperf
-#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf/seed_checkpoint --qos high
-#     while [ ! -f debug_local_results/${model_name}/debugperf/seed_checkpoint/status.txt ] || [ "$(cat debug_local_results/${model_name}/debugperf/seed_checkpoint/status.txt)" != "completed" ]; do
+#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir debug_local_results --flavor debugperf_large
+#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf_large/seed_checkpoint --qos high
+#     while [ ! -f debug_local_results/${model_name}/debugperf_large/seed_checkpoint/status.txt ] || [ "$(cat debug_local_results/${model_name}/debugperf_large/seed_checkpoint/status.txt)" != "completed" ]; do
 #         echo "Waiting for seed checkpoint from ${model_name} to complete ..."
 #         sleep 1
 #     done
-#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf --qos high
+#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugperf_large --qos high
 #     echo "================"
 # done

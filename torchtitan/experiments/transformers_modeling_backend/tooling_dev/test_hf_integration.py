@@ -114,7 +114,7 @@ def _create_slurm_script(
     print(f"Slurm script created at {script_path}")
 
 
-def create_configs(model_name: str, out_dir: str, flavor: str, model_type: str = "transformers_modeling_backend", hf_assets_path: str = None):
+def create_configs(model_name: str, out_dir: str, flavor: str, model_type: str = "transformers_modeling_backend", hf_assets_path: str = None, enable_profiling: bool = False, profile_freq: int = 5):
     """
     results/
         |_ meta-llama
@@ -182,6 +182,12 @@ def create_configs(model_name: str, out_dir: str, flavor: str, model_type: str =
     
     # Set absolute path to dataset to avoid path resolution issues
     config["training"]["dataset_path"] = "/fsx/ferdinandmom/ferdinand-hf/huggingface/torchtitan/tests/assets/c4_test"
+
+    # Configure profiling
+    if enable_profiling:
+        config["profiling"]["enable_profiling"] = True
+        config["profiling"]["profile_freq"] = profile_freq
+        config["profiling"]["save_traces_folder"] = "profile_trace"
 
     # parallelism_configs = [
     #     BASELINE, # baseline
@@ -1193,6 +1199,10 @@ if __name__ == "__main__":
                                        help="Model type: 'transformers_modeling_backend' for HF models, 'torchtitan' for torchtitan native")
     create_configs_parser.add_argument("--hf_assets_path", type=str, default=None,
                                        help="Override hf_assets_path (tokenizer path). If not provided, uses default based on model_type.")
+    create_configs_parser.add_argument("--enable_profiling", action="store_true",
+                                       help="Enable PyTorch profiler for trace collection")
+    create_configs_parser.add_argument("--profile_freq", type=int, default=5,
+                                       help="Profiling frequency (steps between profiles)")
 
     submit_jobs_parser = subparsers.add_parser("submit_jobs")
     submit_jobs_parser.add_argument("--inp_dir", type=str, required=True)
@@ -1219,7 +1229,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.action == "create_configs":
-        create_configs(args.model_name, args.out_dir, args.flavor, args.model_type, args.hf_assets_path)
+        create_configs(args.model_name, args.out_dir, args.flavor, args.model_type, args.hf_assets_path, args.enable_profiling, args.profile_freq)
     elif args.action == "submit_jobs":
         submit_jobs(args.inp_dir, args.qos, args.only)
     elif args.action == "report":
