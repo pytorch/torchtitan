@@ -23,6 +23,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama4.infra.parallelize import (
     apply_compile,
@@ -97,6 +98,8 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
+
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -109,6 +112,7 @@ def parallelize_qwen3(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            dual_pipe_v=dual_pipe_v,
         )
 
     if job_config.activation_checkpoint.mode != "none":

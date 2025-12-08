@@ -28,7 +28,47 @@ Below are optimizations related to pipeline parallelism with expert parallelism
 """
 
 
+def get_dual_pipe_v_flag(job_config, parallel_dims) -> bool:
+    """
+    Determine if DualPipeV should be enabled based on config and
+    validates that incompatible features (EP + DualPipeV + AC) are not used together.
+    """
+    dual_pipe_v = (
+        job_config.parallelism.pipeline_parallel_expert_parallel_overlap
+        and job_config.parallelism.pipeline_parallel_schedule.lower() == "dualpipev"
+    )
+
+    if (
+        parallel_dims.ep_enabled
+        and dual_pipe_v
+        and job_config.activation_checkpoint.mode != "none"
+    ):
+        raise NotImplementedError(
+            "Expert Parallel with DualPipeV and Activation Checkpointing "
+            "cannot be used together. Please disable one of them."
+        )
+
+    return dual_pipe_v
+
+
 class DualPipeExpertParallel(ExpertParallel):
+    """
+    A wrapper + subclass of ExpertParallel that enables overlapping EP communication
+    with PP computation in DualPipe scheduling.
+
+    This class can wrap any ExpertParallel variant (ExpertParallel, ExpertTensorParallel, etc.)
+    and adds synchronization hooks to coordinate forward/backward execution across threads.
+
+    Args:
+        inner_ep: Optional inner ExpertParallel instance to wrap. If None, uses the default
+                  ExpertParallel behavior (self).
+    """
+
+    def __init__(self, inner_ep: Optional[ExpertParallel] = None):
+        super().__init__()
+        # If inner_ep is provided, delegate to it; otherwise use self (default ExpertParallel)
+        self._inner_ep = inner_ep
+
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         """
         The execution order is:
@@ -39,13 +79,22 @@ class DualPipeExpertParallel(ExpertParallel):
         SyncHookC, _token_combine, SyncHookD (post hooks)
         """
         inner_wrapped_module = self._wrap_with_pre_comm_hooks(module)
-        distributed_module = distribute_module(
-            inner_wrapped_module,
-            device_mesh,
-            partition_fn=ExpertParallel._partition_fn,
-            input_fn=self._token_dispatch,
-            output_fn=self._token_combine,
-        )
+
+        if self._inner_ep is not None:
+            # Delegate to the inner EP's _apply method
+            distributed_module = self._inner_ep._apply(
+                inner_wrapped_module, device_mesh
+            )
+        else:
+            # Use default ExpertParallel behavior
+            distributed_module = distribute_module(
+                inner_wrapped_module,
+                device_mesh,
+                partition_fn=ExpertParallel._partition_fn,
+                input_fn=self._token_dispatch,
+                output_fn=self._token_combine,
+            )
+
         final_module = self._wrap_with_post_comm_hooks(distributed_module)
         return final_module
 

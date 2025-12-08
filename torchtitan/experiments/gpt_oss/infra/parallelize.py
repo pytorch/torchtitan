@@ -21,6 +21,10 @@ from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.dual_pipe_v import (
+    DualPipeExpertParallel,
+    get_dual_pipe_v_flag,
+)
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ReordererSequenceParallel,
@@ -92,6 +96,8 @@ def parallelize_gptoss(
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
+
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -104,6 +110,7 @@ def parallelize_gptoss(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            dual_pipe_v=dual_pipe_v,
         )
 
     model_compile_enabled = (
@@ -259,6 +266,7 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
+    dual_pipe_v: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -300,7 +308,7 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            experts_plan = DualPipeExpertParallel() if dual_pipe_v else ExpertParallel()
         else:
             experts_mesh = ep_tp_mesh
             experts_plan = GptossExpertTensorParallel()

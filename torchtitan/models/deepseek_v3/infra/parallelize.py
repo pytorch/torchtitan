@@ -19,6 +19,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama4.infra.parallelize import (
@@ -92,6 +93,8 @@ def parallelize_deepseekv3(
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
+
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -104,9 +107,7 @@ def parallelize_deepseekv3(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
-            dual_pipe_v=job_config.parallelism.pipeline_parallel_expert_parallel_overlap
-            and job_config.parallelism.pipeline_parallel_schedule.lower()
-            == "dualpipev",
+            dual_pipe_v=dual_pipe_v,
         )
 
     model_compile_enabled = (
