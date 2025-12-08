@@ -80,7 +80,7 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
         args.config_path
     ), f"Base config path {args.config_path} does not exist"
 
-    tests_run = 0
+    ran_any_test = False
     for test_flavor in test_list:
         # Filter by test_name if specified
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
@@ -104,9 +104,9 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
             )
         else:
             run_single_test(test_flavor, args.config_path, args.output_dir)
-            tests_run += 1
+            ran_any_test = True
 
-    if tests_run == 0:
+    if not ran_any_test:
         available_tests = [t.test_name for t in test_list if not t.disabled]
         logger.warning(
             f"No tests were run for --test_name '{args.test_name}' in test suite '{args.test_suite}'.\n"
