@@ -52,6 +52,7 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    torch._higher_order_ops.inductor_compiled_code,
 }
 
 
@@ -116,14 +117,11 @@ def parallelize_llama(
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
-    attn_type = getattr(model.model_args, "attn_type", "sdpa")
-    use_flex_attn = attn_type == "flex"
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
