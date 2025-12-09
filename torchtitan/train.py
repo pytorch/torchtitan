@@ -558,6 +558,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # entire step will not be executed.
         for _microbatch in range(self.gradient_accumulation_steps):
             input_dict, labels = next(data_iterator)
+            logger.warning(f"Current Device {torch.cuda.current_device()}")
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
