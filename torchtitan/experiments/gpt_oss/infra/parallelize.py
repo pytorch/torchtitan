@@ -22,7 +22,7 @@ from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.dual_pipe_v import (
-    DualPipeExpertParallel,
+    apply_dual_pipe_sync_hooks,
     get_dual_pipe_v_flag,
 )
 from torchtitan.distributed.expert_parallel import (
@@ -308,10 +308,13 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = DualPipeExpertParallel() if dual_pipe_v else ExpertParallel()
+            experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_tp_mesh
             experts_plan = GptossExpertTensorParallel()
+
+        if dual_pipe_v and isinstance(experts_plan, ExpertParallel):
+            apply_dual_pipe_sync_hooks(experts_plan)
 
         parallelize_module(
             module=transformer_block.moe.experts,

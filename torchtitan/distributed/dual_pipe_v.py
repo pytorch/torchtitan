@@ -4,10 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import threading
-from typing import Optional
+from typing import cast, Optional
 
 import torch
-import torch.nn as nn
+from torch import Tensor
 
 from torch.distributed.pipelining.schedules import (
     _Action,
@@ -16,7 +16,6 @@ from torch.distributed.pipelining.schedules import (
     _wait_batch_p2p,
 )
 from torch.distributed.pipelining.stage import _PipelineStageBase
-from torch.distributed.tensor import DeviceMesh, distribute_module
 from torch.profiler import record_function
 
 from torchtitan.distributed.expert_parallel import ExpertParallel
@@ -51,74 +50,34 @@ def get_dual_pipe_v_flag(job_config, parallel_dims) -> bool:
     return dual_pipe_v
 
 
-class DualPipeExpertParallel(ExpertParallel):
+def apply_dual_pipe_sync_hooks(inner_ep: ExpertParallel) -> ExpertParallel:
     """
-    A wrapper + subclass of ExpertParallel that enables overlapping EP communication
-    with PP computation in DualPipe scheduling.
+    Wrap an ExpertParallel's dispatch/combine methods with sync hooks for
+    overlapping EP communication with PP computation in DualPipe scheduling.
 
-    This class can wrap any ExpertParallel variant (ExpertParallel, ExpertTensorParallel, etc.)
-    and adds synchronization hooks to coordinate forward/backward execution across threads.
-
-    Args:
-        inner_ep: Optional inner ExpertParallel instance to wrap. If None, uses the default
-                  ExpertParallel behavior (self).
+    The execution order becomes:
+    A -> dispatch -> B -> module -> C -> combine -> D
     """
+    original_dispatch = inner_ep._token_dispatch
+    original_combine = inner_ep._token_combine
 
-    def __init__(self, inner_ep: Optional[ExpertParallel] = None):
-        super().__init__()
-        # If inner_ep is provided, delegate to it; otherwise use self (default ExpertParallel)
-        self._inner_ep = inner_ep
+    def wrapped_dispatch(mod, inputs, device_mesh) -> tuple[Tensor, Tensor]:
+        """A -> dispatch -> B"""
+        inputs = (cast(Tensor, SyncHook.apply(inputs[0], "A")),) + inputs[1:]
+        outputs = original_dispatch(mod, inputs, device_mesh)
+        outputs = (cast(Tensor, SyncHook.apply(outputs[0], "B")),) + outputs[1:]
+        return outputs
 
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        """
-        The execution order is:
-        A -> dispatch -> B -> module -> C -> combine -> D
+    def wrapped_combine(mod, routed_output, device_mesh) -> Tensor:
+        """C -> combine -> D"""
+        routed_output = cast(Tensor, SyncHook.apply(routed_output, "C"))
+        combine_output = original_combine(mod, routed_output, device_mesh)
+        combine_output = cast(Tensor, SyncHook.apply(combine_output, "D"))
+        return combine_output
 
-        Hooks are called in the order they are registered:
-        SyncHookA, _token_dispatch, SyncHookB (pre hooks)
-        SyncHookC, _token_combine, SyncHookD (post hooks)
-        """
-        inner_wrapped_module = self._wrap_with_pre_comm_hooks(module)
-
-        if self._inner_ep is not None:
-            # Delegate to the inner EP's _apply method
-            distributed_module = self._inner_ep._apply(
-                inner_wrapped_module, device_mesh
-            )
-        else:
-            # Use default ExpertParallel behavior
-            distributed_module = distribute_module(
-                inner_wrapped_module,
-                device_mesh,
-                partition_fn=ExpertParallel._partition_fn,
-                input_fn=self._token_dispatch,
-                output_fn=self._token_combine,
-            )
-
-        final_module = self._wrap_with_post_comm_hooks(distributed_module)
-        return final_module
-
-    def _wrap_with_pre_comm_hooks(self, module):
-        def inner_pre_hook(module, input):
-            return (SyncHook.apply(input[0], "A"),) + input[1:]
-
-        def inner_post_hook(module, input, output):
-            return SyncHook.apply(output, "C")
-
-        module.register_forward_pre_hook(inner_pre_hook)
-        module.register_forward_hook(inner_post_hook)
-        return module
-
-    def _wrap_with_post_comm_hooks(self, module):
-        def outer_pre_hook(module, input):
-            return (SyncHook.apply(input[0], "B"),) + input[1:]
-
-        def outer_post_hook(module, input, output):
-            return SyncHook.apply(output, "D")
-
-        module.register_forward_pre_hook(outer_pre_hook)
-        module.register_forward_hook(outer_post_hook)
-        return module
+    inner_ep._token_dispatch = wrapped_dispatch
+    inner_ep._token_combine = wrapped_combine
+    return inner_ep
 
 
 class HookCoordinator:
