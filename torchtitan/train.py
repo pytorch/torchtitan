@@ -487,6 +487,100 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         return inputs, labels, extra_inputs, extra_kwargs
 
+    def _collect_moe_expert_metrics(self) -> dict[str, Any]:
+        metrics: dict[str, Any] = {}
+
+        if not getattr(self, "model_parts", None):
+            return metrics
+
+        try:
+            from torchtitan.models.moe import ExpertRoutingHistogram
+        except ImportError:
+            return metrics
+
+        try:
+            from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+                CheckpointImpl,
+            )
+        except ImportError:
+            CheckpointImpl = None  # type: ignore[assignment]
+
+        moe_counts: list[torch.Tensor] = []
+        layer_tags: list[str] = []
+
+        with torch.no_grad():
+            for part_idx, model_part in enumerate(self.model_parts):
+                layers = getattr(model_part, "layers", None)
+                if not layers:
+                    continue
+                for layer_name, transformer_block in layers.items():
+                    if not getattr(transformer_block, "moe_enabled", False):
+                        continue
+                    moe_module = getattr(transformer_block, "moe", None)
+                    if moe_module is None:
+                        continue
+
+                    counts = moe_module.pop_expert_routing_metrics()
+                    if counts is None:
+                        continue
+
+                    checkpoint_impl = getattr(transformer_block, "checkpoint_impl", None)
+
+                    if (
+                        CheckpointImpl is not None
+                        and checkpoint_impl is CheckpointImpl.NO_REENTRANT
+                    ):
+                        counts = counts / 2
+
+                    layer_tag = f"part{part_idx}_layer{layer_name}".replace("/", "_")
+                    moe_counts.append(counts)
+                    layer_tags.append(layer_tag)
+
+        if not moe_counts:
+            return metrics
+
+        tokens_per_expert_by_layer = torch.stack(moe_counts)
+
+        dp_group = None
+        if self.parallel_dims.dp_cp_enabled:
+            dp_group = self.parallel_dims.world_mesh["dp_cp"].get_group()
+        elif self.parallel_dims.dp_enabled:
+            dp_group = self.parallel_dims.world_mesh["dp"].get_group()
+
+        if dp_group is not None:
+            torch.distributed.all_reduce(
+                tokens_per_expert_by_layer,
+                group=dp_group,
+                op=torch.distributed.ReduceOp.SUM,
+            )
+
+        tokens_per_expert_by_layer = tokens_per_expert_by_layer.to(torch.float32).cpu()
+
+        for layer_tag, counts_tensor in zip(layer_tags, tokens_per_expert_by_layer):
+            total_tokens = counts_tensor.sum().item()
+            if total_tokens <= 0:
+                continue
+
+            fractions = counts_tensor / total_tokens
+            top_fraction, top_idx = torch.max(fractions, dim=0)
+            active_experts = int((counts_tensor > 0).sum().item())
+            positive_fractions = fractions[fractions > 0]
+            entropy = float(
+                -(positive_fractions * positive_fractions.log()).sum().item()
+            )
+
+            prefix = f"moe/{layer_tag}"
+            metrics[f"{prefix}/tokens_total"] = float(total_tokens)
+            metrics[f"{prefix}/active_experts"] = active_experts
+            metrics[f"{prefix}/top_expert_idx"] = int(top_idx.item())
+            metrics[f"{prefix}/top_expert_fraction"] = float(top_fraction.item())
+            metrics[f"{prefix}/entropy"] = entropy
+            metrics[f"{prefix}/expert_hist"] = ExpertRoutingHistogram(
+                counts=counts_tensor.tolist()
+            )
+
+        return metrics
+
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
@@ -619,6 +713,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+        extra_metrics.update(self._collect_moe_expert_metrics())
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
