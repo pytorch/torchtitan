@@ -11,7 +11,7 @@ from tests.integration_tests import OverrideDefinitions
 from tests.integration_tests.run_tests import run_tests
 
 
-def build_auto_parallel_test_list() -> list[OverrideDefinitions]:
+def build_autoparallel_test_list() -> list[OverrideDefinitions]:
     """
     returns a list of OverrideDefinitions that is used to generate
     variations of integration tests based on the same root config file.
@@ -21,10 +21,10 @@ def build_auto_parallel_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name auto_parallel.llama3",
+                    "--model.name autoparallel.llama3",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.auto_parallel.job_config",
+                    "--job.custom_config_module=torchtitan.experiments.autoparallel.job_config",
                 ],
             ],
             "llama3 AutoParallel FSDP+TP",
@@ -36,10 +36,10 @@ def build_auto_parallel_test_list() -> list[OverrideDefinitions]:
         # OverrideDefinitions(
         #     [
         #         [
-        #             "--model.name auto_parallel.deepseek_v3",
+        #             "--model.name autoparallel.deepseek_v3",
         #             "--parallelism.data_parallel_shard_degree 2",
         #             "--parallelism.expert_parallel_degree 2",
-        #             "--job.custom_config_module=torchtitan.experiments.auto_parallel.job_config",
+        #             "--job.custom_config_module=torchtitan.experiments.autoparallel.job_config",
         #             "--activation_checkpoint.mode none",
         #         ],
         #     ],
@@ -52,7 +52,7 @@ def build_auto_parallel_test_list() -> list[OverrideDefinitions]:
 
 
 _TEST_SUITES_FUNCTION = {
-    "auto_parallel": build_auto_parallel_test_list,
+    "autoparallel": build_autoparallel_test_list,
 }
 
 
@@ -77,7 +77,7 @@ def main():
     if os.listdir(args.output_dir):
         raise RuntimeError("Please provide an empty output directory.")
 
-    test_list = _TEST_SUITES_FUNCTION["auto_parallel"]()
+    test_list = _TEST_SUITES_FUNCTION["autoparallel"]()
     run_tests(args, test_list)
 
 
