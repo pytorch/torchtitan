@@ -20,6 +20,8 @@ TRAIN_FILE=${TRAIN_FILE:-"torchtitan.train"}
 COMM_MODE=${COMM_MODE:-""}
 
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
+export NCCL_NVLS_ENABLE=0
+export NVSHMEM_DISABLE_NVLS=0
 
 if [ -n "$COMM_MODE" ]; then
     # Communication mode specified: validate configuration or run in debug mode
