@@ -10,12 +10,14 @@ from collections import namedtuple
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.moe import ExpertRoutingHistogram
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type
@@ -123,6 +125,20 @@ class TensorBoardLogger(BaseLogger):
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
         for k, v in metrics.items():
+            if isinstance(v, ExpertRoutingHistogram):
+                continue
+
+            if isinstance(v, torch.Tensor):
+                if v.numel() == 1:
+                    v = v.item()
+                else:
+                    continue
+            elif not isinstance(v, (int, float)):
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+
             tag = k if self.tag is None else f"{self.tag}/{k}"
             self.writer.add_scalar(tag, v, step)
 
@@ -162,10 +178,28 @@ class WandBLogger(BaseLogger):
         logger.info("WandB logging enabled")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
-        wandb_metrics = {
-            (k if self.tag is None else f"{self.tag}/{k}"): v
-            for k, v in metrics.items()
-        }
+        wandb_metrics = {}
+        for k, v in metrics.items():
+            tag = k if self.tag is None else f"{self.tag}/{k}"
+
+            if isinstance(v, ExpertRoutingHistogram):
+                counts_array = np.asarray(v.counts, dtype=np.float64)
+                if counts_array.size == 0:
+                    continue
+                bins = np.arange(counts_array.size + 1, dtype=np.float64)
+                wandb_metrics[tag] = self.wandb.Histogram(
+                    np_histogram=(counts_array, bins)
+                )
+                continue
+
+            if isinstance(v, torch.Tensor):
+                if v.numel() == 1:
+                    v = v.item()
+                else:
+                    v = v.detach().cpu().tolist()
+
+            wandb_metrics[tag] = v
+
         self.wandb.log(wandb_metrics, step=step)
 
     def close(self) -> None:
