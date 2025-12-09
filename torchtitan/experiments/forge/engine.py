@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import os
 from typing import Generator
 
@@ -21,6 +22,9 @@ from torchtitan.tools import utils
 
 from .job_config import ForgeJobConfig
 from .train_spec import ForgeTrainSpec, get_train_spec
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
@@ -228,6 +232,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 if self.train_spec.state_dict_adapter
                 else None
             ),
+            base_folder=job_config.job.dump_folder,
         )
 
         loss_parallel_enabled = (
