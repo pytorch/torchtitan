@@ -5,23 +5,22 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Generic vLLM wrapper for TorchTitan models.
+Base wrapper for TorchTitan models to work with vLLM V1 engine.
 
-This module provides TorchTitanVLLMWrapper, a generic base class that makes
-any TorchTitan model compatible with vLLM by:
-1. Accepting 4 pluggable model-specific components
-2. Replacing attention with vLLM's paged attention
-3. Setting up parallelization (TP/EP)
-4. Loading weights from HuggingFace checkpoints
+This module provides TorchTitanVLLMModel: Core model class that adapts
+TorchTitan models for vLLM.
 """
 
-import functools
-from typing import Callable
+from functools import partial
+from typing import Callable, TypeAlias
 
 import torch
 import torch.nn as nn
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import DTensor
+from torch.distributed._tensor import DTensor, Replicate
+from torch.distributed.checkpoint.state_dict import (
+    set_model_state_dict,
+    StateDictOptions,
+)
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -29,28 +28,25 @@ from vllm.logger import init_logger
 from torchtitan.experiments.deterministic_vllm_rl.models.attention import (
     VLLMPagedFlashAttention,
 )
-from torchtitan.protocols.model import BaseModelArgs
+from torchtitan.experiments.deterministic_vllm_rl.models.utils import (
+    create_parallel_dims_from_vllm_config,
+)
+from torchtitan.models.qwen3.model.model import precompute_rope_cache
+from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
-from torchtitan.tools.utils import device_type
 
 
 logger = init_logger(__name__)
 
+ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
 
-class TorchTitanVLLMWrapper(nn.Module):
+
+class TorchTitanVLLMModel(nn.Module):
     """
-    Generic vLLM-compatible wrapper for TorchTitan models.
-
-    This base class integrates any TorchTitan model with vLLM by accepting
-    4 pluggable model-specific components:
-
-    1. model_cls: The TorchTitan model class (e.g., Qwen3Model)
-    2. model_args_cls: The model args class (e.g., Qwen3ModelArgs)
-    3. state_dict_adapter: State dict adapter for loading HF weights
-    4. parallelize_fn: Function to apply tensor parallelism
+    Generic vLLM-compatible model wrapper for TorchTitan models.
 
     The wrapper handles:
-    - HF config → TorchTitan model args mapping
+    - HF config to TorchTitan model args mapping
     - Attention replacement with vLLM paged attention
     - Tensor parallelism setup
     - Weight loading from HF checkpoints
@@ -64,11 +60,10 @@ class TorchTitanVLLMWrapper(nn.Module):
     def __init__(
         self,
         *,
-        model_cls: type,
-        model_args_cls: BaseModelArgs,
-        state_dict_adapter: BaseStateDictAdapter,
-        parallelize_fn: Callable,
-        rope_cache_compute_fn: Callable | None = None,
+        model_cls: type[ModelProtocol],  # passing types that is not instantiated
+        model_args_cls: type[BaseModelArgs],
+        state_dict_adapter: type[BaseStateDictAdapter],
+        parallelize_fn: ParallelizeFunction,
         vllm_config: VllmConfig,
         prefix: str = "",
     ):
@@ -84,36 +79,41 @@ class TorchTitanVLLMWrapper(nn.Module):
 
         # Map HF config to TorchTitan ModelArgs
         hf_config = vllm_config.model_config.hf_config
-        logger.info(f"Mapping HF config to {model_args_cls.__name__}")
-        model_args = self._map_hf_config_to_model_args(hf_config, model_args_cls)
+        logger.info(f"Mapping HF config to {self.model_args_cls.__name__}")
+        model_args = self._map_hf_config_to_model_args(hf_config, self.model_args_cls)
 
         # Create TorchTitan model
-        logger.info(f"Creating {model_cls.__name__} with config: {model_args}")
-        self.model = model_cls(model_args)
+        logger.info(f"Creating {self.model_cls.__name__} with config: {model_args}")
+        self.model = self.model_cls(model_args)
         self.config = model_args
 
-        # NOTE: Here's assumptions of rope_cache_compute_fn function signature
-        self.rope_cache_extension_fn = functools.partial(
-            rope_cache_compute_fn, dim=self.config.head_dim, base=self.config.rope_theta
+        # Setup RoPE cache extension function if provided
+        self.rope_cache_extension_fn = partial(
+            precompute_rope_cache,
+            dim=self.config.head_dim,
+            base=self.config.rope_theta,
         )
-
         # Replace attention with vLLM paged attention
         self._replace_with_vllm_paged_attention(model_args)
 
-        # Setup parallelization
-        (
-            dp_size,
-            mp_size,
-            cp_size,
-            pp_size,
-            ep_size,
-            etp_size,
-        ) = self._process_parallelism_settings(vllm_config)
-
-        if mp_size > 1 or ep_size > 1:
-            self._build_device_mesh_and_parallelize(
-                dp_size, mp_size, cp_size, pp_size, ep_size, etp_size
+        # Create ParallelDims from vLLM config and apply parallelization
+        # NOTE: We need to apply parallelize within model.__init__ because w
+        parallel_dims = create_parallel_dims_from_vllm_config(vllm_config)
+        if parallel_dims.tp_enabled:
+            self.world_mesh = parallel_dims.world_mesh
+            tp_mesh = self.world_mesh["tp"]
+            parallelize_fn(
+                model=self.model,
+                tp_mesh=tp_mesh,
+                loss_parallel=False,
+                enable_float8_tensorwise_tp=False,
+                enable_async_tp=False,
             )
+            logger.info(
+                f"Successfully initialized model with with TP={parallel_dims.tp}"
+            )
+        else:
+            logger.info("Single GPU mode - no parallelization needed")
 
     def _map_hf_config_to_model_args(self, hf_config, model_args_cls):
         """
@@ -178,84 +178,11 @@ class TorchTitanVLLMWrapper(nn.Module):
             "Successfully replaced TorchTitan attention with vLLM PagedFlashAttention"
         )
 
-    def _process_parallelism_settings(self, vllm_config: VllmConfig):
-        """Parse parallel config from vLLM config."""
-        world_size = (
-            vllm_config.parallel_config.data_parallel_size
-            * vllm_config.parallel_config.tensor_parallel_size
-        )
-        ep_size = (
-            world_size if vllm_config.parallel_config.enable_expert_parallel else 1
-        )
-        etp_size = (
-            1 if vllm_config.parallel_config.enable_expert_parallel else world_size
-        )
-        dp_size = vllm_config.parallel_config.data_parallel_size
-        mp_size = vllm_config.parallel_config.tensor_parallel_size
-        cp_size = vllm_config.parallel_config.decode_context_parallel_size
-        pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        self.pp_size = pp_size
-
-        return dp_size, mp_size, cp_size, pp_size, ep_size, etp_size
-
-    def _build_device_mesh_and_parallelize(
-        self,
-        dp_size: int,
-        mp_size: int,
-        cp_size: int,
-        pp_size: int,
-        ep_size: int,
-        etp_size: int,
-    ):
-        """
-        Build device mesh and apply parallelization using the provided parallelize_fn.
-        """
-        import torch.distributed as dist
-
-        world_size = dist.get_world_size()
-        dp_replicate = dp_size
-        dp_shard = 1
-
-        assert dp_replicate * dp_shard * cp_size * mp_size * pp_size == world_size, (
-            f"Invalid parallel dims: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
-            f"cp({cp_size}) * tp({mp_size}) * pp({pp_size}) != WORLD_SIZE({world_size})"
-        )
-
-        # Build device mesh
-        dims = []
-        names = []
-        for d, name in zip(
-            [pp_size, dp_replicate, dp_shard, cp_size, mp_size],
-            ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
-        ):
-            if d > 1:
-                dims.append(d)
-                names.append(name)
-
-        logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        world_mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
-
-        # Apply tensor parallelism using provided function
-        if mp_size > 1:
-            tp_mesh = world_mesh["tp"]
-            self.parallelize_fn(
-                model=self.model,
-                tp_mesh=tp_mesh,
-                loss_parallel=False,
-                enable_float8_tensorwise_tp=False,
-                enable_async_tp=False,
-            )
-            logger.info(f"Applied Tensor Parallelism with TP={mp_size}")
-
-        self.world_mesh = world_mesh
-
     def _extend_rope_cache_if_needed(
         self, rope_cache: torch.Tensor, max_position: int
     ) -> torch.Tensor:
         """
         Extend RoPE cache if needed during vLLM profiling.
-
-        Uses the rope_cache_extension_fn provided during initialization if available.
 
         Args:
             rope_cache: Current RoPE cache tensor
@@ -412,12 +339,6 @@ class TorchTitanVLLMWrapper(nn.Module):
         Returns:
             Set of loaded parameter names
         """
-        from torch.distributed._tensor import DTensor, Replicate
-        from torch.distributed.checkpoint.state_dict import (
-            set_model_state_dict,
-            StateDictOptions,
-        )
-
         # Collect weights from iterator
         hf_state_dict = {}
         for name, tensor in weights_iter:
