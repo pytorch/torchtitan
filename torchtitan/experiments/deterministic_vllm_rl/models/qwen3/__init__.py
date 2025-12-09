@@ -9,6 +9,5 @@ Qwen3 model with vLLM compatibility for deterministic RL training.
 """
 
 from .model_batch_invariant import Qwen3VLLMCompatModel
-from .model_vllm_compat import TorchTitanQwen3ForCausalLM
 
-__all__ = ["Qwen3VLLMCompatModel", "TorchTitanQwen3ForCausalLM"]
+__all__ = ["Qwen3VLLMCompatModel"]
