@@ -533,6 +533,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
+                    logger.warning(f"Current Device {torch.cuda.current_device()}")
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     loss = self.loss_fn(pred, labels)
                 # need to free pred before bwd to avoid peaking memory
@@ -557,6 +558,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # entire step will not be executed.
         for _microbatch in range(self.gradient_accumulation_steps):
             input_dict, labels = next(data_iterator)
+            logger.warning(f"Current Device {torch.cuda.current_device()}")
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
