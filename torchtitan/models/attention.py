@@ -234,7 +234,18 @@ def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
 
 
 def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
-    """Creates a sliding window mask that only attends to tokens within a fixed window size"""
+    """Creates a sliding window mask that only attends to tokens within a fixed window size.
+
+    This implements causal sliding window attention where each token can only attend to:
+    - Itself (current token)
+    - Up to `window_size - 1` previous tokens
+    Args:
+        window_size: The maximum number of tokens to attend to (including current token).
+                    Must be >= 1. A window_size of 1 means attend only to self.
+
+    Returns:
+        A mask modifier function that implements causal sliding window masking.
+    """
 
     if window_size < 1:
         raise ValueError(
@@ -257,7 +268,11 @@ _compiled_create_block_mask = torch.compile(create_block_mask)
 
 
 def create_attention_mask(*args, **kwargs):
-    """Create an attention mask using compiled create_block_mask."""
+    """Create an attention mask using compiled create_block_mask.
+
+    This function is cached to avoid recreating BlockMasks for the same
+    arguments.
+    """
     return _compiled_create_block_mask(*args, **kwargs)
 
 
