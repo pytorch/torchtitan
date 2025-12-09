@@ -240,6 +240,9 @@ class FluxDataset(IterableDataset, Stateful):
     dp_rank (int): Data parallel rank.
     dp_world_size (int): Data parallel world size.
     infinite (bool): Whether to loop over the dataset infinitely.
+    include_sample_id (bool): Whether to include sample ID in the returned sample.
+    subset_size (int): If set, creates a subset of the dataset by taking the first subset_size samples.
+    cfg_prob (float): Probability of dropping the text tokens for classifier-free guidance. Should be 0 for validation set.
     """
 
     def __init__(
