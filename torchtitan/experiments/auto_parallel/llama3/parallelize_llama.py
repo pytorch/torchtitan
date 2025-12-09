@@ -126,7 +126,7 @@ def parallelize_llama(
         autop.add_input_constraints([x_sharding])
         autop.add_output_constraints([out_sharding])
         t0 = time.time()
-        sharding_placement = autop.optimize_placement()
+        sharding_placement = autop.optimize_placement(verbose=False)
         t1 = time.time()
         logger.info(f"AutoParallel took {t1 - t0} seconds")
         parallel_mod = autop.apply_placement(sharding_placement)
