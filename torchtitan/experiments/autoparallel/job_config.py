@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 
 """
-Use --job.custom_config_module=torchtitan.experiments.auto_parallel.job_config
+Use --job.custom_config_module=torchtitan.experiments.autoparallel.job_config
 """
 
 
