@@ -5,23 +5,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-Example CLI to run TorchTitan Qwen3 model inference with vLLM:
-
-# Run inference
-python torchtitan/experiments/deterministic_vllm_rl/infer.py
-"""
-
 import argparse
 
 from vllm import LLM, SamplingParams
 
-# Import and register the TorchTitan vLLM plugin
-from torchtitan.experiments.deterministic_vllm_rl.register import register
-
-# Register TorchTitan models with vLLM.
-# NOTE(jianiw): We could use plug-in system instead: https://docs.vllm.ai/en/latest/design/plugin_system/
-register()
+# Import models module - this automatically registers TorchTitan models with vLLM
+from torchtitan.experiments.deterministic_vllm_rl import models  # noqa: F401
 
 
 def parse_args():
@@ -66,8 +55,11 @@ def main():
     args = parse_args()
 
     print("=" * 80)
-    print("INITIALIZING vLLM WITH TORCHTITAN QWEN3 MODEL")
+    print("INITIALIZING vLLM WITH TORCHTITAN QWEN3 MODEL ")
     print("=" * 80)
+    print(f"Model: {args.model}")
+    print(f"Tensor Parallel Size: {args.tensor_parallel_size}")
+    print()
 
     # Build hf_overrides with checkpoint path
     hf_overrides = {
@@ -75,22 +67,30 @@ def main():
     }
 
     # Initialize vLLM with custom TorchTitan Qwen3 model
+    # The LLM initialization will internally:
+    # 1. Load TrainSpec for Qwen3 (from register())
+    # 2. Create TorchTitanVLLMModel instance
+    # 3. Process parallelism settings via process_parallelism_settings()
+    # 4. Build device mesh and apply parallelization via build_device_mesh_and_parallelize()
+    # 5. Load model weights and prepare for inference
+    print("Initializing vLLM engine...")
     llm = LLM(
-        model=args.model,  # Use temporary directory with config.json
+        model=args.model,  # Model checkpoint path
         hf_overrides=hf_overrides,
         dtype="bfloat16",
         trust_remote_code=True,
-        enforce_eager=True,  # Use eager mode for debugging
-        # Disable kv cache, required for now
-        enable_prefix_caching=False,
+        enforce_eager=True,  # Use eager mode
+        enable_prefix_caching=False,  # Disable kv cache for now
         tensor_parallel_size=args.tensor_parallel_size,  # Multi-GPU support
     )
 
     print("=" * 80)
-    print("vLLM ENGINE INITIALIZED - STARTING GENERATION")
+    print("vLLM ENGINE INITIALIZED - CONFIGURATION DETAILS")
     print("=" * 80)
+    print(f"Prompt: {args.prompt}")
+    print()
 
-    # Prepare prompt
+    # Prepare prompt and sampling parameters
     prompts = [args.prompt]
     sampling_params = SamplingParams(
         temperature=args.temperature,
@@ -98,7 +98,7 @@ def main():
         max_tokens=args.max_tokens,
     )
 
-    # Generate
+    # Generate text
     outputs = llm.generate(
         prompts=prompts,
         sampling_params=sampling_params,
@@ -109,8 +109,9 @@ def main():
         prompt = output.prompt
         generated_text = output.outputs[0].text
 
-        print(f"\nPrompt: {prompt}")
+        print(f"Prompt: {prompt}")
         print(f"Generated text: {generated_text!r}")
+        print()
 
 
 if __name__ == "__main__":
