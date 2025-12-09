@@ -268,11 +268,7 @@ _compiled_create_block_mask = torch.compile(create_block_mask)
 
 
 def create_attention_mask(*args, **kwargs):
-    """Create an attention mask using compiled create_block_mask.
-
-    This function is cached to avoid recreating BlockMasks for the same
-    arguments.
-    """
+    """Create an attention mask using compiled create_block_mask."""
     return _compiled_create_block_mask(*args, **kwargs)
 
 
