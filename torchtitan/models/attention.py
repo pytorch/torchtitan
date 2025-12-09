@@ -163,22 +163,19 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
             return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
 
 
-# We cannot do inner function/closure because we won't be able to cache it --
-# if we an inner function, a new closure will be created every time
-# `get_causal_mask_mod` is called.
-def _causal_mask(
-    b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
-) -> torch.Tensor:
-    """Causal mask that prevents attention to future tokens."""
-    return q_idx >= kv_idx
-
-
 def get_causal_mask_mod() -> _mask_mod_signature:
     """Returns a causal mask modifier for flex attention.
 
     Returns:
         A mask modifier function that implements causal masking.
     """
+
+    def _causal_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        """Causal mask that prevents attention to future tokens."""
+        return q_idx >= kv_idx
+
     return _causal_mask
 
 
