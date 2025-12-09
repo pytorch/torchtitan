@@ -78,7 +78,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "2D compile",
             "2d_compile",
         ),
-        # TODO: re-enable this test once the async TP CI issue is fixed
         OverrideDefinitions(
             [
                 [
@@ -89,7 +88,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "2D async TP compile",
             "2d_asynctp_compile",
-            disabled=True,
         ),
         OverrideDefinitions(
             [
