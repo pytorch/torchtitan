@@ -25,10 +25,6 @@ import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
 from torch.utils.tensorboard import SummaryWriter
-from transformers import AutoConfig, AutoTokenizer
-
-from vllm import LLM, SamplingParams
-from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
 from torchtitan.experiments.deterministic_vllm_rl.weights.converter import (
     torchtitan_to_vllm,
@@ -39,6 +35,10 @@ from torchtitan.experiments.deterministic_vllm_rl.weights_vllm_compat import (
 )
 
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
+from transformers import AutoConfig, AutoTokenizer
+
+from vllm import LLM, SamplingParams
+from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
 init_batch_invariance()
 
@@ -169,7 +169,6 @@ class VLLMRolloutEngine:
                 dtype="bfloat16",
                 gpu_memory_utilization=0.3,  # Reduced from 0.5
                 seed=42,  # Fixed seed for determinism
-                enforce_eager=True,
             )
             print("✓ Created new vLLM engine")
         else:
@@ -1086,6 +1085,7 @@ def main():
     )
     model = model.to(device)
     model.train()
+    model = torch.compile(model)
 
     # Save initial weights for delta computation (on CPU to save GPU memory)
     print("Saving initial weights for tracking...")
