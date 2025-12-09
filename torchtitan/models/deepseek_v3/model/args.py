@@ -95,10 +95,12 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
         self.max_seq_len = seq_len
 
-        losses_config = job_config.model.extra_losses
+        losses_config = job_config.training.extra_losses
         self.moe_args.load_balance_loss_type = losses_config.load_balance_loss_type
         self.moe_args.load_balance_loss_weight = losses_config.load_balance_loss_weight
-        self.moe_args.load_balance_coeff = losses_config.load_balance_coeff
+        self.moe_args.moe_aux_loss_free_bias_coeff = (
+            losses_config.moe_aux_loss_free_bias_coeff
+        )
 
         if self.moe_args.use_grouped_mm and not has_cuda_capability(9, 0):
             logger.warning(

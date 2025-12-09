@@ -29,7 +29,7 @@ class MoEArgs:
     # token-choice
     top_k: int = 1
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
-    load_balance_coeff: float | None = 1e-3
+    moe_aux_loss_free_bias_coeff: float | None = 1e-3
     load_balance_loss_weight: float = 0
     load_balance_loss_type: Literal["sequence_wise", "batch_wise"] = "sequence_wise"
     _debug_force_load_balance: bool = False
@@ -360,8 +360,7 @@ class MoE(nn.Module):
         super().__init__()
 
         num_experts = moe_args.num_experts
-        self.topk = moe_args.top_k
-        self.num_experts = num_experts
+        self.top_k = moe_args.top_k
         self.experts = GroupedExperts(
             dim=dim,
             hidden_dim=hidden_dim,
@@ -391,9 +390,9 @@ class MoE(nn.Module):
         #       to work with gradient accumulation.
         self.load_balance_loss_weight = moe_args.load_balance_loss_weight
         self.load_balance_loss_type = moe_args.load_balance_loss_type
-        self.load_balance_coeff = moe_args.load_balance_coeff
-        if self.load_balance_coeff is not None:
-            assert self.load_balance_coeff > 0.0
+        self.moe_aux_loss_free_bias_coeff = moe_args.moe_aux_loss_free_bias_coeff
+        if self.moe_aux_loss_free_bias_coeff is not None:
+            assert self.moe_aux_loss_free_bias_coeff > 0.0
             self.register_buffer(
                 "expert_bias",
                 torch.zeros(num_experts, dtype=torch.float32),
@@ -443,14 +442,14 @@ class MoE(nn.Module):
                     selected_experts_indices.long(),
                     bs,
                     slen,
-                    self.topk,
+                    self.top_k,
                     self.load_balance_loss_weight,
                 )
             elif self.load_balance_loss_type == "batch_wise":
                 load_balance_loss = MoE.batch_wise_aux_loss(
                     scores,
                     num_tokens_per_expert,
-                    self.topk,
+                    self.top_k,
                     self.load_balance_loss_weight,
                 )
         else:
@@ -505,7 +504,6 @@ class MoE(nn.Module):
             dim=0, index=token_indices_experts_sorted, src=routed_output
         )
         out = out.reshape(bs, slen, dim)
-
         return out, load_balance_loss
 
     def init_weights(
@@ -522,20 +520,19 @@ class MoE(nn.Module):
             self.tokens_per_expert = torch.zeros(
                 self.experts.num_experts, dtype=torch.float32
             )
-            if self.load_balance_coeff is not None:
+            if self.moe_aux_loss_free_bias_coeff is not None:
                 self.expert_bias = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
                 )
 
     @staticmethod
-    @torch.compile(fullgraph=True)
     def sequence_wise_aux_loss(
-        scores: torch.Tensor,  # Shape: (B*S, N) - Raw Sigmoid Affinities (s_{i,t})
-        indices: torch.Tensor,  # Shape: (B*S, K) - Selected Expert Indices
-        B: int,  # Batch size
-        S: int,  # Sequence length (T in the paper)
-        top_k: int,  # K_r
-        aux_loss_alpha: float,  # Alpha
+        scores: torch.Tensor,
+        indices: torch.Tensor,
+        B: int,
+        S: int,
+        top_k: int,
+        aux_loss_weight: float,
     ) -> torch.Tensor:
         """
         Computes Sequence-Wise Auxiliary Loss (DeepSeek-V3 Equations 17-20).
@@ -544,17 +541,20 @@ class MoE(nn.Module):
             scores: The dense affinity scores (s_{i,t}) for routed experts.
                     Should be the output of Sigmoid, shape (B*S, N).
             indices: The top-k selected expert indices. Shape (B*S, K).
+            B: Batch size
+            S: Sequence length (T in the paper)
+            top_k: K_r in the paper, the number of experts each token will be routed to
+            aux_loss_weight: the weight of the auxiliary loss
         """
-        if aux_loss_alpha <= 0:
+        if aux_loss_weight <= 0:
             return torch.tensor(0.0, device=scores.device, dtype=scores.dtype)
 
-        # N_r: Total number of routed experts
+        # N: Total number of routed experts
         N = scores.size(-1)
 
         # 1. Reshape inputs to handle each sequence separately: (B, S, N)
         #    This ensures we calculate P_i and f_i per sequence (Eq 20 & 18).
         scores_per_seq = scores.view(B, S, N)
-        indices_per_seq = indices.view(B, S, top_k)
 
         # 2. Eq 19: Normalize affinity scores s_{i,t} to get s'_{i,t}
         #    DeepSeek-V3 uses Sigmoid, so scores don't sum to 1.
@@ -573,36 +573,36 @@ class MoE(nn.Module):
         #    f_i = (N / (K * T)) * count_i
 
         # Flatten the top-k dimension to count hits per sequence: (B, S*K)
-        flat_indices_per_seq = indices_per_seq.view(B, -1)
-        selection_counts = torch.zeros((B, N), device=scores.device, dtype=scores.dtype)
-        src = torch.ones_like(flat_indices_per_seq, dtype=scores.dtype)
-        selection_counts.scatter_add_(1, flat_indices_per_seq, src)
+        flat_indices_per_seq = indices.view(B, -1)
+        offset = torch.arange(B, device=flat_indices_per_seq.device).unsqueeze(1) * N
+        flat_indices = (flat_indices_per_seq + offset).reshape(-1)
+        selection_counts = torch.bincount(flat_indices, minlength=B * N).reshape(B, N)
+        selection_counts = selection_counts.to(dtype=scores.dtype)
 
         # Calculate f_i for each sequence, T (tokens in sequence) is S
         f_i = selection_counts * (N / (top_k * S))
 
         # 5. Eq 17: Calculate Balance Loss
-        loss_per_seq = (f_i * P_i).sum(dim=1) * aux_loss_alpha
+        loss_per_seq = (f_i * P_i).sum(dim=1) * aux_loss_weight
 
         return loss_per_seq.mean()
 
     @staticmethod
-    @torch.compile(fullgraph=True)
     def batch_wise_aux_loss(
         scores: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
         top_k: int,
-        aux_loss_alpha: float,
+        aux_loss_weight: float,
     ) -> torch.Tensor:
         """
         Computes Batch-Wise Auxiliary Loss.
         Args:
-            scores: Dense probabilities (BS, N).
-            num_tokens_per_expert: Token counts (N).
-            top_k: Number of experts selected per token.
-            aux_loss_alpha: Scaling factor for the loss.
+            scores: the dense probabilities (s_{i,t}) for routed experts.
+            num_tokens_per_expert: the number of tokens assigned to each expert (f_i).
+            top_k: K_r in the paper, the number of experts each token will be routed to
+            aux_loss_weight: the weight of the auxiliary loss.
         """
-        if aux_loss_alpha <= 0:
+        if aux_loss_weight <= 0:
             return torch.tensor(0.0, device=scores.device, dtype=scores.dtype)
 
         # Total number of routed experts (N)
@@ -614,6 +614,6 @@ class MoE(nn.Module):
 
         f_i = num_tokens_per_expert.to(scores.dtype) * (N / (top_k * T))
 
-        loss = (f_i * P_i).sum() * aux_loss_alpha
+        loss = (f_i * P_i).sum() * aux_loss_weight
 
         return loss

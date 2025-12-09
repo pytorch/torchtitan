@@ -85,14 +85,36 @@ def moe_loss(
     labels: torch.Tensor,
     loss_fn: LossFunction,
 ) -> torch.Tensor:
-    """Sequence-wise auxiliary load balance loss function for MoE
+    """Sequence-wise (or batch-wise) auxiliary load balance loss function for MoE
     model training.
     """
     if isinstance(pred, tuple):
         pred, load_balance_loss = pred
         loss = loss_fn(pred, labels)
-        # USE STE to make the magnitude of loss remain the same
+        # Add auxiliary loss to the computation graph for gradients in the backward pass,
+        # but cancel out its numeric value so the forward pass only logs language model task loss.
         loss = loss + (load_balance_loss - load_balance_loss.detach())
     else:
         loss = loss_fn(pred, labels)
     return loss
+
+
+def moe_loss_wrap(original_build_fn):
+    """
+    Wraps a loss builder function. It builds the base loss function first,
+    then wraps it with the 'moe_loss' logic before returning it.
+    """
+
+    @functools.wraps(original_build_fn)  # Preserves name/docstring of original
+    def wrapper(job_config, **kwargs):
+        # 1. Create the base loss function (e.g., standard CrossEntropy)
+        # We pass job_config and kwargs through exactly as the original expects
+        base_loss_fn = original_build_fn(job_config, **kwargs)
+
+        # 2. Apply the MoE wrapper immediately
+        # This binds 'base_loss_fn' to the 'loss_fn' argument of 'moe_loss'
+        final_loss_fn = functools.partial(moe_loss, loss_fn=base_loss_fn)
+
+        return final_loss_fn
+
+    return wrapper

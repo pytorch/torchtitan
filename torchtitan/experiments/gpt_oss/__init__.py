@@ -38,7 +38,7 @@ gptoss_configs = {
             score_before_experts=False,
             top_k=4,
             use_grouped_mm=True,
-            load_balance_coeff=1e-3,
+            moe_aux_loss_free_bias_coeff=1e-3,
         ),
         attn_mask_type="causal",
     ),
@@ -53,7 +53,7 @@ gptoss_configs = {
             score_before_experts=False,
             top_k=4,
             use_grouped_mm=True,
-            load_balance_coeff=1e-3,
+            moe_aux_loss_free_bias_coeff=1e-3,
         ),
     ),
     "120b": GptOssModelArgs(
@@ -67,7 +67,7 @@ gptoss_configs = {
             score_before_experts=False,
             top_k=4,
             use_grouped_mm=True,
-            load_balance_coeff=1e-3,
+            moe_aux_loss_free_bias_coeff=1e-3,
         ),
     ),
 }
