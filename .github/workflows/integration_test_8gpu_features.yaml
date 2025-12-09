@@ -8,6 +8,7 @@ on:
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths-ignore:
       - 'torchtitan/experiments/**'
   schedule:
@@ -38,8 +39,13 @@ jobs:
       - id: set
         run: |
           # Decide which matrix entries to include based on event type
+          # Runs ROCm when label event is triggered
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.action }}" == "labeled" && "${HAS_8GPU_LABEL}" == "true" ]]; then
+          echo '{"include":[
+              {"name":"rocm","runner":"linux.rocm.gpu.gfx942.8","gpu-arch-type":"rocm","gpu-arch-version":"7.0","docker-image":"torchtitan-rocm-ubuntu-22.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/rocm7.0"}
+            ]}' > matrix.json
           # Runs CUDA and ROCm for push to main, cron schedule and PR label
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "schedule" ]] || [[ "${HAS_8GPU_LABEL}" == "true" ]]; then
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "schedule" ]] || [[ "${HAS_8GPU_LABEL}" == "true" ]]; then
           echo '{"include":[
             {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"},
             {"name":"rocm","runner":"linux.rocm.gpu.gfx942.8","gpu-arch-type":"rocm","gpu-arch-version":"7.0","docker-image":"torchtitan-rocm-ubuntu-22.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/rocm7.0"}
