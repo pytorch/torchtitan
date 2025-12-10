@@ -298,18 +298,18 @@ class TorchTitanVLLMModel(nn.Module):
             max_position = 0
 
         rope_cache = self._extend_rope_cache_if_needed(rope_attr, max_position)
-        rope_cache = rope_cache[positions]
+        positions = positions.unsqueeze(0)
 
         # Pass through transformer layers
         for layer in self.model.layers.values():
-            h = layer(h, rope_cache, attention_masks=None)
+            h = layer(h, rope_cache, attention_masks=None, positions=positions)
 
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
             batch_size, seq_len, hidden_size = h.shape
             h = h.view(batch_size * seq_len, hidden_size)
 
-        # Convert DTensor to regular tensor
+        # TODO(jianiw): finish this conversion when TP is applied
         if isinstance(h, DTensor):
             h = h.full_tensor()
 
@@ -324,8 +324,9 @@ class TorchTitanVLLMModel(nn.Module):
         h = self.model.norm(hidden_states)
         logits = self.model.output(h)
 
+        # TODO: This part is to work with TP integration
         if isinstance(logits, DTensor):
-            logits = logits.full_tensor()
+            logits = logits.to_local()
 
         return logits
 

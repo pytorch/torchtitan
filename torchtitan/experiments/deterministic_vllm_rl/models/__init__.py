@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 
 from torchtitan.protocols.train_spec import get_train_spec, TrainSpec
 from .attention import VLLMCompatibleFlashAttention, VLLMPagedFlashAttention
-from .base_wrapper import TorchTitanVLLMModel
+from .vllm_wrapper import TorchTitanVLLMModel
 
 
 logger = init_logger(__name__)

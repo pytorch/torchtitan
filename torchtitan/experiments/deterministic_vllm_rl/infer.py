@@ -8,18 +8,22 @@
 import argparse
 
 from vllm import LLM, SamplingParams
+from vllm.logger import init_logger
 
 # Import models module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.deterministic_vllm_rl import models  # noqa: F401
 
 
+logger = init_logger(__name__)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run TorchTitan Qwen3 model inference with vLLM",
+        description="Run TorchTitan model inference with vLLM Engine",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--model",
+        "--model_ckpt_path",
         type=str,
         default="torchtitan/experiments/deterministic_vllm_rl/example_checkpoint/qwen3-0.6B",
         help="Path to TorchTitan checkpoint directory",
@@ -54,41 +58,32 @@ def parse_args():
 def main():
     args = parse_args()
 
-    print("=" * 80)
-    print("INITIALIZING vLLM WITH TORCHTITAN QWEN3 MODEL ")
-    print("=" * 80)
-    print(f"Model: {args.model}")
-    print(f"Tensor Parallel Size: {args.tensor_parallel_size}")
-    print()
+    logger.info("Initializing vLLM with TorchTitan model")
+    logger.info(f"Model: {args.model_ckpt_path}")
+    logger.info(f"Tensor Parallel Size: {args.tensor_parallel_size}")
 
-    # Build hf_overrides with checkpoint path
-    hf_overrides = {
-        "checkpoint_dir": args.model,
-    }
-
-    # Initialize vLLM with custom TorchTitan Qwen3 model
+    # Initialize vLLM with custom TorchTitan model
     # The LLM initialization will internally:
-    # 1. Load TrainSpec for Qwen3 (from register())
+    # 1. Load TrainSpec for Qwen3 (from models/__init__.py register())
     # 2. Create TorchTitanVLLMModel instance
-    # 3. Process parallelism settings via process_parallelism_settings()
-    # 4. Build device mesh and apply parallelization via build_device_mesh_and_parallelize()
+    # 3. Create JobConfig and ParallelDims from vLLM config
+    # 4. Apply parallelization using parallelize_qwen3
     # 5. Load model weights and prepare for inference
-    print("Initializing vLLM engine...")
+    logger.info("Creating vLLM LLM engine...")
+
     llm = LLM(
-        model=args.model,  # Model checkpoint path
-        hf_overrides=hf_overrides,
+        model=args.model_ckpt_path,  # Model checkpoint path
+        hf_overrides={
+            "checkpoint_dir": args.model_ckpt_path,
+        },
         dtype="bfloat16",
         trust_remote_code=True,
         enforce_eager=True,  # Use eager mode
-        enable_prefix_caching=False,  # Disable kv cache for now
-        tensor_parallel_size=args.tensor_parallel_size,  # Multi-GPU support
+        tensor_parallel_size=args.tensor_parallel_size,
     )
 
-    print("=" * 80)
-    print("vLLM ENGINE INITIALIZED - CONFIGURATION DETAILS")
-    print("=" * 80)
-    print(f"Prompt: {args.prompt}")
-    print()
+    logger.info("vLLM engine initialized successfully")
+    logger.info(f"Prompt: {args.prompt}")
 
     # Prepare prompt and sampling parameters
     prompts = [args.prompt]
@@ -99,19 +94,20 @@ def main():
     )
 
     # Generate text
+    logger.info("Generating text...")
     outputs = llm.generate(
         prompts=prompts,
         sampling_params=sampling_params,
     )
 
     # Print results
+    logger.info("Generation complete")
     for output in outputs:
         prompt = output.prompt
         generated_text = output.outputs[0].text
 
-        print(f"Prompt: {prompt}")
-        print(f"Generated text: {generated_text!r}")
-        print()
+        print(f"\nPrompt: {prompt}")
+        print(f"Generated text: {generated_text!r}\n")
 
 
 if __name__ == "__main__":

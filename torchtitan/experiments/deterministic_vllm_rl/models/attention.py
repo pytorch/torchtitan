@@ -228,40 +228,35 @@ class VLLMPagedFlashAttention(torch.nn.Module):
 
         # Handle tensor parallelism: adjust num_heads and num_kv_heads for TP
         # NOTE(jianiw): As we use local tensor for this region, we need to manually
-        try:
-            from vllm.config import get_current_vllm_config
-            from vllm.logger import init_logger
 
-            logger = init_logger(__name__)
-            vllm_config = get_current_vllm_config()
-            tp_size = vllm_config.parallel_config.tensor_parallel_size
+        from vllm.config import get_current_vllm_config
+        from vllm.logger import init_logger
 
-            if tp_size > 1:
-                if num_kv_heads % tp_size != 0:
-                    # Pad num_kv_heads and num_heads to be divisible by tp_size
-                    assert num_heads % num_kv_heads == 0
-                    padded_size = tp_size - num_kv_heads % tp_size
-                    padded_num_kv_heads = num_kv_heads + padded_size
-                    padded_num_heads = (
-                        num_heads + padded_size * num_heads // num_kv_heads
-                    )
-                    assert padded_num_heads % tp_size == 0
-                    assert padded_num_kv_heads % tp_size == 0
+        logger = init_logger(__name__)
+        vllm_config = get_current_vllm_config()
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
 
-                    logger.info(
-                        f"Padding attention heads for tensor parallelism: "
-                        f"{num_heads=}, {padded_num_heads=}, "
-                        f"{num_kv_heads=}, {padded_num_kv_heads=}"
-                    )
+        if tp_size > 1:
+            if num_kv_heads % tp_size != 0:
+                # Pad num_kv_heads and num_heads to be divisible by tp_size
+                assert num_heads % num_kv_heads == 0
+                padded_size = tp_size - num_kv_heads % tp_size
+                padded_num_kv_heads = num_kv_heads + padded_size
+                padded_num_heads = num_heads + padded_size * num_heads // num_kv_heads
+                assert padded_num_heads % tp_size == 0
+                assert padded_num_kv_heads % tp_size == 0
 
-                    num_heads = padded_num_heads // tp_size
-                    num_kv_heads = padded_num_kv_heads // tp_size
-                else:
-                    num_heads //= tp_size
-                    num_kv_heads //= tp_size
-        except (ImportError, RuntimeError, AttributeError):
-            # Not in vLLM context - use original values
-            pass
+                logger.info(
+                    f"Padding attention heads for tensor parallelism: "
+                    f"{num_heads=}, {padded_num_heads=}, "
+                    f"{num_kv_heads=}, {padded_num_kv_heads=}"
+                )
+
+                num_heads = padded_num_heads // tp_size
+                num_kv_heads = padded_num_kv_heads // tp_size
+            else:
+                num_heads //= tp_size
+                num_kv_heads //= tp_size
 
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -274,32 +269,25 @@ class VLLMPagedFlashAttention(torch.nn.Module):
             self.scale = scale
 
         # Create vLLM Attention layer
-        try:
-            from vllm.config import get_current_vllm_config
+        from vllm.config import get_current_vllm_config
 
-            config = get_current_vllm_config()
-            cache_config = (
-                config.cache_config if hasattr(config, "cache_config") else None
-            )
+        config = get_current_vllm_config()
+        cache_config = config.cache_config if hasattr(config, "cache_config") else None
 
-            # Generate unique prefix for this attention layer
-            # vLLM expects format "layers.X" for layer index extraction
-            layer_idx = next(VLLMPagedFlashAttention._layer_counter)
-            prefix = f"layers.{layer_idx}"
+        # Generate unique prefix for this attention layer
+        # vLLM expects format "layers.X" for layer index extraction
+        layer_idx = next(VLLMPagedFlashAttention._layer_counter)
+        prefix = f"layers.{layer_idx}"
 
-            self.vllm_attn = Attention(
-                num_heads=num_heads,
-                head_size=head_dim,
-                scale=self.scale,
-                num_kv_heads=num_kv_heads,
-                cache_config=cache_config,
-                quant_config=None,
-                prefix=prefix,
-            )
-
-        except (ImportError, RuntimeError, AttributeError):
-            # Not in vLLM context - will need to set up manually
-            self.vllm_attn = None
+        self.vllm_attn = Attention(
+            num_heads=num_heads,
+            head_size=head_dim,
+            scale=self.scale,
+            num_kv_heads=num_kv_heads,
+            cache_config=cache_config,
+            quant_config=None,
+            prefix=prefix,
+        )
 
         # KV cache - will be populated by vLLM during model loading
         self.kv_cache: list[torch.Tensor] | None = None
@@ -317,26 +305,20 @@ class VLLMPagedFlashAttention(torch.nn.Module):
         # Initialize layer_name attribute
         self.layer_name: str | None = None
 
-        try:
-            from vllm.config import get_current_vllm_config
+        from vllm.config import get_current_vllm_config
 
-            config = get_current_vllm_config()
-            compilation_config = config.compilation_config
+        config = get_current_vllm_config()
+        compilation_config = config.compilation_config
 
-            # Generate unique layer name using class counter
-            # Format: "layers.{index}" for compatibility with extract_layer_index()
-            layer_name = f"layers.{next(VLLMPagedFlashAttention._layer_counter)}"
+        # Generate unique layer name using class counter
+        # Format: "layers.{index}" for compatibility with extract_layer_index()
+        layer_name = f"layers.{next(VLLMPagedFlashAttention._layer_counter)}"
 
-            # Register this layer in static forward context
-            if layer_name in compilation_config.static_forward_context:
-                raise ValueError(f"Duplicate layer name: {layer_name}")
-            compilation_config.static_forward_context[layer_name] = self
-            self.layer_name = layer_name
-
-        except (ImportError, RuntimeError, AttributeError):
-            # Not in vLLM context - this is fine!
-            # Layer will work normally for training/inference without vLLM
-            pass
+        # Register this layer in static forward context
+        if layer_name in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {layer_name}")
+        compilation_config.static_forward_context[layer_name] = self
+        self.layer_name = layer_name
 
     def forward(
         self,

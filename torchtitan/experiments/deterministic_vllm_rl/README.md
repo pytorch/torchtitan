@@ -260,7 +260,7 @@ export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
 
 # Clean previous build
 rm -rf build dist *.egg-info
-pip uninstall -y vllm
+uv pip uninstall -y vllm
 
 # Rebuild vLLM from source with CUDA 12.4
 pip install -e .
