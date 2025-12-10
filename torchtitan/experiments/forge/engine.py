@@ -228,6 +228,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 if self.train_spec.state_dict_adapter
                 else None
             ),
+            base_folder=job_config.job.dump_folder,
         )
 
         loss_parallel_enabled = (
