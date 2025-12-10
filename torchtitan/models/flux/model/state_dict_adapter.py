@@ -62,7 +62,6 @@ class FluxStateDictAdapter(StateDictAdapter):
                     indx = re.search(r"\d+", raw_indx).group(0)
                     self.fqn_to_index_mapping[hf_key] = indx
             else:
-                # pyrefly: ignore [bad-assignment]
                 self.fqn_to_index_mapping = None
 
         self.model_args = model_args

@@ -160,6 +160,9 @@ class Attention(nn.Module):
 
     """
 
+    q_norm: nn.RMSNorm | None
+    k_norm: nn.RMSNorm | None
+
     def __init__(self, model_args: Qwen3ModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
@@ -183,9 +186,7 @@ class Attention(nn.Module):
                 self.head_dim, eps=model_args.norm_eps, elementwise_affine=True
             )
         else:
-            # pyrefly: ignore [bad-assignment]
             self.q_norm = None
-            # pyrefly: ignore [bad-assignment]
             self.k_norm = None
 
         self.wq = nn.Linear(

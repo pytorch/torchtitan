@@ -21,6 +21,7 @@ from torch.nn.attention.flex_attention import (
 )
 
 from torch.nn.attention.varlen import varlen_attn
+from torch.types import Number
 
 
 __all__ = [
@@ -44,8 +45,8 @@ class VarlenMetadata(NamedTuple):
 
     cu_seq_q: torch.Tensor
     cu_seq_k: torch.Tensor
-    max_q: int
-    max_k: int
+    max_q: Number
+    max_k: Number
 
 
 class VarlenAttentionWrapper(torch.nn.Module):
@@ -150,12 +151,11 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
     """
 
     # TODO: remove sdpa_backends after PyTorch 2.9 is released.
-    sdpa_backends: ClassVar[list[SDPBackend]] = []
+    sdpa_backends: list[SDPBackend] = []
 
     def __init__(self) -> None:
         super().__init__()
         if not self.sdpa_backends:
-            # pyrefly: ignore [read-only]
             self.sdpa_backends = [
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.FLASH_ATTENTION,
@@ -341,8 +341,6 @@ def create_varlen_metadata_for_document(
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,
-        # pyrefly: ignore [bad-argument-type]
         max_q=max_seqlen,
-        # pyrefly: ignore [bad-argument-type]
         max_k=max_seqlen,
     )

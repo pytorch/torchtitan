@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -312,9 +314,8 @@ def apply_fsdp(
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
-        # pyrefly: ignore [bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
     match reshard_after_forward_policy:
@@ -346,7 +347,6 @@ def apply_fsdp(
         # - the routed experts are sharded with the remaining dp_mod_ep_mesh
         if transformer_block.moe_enabled and ep_degree > 1:
             fsdp_mod_ep_config = fsdp_config.copy()
-            # pyrefly: ignore [unsupported-operation]
             fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
 
             # NOTE: EP alreadys shards the routed experts on dim 0 (num_experts).
@@ -364,7 +364,6 @@ def apply_fsdp(
             ):
                 _experts_shard_placement_fn = lambda param: Shard(1)
 
-            # pyrefly: ignore [no-matching-overload]
             fully_shard(
                 transformer_block.moe.experts,
                 **fsdp_mod_ep_config,

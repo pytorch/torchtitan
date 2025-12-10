@@ -8,6 +8,7 @@ import functools
 from typing import Any, Generic, Iterator, TypeVar
 
 import torch
+import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.state_dict import (
@@ -391,7 +392,6 @@ def build_optimizers_with_moe_load_balancing(
         tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
         if dp_cp_mesh is not None:
-            # pyrefly: ignore [implicit-import]
             if isinstance(tokens_per_expert_by_layer, torch.distributed.tensor.DTensor):
                 tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
                     placements=[Replicate()]

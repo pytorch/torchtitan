@@ -349,7 +349,7 @@ class MetricsProcessor:
     device_memory_monitor: DeviceMemoryMonitor
     color: utils.NoColor | utils.Color
 
-    gpu_peak_flops: int
+    gpu_peak_flops: float
     ntokens_since_last_log: int
     data_loading_times: list[float]
     time_last_log: float

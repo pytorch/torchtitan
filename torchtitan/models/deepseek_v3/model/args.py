@@ -101,17 +101,17 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        # pyrefly: ignore [unknown-name]
-        if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
+        if (
+            job_config.parallelism.context_parallel_degree > 1
+            and self.attn_type != "sdpa"
+        ):
             raise NotImplementedError("CP support is only supported for SDPA.")
 
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
         )
 
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(
             self,
             model,

@@ -6,6 +6,7 @@
 
 # imported from black-forest-labs/FLUX
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -34,7 +35,7 @@ def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tenso
 
 
 class EmbedND(nn.Module):
-    def __init__(self, dim: int, theta: int, axes_dim: list[int]):
+    def __init__(self, dim: int, theta: int, axes_dim: Sequence[int]):
         super().__init__()
         self.dim = dim
         self.theta = theta

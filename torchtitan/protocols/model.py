@@ -6,7 +6,7 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -17,6 +17,8 @@ from torchtitan.components.tokenizer import BaseTokenizer
 
 from torchtitan.config import JobConfig
 from torchtitan.models.attention import VarlenMetadata
+from torchtitan.models.flux.model.autoencoder import AutoEncoderParams
+from torchtitan.models.moe.moe import MoEArgs
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
@@ -32,14 +34,23 @@ class BaseModelArgs:
 
     _enforced: str = "This field is used to enforce all fields have defaults."
 
+    if TYPE_CHECKING:
+        # Declare fields that exist on BaseModelArgs subclasses to help the type checker.
+        # These aren't added at runtime.
+        autoencoder_params: AutoEncoderParams = AutoEncoderParams()
+        enable_weight_tying: bool = False
+        max_seq_len: int = 0
+        moe_args: MoEArgs = MoEArgs()
+        n_heads: int = 0
+        n_layers: int = 0
+        vocab_size: int = 0
+
     @abstractmethod
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         pass
 
     @abstractmethod
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         pass
 
 

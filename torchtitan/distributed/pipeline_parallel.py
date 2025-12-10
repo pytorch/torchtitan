@@ -441,8 +441,7 @@ def pipeline_module_split(
         "v" if schedule_class in (ScheduleZBVZeroBubble, ScheduleDualPipeV) else "loop"
     )
 
-    # pyrefly: ignore [bad-return]
-    def _get_stage_indices() -> tuple[int]:
+    def _get_stage_indices() -> tuple[int, ...]:
         """
         Compute the stage ids for the stages that will run on this pp rank
         for either a looped or V style schedule
@@ -452,7 +451,6 @@ def pipeline_module_split(
         ), f"num_stages {num_stages} must be evenly divisible by pp_degree {pp_degree}"
         stages_per_rank = num_stages // pp_degree
         if style == "loop":
-            # pyrefly: ignore [bad-return]
             return tuple(pp_rank + s * pp_degree for s in range(stages_per_rank))
         elif style == "v":
             assert (
@@ -461,8 +459,9 @@ def pipeline_module_split(
             stage_v_pairs = list(
                 zip(range(pp_degree), range(num_stages - 1, pp_degree - 1, -1))
             )
-            # pyrefly: ignore [bad-return]
             return stage_v_pairs[pp_rank]
+        else:
+            raise ValueError(f"Unknown style {style}")
 
     for stage_idx in _get_stage_indices():
         module_names = module_names_per_stage[stage_idx]

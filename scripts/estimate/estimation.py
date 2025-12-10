@@ -128,23 +128,18 @@ def estimate_memory(job_config: JobConfig):
             lambda *args, **kwargs: model_converters.post_optimizer_hook(model)
         )
 
-        # pyrefly: ignore [missing-attribute]
         logger.info(f"Vocab size: {model_args.vocab_size}")
         # Create a dummy batch instead of loading from a dataset
         batch = (
             torch.randint(
                 0,
-                # pyrefly: ignore [missing-attribute]
                 model_args.vocab_size,
-                # pyrefly: ignore [missing-attribute]
                 (job_config.training.local_batch_size, model_args.max_seq_len),
                 device="cuda",
             ),
             torch.randint(
                 0,
-                # pyrefly: ignore [missing-attribute]
                 model_args.vocab_size,
-                # pyrefly: ignore [missing-attribute]
                 (job_config.training.local_batch_size, model_args.max_seq_len),
                 device="cuda",
             ),
@@ -158,7 +153,6 @@ def estimate_memory(job_config: JobConfig):
             for iter_idx in range(2):
                 input_ids, labels = batch
                 # train step
-                # pyrefly: ignore [not-callable]
                 with train_context():
                     # pyrefly: ignore [not-callable]
                     pred = model(input_ids)

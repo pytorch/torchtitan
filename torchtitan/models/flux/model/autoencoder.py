@@ -19,8 +19,7 @@ class AutoEncoderParams:
     in_channels: int = 3
     ch: int = 128
     out_ch: int = 3
-    # pyrefly: ignore [bad-assignment]
-    ch_mult: tuple[int] = (1, 2, 4, 4)
+    ch_mult: tuple[int, ...] = (1, 2, 4, 4)
     num_res_blocks: int = 2
     z_channels: int = 16
     scale_factor: float = 0.3611

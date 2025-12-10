@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 import PIL
+import PIL.Image
 
 import torch
 from datasets import Dataset, load_dataset
@@ -29,7 +30,6 @@ from torchtitan.tools.logging import logger
 
 
 def _process_cc12m_image(
-    # pyrefly: ignore [implicit-import]
     img: PIL.Image.Image,
     output_size: int = 256,
 ) -> Optional[torch.Tensor]:

@@ -77,23 +77,20 @@ def _run_experts_for_loop(
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
     # NOTE: this would incur a synchronization between device and host
-    # pyrefly: ignore [bad-assignment]
-    num_tokens_per_expert = num_tokens_per_expert.tolist()
+    num_tokens_per_expert_list = num_tokens_per_expert.tolist()
 
     # side-effect code due to the usage of generate_permute_indices
-    num_padding = x.shape[0] - sum(num_tokens_per_expert)
+    num_padding = x.shape[0] - sum(num_tokens_per_expert_list)
 
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
-    # pyrefly: ignore [bad-assignment]
-    x = torch.split(
-        x[: sum(num_tokens_per_expert)],
-        # pyrefly: ignore [bad-argument-type]
-        split_size_or_sections=num_tokens_per_expert,
+    x_splits = torch.split(
+        x[: sum(num_tokens_per_expert_list)],
+        split_size_or_sections=num_tokens_per_expert_list,
         dim=0,
     )
     out_experts_splits = []
-    for expert_idx, x_expert in enumerate(x):
+    for expert_idx, x_expert in enumerate(x_splits):
         h = F.silu(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
         h = h * torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
         h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
@@ -102,7 +99,6 @@ def _run_experts_for_loop(
     out = torch.cat(out_experts_splits, dim=0)
 
     # side-effect code due to the usage of generate_permute_indices
-    # pyrefly: ignore [no-matching-overload]
     out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
 
     return out

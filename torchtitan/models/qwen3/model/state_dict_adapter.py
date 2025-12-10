@@ -87,11 +87,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     # keep this path for offline conversion
                     split_values = self._split_experts_weights(
                         value,
-                        # pyrefly: ignore [missing-attribute]
                         self.model_args.moe_args.num_experts,
                     )
 
-                    # pyrefly: ignore [missing-attribute]
                     for expert_num in range(self.model_args.moe_args.num_experts):
                         new_key = new_abstract_key.format(layer_num, expert_num)
                         hf_state_dict[new_key] = split_values[expert_num].squeeze()
@@ -109,7 +107,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             else:
                 if key not in to_hf_map:
                     continue
-                # pyrefly: ignore [missing-attribute]
                 if self.model_args.enable_weight_tying and key == "output.weight":
                     continue
                 new_key = to_hf_map[key]
@@ -127,7 +124,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
 
         if (
-            # pyrefly: ignore [missing-attribute]
             self.model_args.enable_weight_tying
             and "lm_head.weight" not in hf_state_dict
         ):
@@ -139,7 +135,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
                 layer_num, expert_num = re.findall(r"\d+", key)
                 titan_abstract_key = self.from_hf_map[abstract_key]
-                # pyrefly: ignore [missing-attribute]
+                assert titan_abstract_key is not None
                 new_key = titan_abstract_key.format(layer_num)
 
                 # Store the expert's weight in expert_weights_by_layer for concatenating later.
@@ -154,7 +150,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 if isinstance(value, DTensor):
                     stacked_value = self._concatenate_expert_weights_dtensor(
                         expert_weights_by_layer,
-                        # pyrefly: ignore [bad-argument-type]
                         titan_abstract_key,
                         layer_num,
                         value.device_mesh,
@@ -162,10 +157,8 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 else:  # keep this path to be compatible with offline conversion
                     stacked_value = self._concatenate_expert_weights(
                         expert_weights_by_layer,
-                        # pyrefly: ignore [bad-argument-type]
                         titan_abstract_key,
                         layer_num,
-                        # pyrefly: ignore [missing-attribute]
                         self.model_args.moe_args.num_experts,
                     )
 
@@ -183,6 +176,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
             else:
                 new_key = self.from_hf_map[key]
+                # pyrefly: ignore [unsupported-operation]
                 state_dict[new_key] = value
 
         return state_dict

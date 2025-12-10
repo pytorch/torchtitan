@@ -10,10 +10,11 @@ import json
 import os
 import time
 from datetime import timedelta
-from typing import Any, Generator, Iterable
+from typing import Any, Iterable
 
 import torch
 
+import torch.distributed.checkpoint.stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
@@ -36,7 +37,6 @@ from torchtitan.tools.profiling import (
 )
 
 
-# pyrefly: ignore [implicit-import]
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # core configs
     job_config: JobConfig
@@ -61,7 +61,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # runtime utilities
     device: torch.device
     gc_handler: utils.GarbageCollection
-    train_context: Generator[None, None, None]
+    train_context: dist_utils.TrainContext
     gradient_accumulation_steps: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
@@ -170,7 +170,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # calculate model size and flops per token
         (
             model_param_count,
-            # pyrefly: ignore [bad-assignment]
             self.metrics_processor.num_flops_per_token,
             # pyrefly: ignore [bad-argument-type]
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
@@ -330,7 +329,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
             parallel_dims,
             job_config.training.mixed_precision_param,
-            # pyrefly: ignore [bad-argument-type]
             device_type,
         )
 
@@ -510,7 +508,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
-            # pyrefly: ignore [not-callable]
             with self.train_context(optional_context_parallel_ctx):
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
@@ -544,10 +541,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # Non-PP forward / backward
-            # pyrefly: ignore [not-callable]
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
-                # pyrefly: ignore [bad-context-manager]
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     loss = self.loss_fn(pred, labels)

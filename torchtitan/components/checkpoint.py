@@ -29,7 +29,10 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-from torch.distributed.checkpoint.state_dict_saver import AsyncCheckpointerType
+from torch.distributed.checkpoint.state_dict_saver import (
+    AsyncCheckpointerType,
+    AsyncSaveResponse,
+)
 from torch.distributed.checkpoint.stateful import Stateful
 
 from torchtitan.components.dataloader import BaseDataLoader
@@ -174,6 +177,9 @@ class CheckpointManager:
 
     """
 
+    mp_queue_send: queue.Queue
+    purge_thread: threading.Thread | None
+
     def __init__(
         self,
         dataloader: BaseDataLoader | None,
@@ -300,7 +306,6 @@ class CheckpointManager:
             )
             self.purge_thread.start()
         else:
-            # pyrefly: ignore [bad-assignment]
             self.purge_thread = None
 
         self.mp = None
@@ -327,7 +332,6 @@ class CheckpointManager:
     def close(self):
         if hasattr(self, "enable") and self.enable:
             if hasattr(self, "mp") and self.mp and self.mp.is_alive():
-                # pyrefly: ignore [missing-attribute]
                 self.mp_queue_send.put(Terminate())
                 self.mp.join()
             if (
@@ -349,7 +353,7 @@ class CheckpointManager:
         async_mode: AsyncMode,
         enable_garbage_collection: bool = False,
         to_hf: bool = False,
-    ) -> Future | None:
+    ) -> Future | AsyncSaveResponse | None:
         """Save the checkpoint with dcp.
         Args:
             state_dict (dict): The state dict to save.
@@ -362,7 +366,7 @@ class CheckpointManager:
             Future: The future object if the checkpoint is async, otherwise None.
         """
 
-        ret: Future | None = None
+        ret: Future | AsyncSaveResponse | None = None
 
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
@@ -372,7 +376,6 @@ class CheckpointManager:
             ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
             state_dict = self.sd_adapter.to_hf(state_dict)
 
-            # pyrefly: ignore [missing-attribute]
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
             if fqn_to_index_mapping:
                 storage_writer = HuggingFaceStorageWriter(
@@ -396,7 +399,6 @@ class CheckpointManager:
             checkpoint_save_id = checkpoint_id
 
         if async_mode == AsyncMode.ASYNC:
-            # pyrefly: ignore [bad-assignment]
             ret = dcp.async_save(
                 state_dict,
                 storage_writer=storage_writer,
@@ -405,7 +407,6 @@ class CheckpointManager:
                 process_group=self.pg,
             )
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            # pyrefly: ignore [bad-assignment]
             ret = dcp.async_save(
                 state_dict,
                 storage_writer=storage_writer,

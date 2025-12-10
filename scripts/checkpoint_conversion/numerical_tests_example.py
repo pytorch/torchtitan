@@ -25,8 +25,7 @@ def loss_fn(logits1, logits2):
     probs2 = F.softmax(logits2, dim=-1)
 
     # Calculate KL Divergence
-    # pyrefly: ignore [bad-argument-type]
-    kl_loss = F.kl_div(probs1, probs2, "mean")
+    kl_loss = F.kl_div(probs1, probs2, reduction="mean")
     return kl_loss
 
 
@@ -156,8 +155,7 @@ if __name__ == "__main__":
     avg_losses = {}
 
     for test_name, (baseline_outputs, conversion_outputs) in test_configs.items():
-        total_loss = 0
-        # pyrefly: ignore [bad-assignment]
+        total_loss: int | torch.Tensor = 0
         for baseline, outputs in zip(baseline_outputs, conversion_outputs):
             total_loss += loss_fn(baseline, outputs)
         avg_loss = total_loss / len(test_set)

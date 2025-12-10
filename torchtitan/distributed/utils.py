@@ -7,12 +7,16 @@
 import contextlib
 import math
 import os
-from collections.abc import Generator, Iterable
+from abc import abstractmethod
+from collections.abc import Iterable
 from datetime import timedelta
+from typing import Protocol
 
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
+import torch.distributed.tensor._random
+import torch.distributed.tensor.parallel
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
@@ -196,7 +200,7 @@ def set_determinism(
     # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
     # IF PP is also used, this seed is unique per PP rank.
     if duplicate_seed_mesh and duplicate_seed_mesh.get_coordinate() is not None:
-        # pyrefly: ignore [bad-argument-type, implicit-import]
+        # pyrefly: ignore [bad-argument-type]
         torch.distributed.tensor._random.manual_seed(seed, duplicate_seed_mesh)
 
 
@@ -210,15 +214,13 @@ def create_context_parallel_ctx(
     try:
         from torch.distributed.tensor.experimental import context_parallel
         from torch.distributed.tensor.experimental._attention import set_rotate_method
-    except ImportError:
-        print(
+    except ImportError as e:
+        raise ValueError(
             f"PyTorch version {torch.__version__} does not include the experimental "
             "Context Parallel API. Please update to a newer version."
-        )
+        ) from e
 
-    # pyrefly: ignore [unbound-name]
     set_rotate_method(cp_rotate_method)
-    # pyrefly: ignore [unbound-name]
     return context_parallel(
         cp_mesh,
         buffers=cp_buffers,
@@ -227,31 +229,36 @@ def create_context_parallel_ctx(
     )
 
 
-def get_train_context(enable_loss_parallel: bool) -> Generator[None, None, None]:
+class TrainContext(Protocol):
+    @abstractmethod
+    def __call__(
+        self,
+        cp_context: contextlib.AbstractContextManager[None] | None = None,
+    ) -> contextlib.AbstractContextManager[None]:
+        pass
+
+
+def get_train_context(enable_loss_parallel: bool) -> TrainContext:
     @contextlib.contextmanager
-    def context(cp_context: Generator[None, None, None] | None = None):
+    def context(cp_context: contextlib.AbstractContextManager[None] | None = None):
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
-                # pyrefly: ignore [implicit-import]
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
 
             if cp_context:
-                # pyrefly: ignore [bad-argument-type]
                 stack.enter_context(cp_context)
 
             yield
 
-    # pyrefly: ignore [bad-return]
     return context
 
 
 def maybe_enable_amp(
-    parallel_dims: ParallelDims, mixed_precision_param: str, device_type: torch.device
-) -> Generator[None, None, None]:
+    parallel_dims: ParallelDims, mixed_precision_param: str, device_type: str
+) -> contextlib.AbstractContextManager[None]:
     if parallel_dims.fsdp_enabled:
         # FSDP handles mixed precision internally
         logger.info("Mixed precision training is handled by fully_shard")
-        # pyrefly: ignore [bad-return]
         return contextlib.nullcontext()
     else:
         if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
@@ -259,14 +266,12 @@ def maybe_enable_amp(
                 "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP is enabled."
             )
             logger.info("Mixed precision training is disabled")
-            # pyrefly: ignore [bad-return]
             return contextlib.nullcontext()
         else:
             # the following code will only be executed for DDP or single-device training
             logger.info("Mixed precision training is handled by AMP")
             # pyrefly: ignore [bad-return]
             return torch.autocast(
-                # pyrefly: ignore [bad-argument-type]
                 device_type,
                 dtype=TORCH_DTYPE_MAP[mixed_precision_param],
             )

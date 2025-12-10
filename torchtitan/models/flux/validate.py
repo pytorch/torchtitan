@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Generator
+from contextlib import AbstractContextManager
 
 import torch
 import torch.nn as nn
@@ -15,7 +15,7 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.components.validate import Validator
+from torchtitan.components.validate import ValidationContext, Validator
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.flux.flux_datasets import build_flux_validation_dataloader
@@ -53,8 +53,8 @@ class FluxValidator(Validator):
         tokenizer: BaseTokenizer,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
-        validation_context: Generator[None, None, None],
-        maybe_enable_amp: Generator[None, None, None],
+        validation_context: ValidationContext,
+        maybe_enable_amp: AbstractContextManager[None],
         metrics_processor: MetricsProcessor | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
@@ -244,9 +244,7 @@ class FluxValidator(Validator):
                     else None
                 )
 
-                # pyrefly: ignore [not-callable]
                 with self.validation_context(optional_context_parallel_ctx):
-                    # pyrefly: ignore [bad-context-manager]
                     with self.maybe_enable_amp:
                         latent_noise_pred = model(
                             img=latents,
@@ -292,8 +290,8 @@ def build_flux_validator(
     tokenizer: BaseTokenizer,
     parallel_dims: ParallelDims,
     loss_fn: LossFunction,
-    validation_context: Generator[None, None, None],
-    maybe_enable_amp: Generator[None, None, None],
+    validation_context: ValidationContext,
+    maybe_enable_amp: AbstractContextManager[None],
     metrics_processor: MetricsProcessor | None = None,
     pp_schedule: _PipelineSchedule | None = None,
     pp_has_first_stage: bool | None = None,

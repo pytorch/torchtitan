@@ -50,7 +50,6 @@ class FluxTrainer(Trainer):
         self.autoencoder = load_ae(
             # pyrefly: ignore [missing-attribute]
             job_config.encoder.autoencoder_path,
-            # pyrefly: ignore [missing-attribute]
             model_args.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
@@ -159,9 +158,7 @@ class FluxTrainer(Trainer):
             if self.parallel_dims.cp_enabled
             else None
         )
-        # pyrefly: ignore [not-callable]
         with self.train_context(optional_context_parallel_ctx):
-            # pyrefly: ignore [bad-context-manager]
             with self.maybe_enable_amp:
                 latent_noise_pred = model(
                     img=latents,

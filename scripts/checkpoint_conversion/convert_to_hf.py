@@ -52,7 +52,6 @@ def convert_to_hf(
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
         save_distributed=True,
-        # pyrefly: ignore [missing-attribute]
         fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping,
         enable_consolidation=True,
         thread_count_consolidation=5,

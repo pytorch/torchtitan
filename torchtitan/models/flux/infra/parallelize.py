@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -77,9 +78,8 @@ def apply_fsdp(
         cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
-        # pyrefly: ignore [bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
     linear_layers = [
@@ -150,12 +150,11 @@ def parallelize_encoders(
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
-        fsdp_config = {
+        fsdp_config: dict[str, Any] = {
             "mesh": parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
             "mp_policy": mp_policy,
         }
         if job_config.training.enable_cpu_offload:
-            # pyrefly: ignore [bad-typed-dict-key]
             fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
         # NOTE: only apply FSDP to the T5 encoder, not the CLIP text encoder.

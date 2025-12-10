@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import importlib
+import importlib.util
 from contextlib import nullcontext
 from datetime import timedelta
 from typing import Callable, ContextManager, Optional, TYPE_CHECKING, Union
@@ -18,7 +19,6 @@ from torch.distributed.distributed_c10d import ReduceOp
 from torchtitan.components.ft.config import FaultTolerance as FTConfig
 from torchtitan.tools.logging import logger
 
-# pyrefly: ignore [implicit-import]
 if importlib.util.find_spec("torchft") is not None:
     import torchft as ft
 

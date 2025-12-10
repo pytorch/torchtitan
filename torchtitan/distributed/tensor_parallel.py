@@ -6,6 +6,7 @@
 
 
 import torch
+import torch._inductor.config
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import JobConfig
@@ -23,7 +24,6 @@ def maybe_enable_async_tp(job_config: JobConfig, tp_mesh: DeviceMesh):
 
     from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
-    # pyrefly: ignore [implicit-import]
     torch._inductor.config._micro_pipeline_tp = True
     enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 

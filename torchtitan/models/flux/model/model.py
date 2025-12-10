@@ -53,7 +53,6 @@ class FluxModel(nn.Module, ModelProtocol):
         self.pe_embedder = EmbedND(
             dim=pe_dim,
             theta=model_args.theta,
-            # pyrefly: ignore [bad-argument-type]
             axes_dim=model_args.axes_dim,
         )
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
