@@ -55,19 +55,19 @@ jobs:
           if [[ "$IS_8GPU_TAG" == "true" ]]; then
             cat > matrix.json <<JSON
           {"include": [$ROCM_MATRIX]}
-JSON
+          JSON
 
           # Runs CUDA and ROCm for normal PR (if PR label is present) OR for push to main, cron schedule
           elif [[ ("$HAS_8GPU_LABEL" == "true" && "$IS_PR" == "true") || ("$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true") ]]; then
             cat > matrix.json <<JSON
           {"include": [$CUDA_MATRIX,$ROCM_MATRIX]}
-JSON
+          JSON
 
           # Runs CUDA as default (includes normal PR, if PR label is NOT present)
           else
             cat > matrix.json <<JSON
           {"include": [$CUDA_MATRIX]}
-JSON
+          JSON
           fi
 
           # Export matrix to job outputs
