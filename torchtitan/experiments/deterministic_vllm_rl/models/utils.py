@@ -15,49 +15,112 @@ import torch.distributed as dist
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
+from torchtitan.config import JobConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 logger = init_logger(__name__)
 
 
-def create_parallel_dims_from_vllm_config(vllm_config: VllmConfig) -> ParallelDims:
+def create_parallel_dims(job_config: JobConfig) -> ParallelDims:
     """
-    Create ParallelDims from vLLM config.
+    Create ParallelDims from JobConfig.
 
-    Maps vLLM parallelism settings to TorchTitan's ParallelDims dataclass.
+    Maps JobConfig parallelism settings to TorchTitan's ParallelDims dataclass.
+    This follows the same pattern as init_distributed() in train.py.
+
+    Args:
+        job_config: TorchTitan JobConfig object with parallelism settings
+
+    Returns:
+        ParallelDims object with parallelism settings validated
+    """
+    world_size = dist.get_world_size()
+
+    parallelism_config = job_config.parallelism
+    parallel_dims = ParallelDims(
+        dp_shard=parallelism_config.data_parallel_shard_degree,
+        dp_replicate=parallelism_config.data_parallel_replicate_degree,
+        cp=parallelism_config.context_parallel_degree,
+        tp=parallelism_config.tensor_parallel_degree,
+        pp=parallelism_config.pipeline_parallel_degree,
+        ep=parallelism_config.expert_parallel_degree,
+        etp=parallelism_config.expert_tensor_parallel_degree,
+        world_size=world_size,
+    )
+
+    logger.info(
+        f"Created ParallelDims from JobConfig: "
+        f"DP_replicate={parallel_dims.dp_replicate}, "
+        f"DP_shard={parallel_dims.dp_shard}, "
+        f"TP={parallel_dims.tp}, "
+        f"CP={parallel_dims.cp}, "
+        f"PP={parallel_dims.pp}"
+    )
+
+    return parallel_dims
+
+
+def create_job_config_from_vllm_config(vllm_config: VllmConfig) -> JobConfig:
+    """
+    Create a minimal JobConfig from vLLM config.
+
+    This extracts relevant settings from vLLM config and creates a JobConfig
+    object that can be used with TorchTitan's parallelize_qwen3 function.
+    We need to translate from vllm to torchtitan JobConfig because now the
+    entrypoint is vLLM inference Engine.
 
     Args:
         vllm_config: vLLM configuration object
 
     Returns:
-        ParallelDims object with parallelism settings validated
-
-    Note:
-        vLLM doesn't use FSDP sharding (dp_shard=1) or expert parallelism (ep=1, etp=1)
-        in inference. These are set to default values.
+        JobConfig with settings mapped from vLLM config
     """
-    world_size = dist.get_world_size()
+    job_config = JobConfig()
 
-    # Map vLLM config to TorchTitan ParallelDims
-    parallel_dims = ParallelDims(
-        dp_replicate=vllm_config.parallel_config.data_parallel_size,
-        dp_shard=1,  # vLLM doesn't use FSDP sharding
-        cp=vllm_config.parallel_config.decode_context_parallel_size,
-        tp=vllm_config.parallel_config.tensor_parallel_size,
-        pp=vllm_config.parallel_config.pipeline_parallel_size,
-        ep=1,  # Expert parallelism not used in vLLM inference yet
-        etp=1,  # Expert tensor parallelism not used in vLLM inference yet
-        world_size=world_size,
+    # Training settings
+    job_config.training.seq_len = vllm_config.model_config.max_model_len
+    job_config.training.dtype = "bfloat16"  # vLLM inference uses bfloat16
+    job_config.training.mixed_precision_param = "bfloat16"
+    job_config.training.mixed_precision_reduce = "float32"
+
+    # Parallelism settings
+    parallel_config = vllm_config.parallel_config
+    job_config.parallelism.tensor_parallel_degree = parallel_config.tensor_parallel_size
+    job_config.parallelism.pipeline_parallel_degree = (
+        parallel_config.pipeline_parallel_size
     )
+    job_config.parallelism.data_parallel_shard_degree = 1  # vLLM doesn't use FSDP
+    job_config.parallelism.data_parallel_replicate_degree = (
+        parallel_config.data_parallel_size
+    )
+    job_config.parallelism.context_parallel_degree = (
+        parallel_config.decode_context_parallel_size
+    )
+    job_config.parallelism.disable_loss_parallel = (
+        True  # Inference doesn't need loss parallel
+    )
+    job_config.parallelism.enable_async_tensor_parallel = (
+        False  # Disabled for inference
+    )
+
+    # Activation checkpoint - disabled for inference
+    job_config.activation_checkpoint.mode = "none"
+
+    # Compile - disabled for inference
+    job_config.compile.enable = False
+
+    # Model settings
+    job_config.model.converters = []  # No converters for inference
 
     logger.info(
-        f"Created ParallelDims from vLLM config: "
-        f"DP={parallel_dims.dp_replicate}, TP={parallel_dims.tp}, "
-        f"CP={parallel_dims.cp}, PP={parallel_dims.pp}"
+        f"Created JobConfig from vLLM config: "
+        f"seq_len={job_config.training.seq_len}, "
+        f"tp={job_config.parallelism.tensor_parallel_degree}, "
+        f"pp={job_config.parallelism.pipeline_parallel_degree}"
     )
 
-    return parallel_dims
+    return job_config
 
 
 def build_device_mesh_and_parallelize(
@@ -90,15 +153,5 @@ def build_device_mesh_and_parallelize(
     logger.info(f"Built device mesh using ParallelDims: {world_mesh}")
 
     # Apply tensor parallelism using provided function
-    if parallel_dims.tp_enabled:
-        tp_mesh = world_mesh["tp"]
-        parallelize_fn(
-            model=model,
-            tp_mesh=tp_mesh,
-            loss_parallel=False,
-            enable_float8_tensorwise_tp=False,
-            enable_async_tp=False,
-        )
-        logger.info(f"Applied Tensor Parallelism with TP={parallel_dims.tp}")
 
     return world_mesh

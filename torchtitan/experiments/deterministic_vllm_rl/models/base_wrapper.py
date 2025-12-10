@@ -29,7 +29,8 @@ from torchtitan.experiments.deterministic_vllm_rl.models.attention import (
     VLLMPagedFlashAttention,
 )
 from torchtitan.experiments.deterministic_vllm_rl.models.utils import (
-    create_parallel_dims_from_vllm_config,
+    create_job_config_from_vllm_config,
+    create_parallel_dims,
 )
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
@@ -96,22 +97,18 @@ class TorchTitanVLLMModel(nn.Module):
         # Replace attention with vLLM paged attention
         self._replace_with_vllm_paged_attention(model_args)
 
-        # Create ParallelDims from vLLM config and apply parallelization
-        # NOTE: We need to apply parallelize within model.__init__ because w
-        parallel_dims = create_parallel_dims_from_vllm_config(vllm_config)
+        # Create JobConfig and ParallelDims from vLLM config
+        job_config = create_job_config_from_vllm_config(vllm_config)
+        parallel_dims = create_parallel_dims(job_config)
+
+        # Apply parallelization using parallelize_qwen3
         if parallel_dims.tp_enabled:
-            self.world_mesh = parallel_dims.world_mesh
-            tp_mesh = self.world_mesh["tp"]
             parallelize_fn(
-                model=self.model,
-                tp_mesh=tp_mesh,
-                loss_parallel=False,
-                enable_float8_tensorwise_tp=False,
-                enable_async_tp=False,
+                self.model,
+                parallel_dims,
+                job_config,
             )
-            logger.info(
-                f"Successfully initialized model with with TP={parallel_dims.tp}"
-            )
+            logger.info(f"Successfully initialized model with TP={parallel_dims.tp}")
         else:
             logger.info("Single GPU mode - no parallelization needed")
 
@@ -298,11 +295,10 @@ class TorchTitanVLLMModel(nn.Module):
             max_position = 0
 
         rope_cache = self._extend_rope_cache_if_needed(rope_attr, max_position)
-        rope_cache = rope_cache[positions]
 
         # Pass through transformer layers
         for layer in self.model.layers.values():
-            h = layer(h, rope_cache, attention_masks=None)
+            h = layer(h, rope_cache, attention_masks=None, positions=positions)
 
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
@@ -311,7 +307,7 @@ class TorchTitanVLLMModel(nn.Module):
 
         # Convert DTensor to regular tensor
         if isinstance(h, DTensor):
-            h = h.full_tensor()
+            h = h.to_local()
 
         return h
 
@@ -321,11 +317,13 @@ class TorchTitanVLLMModel(nn.Module):
         sampling_metadata=None,
     ) -> torch.Tensor | None:
         """Compute logits from hidden states."""
+        # print(f"[jianiw] The shape of hidden_state of compute_logits() is: {hidden_states.shape}")
+        # hidden_states: 1024 * 1024, now the placement is Shard(1) according to TP plan
         h = self.model.norm(hidden_states)
         logits = self.model.output(h)
 
         if isinstance(logits, DTensor):
-            logits = logits.full_tensor()
+            logits = logits.to_local()
 
         return logits
 
