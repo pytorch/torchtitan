@@ -453,7 +453,7 @@ class MoE(nn.Module):
                     self.load_balance_loss_weight,
                 )
         else:
-            load_balance_loss = torch.tensor(0.0, device=out.device, dtype=out.dtype)
+            load_balance_loss = torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
         # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)
