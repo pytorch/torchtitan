@@ -47,6 +47,7 @@ _op_sac_save_list = {
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
     torch.ops.torch_attn._varlen_attn.default,
+    torch._higher_order_ops.inductor_compiled_code,
 }
 
 
@@ -116,8 +117,6 @@ def parallelize_qwen3(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=attn_type == "flex",
-            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
@@ -245,9 +244,11 @@ def apply_non_moe_tp(
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
+            # NOTE: when the fourth argument (positions) is not None, its input layout
+            # and desired input layout should be Replicate()
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate(), None),
-                desired_input_layouts=(Replicate(), Replicate(), None),
+                input_layouts=(Shard(1), Replicate(), None, None),
+                desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
             "attention.wq": colwise_parallel(use_local_output=False),
             "attention.wk": colwise_parallel(use_local_output=False),

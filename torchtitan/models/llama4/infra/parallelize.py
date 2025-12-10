@@ -52,6 +52,7 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    torch._higher_order_ops.inductor_compiled_code,
 }
 
 
@@ -116,15 +117,11 @@ def parallelize_llama(
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
-    attn_type = getattr(model.model_args, "attn_type", "sdpa")
-    use_flex_attn = attn_type == "flex"
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
-            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
@@ -244,9 +241,11 @@ def apply_non_moe_tp(
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
+            # NOTE: when the fourth argument (positions) is not None, its input layout
+            # and desired input layout should be Replicate()
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None, None),
-                desired_input_layouts=(Replicate(), None, None),
+                input_layouts=(Shard(1), None, None, None),
+                desired_input_layouts=(Replicate(), None, None, None),
             ),
             "attention.wq": colwise_parallel(),
             "attention.wk": colwise_parallel(),

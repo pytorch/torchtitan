@@ -105,6 +105,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
             world_mesh,
             self.device,
             job_config.debug,
+            distinct_seed_mesh_dims=["pp"],  # same as `torchtitan/train.py`
         )
         self.train_spec = get_train_spec(job_config.model.name)
 
@@ -227,6 +228,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 if self.train_spec.state_dict_adapter
                 else None
             ),
+            base_folder=job_config.job.dump_folder,
         )
 
         loss_parallel_enabled = (

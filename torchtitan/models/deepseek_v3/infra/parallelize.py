@@ -44,6 +44,7 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    torch._higher_order_ops.inductor_compiled_code,
 }
 
 
@@ -65,7 +66,6 @@ def parallelize_deepseekv3(
         """
 
     attn_type = getattr(model.model_args, "attn_type", "sdpa")
-    use_flex_attn = attn_type == "flex"
     if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
         raise NotImplementedError("CP support is only supported for SDPA.")
 
@@ -115,8 +115,6 @@ def parallelize_deepseekv3(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
-            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
@@ -227,9 +225,11 @@ def apply_non_moe_tp(
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
+            # NOTE: when the fourth argument (positions) is not None, its input layout
+            # and desired input layout should be Replicate()
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate(), None),
-                desired_input_layouts=(Replicate(), Replicate(), None),
+                input_layouts=(Shard(1), Replicate(), None, None),
+                desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
             # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
             # so that the intermedidate results k is generated as a DTensor and its gradient is
