@@ -557,6 +557,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "validation_tp_cp_pp",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    '--training.dataloader.kwargs \'{"num_workers": 2, "pin_memory": true, "prefetch_factor": 2}\'',
+                ],
+            ],
+            "Dataloader kwargs",
+            "dataloader_kwargs",
+            ngpu=2,
+        ),
     ]
 
     return integration_tests_flavors

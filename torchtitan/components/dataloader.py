@@ -77,17 +77,8 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
 
         super().__init__(dataset, **kwargs)
 
-    @classmethod
-    def _get_valid_dataloader_kwargs(cls) -> frozenset[str]:
-        """Get valid kwargs from StatefulDataLoader's signature using inspect."""
-        sig = inspect.signature(StatefulDataLoader.__init__)
-        # Exclude 'self' and 'dataset' (which we handle explicitly)
-        return frozenset(
-            name for name in sig.parameters.keys() if name not in ("self", "dataset")
-        )
-
-    @classmethod
-    def _validate_kwargs(cls, kwargs: dict[str, Any]) -> None:
+    @staticmethod
+    def _validate_kwargs(kwargs: dict[str, Any]) -> None:
         """Validate kwargs passed to the dataloader.
 
         Raises:
@@ -99,7 +90,10 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
                 "it must be provided as the first positional argument."
             )
 
-        valid_kwargs = cls._get_valid_dataloader_kwargs()
+        sig = inspect.signature(StatefulDataLoader.__init__)
+        valid_kwargs = frozenset(
+            name for name in sig.parameters.keys() if name not in ("self", "dataset")
+        )
         invalid_kwargs = set(kwargs.keys()) - valid_kwargs
         if invalid_kwargs:
             raise ValueError(

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import importlib
+import json
 import os
 import sys
 
@@ -234,6 +235,41 @@ class ConfigManager:
                 instance_from_str=lambda args: args[0].split(","),
                 is_instance=lambda instance: all(isinstance(i, str) for i in instance),
                 str_from_instance=lambda instance: [",".join(instance)],
+            )
+
+        @registry.primitive_rule
+        def dict_str_any_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
+            """Support for dict[str, Any] parsing from CLI.
+
+            Accepts JSON format: {"key": "value", "num": 123, "flag": true}
+
+            Note: When using from command line, wrap in single quotes for shell escaping:
+                --training.dataloader.kwargs '{"num_workers": 2, "pin_memory": true}'
+
+            The single quotes prevent bash from interpreting {}, spaces, and double quotes.
+            """
+            if type_info.type != dict[str, Any]:
+                return None
+
+            def parse_dict(args: list[str]) -> dict[str, Any]:
+                if not args or not args[0]:
+                    return {}
+                try:
+                    return json.loads(args[0])
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        f"Invalid JSON for dict argument: {args[0]}. Error: {e}"
+                    ) from e
+
+            def dict_to_str(instance: dict[str, Any]) -> list[str]:
+                return [json.dumps(instance)]
+
+            return tyro.constructors.PrimitiveConstructorSpec(
+                nargs=1,
+                metavar='{"key": value, ...}',
+                instance_from_str=parse_dict,
+                is_instance=lambda instance: isinstance(instance, dict),
+                str_from_instance=dict_to_str,
             )
 
 
