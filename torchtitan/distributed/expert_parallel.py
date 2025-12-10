@@ -71,6 +71,8 @@ class ExpertParallel(ParallelStyle):
         self.output_splits = None
         self.input_shape = None
         self.permuted_indices = None
+        self._a2a_dispatch_impl = all_to_all_single_autograd
+        self._a2a_combine_impl = all_to_all_single_autograd
 
     # performing all-to-all dispatch on the input
     def _token_dispatch(self, mod, inputs, device_mesh):
@@ -107,7 +109,7 @@ class ExpertParallel(ParallelStyle):
             self.output_splits = output_splits.tolist()
 
         # perform all-to-all
-        routed_input = all_to_all_single_autograd(
+        routed_input = self._a2a_dispatch_impl(
             routed_input,
             self.output_splits,
             self.input_splits,
@@ -150,7 +152,7 @@ class ExpertParallel(ParallelStyle):
             routed_output, self.input_shape, self.permuted_indices
         )
 
-        routed_output = all_to_all_single_autograd(
+        routed_output = self._a2a_combine_impl(
             routed_output,
             self.input_splits,
             self.output_splits,

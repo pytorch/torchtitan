@@ -11,6 +11,7 @@ from torchtitan.components.quantization import (
     FP8_GROUP_ALIGNMENT_SIZE,
     QuantizationConverter,
 )
+from torchtitan.components.quantization.utils import module_filter_fn
 
 from torchtitan.config.job_config import Float8Linear, JobConfig
 from torchtitan.distributed import ParallelDims
@@ -18,8 +19,6 @@ from torchtitan.models.moe.utils import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
-
-from .utils import module_filter_fn
 
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 

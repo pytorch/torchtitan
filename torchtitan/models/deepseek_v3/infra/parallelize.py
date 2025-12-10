@@ -94,6 +94,7 @@ def parallelize_deepseekv3(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
+            job_config,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
             ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
             ep_tp_mesh=(
