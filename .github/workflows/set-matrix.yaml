@@ -11,7 +11,7 @@ jobs:
   set:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.write.outputs.matrix }}
+      matrix: ${{ steps.set.outputs.matrix }}
     env:
       HAS_8GPU_LABEL: ${{ (github.event_name == 'pull_request') && contains(github.event.pull_request.labels.*.name, 'ciflow/8gpu') }}
 
