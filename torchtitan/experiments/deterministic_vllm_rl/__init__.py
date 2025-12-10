@@ -18,7 +18,7 @@ Key components:
 - TorchTitanVLLMModel: Generic wrapper for TorchTitan models with vLLM
 
 For vLLM inference with TorchTitan models, see:
-- models/base_wrapper.py: Core vLLM wrapper
+- models/vllm_wrapper.py: Core vLLM wrapper
 - models/__init__.py: Auto-registration with vLLM
 - infer.py: Example inference script
 """
@@ -29,8 +29,8 @@ from .batch_invariant_backward import (
     silu_and_mul_with_gradients,
 )
 from .models import VLLMCompatibleFlashAttention
-from .models.base_wrapper import TorchTitanVLLMModel
 from .models.qwen3 import Qwen3VLLMCompatModel
+from .models.vllm_wrapper import TorchTitanVLLMModel
 
 
 __all__ = [
