@@ -1,4 +1,4 @@
-"ciflow/8gpu/":
+"ciflow/8gpu":
 - .ci/docker/**
 - .github/workflows/**
 - scripts/**
