@@ -20,6 +20,7 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
+# pyrefly: ignore [missing-import]
 from torch.nn.attention.varlen import varlen_attn
 from torch.types import Number
 

@@ -48,6 +48,7 @@ _op_sac_save_list = {
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
     torch.ops.torch_attn._varlen_attn.default,
+    # pyrefly: ignore [missing-attribute]
     torch._higher_order_ops.inductor_compiled_code,
 }
 
@@ -249,7 +250,9 @@ def apply_non_moe_tp(
             # NOTE: when the fourth argument (positions) is not None, its input layout
             # and desired input layout should be Replicate()
             "attention": prepare_module_input(
+                # pyrefly: ignore [bad-argument-type]
                 input_layouts=(Shard(1), Replicate(), None, None),
+                # pyrefly: ignore [bad-argument-type]
                 desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
             "attention.wq": colwise_parallel(use_local_output=False),

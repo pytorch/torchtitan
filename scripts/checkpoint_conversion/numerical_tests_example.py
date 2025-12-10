@@ -29,6 +29,7 @@ def loss_fn(logits1, logits2):
     return kl_loss
 
 
+# pyrefly: ignore [bad-argument-count]
 @torch.no_grad
 def forward_hf(model_name, model_path: Optional[str], input_ids):
     # Load the tokenizer and model
@@ -60,6 +61,7 @@ def forward_hf(model_name, model_path: Optional[str], input_ids):
     return outputs_list
 
 
+# pyrefly: ignore [bad-argument-count]
 @torch.no_grad
 def forward_tt(config_path, checkpoint_path, test_set):
 
@@ -141,10 +143,13 @@ if __name__ == "__main__":
     ]
 
     # baseline logits
+    # pyrefly: ignore [bad-argument-count, bad-specialization]
     baseline_hf_outputs = forward_hf(hf_model_name, None, test_set)
 
     # testing from hf conversion
+    # pyrefly: ignore [bad-argument-count, bad-specialization]
     from_hf_outputs = forward_tt(config_path, checkpoint_path, test_set)
+    # pyrefly: ignore [bad-argument-count, bad-specialization]
     from_hf_outputs_no_perm = forward_tt(config_path, checkpoint_path_no_perm, test_set)
 
     # Define the set of outputs to test loss for

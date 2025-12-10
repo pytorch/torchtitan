@@ -54,6 +54,7 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    # pyrefly: ignore [missing-attribute]
     torch._higher_order_ops.inductor_compiled_code,
 }
 
@@ -247,7 +248,9 @@ def apply_non_moe_tp(
             # NOTE: when the fourth argument (positions) is not None, its input layout
             # and desired input layout should be Replicate()
             "attention": prepare_module_input(
+                # pyrefly: ignore [bad-argument-type]
                 input_layouts=(Shard(1), None, None, None),
+                # pyrefly: ignore [bad-argument-type]
                 desired_input_layouts=(Replicate(), None, None, None),
             ),
             "attention.wq": colwise_parallel(),

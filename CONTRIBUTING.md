@@ -15,12 +15,7 @@ We actively welcome your pull requests.
 3. If you've changed APIs, update the documentation.
 4. Ensure the test suite passes.
 5. Make sure your code lints (`pre-commit run --all-files`).
-6. Make sure your code type checks:
-   ```
-   .github/scripts/setup_pyrefly.sh  # one-time setup
-   pyrefly check
-   ```
-7. If you haven't already, complete the Contributor License Agreement ("CLA").
+6. If you haven't already, complete the Contributor License Agreement ("CLA").
 
 ### Contributor License Agreement ("CLA")
 In order to accept your pull request, we need you to submit a CLA. You only need

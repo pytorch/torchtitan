@@ -295,6 +295,7 @@ def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):
 
     # If local_tensor mode is enabled, initialize LocalTensorMode context
     if comm_mode == "local_tensor":
+        # pyrefly: ignore [missing-module-attribute]
         from torch.distributed import _local_tensor
 
         lm = _local_tensor.LocalTensorMode(world_size)
@@ -364,6 +365,7 @@ def init_distributed(
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),
         timeout=timedelta(seconds=comm_config.init_timeout_seconds),
+        # pyrefly: ignore [unexpected-keyword]
         _ranks=ranks if ranks is not None else [],
     )
 

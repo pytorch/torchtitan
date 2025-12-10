@@ -215,7 +215,6 @@ class MoEStateDictAdapter(StateDictAdapter):
             elif isinstance(placement, _StridedShard):
                 # Keep strided shard with same parameters
                 new_placements.append(
-                    # pyrefly: ignore [unexpected-positional-argument]
                     _StridedShard(placement.dim, placement.split_factor)
                 )
             else:
