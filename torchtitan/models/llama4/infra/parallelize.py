@@ -572,27 +572,34 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
 
         model.layers.register_module(layer_id, transformer_block)
 
-    moe_module._run_experts_grouped_mm = torch.compile(
-        moe_module._run_experts_grouped_mm,
-        backend=compile_config.backend,
-        fullgraph=True,
+    # Patch some globals only once (apply_compile is called multiple times for PP setup)
+    already_patched = (
+        "_run_experts_grouped_mm_dynamic"
+        in moe_module._run_experts_grouped_mm.__qualname__
     )
+    if not already_patched:
+        moe_module._run_experts_grouped_mm = torch.compile(
+            moe_module._run_experts_grouped_mm,
+            backend=compile_config.backend,
+            fullgraph=True,
+        )
 
-    if ep_enabled:
-        compiled_fn = moe_module._run_experts_grouped_mm
+        if ep_enabled:
+            compiled_fn = moe_module._run_experts_grouped_mm
 
-        def _run_experts_grouped_mm_dynamic(
-            w1: torch.Tensor,
-            w2: torch.Tensor,
-            w3: torch.Tensor,
-            x: torch.Tensor,
-            num_tokens_per_expert: torch.Tensor,
-        ) -> torch.Tensor:
-            # dynamic number of tokens in expert parallel
-            torch._dynamo.mark_dynamic(x, 0)
-            return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)
+            # keep function logic in sync with `already_patched` above
+            def _run_experts_grouped_mm_dynamic(
+                w1: torch.Tensor,
+                w2: torch.Tensor,
+                w3: torch.Tensor,
+                x: torch.Tensor,
+                num_tokens_per_expert: torch.Tensor,
+            ) -> torch.Tensor:
+                # dynamic number of tokens in expert parallel
+                torch._dynamo.mark_dynamic(x, 0)
+                return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)
 
-        moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
+            moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
 
     # NOTE: We don't compile for loop code path due to an issue with unbacked symints:
     # https://github.com/pytorch/pytorch/issues/166460
