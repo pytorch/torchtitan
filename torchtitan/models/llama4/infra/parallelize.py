@@ -25,11 +25,12 @@ from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.dual_pipe_v import (
-    apply_dual_pipe_sync_hooks,
+    DualPipeExpertParallel,
     get_dual_pipe_v_flag,
 )
 
 from torchtitan.distributed.expert_parallel import (
+    BaseExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
     ReordererSequenceParallel,
@@ -508,8 +509,8 @@ def apply_moe_ep_tp(
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel()
 
-        if dual_pipe_v and isinstance(experts_plan, ExpertParallel):
-            apply_dual_pipe_sync_hooks(experts_plan)
+        if dual_pipe_v and isinstance(experts_plan, BaseExpertParallel):
+            experts_plan = DualPipeExpertParallel(experts_plan)
 
         parallelize_module(
             module=transformer_block.moe.experts,

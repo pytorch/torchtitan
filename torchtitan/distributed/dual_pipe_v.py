@@ -7,6 +7,7 @@ import threading
 from typing import cast, Optional
 
 import torch
+import torch.nn as nn
 from torch import Tensor
 
 from torch.distributed.pipelining.schedules import (
@@ -16,9 +17,10 @@ from torch.distributed.pipelining.schedules import (
     _wait_batch_p2p,
 )
 from torch.distributed.pipelining.stage import _PipelineStageBase
+from torch.distributed.tensor import DeviceMesh, distribute_module
 from torch.profiler import record_function
 
-from torchtitan.distributed.expert_parallel import ExpertParallel
+from torchtitan.distributed.expert_parallel import BaseExpertParallel
 
 from torchtitan.tools.utils import get_device_info
 
@@ -50,34 +52,53 @@ def get_dual_pipe_v_flag(job_config, parallel_dims) -> bool:
     return dual_pipe_v
 
 
-def apply_dual_pipe_sync_hooks(inner_ep: ExpertParallel) -> ExpertParallel:
+class DualPipeExpertParallel(BaseExpertParallel):
     """
-    Wrap an ExpertParallel's dispatch/combine methods with sync hooks for
-    overlapping EP communication with PP computation in DualPipe scheduling.
+    Wrapper that adds dual-pipe synchronization hooks to any BaseExpertParallel.
+    Wraps dispatch/combine with sync hooks for overlapping EP communication
+    with PP computation in DualPipe scheduling.
 
     The execution order becomes:
     A -> dispatch -> B -> module -> C -> combine -> D
     """
-    original_dispatch = inner_ep._token_dispatch
-    original_combine = inner_ep._token_combine
 
-    def wrapped_dispatch(mod, inputs, device_mesh) -> tuple[Tensor, Tensor]:
+    def __init__(self, inner_ep: BaseExpertParallel):
+        super().__init__()
+        self.inner_ep = inner_ep
+
+    @staticmethod
+    def _partition_fn(name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        raise NotImplementedError(
+            "DualPipeExpertParallel._partition_fn should not be called directly. "
+            "Use _apply() which delegates to inner_ep._partition_fn."
+        )
+
+    def _token_dispatch(
+        self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
         """A -> dispatch -> B"""
         inputs = (cast(Tensor, SyncHook.apply(inputs[0], "A")),) + inputs[1:]
-        outputs = original_dispatch(mod, inputs, device_mesh)
+        outputs = self.inner_ep._token_dispatch(mod, inputs, device_mesh)
         outputs = (cast(Tensor, SyncHook.apply(outputs[0], "B")),) + outputs[1:]
         return outputs
 
-    def wrapped_combine(mod, routed_output, device_mesh) -> Tensor:
+    def _token_combine(
+        self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
         """C -> combine -> D"""
         routed_output = cast(Tensor, SyncHook.apply(routed_output, "C"))
-        combine_output = original_combine(mod, routed_output, device_mesh)
+        combine_output = self.inner_ep._token_combine(mod, routed_output, device_mesh)
         combine_output = cast(Tensor, SyncHook.apply(combine_output, "D"))
         return combine_output
 
-    inner_ep._token_dispatch = wrapped_dispatch
-    inner_ep._token_combine = wrapped_combine
-    return inner_ep
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=self.inner_ep._partition_fn,
+            input_fn=self._token_dispatch,
+            output_fn=self._token_combine,
+        )
 
 
 class HookCoordinator:

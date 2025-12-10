@@ -6,8 +6,9 @@
 
 
 import torch.nn as nn
-from torch.distributed.tensor import distribute_tensor, Replicate, Shard
+from torch.distributed.tensor import DeviceMesh, distribute_tensor, Replicate, Shard
 from torchtitan.distributed.expert_parallel import ExpertTensorParallel, TensorParallel
+
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class GptossTensorParallel(TensorParallel):
@@ -38,28 +39,29 @@ class GptossTensorParallel(TensorParallel):
 
 # This class is for dp2ep with TP (without TP we can just use GptossExpertParallel)
 class GptossExpertTensorParallel(ExpertTensorParallel):
-    def _partition_fn_2d(self, name, mod, ep_tp_mesh):
+    @staticmethod
+    def _partition_fn(name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         mod.register_parameter(
             "mlp1_weight",
             nn.Parameter(
-                distribute_tensor(mod.mlp1_weight, ep_tp_mesh, [Shard(0), Shard(1)])
+                distribute_tensor(mod.mlp1_weight, device_mesh, [Shard(0), Shard(1)])
             ),
         )  # Column-wise sharding
         mod.register_parameter(
             "mlp1_bias",
             nn.Parameter(
-                distribute_tensor(mod.mlp1_bias, ep_tp_mesh, [Shard(0), Shard(1)])
+                distribute_tensor(mod.mlp1_bias, device_mesh, [Shard(0), Shard(1)])
             ),
         )  # Column-wise sharding
         mod.register_parameter(
             "mlp2_weight",
             nn.Parameter(
-                distribute_tensor(mod.mlp2_weight, ep_tp_mesh, [Shard(0), Shard(2)])
+                distribute_tensor(mod.mlp2_weight, device_mesh, [Shard(0), Shard(2)])
             ),
         )  # Row-wise sharding
         mod.register_parameter(
             "mlp2_bias",
             nn.Parameter(
-                distribute_tensor(mod.mlp2_bias, ep_tp_mesh, [Shard(0), Replicate()])
+                distribute_tensor(mod.mlp2_bias, device_mesh, [Shard(0), Replicate()])
             ),
         )  # Replicate
