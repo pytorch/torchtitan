@@ -7,8 +7,6 @@ pytest-cov
 pre-commit
 pyrefly==0.45.1
 tomli-w >= 1.1.0
-torch
-torchao
 torchdata >= 0.8.0
 torchft-nightly
 transformers

@@ -5,6 +5,7 @@ possible. Contributions should follow the [Contributing Guidelines](#contributin
 ### Setup
 ```
 pip install -r requirements-dev.txt
+pip install --force-reinstall --pre --index-url https://download.pytorch.org/whl/nightly/cu126 torch torchao
 ```
 
 ### Pull Requests
