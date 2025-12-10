@@ -13,32 +13,66 @@ jobs:
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
     env:
-      HAS_8GPU_LABEL: ${{ (github.event_name == 'pull_request') && contains(github.event.pull_request.labels.*.name, 'ciflow/8gpu') }}
+      # Event flags evaluated by github actions before the step runs:
+      IS_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      IS_SCHEDULE:  ${{ github.event_name == 'schedule' }}
+      IS_PR:        ${{ github.event_name == 'pull_request' }}
+      HAS_8GPU_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ciflow/8gpu') }}
+      IS_8GPU_TAG:  ${{ startsWith(github.ref, 'refs/tags/ciflow/8gpu/') }}
 
     steps:
       - id: set
-        run: |
-          # Decide which matrix entries to include based on event type
-          # Runs ROCm when label event is triggered
-          if [[ "${{ github.event_name }}" == "pull_request" && "${{ github.event.action }}" == "labeled" && "${HAS_8GPU_LABEL}" == "true" ]]; then
-          echo '{"include":[
-              {"name":"rocm","runner":"linux.rocm.gpu.gfx942.8","gpu-arch-type":"rocm","gpu-arch-version":"7.0","docker-image":"torchtitan-rocm-ubuntu-22.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/rocm7.0"}
-            ]}' > matrix.json                                                                                                                  # Runs CUDA and ROCm for push to main, cron schedule and PR label
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "schedule" ]] || [[ "${HAS_8GPU_LABEL}" == "true" ]]; then
-          echo '{"include":[
-            {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"},
-            {"name":"rocm","runner":"linux.rocm.gpu.gfx942.8","gpu-arch-type":"rocm","gpu-arch-version":"7.0","docker-image":"torchtitan-rocm-ubuntu-22.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/rocm7.0"}
-            ]}' > matrix.json
-          # Runs CUDA for normal PR (without PR label)
-          else
-          echo '{"include":[
-            {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"}
-            ]}' > matrix.json
-          fi
+          run: |
+            # Define ROCm matrix
+            ROCM_MATRIX='{  
+              "name": "rocm",
+              "runner": "linux.rocm.gpu.gfx942.8",
+              "gpu-arch-type": "rocm",
+              "gpu-arch-version": "7.0",
+              "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
+              "index-url": "https://download.pytorch.org/whl/nightly/rocm7.0"
+            }'
 
-          # Export matrix to job outputs
-          {
-            echo 'matrix<<EOF'
-            cat matrix.json
-            echo 'EOF'
-          } >> $GITHUB_OUTPUT
+            # Define CUDA matrix
+            CUDA_MATRIX='{
+              "name": "cuda",
+              "runner": "linux.g5.48xlarge.nvidia.gpu",
+              "gpu-arch-type": "cuda",
+              "gpu-arch-version": "12.6",
+              "docker-image": "torchtitan-ubuntu-20.04-clang12",
+              "index-url": "https://download.pytorch.org/whl/nightly/cu126"
+            }'
+
+            # Use default value as 'false' for unset environment variables
+            IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
+            IS_SCHEDULE="${IS_SCHEDULE:-false}"
+            IS_PR="${IS_PR:-false}"
+            HAS_8GPU_LABEL="${HAS_8GPU_LABEL:-false}"
+            IS_8GPU_TAG="${IS_8GPU_TAG:-false}"
+
+            # Decide which matrix entries to include based on event type
+            # Runs ROCm only for push tag
+            if [[ "$IS_8GPU_TAG" == "true" ]]; then
+              cat > matrix.json <<JSON
+            {"include": [$ROCM_MATRIX]}
+JSON
+
+            # Runs CUDA and ROCm for normal PR (if PR label is present) OR for push to main, cron schedule
+            elif [[ ("$HAS_8GPU_LABEL" == "true" && "$IS_PR" == "true") || ("$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true") ]]; then
+              cat > matrix.json <<JSON
+            {"include": [$CUDA_MATRIX,$ROCM_MATRIX]}
+JSON
+
+            # Runs CUDA as default (includes normal PR, if PR label is NOT present)
+            else
+              cat > matrix.json <<JSON
+            {"include": [$CUDA_MATRIX]}
+JSON
+            fi
+
+            # Export matrix to job outputs
+            {
+              echo 'matrix<<EOF'
+              cat matrix.json
+              echo 'EOF'
+            } >> $GITHUB_OUTPUT
