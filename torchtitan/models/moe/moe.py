@@ -262,13 +262,12 @@ class TokenChoiceTopKRouter(nn.Module):
             _, selected_experts_indices = torch.topk(
                 scores + expert_bias, k=self.top_k, dim=1
             )
-            expert_indices_for_load_balance = torch.topk(scores, k=self.top_k, dim=1)[1]
             top_scores = scores.gather(dim=1, index=selected_experts_indices)
         else:
             top_scores, selected_experts_indices = torch.topk(
                 scores, k=self.top_k, dim=1
             )
-            expert_indices_for_load_balance = torch.topk(scores, k=self.top_k, dim=1)[1]
+        expert_indices_for_load_balance = torch.topk(scores, k=self.top_k, dim=1)[1]
 
         # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
