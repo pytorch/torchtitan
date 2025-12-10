@@ -40,9 +40,11 @@ The Guiding Principles when building `torchtitan`
 * Minimal changes to the model code when applying multi-dimensional parallelism.
 * Bias towards a clean, minimal codebase while providing basic reusable / swappable components.
 
-`torchtitan` has been showcasing PyTorch's latest distributed training features, via pretraining Llama 3.1 LLMs of various sizes.
-To accelerate contributions to and innovations around torchtitan, we host an [`experiments`](torchtitan/experiments) folder. We look forward to your contributions!
+`torchtitan` has been showcasing PyTorch's latest distributed training features, via support for pretraining Llama 3.1 LLMs of various sizes.
 
+## Contributing
+
+To accelerate contributions to and innovations around torchtitan, we host an [`experiments`](torchtitan/experiments) folder. To contribute, follow the [`guidelines`](CONTRIBUTING.md). We look forward to your contributions!
 
 ## Llama 3.1 training
 
