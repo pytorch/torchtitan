@@ -19,4 +19,4 @@ uv pip install -U --pre --index-url https://download.pytorch.org/whl/nightly/cu1
   torchao \
   torch \
   $UV_INSTALL_FLAGS
-uv pip install pyrefly==0.44.2 $UV_INSTALL_FLAGS
+uv pip install pyrefly==0.45.1 $UV_INSTALL_FLAGS

@@ -254,7 +254,10 @@ if __name__ == "__main__":
     #
     # -----------------------------------------------------------------------------
 
+    # pyrefly: ignore [missing-import]
     from rich import print as rprint
+
+    # pyrefly: ignore [missing-import]
     from rich.pretty import Pretty
 
     config_manager = ConfigManager()

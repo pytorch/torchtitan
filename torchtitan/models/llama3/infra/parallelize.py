@@ -101,6 +101,7 @@ def parallelize_llama(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
+            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )

@@ -579,6 +579,7 @@ class Transformer(nn.Module, ModelProtocol):
             h = layer(
                 h, self.freqs_cis, attention_masks=attention_masks, positions=positions
             )
+        # pyrefly: ignore [not-callable]
         h = self.norm(h) if self.norm else h
         # pyrefly: ignore [not-callable]
         output = self.output(h) if self.output else h
