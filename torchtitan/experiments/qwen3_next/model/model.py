@@ -28,22 +28,16 @@ from torchtitan.protocols.train_spec import ModelProtocol
 from .args import Qwen3NextModelArgs
 
 try:
-    from causal_conv1d import causal_conv1d_fn
-
-    HAS_CASUAL_CONV1D = True
-except ImportError:
-    HAS_CASUAL_CONV1D = False
-    causal_conv1d_fn = None
-
-try:
     from fla.modules import FusedRMSNormGated
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+    from fla.modules.convolution import causal_conv1d as causal_conv1d_fn
 
     HAS_FLA = True
 except ImportError:
     HAS_FLA = False
     FusedRMSNormGated = None
     chunk_gated_delta_rule = None
+    causal_conv1d_fn = None
 
 
 # Adapted from https://github.com/pytorch/torchtune/blob/main/torchtune/models/qwen2/_positional_embeddings.py
@@ -323,15 +317,14 @@ class GatedDeltaNet(nn.Module):
 
         mixed_qkv = torch.cat((query, key, value), dim=-1)
         mixed_qkv = mixed_qkv.transpose(1, 2)
-
-        mixed_qkv = causal_conv1d_fn(
+        mixed_qkv, _ = causal_conv1d_fn(
             x=mixed_qkv,
             weight=self.conv1d.weight.squeeze(1),
             bias=self.conv1d.bias,
             activation=self.activation,
             seq_idx=(
                 attention_masks.get("seq_idx", None)
-                if attention_masks is not None
+                if isinstance(attention_masks, dict)
                 else None
             ),
         )
@@ -667,10 +660,10 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
             lt == "linear_attention" for lt in model_args.layer_types
         )
         if have_linear_attention:
-            if not HAS_FLA or not HAS_CASUAL_CONV1D:
+            if not HAS_FLA:
                 raise ImportError(
-                    "The 'causal_conv1d' and packages are required for models with 'linear_attention' layers. "
-                    "Please install them to proceed: `pip install flash-linear-attention causal_conv1d`"
+                    "The 'flash-linear-attention' package is required for models with 'linear_attention' layers. "
+                    "Please install it to proceed: `pip install flash-linear-attention`"
                 )
 
         self.model_args = model_args
@@ -725,6 +718,14 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
         ret = {}
         mask_mods = [get_causal_mask_mod()]
         match self.model_args.attn_mask_type:
+            case "causal":
+                return create_attention_mask(
+                    and_masks(*mask_mods),
+                    1,
+                    None,
+                    input_batch.shape[1],
+                    input_batch.shape[1],
+                )
             case "block_causal":
                 B, T = input_batch.shape
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
@@ -773,7 +774,7 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
             #         get_block_causal_mask_mod_by_seq_lens(sequence_lengths)
             #     )
 
-                # TODO: calculate seq_idx and cu_seqlens
+            # TODO: calculate seq_idx and cu_seqlens
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"

@@ -681,8 +681,12 @@ class Compile:
     components: list[Literal["model", "loss"]] = field(
         default_factory=lambda: ["model", "loss"]
     )
+
     """Which components to compile"""
     backend: str = "inductor"
+
+    """Use fullgraph when compiling"""
+    fullgraph: bool = True
 
 
 @dataclass
