@@ -27,7 +27,7 @@ jobs:
           # Define ROCm matrix
           ROCM_MATRIX='{
             "name": "rocm",
-            "runner": "linux.rocm.gpu.gfx942.8",
+            "runner": "linux.rocm.gpu.gfx942.4",
             "gpu-arch-type": "rocm",
             "gpu-arch-version": "7.0",
             "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
