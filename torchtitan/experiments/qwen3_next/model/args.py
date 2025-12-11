@@ -85,10 +85,6 @@ class Qwen3NextModelArgs(BaseModelArgs):
             )
         self.max_seq_len = seq_len
 
-        self.moe_args._debug_force_load_balance = (
-            job_config.training.debug_moe_force_load_balance
-        )
-
         if self.layer_types == []:
             self.layer_types = [
                 (
@@ -105,4 +101,4 @@ class Qwen3NextModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_moe_model_nparams_and_flops(self, model, seq_len)
+        return get_moe_model_nparams_and_flops(self, model, 2 * self.head_dim, seq_len)
