@@ -19,7 +19,7 @@ jobs:
       IS_PR:        ${{ github.event_name == 'pull_request' }}
       HAS_8GPU_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ciflow/8gpu') }}
       IS_8GPU_TAG:  ${{ startsWith(github.ref, 'refs/tags/ciflow/8gpu/') }}
-      ADDED_8GPU_LABEL: ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' }}
+      TRIGGERED_8GPU_LABEL: ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' }}
 
     steps:
       - id: set
@@ -50,10 +50,11 @@ jobs:
           IS_PR="${IS_PR:-false}"
           HAS_8GPU_LABEL="${HAS_8GPU_LABEL:-false}"
           IS_8GPU_TAG="${IS_8GPU_TAG:-false}"
+          TRIGGERED_8GPU_LABEL="${TRIGGERED_8GPU_LABEL:-false}"
 
           # Decide which matrix entries to include based on event type
-          # Runs ROCm only for push tag OR label added
-          if [[ "$IS_8GPU_TAG" == "true" || "$ADDED_8GPU_LABEL" == "true" ]]; then
+          # Runs ROCm only for push tag OR when PR label gets triggered
+          if [[ "$IS_8GPU_TAG" == "true" || "$TRIGGERED_8GPU_LABEL" == "true" ]]; then
             cat > matrix.json <<JSON
           {"include": [$ROCM_MATRIX]}
           JSON
