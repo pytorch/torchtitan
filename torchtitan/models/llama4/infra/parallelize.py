@@ -540,7 +540,7 @@ def old_apply_compile(model: nn.Module, compile_config: CompileConfig):
         transformer_block = torch.compile(
             transformer_block,
             backend=compile_config.backend,
-            fullgraph=fullgraph,
+            fullgraph=compile_config.fullgraph,
         )
         model.layers.register_module(layer_id, transformer_block)
 
@@ -592,7 +592,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
                                 torch.compile(
                                     submod,
                                     backend=compile_config.backend,
-                                    fullgraph=True,
+                                    fullgraph=compile_config.fullgraph,
                                 ),
                             )
                     else:
@@ -600,7 +600,9 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
                             block,
                             attr_name,
                             torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
+                                submod,
+                                backend=compile_config.backend,
+                                fullgraph=compile_config.fullgraph,
                             ),
                         )
 
@@ -610,7 +612,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
                 transformer_block = torch.compile(
                     transformer_block,
                     backend=compile_config.backend,
-                    fullgraph=True,
+                    fullgraph=compile_config.fullgraph,
                 )
 
             model.layers.register_module(layer_id, transformer_block)
@@ -618,7 +620,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
         moe_module._run_experts_grouped_mm = torch.compile(
             moe_module._run_experts_grouped_mm,
             backend=compile_config.backend,
-            fullgraph=True,
+            fullgraph=compile_config.fullgraph,
         )
 
         # NOTE: We don't compile for loop code path due to an issue with unbacked symints:
