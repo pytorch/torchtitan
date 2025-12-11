@@ -366,7 +366,8 @@ class VLLMPagedFlashAttention(torch.nn.Module):
         """
 
         # When TP is applied, q/k/v are DTensors which Shard(1) placement - Colwise shard
-        if self.tp_size > 1:
+        is_dtensor = isinstance(q, DTensor)
+        if self.tp_size > 1 and is_dtensor:
             dtensor_placement = q.placements
             dtensor_device_mesh = q.device_mesh
             q = q.to_local()
@@ -399,7 +400,11 @@ class VLLMPagedFlashAttention(torch.nn.Module):
         output = output.transpose(1, 2)
 
         # When TP is applied, we need to pack plain tensor back to DTensor
+<<<<<<< HEAD
         if self.tp_size > 1:
+=======
+        if self.tp_size > 1 and is_dtensor:
+>>>>>>> 7464252a (tp v2)
             output = DTensor.from_local(
                 output, device_mesh=dtensor_device_mesh, placements=dtensor_placement
             )

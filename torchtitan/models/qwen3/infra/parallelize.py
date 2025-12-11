@@ -309,9 +309,17 @@ def apply_non_moe_tp(
         tp_mesh,
         {
             "tok_embeddings": RowwiseParallel(
+<<<<<<< HEAD
                 input_layouts=Replicate(), output_layouts=Replicate()
             ),
             "norm": SequenceParallel(),
+=======
+                input_layouts=Replicate(),
+                output_layouts=Shard(1),
+                use_local_output=False,
+            ),
+            "norm": SequenceParallel(use_local_output=False),
+>>>>>>> 7464252a (tp v2)
             "output": ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
@@ -348,7 +356,7 @@ def apply_non_moe_tp(
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     for transformer_block in model.layers.values():
         layer_plan = {
-            "attention_norm": SequenceParallel(),
+            "attention_norm": SequenceParallel(use_local_output=False),
             # NOTE: when the fourth argument (positions) is not None, its input layout
             # and desired input layout should be Replicate()
             "attention": prepare_module_input(
@@ -359,11 +367,15 @@ def apply_non_moe_tp(
             "attention.wk": colwise_parallel(use_local_output=False),
             "attention.wv": colwise_parallel(use_local_output=False),
             "attention.q_norm": SequenceParallel(
-                sequence_dim=2,
+                sequence_dim=2, use_local_output=False
             ),
-            "attention.k_norm": SequenceParallel(sequence_dim=2),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
+            "attention.k_norm": SequenceParallel(
+                sequence_dim=2, use_local_output=False
+            ),
+            "attention.wo": rowwise_parallel(
+                output_layouts=Shard(1), use_local_output=False
+            ),
+            "ffn_norm": SequenceParallel(use_local_output=False),
         }
 
         if not transformer_block.moe_enabled:
@@ -373,9 +385,11 @@ def apply_non_moe_tp(
                         input_layouts=(Shard(1),),
                         desired_input_layouts=(Replicate(),),
                     ),
-                    "feed_forward.w1": colwise_parallel(),
-                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-                    "feed_forward.w3": colwise_parallel(),
+                    "feed_forward.w1": colwise_parallel(use_local_output=False),
+                    "feed_forward.w2": rowwise_parallel(
+                        output_layouts=Shard(1), use_local_output=False
+                    ),
+                    "feed_forward.w3": colwise_parallel(use_local_output=False),
                 }
             )
 

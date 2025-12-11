@@ -80,7 +80,6 @@ def main():
         dtype="bfloat16",
         trust_remote_code=True,
         enforce_eager=True,  # Use eager mode
-        enable_prefix_caching=False,  # Disable kv cache for now
         tensor_parallel_size=args.tensor_parallel_size,  # Multi-GPU support
     )
 

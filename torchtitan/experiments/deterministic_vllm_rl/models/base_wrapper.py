@@ -239,6 +239,7 @@ class TorchTitanVLLMModel(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings."""
+<<<<<<< HEAD
         # DEBUG: Use print instead of logger for visibility
         print(f"\n{'=' * 80}")
         print("[DEBUG embed_input_ids] Called with:")
@@ -269,6 +270,11 @@ class TorchTitanVLLMModel(nn.Module):
             # inputs_embeddings = inputs_embeddings.full_tensor()
             return inputs_embeddings.full_tensor()
 
+=======
+        inputs_embeddings = self.model.tok_embeddings(input_ids)
+        # NOTE: When TP is applied, the inputs_embedding will be row-wise sharded (Shard(1))
+        # and will be a plain tensor, return directly
+>>>>>>> 7464252a (tp v2)
         return inputs_embeddings
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -307,7 +313,7 @@ class TorchTitanVLLMModel(nn.Module):
             f"before calling tok_embeddings, tokens_2d is_dtensor {isinstance(tokens_2d, DTensor)}"
         )
         # Get embeddings
-        h = self.model.tok_embeddings(tokens_2d)
+        h = self.model.tok_embeddings(tokens_2d)  # h will be shard(1) plain tensor
 
         print(f"after calling tok_embeddings, h is_dtensor {isinstance(h, DTensor)}")
         if isinstance(h, DTensor):
@@ -333,17 +339,39 @@ class TorchTitanVLLMModel(nn.Module):
         # Pass through transformer layers
         for layer in self.model.layers.values():
             h = layer(h, rope_cache[positions], attention_masks=None)
+<<<<<<< HEAD
+=======
+
+        # To make it work with vLLM Engine, turn it into local tensor
+        if isinstance(h, DTensor):
+            h = h.full_tensor()
+        else:
+            # Here h is returned as a shard(1) plain tensor because rowwise has use_local_output=True
+            h = DTensor.from_local(
+                h,
+                device_mesh=self.parallel_dims.world_mesh,
+                placements=[
+                    Shard(1),
+                ],
+            )
+            h = h.full_tensor()
+>>>>>>> 7464252a (tp v2)
 
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
             batch_size, seq_len, hidden_size = h.shape
+            # When TP is applied, transformer layer's output is Shard(1) because we applied sequence parallel
+            # so after flatten, h is Shard(0). And this conversion might be wrong
             h = h.view(batch_size * seq_len, hidden_size)
 
+<<<<<<< HEAD
         # When TP is applied, transformer layer's output is Partial().
         # To make it work with vllm Engine, turn it into local tensor
         if isinstance(h, DTensor):
             h = h.to_local()
 
+=======
+>>>>>>> 7464252a (tp v2)
         return h
 
     def compute_logits(
@@ -353,6 +381,7 @@ class TorchTitanVLLMModel(nn.Module):
     ) -> torch.Tensor | None:
         """Compute logits from hidden states."""
 
+<<<<<<< HEAD
         # When TP is applied, transformer layer's output is Partial(SUM)
         # Pack tensor back from plain tensor to DTensor
         if self.parallel_dims.tp_enabled:
@@ -374,6 +403,20 @@ class TorchTitanVLLMModel(nn.Module):
 
         print(f"returned logits {logits.shape}")
 
+=======
+        # Here h is returned as a shard(1) plain tensor because rowwise has use_local_output=True
+        hidden_states = DTensor.from_local(
+            hidden_states,
+            device_mesh=self.parallel_dims.world_mesh,
+            placements=[
+                Replicate(),
+            ],
+        )
+        # When TP is applied, we didn't use SP because DTensor can not handle uneven sharding on sequence-length dimension
+        h = self.model.norm(hidden_states)
+        logits = self.model.output(h)
+
+>>>>>>> 7464252a (tp v2)
         return logits
 
     def load_weights(self, weights_iter):
