@@ -19,6 +19,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
@@ -222,13 +223,10 @@ def create_context_parallel_ctx(
 
 def get_train_context(enable_loss_parallel: bool) -> Generator[None, None, None]:
     @contextlib.contextmanager
-    def context(cp_context: Generator[None, None, None] | None = None):
+    def context():
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
-
-            if cp_context:
-                stack.enter_context(cp_context)
 
             yield
 
@@ -515,3 +513,37 @@ def _clip_grad_norm_with_ep(
     torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
 
     return total_norm
+
+
+def cp_shard(
+    cp_mesh: DeviceMesh,
+    inputs: torch.Tensor,
+    attention_masks: AttentionMasksType | None,
+):
+    from torch.distributed.tensor.experimental._attention import (
+        _context_parallel_shard,
+        _HeadTailLoadBalancer,
+    )
+    from torch.nn.attention.flex_attention import BlockMask
+
+    INPUT_SEQ_DIM = 1
+    seq_len = inputs[0].size(INPUT_SEQ_DIM)
+    cp_world_size = cp_mesh.size(0)
+    if isinstance(attention_masks, BlockMask):
+        raise ValueError(
+            "FlexAttention CP is not supported yet. Will come in the next PR."
+        )
+    else:
+        # For SDPA, we use the _HeadTailLoadBalancer.
+        load_balancer = _HeadTailLoadBalancer(
+            seq_len, cp_world_size, cp_mesh.device_type
+        )
+
+    inputs = _context_parallel_shard(
+        mesh=cp_mesh,
+        buffers=inputs,
+        seq_dims=tuple(1 for _ in inputs),
+        load_balancer=load_balancer,
+    )
+
+    return inputs, attention_masks
