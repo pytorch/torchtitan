@@ -65,7 +65,7 @@ jobs:
           {"include": [$CUDA_MATRIX,$ROCM_MATRIX]}
           JSON
 
-          # Runs CUDA as default (includes normal PR, if PR label is NOT present)
+          # Runs CUDA only as default (includes normal PR, if PR label is NOT present)
           else
             cat > matrix.json <<JSON
           {"include": [$CUDA_MATRIX]}
