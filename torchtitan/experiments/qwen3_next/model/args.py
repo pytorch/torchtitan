@@ -97,6 +97,12 @@ class Qwen3NextModelArgs(BaseModelArgs):
 
         if not self.use_flex_attn:
             raise ValueError("Qwen3-Next requires FlexAttention")
+        if (
+            job_config.compile.enable
+            and "model" in job_config.compile.components
+            and job_config.compile.fullgraph
+        ):
+            raise ValueError("`compile.fullgraph` must be off for Qwen3-Next")
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
