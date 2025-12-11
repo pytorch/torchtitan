@@ -567,12 +567,22 @@ class MoE(nn.Module):
                 )
 
 
-def build_moe(args: MoEArgs, dim: int, hidden_dim: int, communication_backend: str = "standard", **kwargs) -> nn.Module:
-    """Factory for MoE with different backends: 'standard' (all-to-all) or 'deep_ep' (DeepEP)."""
-    if communication_backend == "deep_ep":
-        from .moe_deepep import MoEWithDeepEP
-        logger.info(f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}")
-        return MoEWithDeepEP(moe_args=args, dim=dim, hidden_dim=hidden_dim, score_before_experts=kwargs.get('score_before_experts', False))
-    else:
-        logger.info(f"Standard MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}")
-        return MoE(args, dim=dim, hidden_dim=hidden_dim)
+def build_moe(args: MoEArgs, dim: int, hidden_dim: int, communication_backend: str = "standard") -> nn.Module:
+    """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP).
+
+    If 'deepep' is requested but DeepEP is not installed, falls back to standard with a warning.
+    """
+    if communication_backend == "deepep":
+        try:
+            from .moe_deepep import MoEWithDeepEP
+            logger.info(f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}")
+            return MoEWithDeepEP(moe_args=args, dim=dim, hidden_dim=hidden_dim)
+        except ImportError as e:
+            logger.warning(
+                f"DeepEP requested but not available: {e}. "
+                f"Falling back to standard MoE. Install DeepEP from: https://github.com/deepseek-ai/deepep"
+            )
+            # Fall through to standard MoE
+    
+    logger.info(f"Standard MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}")
+    return MoE(args, dim=dim, hidden_dim=hidden_dim)

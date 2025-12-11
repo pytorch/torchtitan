@@ -9,7 +9,6 @@ _supported_experiments = frozenset(
         "gpt_oss",
         "simple_fsdp.llama3",
         "simple_fsdp.deepseek_v3",
-        "deepep.deepseek_v3",  # DeepEP + DeepSeek-V3
         "vlm",
         "compiler_toolkit.deepseek_v3",
         "compiler_toolkit.llama3",

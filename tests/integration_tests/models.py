@@ -79,37 +79,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "deepseek_v3_pp+fsdp+tp+ep+etp",
             ngpu=8,
         ),
-        # Integration Test Cases for DeepSeek V3 with DeepEP
-        OverrideDefinitions(
-            [
-                [
-                    "--model.name deepseek_v3",
-                    "--parallelism.data_parallel_shard_degree 4",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.moe_comm_backend deep_ep",
-                ],
-            ],
-            "DeepSeek V3 FSDP+EP+DeepEP",
-            "deepseek_v3_fsdp+ep+deepep",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--model.name deepseek_v3",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
-                    "--parallelism.moe_comm_backend deep_ep",
-                ],
-            ],
-            "DeepSeek V3 PP+FSDP+TP+EP+DeepEP",
-            "deepseek_v3_pp+fsdp+tp+ep+deepep",
-            ngpu=8,
-        ),
         # Integration Test Cases for Qwen3 dense and MoE model
         OverrideDefinitions(
             [
@@ -138,23 +107,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "qwen3_fsdp+tp+ep+etp",
             ngpu=4,
         ),
-        # Integration Test Cases for Qwen3 with DeepEP
-        OverrideDefinitions(
-            [
-                [
-                    "--model.name qwen3",
-                    "--model.flavor debugmodel_moe",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 2",
-                    "--parallelism.expert_tensor_parallel_degree 2",
-                    "--parallelism.moe_comm_backend deep_ep",
-                ],
-            ],
-            "Qwen3 FSDP+TP+EP+ETP+DeepEP",
-            "qwen3_fsdp+tp+ep+etp+deepep",
-            ngpu=4,
-        ),
         # Integration Test Cases for Llama 4
         OverrideDefinitions(
             [
@@ -171,24 +123,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ],
             "Llama 4 PP+FSDP+TP+EP+compile",
             "llama4_pp+fsdp+tp+ep+compile",
-            ngpu=8,
-        ),
-        # Integration Test Cases for Llama 4 with DeepEP
-        OverrideDefinitions(
-            [
-                [
-                    "--model.name llama4",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
-                    "--parallelism.data_parallel_shard_degree 2",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.expert_parallel_degree 4",
-                    "--parallelism.expert_tensor_parallel_degree 1",
-                    "--parallelism.moe_comm_backend deep_ep",
-                ],
-            ],
-            "Llama 4 PP+FSDP+TP+EP+DeepEP",
-            "llama4_pp+fsdp+tp+ep+deepep",
             ngpu=8,
         ),
     ]

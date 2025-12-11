@@ -424,15 +424,24 @@ class Parallelism:
     Note that this is still an experimental feature.
     """
 
-    moe_comm_backend: Literal["standard", "deep_ep"] = "standard"
+    expert_parallel_comm_backend: Literal["standard", "deepep"] = "standard"
     """
-    MoE expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
+    Expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
     
     - "standard": Uses PyTorch all-to-all collectives (default)
-    - "deep_ep": Uses DeepEP custom kernels for more efficient communication
+    - "deepep": Uses DeepEP custom kernels for more efficient communication
     
     DeepEP requires installation:
     https://github.com/deepseek-ai/DeepEP.
+    """
+
+    deepep_use_alignment_padding: bool = False
+    """
+    Whether to use alignment padding for DeepEP token dispatch.
+    Only applies when expert_parallel_comm_backend="deepep".
+    
+    Recommended for large models (671B+) where the padding overhead is 
+    amortized over more compute. May cause slowdown for smaller models.
     """
 
 

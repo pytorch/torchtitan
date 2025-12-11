@@ -24,7 +24,7 @@ from torch.distributed.tensor.parallel import (
 )
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import NoParallel, ParallelDims, DeepEPExpertParallel
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
@@ -59,8 +59,20 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
-    torch._higher_order_ops.inductor_compiled_code,
 }
+# Add optional ops if available (requires newer PyTorch)
+try:
+    _op_sac_save_list.add(torch._higher_order_ops.inductor_compiled_code)
+except AttributeError:
+    pass
+
+# Add DeepEP custom ops to SAC save list
+try:
+    import torchtitan.distributed.deepep.deepep  # noqa: F401
+    _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+    _op_sac_save_list.add(torch.ops.deepep.combine.default)
+except (ImportError, AttributeError):
+    pass
 
 
 def parallelize_llama(
@@ -106,6 +118,28 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
+    # Check if using DeepEP for MoE communication
+    use_deepep = (
+        parallel_dims.ep_enabled 
+        and job_config.parallelism.expert_parallel_comm_backend == "deepep"
+    )
+    
+    if (
+        job_config.parallelism.expert_parallel_comm_backend == "deepep" 
+        and not parallel_dims.ep_enabled
+    ):
+        logger.warning(
+            "expert_parallel_comm_backend='deepep' has no effect when EP=1. "
+            "Using standard communication."
+        )
+    
+    # DeepEP + ETP is not supported yet
+    if use_deepep and parallel_dims.etp_enabled:
+        raise NotImplementedError(
+            "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+            "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
+        )
+
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
@@ -122,6 +156,8 @@ def parallelize_llama(
             ),
             etp_enabled=parallel_dims.etp_enabled,
             dual_pipe_v=dual_pipe_v,
+            use_deepep=use_deepep,
+            use_alignment_padding=job_config.parallelism.deepep_use_alignment_padding,
         )
 
     model_compile_enabled = (
@@ -480,18 +516,8 @@ def apply_moe_ep_tp(
     etp_enabled: bool,
     dual_pipe_v: bool = False,
     use_deepep: bool = False,
+    use_alignment_padding: bool = False,
 ):
-    """
-    Apply MoE Expert Parallelism and Tensor Parallelism.
-    
-    Args:
-        model: The model to parallelize
-        tp_mesh: Tensor parallel mesh
-        ep_mesh: Expert parallel mesh
-        ep_tp_mesh: Combined expert + tensor parallel mesh
-        etp_enabled: Whether expert tensor parallelism is enabled
-        use_deepep: Whether to use DeepEP for expert communication
-    """
     assert ep_mesh is not None or tp_mesh is not None
 
     # pyrefly: ignore [not-callable]
@@ -548,14 +574,15 @@ def apply_moe_ep_tp(
             experts_plan = TensorParallel()
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
-            # input / output sharding on the batch / tokens dim
-            # Select parallelism style based on use_deepep flag
             if use_deepep:
-                from torchtitan.distributed import ExpertParallelDeepEP
-                from torchtitan.tools.logging import logger as parallelism_logger
-                experts_plan = ExpertParallelDeepEP()
-                parallelism_logger.info(f"  Applying DeepEP to MoE layer")
+                score_before_experts = transformer_block.moe.score_before_experts
+                experts_plan = DeepEPExpertParallel(
+                    score_before_experts=score_before_experts,
+                    use_alignment_padding=use_alignment_padding,
+                )
+                logger.info(f"Applying DeepEP to MoE layer")
             else:
+                # input / output sharding on the batch / tokens dim
                 experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_tp_mesh
