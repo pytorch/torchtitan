@@ -6,9 +6,14 @@
 
 """DeepEP distributed communication primitives for MoE."""
 
-from .flex_dispatcher import MoEFlexTokenDispatcher
+from .deepep import (
+    dispatch_tokens,
+    combine_tokens,
+    DispatchState,
+)
 
 __all__ = [
-    "MoEFlexTokenDispatcher",
+    "dispatch_tokens",
+    "combine_tokens",
+    "DispatchState",
 ]
-
