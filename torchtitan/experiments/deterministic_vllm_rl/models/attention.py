@@ -11,6 +11,7 @@ vLLM-compatible Flash Attention implementation for deterministic RL training.
 import itertools
 
 import torch
+from torch.distributed.tensor._api import DTensor
 
 from vllm.attention.layer import Attention
 from vllm.attention.utils.fa_utils import flash_attn_varlen_func
@@ -190,8 +191,13 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
             self.fa_version,
         )
 
-        # Convert back to batch format
-        # (total_tokens, nheads, headdim) -> (batch, seqlen, nheads, headdim)
+        # Convert output back to DTensor with original placement
+        # from_local is a class method of DTensor, not an instance method
+        output = DTensor.from_local(
+            output, device_mesh=dtensor_device_mesh, placements=dtensor_placement
+        )
+
+        return output
         output = output_varlen.reshape(batch_size, seq_len, num_heads, head_dim)
 
         # Transpose back to TorchTitan format: (batch, num_heads, seq_len, head_dim)
@@ -234,7 +240,7 @@ class VLLMPagedFlashAttention(torch.nn.Module):
 
             logger = init_logger(__name__)
             vllm_config = get_current_vllm_config()
-            tp_size = vllm_config.parallel_config.tensor_parallel_size
+            self.tp_size = tp_size = vllm_config.parallel_config.tensor_parallel_size
 
             if tp_size > 1:
                 if num_kv_heads % tp_size != 0:
@@ -358,7 +364,17 @@ class VLLMPagedFlashAttention(torch.nn.Module):
         Returns:
             output: [batch, num_heads, seq_len, head_dim]
         """
+
+        # When TP is applied, q/k/v are DTensors which Shard(1) placement - Colwise shard
+        if self.tp_size > 1:
+            dtensor_placement = q.placements
+            dtensor_device_mesh = q.device_mesh
+            q = q.to_local()
+            k = k.to_local()
+            v = v.to_local()
+
         # Input is (batch, num_heads, seq_len, head_dim)
+        # When TP is applied, num_heads are num_local_heads
         batch_size, num_heads, seq_len, head_dim = q.shape
 
         if self.vllm_attn is None:
@@ -381,5 +397,11 @@ class VLLMPagedFlashAttention(torch.nn.Module):
 
         # Transpose back to TorchTitan format: (batch, num_heads, seq_len, head_dim)
         output = output.transpose(1, 2)
+
+        # When TP is applied, we need to pack plain tensor back to DTensor
+        if self.tp_size > 1:
+            output = DTensor.from_local(
+                output, device_mesh=dtensor_device_mesh, placements=dtensor_placement
+            )
 
         return output

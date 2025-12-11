@@ -16,7 +16,7 @@ from typing import Callable, TypeAlias
 
 import torch
 import torch.nn as nn
-from torch.distributed._tensor import DTensor, Replicate
+from torch.distributed._tensor import DTensor, Partial, Replicate
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
@@ -35,7 +35,6 @@ from torchtitan.experiments.deterministic_vllm_rl.models.utils import (
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
-
 
 logger = init_logger(__name__)
 
@@ -99,7 +98,7 @@ class TorchTitanVLLMModel(nn.Module):
 
         # Create JobConfig and ParallelDims from vLLM config
         job_config = create_job_config_from_vllm_config(vllm_config)
-        parallel_dims = create_parallel_dims(job_config)
+        self.parallel_dims = parallel_dims = create_parallel_dims(job_config)
 
         # Apply parallelization using parallelize_qwen3
         if parallel_dims.tp_enabled:
@@ -188,7 +187,6 @@ class TorchTitanVLLMModel(nn.Module):
         Returns:
             Extended RoPE cache if needed, otherwise original cache
         """
-        from torch.distributed._tensor import DTensor, Replicate
 
         required_len = max_position + 1
 
@@ -205,9 +203,9 @@ class TorchTitanVLLMModel(nn.Module):
             )
             return rope_cache
 
-        # Handle DTensor case
-        is_dtensor = isinstance(rope_cache, DTensor)
-        if is_dtensor:
+        # Handle DTensor case when TP is applied
+        if self.parallel_dims.tp_enabled:
+            assert isinstance(rope_cache, DTensor)
             device_mesh = rope_cache.device_mesh
             local_rope_cache = rope_cache.to_local()
             device = local_rope_cache.device
@@ -227,8 +225,8 @@ class TorchTitanVLLMModel(nn.Module):
             )
             return rope_cache
 
-        # Convert back to DTensor if needed
-        if is_dtensor:
+        # Convert back to DTensor when TP is applied
+        if self.parallel_dims.tp_enabled:
             rope_cache = DTensor.from_local(
                 extended_cache,
                 device_mesh=device_mesh,
@@ -241,7 +239,37 @@ class TorchTitanVLLMModel(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings."""
-        return self.model.tok_embeddings(input_ids)
+        # DEBUG: Use print instead of logger for visibility
+        print(f"\n{'=' * 80}")
+        print("[DEBUG embed_input_ids] Called with:")
+        print(f"  input_ids.shape: {input_ids.shape}")
+        print(f"  input_ids.dtype: {input_ids.dtype}, device: {input_ids.device}")
+        print(
+            f"  input_ids.min: {input_ids.min().item()}, max: {input_ids.max().item()}"
+        )
+        print(f"  config.vocab_size: {self.config.vocab_size}")
+        print(f"  embedding weight type: {type(self.model.tok_embeddings.weight)}")
+
+        # Check embedding weight shape (handle DTensor case)
+        if isinstance(self.model.tok_embeddings.weight, DTensor):
+            local_weight = self.model.tok_embeddings.weight.to_local()
+            print("  embedding is DTensor:")
+            print(f"    - placements: {self.model.tok_embeddings.weight.placements}")
+            print(f"    - global shape: {self.model.tok_embeddings.weight.shape}")
+            print(f"    - local shape: {local_weight.shape}")
+            effective_vocab_size = local_weight.shape[0]
+        else:
+            print(f"  embedding weight.shape: {self.model.tok_embeddings.weight.shape}")
+            effective_vocab_size = self.model.tok_embeddings.weight.shape[0]
+
+        inputs_embeddings = self.model.tok_embeddings(input_ids)
+
+        # When TP is applied, the inputs_embedding will be sharded rowwise (Shard(1))
+        if isinstance(inputs_embeddings, DTensor):
+            # inputs_embeddings = inputs_embeddings.full_tensor()
+            return inputs_embeddings.full_tensor()
+
+        return inputs_embeddings
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings (deprecated vLLM interface)."""
@@ -275,9 +303,15 @@ class TorchTitanVLLMModel(nn.Module):
         # Convert vLLM interface to TorchTitan interface
         # vLLM: [total_tokens] → TorchTitan: [batch_size, seq_len]
         tokens_2d = input_ids.unsqueeze(0)
-
+        print(
+            f"before calling tok_embeddings, tokens_2d is_dtensor {isinstance(tokens_2d, DTensor)}"
+        )
         # Get embeddings
         h = self.model.tok_embeddings(tokens_2d)
+
+        print(f"after calling tok_embeddings, h is_dtensor {isinstance(h, DTensor)}")
+        if isinstance(h, DTensor):
+            print(f"h is DTensor with placements: {h.placements}, shape: {h.shape}")
 
         # Get RoPE cache (handle model-specific attribute names)
         # Use hasattr to avoid ambiguous boolean value error with tensors
@@ -298,14 +332,15 @@ class TorchTitanVLLMModel(nn.Module):
 
         # Pass through transformer layers
         for layer in self.model.layers.values():
-            h = layer(h, rope_cache, attention_masks=None, positions=positions)
+            h = layer(h, rope_cache[positions], attention_masks=None)
 
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
             batch_size, seq_len, hidden_size = h.shape
             h = h.view(batch_size * seq_len, hidden_size)
 
-        # Convert DTensor to regular tensor
+        # When TP is applied, transformer layer's output is Partial().
+        # To make it work with vllm Engine, turn it into local tensor
         if isinstance(h, DTensor):
             h = h.to_local()
 
@@ -317,13 +352,27 @@ class TorchTitanVLLMModel(nn.Module):
         sampling_metadata=None,
     ) -> torch.Tensor | None:
         """Compute logits from hidden states."""
+
+        # When TP is applied, transformer layer's output is Partial(SUM)
+        # Pack tensor back from plain tensor to DTensor
+        if self.parallel_dims.tp_enabled:
+            print("before convert hidden_states")
+            # TODO(jianiw): fix placements to be n-D
+            hidden_states = DTensor.from_local(
+                hidden_states,
+                device_mesh=self.parallel_dims.world_mesh,
+                placements=[
+                    Partial(),
+                ],
+            )
+            print("hidden_states after conversion")
+
         # print(f"[jianiw] The shape of hidden_state of compute_logits() is: {hidden_states.shape}")
         # hidden_states: 1024 * 1024, now the placement is Shard(1) according to TP plan
         h = self.model.norm(hidden_states)
         logits = self.model.output(h)
 
-        if isinstance(logits, DTensor):
-            logits = logits.to_local()
+        print(f"returned logits {logits.shape}")
 
         return logits
 
@@ -370,5 +419,25 @@ class TorchTitanVLLMModel(nn.Module):
         )
 
         loaded_params = {f"model.{name}" for name in torchtitan_state_dict.keys()}
+
+        print(f"Loaded weights successfully, loaded {len(loaded_params)} parameters")
+
+        # DEBUG: Print embedding table info after loading
+        print(f"\n{'=' * 80}")
+        print("[DEBUG load_weights] After loading weights:")
+        print(f"  tok_embeddings.weight type: {type(self.model.tok_embeddings.weight)}")
+        if isinstance(self.model.tok_embeddings.weight, DTensor):
+            print("  tok_embeddings is DTensor:")
+            print(f"    - placements: {self.model.tok_embeddings.weight.placements}")
+            print(f"    - global shape: {self.model.tok_embeddings.weight.shape}")
+            print(
+                f"    - local shape: {self.model.tok_embeddings.weight.to_local().shape}"
+            )
+        else:
+            print(
+                f"  tok_embeddings.weight.shape: {self.model.tok_embeddings.weight.shape}"
+            )
+        print(f"  config.vocab_size: {self.config.vocab_size}")
+        print(f"{'=' * 80}\n")
 
         return loaded_params

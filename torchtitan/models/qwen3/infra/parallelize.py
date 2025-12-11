@@ -184,7 +184,7 @@ def parallelize_qwen3(
     return model
 
 
-def apply_non_moe_tp(
+def apply_non_moe_tp_no_sequence_parallel(
     model: nn.Module,
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
@@ -259,6 +259,111 @@ def apply_non_moe_tp(
             ),  # NOTE(jianiw): inner_attention output shape (batch, num_heads, seq_len, head_dim)
             "attention.wo": rowwise_parallel(),
             # "ffn_norm": SequenceParallel(),
+        }
+
+        if not transformer_block.moe_enabled:
+            layer_plan.update(
+                {
+                    "feed_forward": prepare_module_input(
+                        input_layouts=(Shard(1),),
+                        desired_input_layouts=(Replicate(),),
+                    ),
+                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
+                    "feed_forward.w3": colwise_parallel(),
+                }
+            )
+
+        parallelize_module(
+            module=transformer_block,
+            device_mesh=tp_mesh,
+            parallelize_plan=layer_plan,
+        )
+
+    if enable_async_tp:
+        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+
+        torch._inductor.config._micro_pipeline_tp = True
+        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
+
+    logger.info(
+        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
+        "Tensor Parallelism to the model"
+    )
+
+
+def apply_non_moe_tp(
+    model: nn.Module,
+    tp_mesh: DeviceMesh,
+    loss_parallel: bool,
+    enable_float8_tensorwise_tp: bool,
+    enable_async_tp: bool,
+):
+    """Apply tensor parallelism."""
+    # 1. Parallelize the embedding and shard its outputs (which are the first
+    # transformer block's inputs)
+    # 2. Parallelize the root norm layer over the sequence dim
+    # 3. Parallelize the final linear output layer
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "tok_embeddings": RowwiseParallel(
+                input_layouts=Replicate(), output_layouts=Replicate()
+            ),
+            "norm": SequenceParallel(),
+            "output": ColwiseParallel(
+                input_layouts=Shard(1),
+                output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                use_local_output=not loss_parallel,
+            ),
+        },
+    )
+
+    # Parallel styles used for transformer block linear weights and their
+    # inputs may be different for float8 linears with tensorwise scaling.
+    if enable_float8_tensorwise_tp:
+        # TODO(vkuzo): add the items below to __init__.py of torchao.float8 and import from there
+        from torchao.float8.float8_tensor_parallel import (
+            Float8ColwiseParallel,
+            Float8RowwiseParallel,
+            PrepareFloat8ModuleInput,
+        )
+
+        rowwise_parallel, colwise_parallel, prepare_module_input = (
+            Float8RowwiseParallel,
+            Float8ColwiseParallel,
+            PrepareFloat8ModuleInput,
+        )
+    else:
+        rowwise_parallel, colwise_parallel, prepare_module_input = (
+            RowwiseParallel,
+            ColwiseParallel,
+            PrepareModuleInput,
+        )
+
+    # Apply tensor + sequence parallelism to every transformer block
+    # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
+    #       by folding (and unfolding) the batch dimension and the sequence dimension.
+    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    for transformer_block in model.layers.values():
+        layer_plan = {
+            "attention_norm": SequenceParallel(),
+            # NOTE: when the fourth argument (positions) is not None, its input layout
+            # and desired input layout should be Replicate()
+            "attention": prepare_module_input(
+                input_layouts=(Shard(1), Replicate(), None),
+                desired_input_layouts=(Replicate(), Replicate(), None),
+            ),
+            "attention.wq": colwise_parallel(use_local_output=False),
+            "attention.wk": colwise_parallel(use_local_output=False),
+            "attention.wv": colwise_parallel(use_local_output=False),
+            "attention.q_norm": SequenceParallel(
+                sequence_dim=2,
+            ),
+            "attention.k_norm": SequenceParallel(sequence_dim=2),
+            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
+            "ffn_norm": SequenceParallel(),
         }
 
         if not transformer_block.moe_enabled:

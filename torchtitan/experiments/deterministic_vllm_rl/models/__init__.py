@@ -62,13 +62,11 @@ def register_torchtitan_model_from_train_spec(
     # Register with vLLM
     ModelRegistry.register_model(model_name, TorchTitanVLLMModelFromSpec)
 
-    logger.info(
-        f"Successfully registered {model_name} with vLLM using TrainSpec "
-        f"(model_cls={train_spec.model_cls.__name__})"
-    )
-
 
 # Auto-register TorchTitan models with vLLM when this module is imported
+# NOTE: We use a custom parallelization function for vLLM compatibility
+from torchtitan.protocols.train_spec import TrainSpec
+
 register_torchtitan_model_from_train_spec(
     train_spec=get_train_spec("qwen3"),
     model_name="Qwen3TorchTitanForCausalLM",
