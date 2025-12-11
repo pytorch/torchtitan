@@ -85,10 +85,6 @@ class Qwen3NextModelArgs(BaseModelArgs):
             )
         self.max_seq_len = seq_len
 
-        self.moe_args._debug_force_load_balance = (
-            job_config.training.debug_moe_force_load_balance
-        )
-
         if self.layer_types == []:
             self.layer_types = [
                 (
@@ -101,8 +97,14 @@ class Qwen3NextModelArgs(BaseModelArgs):
 
         if not self.use_flex_attn:
             raise ValueError("Qwen3-Next requires FlexAttention")
+        if (
+            job_config.compile.enable
+            and "model" in job_config.compile.components
+            and job_config.compile.fullgraph
+        ):
+            raise ValueError("`compile.fullgraph` must be off for Qwen3-Next")
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_moe_model_nparams_and_flops(self, model, seq_len)
+        return get_moe_model_nparams_and_flops(self, model, 2 * self.head_dim, seq_len)
