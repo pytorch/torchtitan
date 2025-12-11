@@ -24,6 +24,7 @@ dependencies = [
     "fsspec",
     "tyro",
     "tensorboard",
+    "psutil",
 ]
 dynamic = ["version"]
 
