@@ -49,7 +49,6 @@ def _get_next_cache_id() -> torch.Tensor:
 # Custom Op Registration for SAC Integration
 # ============================================================================
 
-# Define the library
 _lib = torch.library.Library("deepep", "DEF")
 
 # dispatch returns: (recv_x, recv_indices, recv_scores, num_recv_per_expert, cache_id)
@@ -315,7 +314,7 @@ class DispatchState:
     cache_id: torch.Tensor  # CPU tensor used to retrieve cached handle
     sorted_indices: torch.Tensor
     num_recv_tokens: int
-    permuted_scores: Optional[torch.Tensor] = None  # For score_before_experts=False
+    permuted_scores: Optional[torch.Tensor] = None
     # For alignment padding (only set when use_alignment_padding=True)
     padding_input_shape: Optional[torch.Size] = None
     padding_indices: Optional[torch.Tensor] = None
@@ -363,7 +362,6 @@ def dispatch_tokens(
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
     
-    # Get buffer and dispatch layout
     buffer = get_buffer(group, get_hidden_bytes(hidden_states))
     
     num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert_dispatch, is_token_in_rank, _ = \
@@ -376,12 +374,10 @@ def dispatch_tokens(
             is_token_in_rank, num_tokens_per_expert_dispatch,
         )
     
-    # Convert dispatched indices to multihot routing map for permutation
     dispatched_routing_map, dispatched_probs_multihot = _indices_to_multihot(
         dispatched_indices, dispatched_scores, num_local_experts
     )
     
-    # Save num_recv_tokens for unpermute
     num_recv_tokens = hidden_states.shape[0]
     
     # Sort tokens by expert for grouped_mm
@@ -392,19 +388,16 @@ def dispatch_tokens(
     # Compute tokens_per_expert from routing_map (matches the sorted tokens)
     tokens_per_expert = dispatched_routing_map.sum(dim=0).to(torch.int32).to(hidden_states.device)
     
-    # Optional: Add alignment padding for better torch._grouped_mm performance
     padding_input_shape = None
     padding_indices = None
     if use_alignment_padding:
         padding_input_shape, hidden_states, padding_indices, tokens_per_expert = moe_permute(
             hidden_states, tokens_per_expert, ep_degree=1, num_local_experts=num_local_experts
         )
-        # Pad scores using same indices
         if permuted_scores is not None:
             scores_with_zero = torch.cat([permuted_scores, permuted_scores.new_zeros(1)])
             permuted_scores = scores_with_zero[padding_indices]
     
-    # Apply scores before experts if configured
     if score_before_experts and permuted_scores is not None:
         hidden_states = (hidden_states.to(torch.float32) * permuted_scores.reshape(-1, 1)).to(hidden_states.dtype)
         permuted_scores_for_state = None
@@ -428,7 +421,6 @@ def combine_tokens(
     state: DispatchState,
 ) -> torch.Tensor:
     """Combine tokens from experts via DeepEP."""
-    # Apply scores after experts if they weren't applied before
     if state.permuted_scores is not None:
         hidden_states = (hidden_states.to(torch.float32) * state.permuted_scores.reshape(-1, 1)).to(hidden_states.dtype)
     

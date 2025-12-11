@@ -34,7 +34,6 @@ class MoEWithDeepEP(MoE):
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
         
-        # Route tokens
         top_scores, selected_experts_indices, num_tokens_per_expert = self.router(x, self.expert_bias)
         
         if self.load_balance_coeff is not None:
@@ -47,7 +46,6 @@ class MoEWithDeepEP(MoE):
             selected_experts_indices, top_scores, self.experts.num_experts
         )
         
-        # Shared expert
         out = self.shared_experts(x) if self.shared_experts is not None else None
         
         if out is None:

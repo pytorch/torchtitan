@@ -439,9 +439,6 @@ class Parallelism:
     """
     Whether to use alignment padding for DeepEP token dispatch.
     Only applies when expert_parallel_comm_backend="deepep".
-    
-    Recommended for large models (671B+) where the padding overhead is 
-    amortized over more compute. May cause slowdown for smaller models.
     """
 
 
