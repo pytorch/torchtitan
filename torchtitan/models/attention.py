@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
+    _score_mod_signature,
     BlockMask,
     create_block_mask,
     flex_attention,
@@ -113,7 +114,8 @@ class FlexAttentionWrapper(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
-        block_mask: BlockMask,
+        score_mod: _score_mod_signature | None = None,
+        block_mask: BlockMask | None = None,
         scale: float | None = None,
         return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
