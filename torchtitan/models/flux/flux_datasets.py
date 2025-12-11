@@ -9,7 +9,6 @@ import math
 from typing import Any, Callable, Optional
 
 import numpy as np
-import PIL
 import PIL.Image
 
 import torch
