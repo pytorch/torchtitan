@@ -1,6 +1,4 @@
-einops
 expecttest==0.1.6
-pillow
 pytest==7.3.2
 pytest-cov
 pre-commit

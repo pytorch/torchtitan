@@ -25,6 +25,8 @@ dependencies = [
     "tyro",
     "tensorboard",
     "psutil",
+    "einops",
+    "pillow",
 ]
 dynamic = ["version"]
 
