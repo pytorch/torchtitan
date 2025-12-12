@@ -567,16 +567,16 @@ class MoE(nn.Module):
                 )
 
 
-def build_moe(args: MoEArgs, dim: int, hidden_dim: int, communication_backend: str = "standard") -> nn.Module:
+def build_moe(args: MoEArgs, dim: int, hidden_dim: int, moe_impl: str = "standard") -> nn.Module:
     """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP).
 
     If 'deepep' is requested but DeepEP is not installed, falls back to standard with a warning.
     """
-    if communication_backend == "deepep":
+    if moe_impl == "deepep":
         try:
-            from .moe_deepep import MoEWithDeepEP
+            from .moe_deepep import DeepEPMoE
             logger.info(f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}")
-            return MoEWithDeepEP(moe_args=args, dim=dim, hidden_dim=hidden_dim)
+            return DeepEPMoE(moe_args=args, dim=dim, hidden_dim=hidden_dim)
         except ImportError as e:
             logger.warning(
                 f"DeepEP requested but not available: {e}. "

@@ -11,7 +11,7 @@ import torch
 from .moe import MoE, MoEArgs
 
 
-class MoEWithDeepEP(MoE):
+class DeepEPMoE(MoE):
     """
     Mixture of Experts with DeepEP communication.
     

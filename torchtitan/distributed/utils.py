@@ -360,21 +360,12 @@ def init_distributed(
         prefix = comm_config.save_traces_file_prefix
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
-
-    # _ranks argument is only available in newer PyTorch versions
-    init_kwargs = {
-        "backend": _get_distributed_backend(enable_cpu_backend),
-        "timeout": timedelta(seconds=comm_config.init_timeout_seconds),
-    }
-    # Try with _ranks first (newer PyTorch), fall back without it
-    try:
-        torch.distributed.init_process_group(
-            **init_kwargs,
-            _ranks=ranks if ranks is not None else [],
-        )
-    except TypeError:
-        # Older PyTorch doesn't support _ranks
-        torch.distributed.init_process_group(**init_kwargs)
+ 
+    torch.distributed.init_process_group(
+        backend=_get_distributed_backend(enable_cpu_backend),
+        timeout=timedelta(seconds=comm_config.init_timeout_seconds),
+        _ranks=ranks if ranks is not None else [],
+    )
 
     return torch.distributed.get_world_size()
 

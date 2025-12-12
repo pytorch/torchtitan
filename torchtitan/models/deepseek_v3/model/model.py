@@ -19,7 +19,7 @@ from torchtitan.models.attention import (
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
 )
-from torchtitan.models.moe import FeedForward, MoE
+from torchtitan.models.moe import FeedForward, MoE, build_moe
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -351,13 +351,11 @@ class TransformerBlock(nn.Module):
 
         self.moe_enabled = layer_id >= model_args.n_dense_layers
         if self.moe_enabled:
-            # Use build_moe factory to support different communication backends
-            from torchtitan.models.moe import build_moe
             self.moe = build_moe(
                 args=model_args.moe_args,
                 dim=model_args.dim,
                 hidden_dim=model_args.moe_inter_dim,
-                communication_backend=model_args.expert_parallel_comm_backend,
+                moe_impl=model_args.moe_impl,
             )
         else:
             self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)

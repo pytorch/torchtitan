@@ -45,21 +45,8 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    torch._higher_order_ops.inductor_compiled_code,
 }
-# Add optional ops if available (requires newer PyTorch)
-try:
-    _op_sac_save_list.add(torch._higher_order_ops.inductor_compiled_code)
-except AttributeError:
-    pass
-
-# Add DeepEP custom ops to SAC save list
-try:
-    import torchtitan.distributed.deepep.deepep  # noqa: F401
-    _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
-    _op_sac_save_list.add(torch.ops.deepep.combine.default)
-except (ImportError, AttributeError):
-    pass
-
 
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
@@ -118,11 +105,17 @@ def parallelize_deepseekv3(
             job_config.parallelism.expert_parallel_comm_backend == "deepep" 
             and not parallel_dims.ep_enabled
         ):
+            use_deepep = False
             logger.warning(
                 "expert_parallel_comm_backend='deepep' has no effect when EP=1. "
                 "Using standard communication."
             )
         
+        if use_deepep:
+            import torchtitan.distributed.deepep.deepep  # noqa: F401
+            _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+            _op_sac_save_list.add(torch.ops.deepep.combine.default)
+
         # DeepEP + ETP is not supported yet
         if use_deepep and parallel_dims.etp_enabled:
             raise NotImplementedError(

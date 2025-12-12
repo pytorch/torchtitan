@@ -62,14 +62,6 @@ _op_sac_save_list = {
     torch._higher_order_ops.inductor_compiled_code,
 }
 
-# Add DeepEP custom ops to SAC save list
-try:
-    import torchtitan.distributed.deepep.deepep  # noqa: F401
-    _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
-    _op_sac_save_list.add(torch.ops.deepep.combine.default)
-except (ImportError, AttributeError):
-    pass
-
 
 def parallelize_llama(
     model: nn.Module,
@@ -124,10 +116,18 @@ def parallelize_llama(
         job_config.parallelism.expert_parallel_comm_backend == "deepep" 
         and not parallel_dims.ep_enabled
     ):
+        use_deepep = False
         logger.warning(
             "expert_parallel_comm_backend='deepep' has no effect when EP=1. "
             "Using standard communication."
         )
+    
+    if use_deepep:
+        # Import deepep module to register custom ops before accessing them
+        import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
+        _op_sac_save_list.add(torch.ops.deepep.get_dispatch_layout.default)
+        _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+        _op_sac_save_list.add(torch.ops.deepep.combine.default)
     
     # DeepEP + ETP is not supported yet
     if use_deepep and parallel_dims.etp_enabled:

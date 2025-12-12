@@ -113,7 +113,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         )
         
         # Configure expert parallel communication backend from config (defaults to "standard")
-        self.expert_parallel_comm_backend = job_config.parallelism.expert_parallel_comm_backend
+        self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(
