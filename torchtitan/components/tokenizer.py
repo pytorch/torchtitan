@@ -14,6 +14,7 @@ from typing import Any, Optional, Union
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
+from transformers import AutoTokenizer
 from typing_extensions import override
 
 
@@ -66,6 +67,10 @@ class HuggingFaceTokenizer(BaseTokenizer):
         # Load configuration files
         self.config = self._load_config(
             os.path.join(tokenizer_path, "tokenizer_config.json")
+        )
+
+        self.backup_hf_tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer_path, use_fast=True
         )
 
         # Infer special tokens and adding BOS/EOS behavior
@@ -408,6 +413,10 @@ class HuggingFaceTokenizer(BaseTokenizer):
     def id_to_token(self, token_id: int) -> Optional[str]:
         """Convert ID to token."""
         return self.tokenizer.id_to_token(token_id)
+
+    def apply_chat_template(self, conversation, **kwargs):
+
+        return self.backup_hf_tokenizer.apply_chat_template(conversation, **kwargs)
 
 
 def build_hf_tokenizer(
