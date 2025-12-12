@@ -191,7 +191,7 @@ def apply_non_moe_tp(
     embed_plan = RowwiseParallel(
         input_layouts=Replicate(),
         output_layouts=sp_layout,
-        use_local_output=enable_sp,
+        use_local_output=False,
     )
 
     parallelize_module(
@@ -199,7 +199,7 @@ def apply_non_moe_tp(
         tp_mesh,
         {
             "tok_embeddings": embed_plan,
-            "norm": SequenceParallel() if enable_sp else NoParallel(),
+            "norm": SequenceParallel(use_local_output=False) if enable_sp else NoParallel(),
             "output": ColwiseParallel(
                 input_layouts=sp_layout,
                 output_layouts=Shard(-1) if enable_loss_parallel else Replicate(),
@@ -235,10 +235,10 @@ def apply_non_moe_tp(
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     positions_sharding = Replicate() if enable_cp else None
-    norm_plan = SequenceParallel() if enable_sp else NoParallel()
-    qk_norm_plan = SequenceParallel(sequence_dim=2)
+    norm_plan = SequenceParallel(use_local_output=False) if enable_sp else NoParallel()
+    qk_norm_plan = SequenceParallel(sequence_dim=2, use_local_output=False)
     rowwise_output_plan = rowwise_parallel(
-        output_layouts=sp_layout, use_local_output=enable_sp
+        output_layouts=sp_layout, use_local_output=False
     )
 
     # pyrefly: ignore [not-callable]
@@ -272,9 +272,9 @@ def apply_non_moe_tp(
                         input_layouts=(sp_layout,),
                         desired_input_layouts=(Replicate(),),
                     ),
-                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w1": colwise_parallel(use_local_output=False),
                     "feed_forward.w2": rowwise_output_plan,
-                    "feed_forward.w3": colwise_parallel(),
+                    "feed_forward.w3": colwise_parallel(use_local_output=False),
                 }
             )
 
