@@ -92,8 +92,11 @@ def fill_indices_wrapper(
         start_index_values,
         write_offsets,
         permuted_indices,
+        # pyrefly: ignore [bad-argument-type]
         experts_per_rank,
+        # pyrefly: ignore [bad-argument-type]
         num_ranks,
+        # pyrefly: ignore [bad-argument-type]
         BLOCK_SIZE=block_size,
     )
     return permuted_indices

@@ -58,6 +58,7 @@ class FluxStateDictAdapter(StateDictAdapter):
             if hf_safetensors_indx:
                 self.fqn_to_index_mapping = {}
                 for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
+                    # pyrefly: ignore [missing-attribute]
                     indx = re.search(r"\d+", raw_indx).group(0)
                     self.fqn_to_index_mapping[hf_key] = indx
             else:
@@ -173,6 +174,7 @@ class FluxStateDictAdapter(StateDictAdapter):
         for key, value in state_dict.items():
             # Extract layer_num and abstract key if necessary
             if "blocks" in key:
+                # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
                 key = re.sub(r"(\d+)", "{}", key, count=1)
             else:
@@ -242,6 +244,7 @@ class FluxStateDictAdapter(StateDictAdapter):
         for key, value in hf_state_dict.items():
             # extract layer_num and abstract key if necessary
             if "blocks" in key:
+                # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
                 key = re.sub(r"(\d+)", "{}", key, count=1)
             else:
@@ -273,6 +276,7 @@ class FluxStateDictAdapter(StateDictAdapter):
 
         # combine collected values
         for tt_fqn, hf_fqn_map in to_combine.items():
+            # pyrefly: ignore [missing-attribute]
             layer_num = re.search(r"\d+", tt_fqn).group(0)
             tt_abstract_key = re.sub(r"(\d+)", "{}", tt_fqn, count=1)
             combine_values = []

@@ -9,3 +9,5 @@ tyro
 tokenizers >= 0.15.0
 safetensors
 psutil
+einops
+pillow

@@ -223,8 +223,10 @@ class Attention(nn.Module):
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
             case "varlen":
+                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = VarlenAttentionWrapper()
             case _:
+                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def init_weights(self, init_std: float):
@@ -474,6 +476,7 @@ class Transformer(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
+                # pyrefly: ignore [not-callable]
                 layer.init_weights()
         if self.norm is not None:
             self.norm.reset_parameters()
@@ -569,12 +572,15 @@ class Transformer(nn.Module, ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        # pyrefly: ignore [not-callable]
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
             h = layer(
                 h, self.freqs_cis, attention_masks=attention_masks, positions=positions
             )
+        # pyrefly: ignore [not-callable]
         h = self.norm(h) if self.norm else h
+        # pyrefly: ignore [not-callable]
         output = self.output(h) if self.output else h
         return output

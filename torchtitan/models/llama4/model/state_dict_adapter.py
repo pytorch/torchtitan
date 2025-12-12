@@ -52,6 +52,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
         to_combine = defaultdict(dict)
         for key, value in state_dict.items():
             if "layers" in key:
+                # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
                 key = re.sub(r"(\d+)", "{}", key, count=1)
             else:
@@ -77,6 +78,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
                 hf_abstract_key = (
                     "language_model.model.layers.{}.feed_forward.experts.gate_up_proj"
                 )
+                # pyrefly: ignore [unnecessary-comparison]
                 if hf_abstract_key is None:
                     continue
                 to_combine[hf_abstract_key.format(layer_num)][
@@ -85,6 +87,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
 
         # combine collected values
         for hf_fqn, tt_fqn_map in to_combine.items():
+            # pyrefly: ignore [missing-attribute]
             layer_num = re.search(r"\d+", hf_fqn).group(0)
             combine_values = []
             # put into correct order to combine
@@ -106,6 +109,7 @@ class Llama4StateDictAdapter(StateDictAdapter):
 
         for key, value in hf_state_dict.items():
             if "layers" in key:
+                # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
                 key = re.sub(r"(\d+)", "{}", key, count=1)
             else:

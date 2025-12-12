@@ -134,6 +134,7 @@ def run_with_realtime_output(cmd: str, logfile: str, env: dict[str, Any]) -> Non
             bufsize=1,
         )
 
+        # pyrefly: ignore [not-iterable]
         for line in process.stdout:
             print(line, end="")
             log_f.write(line)

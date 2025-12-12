@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import importlib
+import importlib.util
 from contextlib import nullcontext
 from datetime import timedelta
 from typing import Callable, ContextManager, Optional, TYPE_CHECKING, Union
@@ -165,4 +165,5 @@ def maybe_semi_sync_training(
             raise ValueError(
                 f"Unknown training method: {semi_sync_method}, only 'diloco' and 'local_sgd' are supported."
             )
+    # pyrefly: ignore [no-matching-overload]
     return nullcontext()
