@@ -342,6 +342,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
+                model_args=self.model_args,
                 parallel_dims=parallel_dims,
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
