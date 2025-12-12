@@ -34,16 +34,15 @@ def get_dual_pipe_v_flag(job_config, parallel_dims) -> bool:
     Determine if DualPipeV should be enabled based on config and
     validates that incompatible features (EP + DualPipeV + AC) are not used together.
     """
+    if not parallel_dims.ep_enabled or not parallel_dims.pp_enabled:
+        return False
+
     dual_pipe_v = (
         job_config.parallelism.pipeline_parallel_expert_parallel_overlap
         and job_config.parallelism.pipeline_parallel_schedule.lower() == "dualpipev"
     )
 
-    if (
-        parallel_dims.ep_enabled
-        and dual_pipe_v
-        and job_config.activation_checkpoint.mode != "none"
-    ):
+    if dual_pipe_v and job_config.activation_checkpoint.mode != "none":
         raise NotImplementedError(
             "Expert Parallel with DualPipeV and Activation Checkpointing "
             "cannot be used together. Please disable one of them."
@@ -66,12 +65,8 @@ class DualPipeExpertParallel(BaseExpertParallel):
         super().__init__()
         self.inner_ep = inner_ep
 
-    @staticmethod
-    def _partition_fn(name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
-        raise NotImplementedError(
-            "DualPipeExpertParallel._partition_fn should not be called directly. "
-            "Use _apply() which delegates to inner_ep._partition_fn."
-        )
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        return self.inner_ep._partition_fn(name, mod, device_mesh)
 
     def _token_dispatch(
         self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh

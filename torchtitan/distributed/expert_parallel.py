@@ -28,9 +28,8 @@ from torchtitan.models.moe.utils import _permute, _unpermute
 
 
 class BaseExpertParallel(ParallelStyle, ABC):
-    @staticmethod
     @abstractmethod
-    def _partition_fn(name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         ...
 
     @abstractmethod
@@ -94,8 +93,7 @@ class ExpertParallel(BaseExpertParallel):
         self.input_shape = None
         self.permuted_indices = None
 
-    @staticmethod
-    def _partition_fn(name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         for param_name, param in mod.named_parameters(recurse=False):
             dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
             mod.register_parameter(param_name, dist_param)
@@ -208,8 +206,7 @@ class ExpertTensorParallel(ExpertParallel):
         # token dispatch happens on the EP mesh, whereas device_mesh is [ep, tp] mesh
         return super()._token_dispatch(mod, inputs, device_mesh["ep"])
 
-    @staticmethod
-    def _partition_fn(name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         # w1 shape = (experts, out_dim, in_dim)
         mod.register_parameter(
             "w1",

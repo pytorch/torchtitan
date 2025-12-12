@@ -39,8 +39,7 @@ class GptossTensorParallel(TensorParallel):
 
 # This class is for dp2ep with TP (without TP we can just use GptossExpertParallel)
 class GptossExpertTensorParallel(ExpertTensorParallel):
-    @staticmethod
-    def _partition_fn(name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         mod.register_parameter(
             "mlp1_weight",
             nn.Parameter(
