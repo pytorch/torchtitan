@@ -439,6 +439,28 @@ class SFTDataset(IterableDataset, Stateful):
         }
         ret_labels = torch.cat(self._buffer["labels"], dim=0)
 
+        if self.pad_mode == "no_padding" and self.greedy_packing:
+            L = int(ret_input["input"].numel())
+            T = int(self.buffer_max_length)  # == seq_len when greedy_packing=True
+            if L < T:
+                pad_len = T - L
+                pad_token_id = (
+                    self.tokenizer.pad_id
+                    if self.tokenizer.pad_id is not None
+                    else self.tokenizer.eos_id
+                )
+
+                ret_input["input"] = F.pad(
+                    ret_input["input"], (0, pad_len), value=pad_token_id
+                )
+                ret_input["positions"] = F.pad(
+                    ret_input["positions"], (0, pad_len), value=0
+                )
+                ret_input["attention_masks"] = F.pad(
+                    ret_input["attention_masks"], (0, pad_len), value=0
+                )
+                ret_labels = F.pad(ret_labels, (0, pad_len), value=IGNORE_INDEX)
+
         return ret_input, ret_labels
 
     def __iter__(self):
