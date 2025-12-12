@@ -27,6 +27,15 @@ __all__ = [
 
 
 llama3_args = {
+    "debugperf": TransformerModelArgs(
+        dim=256, n_layers=6, n_heads=16, n_kv_heads=16, vocab_size=2048, rope_theta=500000
+    ),
+    "debugperf_large": TransformerModelArgs(
+        dim=1024,
+        n_layers=24,
+        vocab_size=32000,
+        rope_theta=500000,
+    ),
     "debugmodel": TransformerModelArgs(
         dim=256, n_layers=6, n_heads=16, vocab_size=2048, rope_theta=500000
     ),
