@@ -399,7 +399,8 @@ def dispatch_tokens(
             permuted_scores = scores_with_zero[padding_indices]
     
     if score_before_experts and permuted_scores is not None:
-        hidden_states = (hidden_states.to(torch.float32) * permuted_scores.reshape(-1, 1)).to(hidden_states.dtype)
+        # Avoid float32 conversion to save memory
+        hidden_states = hidden_states * permuted_scores.to(hidden_states.dtype).reshape(-1, 1)
         permuted_scores_for_state = None
     else:
         permuted_scores_for_state = permuted_scores
@@ -422,7 +423,8 @@ def combine_tokens(
 ) -> torch.Tensor:
     """Combine tokens from experts via DeepEP."""
     if state.permuted_scores is not None:
-        hidden_states = (hidden_states.to(torch.float32) * state.permuted_scores.reshape(-1, 1)).to(hidden_states.dtype)
+        # In-place multiplication to save memory
+        hidden_states = hidden_states * state.permuted_scores.to(hidden_states.dtype).reshape(-1, 1)
     
     # Remove alignment padding if it was applied
     if state.padding_indices is not None:
