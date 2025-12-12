@@ -190,7 +190,10 @@ def get_causal_mask_mod() -> _mask_mod_signature:
     return _causal_mask
 
 
-def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signature:
+def get_document_mask_mod_using_eos_id(
+    batch: torch.Tensor,
+    eos_id: int,
+) -> _mask_mod_signature:
     """Creates a document mask that prevents attention across document boundaries.
 
     Args:
@@ -213,6 +216,92 @@ def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signatu
         return sequence_indices[b, q_idx] == sequence_indices[b, kv_idx]
 
     return document_mask
+
+
+def get_document_mask_mod_using_sequence_indices(
+    batch: torch.Tensor,
+    seq_lengths: torch.Tensor,  # Shape: [B, Num_Docs]
+    seq_start_indices: torch.Tensor,  # Shape: [B, Num_Docs]
+) -> _mask_mod_signature:
+    device = batch.device
+    B, S = batch.shape[:2]  # Derive S from the actual batch, not metadata
+    # Initialize the ID map [B, S]
+    document_ids = torch.zeros((B, S), dtype=torch.int32, device=device)
+
+    # Filter valid starts (ignore -1 padding)
+    valid_mask = seq_start_indices != -1
+
+    # Scatter '1' at the start of every document
+    # This creates a map like: [0, 0, 1, 0, 0, 1, 0...]
+    batch_rows = (
+        torch.arange(B, device=device)
+        .unsqueeze(1)
+        .expand_as(seq_start_indices)[valid_mask]
+    )
+    start_cols = seq_start_indices[valid_mask].long()
+
+    start_cols = start_cols.clamp(0, S - 1)
+    document_ids[batch_rows, start_cols] = 1
+
+    # Cumsum to propagate IDs
+    # [0, 0, 1, 0, 0] -> [0, 0, 1, 1, 1]
+    # We start from 0, so the first document becomes ID 1, next is 2, etc.
+    seq_ids = document_ids.cumsum(dim=1)
+
+    # Calculate where the valid data actually ends per row
+    doc_ends = seq_start_indices + seq_lengths
+    # Get the max end index per batch row
+    last_valid_end = torch.max(torch.where(valid_mask, doc_ends, -1), dim=1).values
+
+    # Create mask: True where position >= last_valid_end
+    pos_indices = torch.arange(S, device=device).unsqueeze(0)
+    is_padding = pos_indices >= last_valid_end.unsqueeze(1)
+
+    # Set padding to -1
+    seq_ids = seq_ids.masked_fill(is_padding, -1)
+
+    def document_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        # Check if tokens belong to same document AND are not padding
+        return (seq_ids[b, q_idx] == seq_ids[b, kv_idx]) & (seq_ids[b, q_idx] > 0)
+
+    return document_mask
+
+
+def get_document_mask_mod(
+    batch: torch.Tensor,
+    eos_id: int,
+    extra_inputs: dict[str, torch.Tensor] | None = None,
+) -> _mask_mod_signature:
+    """Creates a document mask that prevents attention across document boundaries.
+
+    Args:
+        batch: Input batch tensor with shape [b, s, h, d]
+        eos_id: End-of-sequence token ID that marks document boundaries
+        extra_inputs: Extra inputs to the mask modifier function
+
+    Returns:
+        A mask modifier function that implements document-level masking.
+    """
+    # batch is [b, s, h, d] shape
+
+    # this functioned can be called in two ways:
+    # 1. with eos_id: (we use this in the pre-training while eos_id is relible to get the document boundaries)
+    # 2. with seq_lengths and seq_start_indices:
+    #    - seq_lengths: the length of each sequence
+    #    - seq_start_indices: the start index of each sequence
+    #    - we use this in the post-training while eos_id is not relible to get the document boundaries
+
+    if extra_inputs is None and eos_id is not None:
+        return get_document_mask_mod_using_eos_id(batch, eos_id)
+    elif extra_inputs is not None:
+        seq_lens = extra_inputs.pop("seq_lens", None)
+        seq_start_indices = extra_inputs.pop("seq_start_indices", None)
+        assert seq_lens is not None and seq_start_indices is not None
+        return get_document_mask_mod_using_sequence_indices(
+            batch, seq_lens, seq_start_indices
+        )
 
 
 def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
@@ -286,6 +375,25 @@ def create_attention_mask(*args, **kwargs):
 
 
 def create_varlen_metadata_for_document(
+    input_batch: torch.Tensor,
+    eos_id: int,
+    extra_inputs: dict[str, torch.Tensor] | None = None,
+) -> _mask_mod_signature:
+    """
+    Creates an attention mask for document-level attention.
+    """
+    if extra_inputs is None and eos_id is not None:
+        return create_varlen_metadata_for_document_using_eos_id(input_batch, eos_id)
+    elif extra_inputs is not None:
+        seq_lens = extra_inputs.pop("seq_lens", None)
+        seq_start_indices = extra_inputs.pop("seq_start_indices", None)
+        assert seq_lens is not None and seq_start_indices is not None
+        return create_varlen_metadata_for_document_using_sequence_indices(
+            input_batch, seq_lens, seq_start_indices
+        )
+
+
+def create_varlen_metadata_for_document_using_eos_id(
     input_batch: torch.Tensor, eos_id: int
 ) -> VarlenMetadata:
     """
@@ -337,6 +445,44 @@ def create_varlen_metadata_for_document(
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,
+        max_q=max_seqlen,
+        max_k=max_seqlen,
+    )
+
+
+def create_varlen_metadata_for_document_using_sequence_indices(
+    input_batch, seq_lens, seq_start_indices
+):
+    B, S = input_batch.shape[:2]
+    device = input_batch.device
+
+    valid_mask = (seq_start_indices >= 0) & (seq_lens > 0)
+
+    batch_offsets = (torch.arange(B, device=device, dtype=torch.int32) * S).unsqueeze(1)
+    global_starts = seq_start_indices.to(torch.int32) + batch_offsets
+
+    flat_starts = global_starts[valid_mask].reshape(-1)
+
+    global_ends = global_starts + seq_lens.to(torch.int32)
+
+    doc_counts = valid_mask.sum(dim=1)
+    last_doc_idx = (doc_counts - 1).clamp(min=0)
+
+    last_ends = global_ends.gather(1, last_doc_idx.unsqueeze(1)).reshape(-1)
+    last_ends = last_ends[doc_counts > 0]
+
+    batch_boundaries = torch.arange(B + 1, device=device, dtype=torch.int32) * S
+
+    all_points = torch.cat([batch_boundaries, flat_starts, last_ends]).clamp(0, B * S)
+    sorted_points, _ = torch.sort(all_points)
+    cu = torch.unique_consecutive(sorted_points)
+
+    seg_lens = torch.diff(cu)
+    max_seqlen = int(seg_lens.max().item()) if seg_lens.numel() else 0
+
+    return VarlenMetadata(
+        cu_seq_q=cu,
+        cu_seq_k=cu,
         max_q=max_seqlen,
         max_k=max_seqlen,
     )

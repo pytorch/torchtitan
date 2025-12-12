@@ -13,12 +13,10 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.components.ft.manager import FTManager
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
-
-
-IGNORE_INDEX = -100  # Pytorch's default for F.cross_entropy
 
 
 # WARNING: currently this does not take into account gradient accumulation
