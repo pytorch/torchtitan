@@ -65,3 +65,4 @@ testpaths = ["tests"]
 
 [tool.pyrefly]
 project-excludes = ["torchtitan/experiments", "**/tests/**"]
+ignore-missing-imports = ["torchao.*"]  # optional dependency
