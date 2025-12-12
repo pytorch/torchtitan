@@ -241,6 +241,7 @@ class CheckpointManager:
                 for k, v in state_dict.items():
                     self.states[k].load_state_dict(v)
 
+            # pyrefly: ignore [missing-attribute]
             self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
             # pyrefly: ignore [missing-attribute]
             self.ft_replica_id = ft_manager.replica_id
@@ -502,6 +503,7 @@ class CheckpointManager:
 
         begin = time.monotonic()
         if not self.enable_ft_dataloader_checkpoints or (
+            # pyrefly: ignore [missing-attribute]
             self.ft_manager and self.ft_manager.participating_rank() == 0
         ):
             logger.info("Saving the checkpoint (or staging if async is enabled).")
@@ -552,6 +554,7 @@ class CheckpointManager:
             assert self.ft_manager is not None
             logger.info(
                 "Replica %d doesn't save checkpoint.",
+                # pyrefly: ignore [missing-attribute]
                 self.ft_manager.participating_rank(),
             )
 
@@ -846,6 +849,7 @@ class CheckpointManager:
             and os.path.isdir(self.folder)
             and (
                 not self.enable_ft_dataloader_checkpoints
+                # pyrefly: ignore [missing-attribute]
                 or (self.ft_manager and self.ft_manager.participating_rank() == 0)
             )
         ):
