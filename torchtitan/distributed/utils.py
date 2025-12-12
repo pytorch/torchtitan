@@ -523,6 +523,7 @@ def cp_shard(
     from torch.distributed.tensor.experimental._attention import (
         _context_parallel_shard,
         _HeadTailLoadBalancer,
+        _PTRRLoadBalancer,
     )
     from torch.nn.attention.flex_attention import BlockMask
 
@@ -530,9 +531,7 @@ def cp_shard(
     seq_len = inputs[0].size(INPUT_SEQ_DIM)
     cp_world_size = cp_mesh.size(0)
     if isinstance(attention_masks, BlockMask):
-        raise ValueError(
-            "FlexAttention CP is not supported yet. Will come in the next PR."
-        )
+        load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
     else:
         # For SDPA, we use the _HeadTailLoadBalancer.
         load_balancer = _HeadTailLoadBalancer(
@@ -545,5 +544,23 @@ def cp_shard(
         seq_dims=tuple(1 for _ in inputs),
         load_balancer=load_balancer,
     )
+
+    if attention_masks is not None:
+        masks = (
+            [attention_masks]
+            if isinstance(attention_masks, BlockMask)
+            else list(attention_masks.values())
+        )
+        masks = _context_parallel_shard(
+            mesh=cp_mesh,
+            buffers=masks,
+            seq_dims=(2,) * len(masks),
+            load_balancer=load_balancer,
+        )
+        attention_masks = (
+            masks[0]
+            if isinstance(attention_masks, BlockMask)
+            else {k: v for k, v in zip(attention_masks.keys(), masks)}
+        )
 
     return inputs, attention_masks
