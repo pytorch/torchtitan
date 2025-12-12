@@ -37,8 +37,6 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         n_heads (int): Number of attention heads.
         norm_eps (float): Epsilon value used for RMSNorm.
         moe_args (MoEArgs): MoE configuration.
-        n_expert_groups (int): Number of expert groups.
-        n_limited_groups (int): Number of limited groups for MoE routing.
         q_lora_rank (int): LoRA rank for query projections.
         kv_lora_rank (int): LoRA rank for key-value projections.
         qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
@@ -66,8 +64,6 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
 
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
-    n_expert_groups: int = 1
-    n_limited_groups: int = 1
 
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
