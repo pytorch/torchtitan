@@ -239,69 +239,46 @@ class TokenChoiceTopKRouter(nn.Module):
         top_scores = scores.gather(dim=1, index=selected_experts_indices)  # [N,K]
         return selected_experts_indices, top_scores
 
-    def _node_limited_routing(
+    def _get_node_limited_routing_scores(
         self,
-        scores: torch.Tensor,
-        expert_bias: torch.Tensor | None,
+        scores_for_choice: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Select top_k experts, optionally limiting to a subset of expert groups.
-
-        If num_expert_groups is set, applies node-limited routing:
-        1. Select num_limited_groups groups based on group scores
-        2. Select top_k experts only from those groups
-
-        If expert_bias is provided, it is added to scores for selection, but
-        the returned top_scores are always from the original (unbiased) scores.
+        """Select num_limited_groups groups based on group scores,
+            and set expert scores in non-selected groups as -inf
 
         Args:
-            scores: Router scores after sigmoid or softmax, shape (bs*slen, num_experts)
-            expert_bias: Optional bias for load balancing, shape (num_experts,)
+            scores_for_choice: Router scores with expert_bias (if any), shape (bs*slen, num_experts)
 
         Returns:
-            tuple of (selected_experts_indices, top_scores)
-                - selected_experts_indices: shape (bs*slen, top_k)
-                - top_scores: shape (bs*slen, top_k)
+            scores_for_choice: shape (bs*slen, num_experts)
         """
-        scores_for_choice = scores if expert_bias is None else scores + expert_bias
-
-        # Apply node-limited routing mask if configured
-        if self.num_expert_groups is not None:
-            if self.num_limited_groups is None:
-                raise ValueError(
-                    "num_limited_groups must be set when num_expert_groups is set"
-                )
-            if self.num_experts % self.num_expert_groups != 0:
-                raise ValueError(
-                    f"num_experts ({self.num_experts}) must be divisible by num_expert_groups ({self.num_expert_groups})"
-                )
-            experts_per_group = self.num_experts // self.num_expert_groups
-            if experts_per_group < 2:
-                raise ValueError(
-                    f"experts_per_group ({experts_per_group}) must be >= 2"
-                )
-            scores_grouped = scores_for_choice.view(
-                -1, self.num_expert_groups, experts_per_group
+        if self.num_limited_groups is None:
+            raise ValueError(
+                "num_limited_groups must be set when num_expert_groups is set"
             )
-            group_scores = scores_grouped.topk(2, dim=-1)[0].sum(dim=-1)
-            group_idx = torch.topk(
-                group_scores, k=self.num_limited_groups, dim=-1, sorted=False
-            )[1]
-            group_mask = torch.ones_like(group_scores, dtype=torch.bool)
-            group_mask.scatter_(1, group_idx, False)  # False = selected groups (keep)
-            # Mask out experts from non-selected groups
-            scores_for_choice = scores_grouped.masked_fill(
-                group_mask.unsqueeze(-1), float("-inf")
-            ).view(-1, self.num_experts)
+        if self.num_experts % self.num_expert_groups != 0:
+            raise ValueError(
+                f"num_experts ({self.num_experts}) must be divisible by num_expert_groups ({self.num_expert_groups})"
+            )
+        experts_per_group = self.num_experts // self.num_expert_groups
+        if experts_per_group < 2:
+            raise ValueError(f"experts_per_group ({experts_per_group}) must be >= 2")
+        scores_grouped = scores_for_choice.view(
+            -1, self.num_expert_groups, experts_per_group
+        )
+        top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
+        group_scores = top2_scores_in_group.sum(dim=-1)
+        _, group_idx = torch.topk(
+            group_scores, k=self.num_limited_groups, dim=-1, sorted=False
+        )
+        group_mask = torch.ones_like(group_scores, dtype=torch.bool)
+        group_mask.scatter_(1, group_idx, False)  # False = selected groups (keep)
+        # Mask out experts from non-selected groups
+        scores_for_choice = scores_grouped.masked_fill(
+            group_mask.unsqueeze(-1), float("-inf")
+        ).view(-1, self.num_experts)
 
-        selected_experts_indices = torch.topk(
-            scores_for_choice, k=self.top_k, dim=-1, sorted=False
-        )[1]
-
-        # NOTE: The expert_bias is only used for routing. The gating value
-        #       top_scores is still derived from the original scores.
-        top_scores = scores.gather(dim=1, index=selected_experts_indices)
-
-        return selected_experts_indices, top_scores
+        return scores_for_choice
 
     def forward(
         self, x: torch.Tensor, expert_bias: torch.Tensor | None = None
@@ -332,10 +309,18 @@ class TokenChoiceTopKRouter(nn.Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        # top scores shape (bs*slen, top_k)
-        selected_experts_indices, top_scores = self._node_limited_routing(
-            scores, expert_bias
+        scores_for_choice = scores if expert_bias is None else scores + expert_bias
+        # Apply node-limited routing if configured
+        if self.num_expert_groups is not None:
+            scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
+        _, selected_experts_indices = torch.topk(
+            scores_for_choice, k=self.top_k, dim=-1, sorted=False
         )
+
+        # top scores shape (bs*slen, top_k)
+        # NOTE: The expert_bias is only used for routing. The gating value
+        #       top_scores is still derived from the original scores.
+        top_scores = scores.gather(dim=1, index=selected_experts_indices)
 
         # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
