@@ -194,9 +194,7 @@ class CompiledModule(torch.nn.Module):
     def forward(self, *args, **kwargs):
         assert "forward" not in self._overrides, "forward cannot be overridden"
 
-        dt_args, dt_kwargs = self.parallelize_inputs(
-            self.parallel_dims.world_mesh, args, kwargs
-        )
+        dt_args, dt_kwargs = self.parallelize_inputs(self.parallel_dims, args, kwargs)
 
         if self.joint_graph_module is None:
             self.joint_graph_module = self.joint_graph_builder(
