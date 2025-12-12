@@ -89,8 +89,14 @@ def parallelize_llama(
             world_mesh["tp"],
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
+            cp_enabled=parallel_dims.cp_enabled,
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
+
+    use_flex_attn = getattr(model.model_args, "attn_type", "sdpa") == "flex"
+    if parallel_dims.cp_enabled:
+        logger.info("Applied Context Parallel to the model")
+        apply_cp(model, world_mesh["cp"], use_flex_attn)
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -131,9 +137,6 @@ def parallelize_llama(
         else:
             logger.info("Applied FSDP to the model")
 
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
-
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
@@ -153,6 +156,7 @@ def apply_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
+    cp_enabled: bool = False,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -202,11 +206,13 @@ def apply_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
             # NOTE: when the fourth argument (positions) is not None, its input layout
-            # and desired input layout should be Replicate()
+            # and desired input layout is still None as we don't convert freqs_cis to
+            # a DTensor for llama3.
             "attention": prepare_module_input(
                 input_layouts=(Shard(1), None, None, None),
                 desired_input_layouts=(Replicate(), None, None, None),
@@ -330,3 +336,42 @@ def apply_ddp(
     replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
 
     logger.info("Applied DDP to the model")
+
+
+def apply_cp(
+    model: nn.Module,
+    cp_mesh: DeviceMesh,
+    use_flex_attn: bool,
+) -> None:
+    """
+    Apply context parallelism to the model.
+    """
+    from torch.distributed.tensor.experimental._attention import (
+        _ContextParallel,
+        _enable_context_parallel_dispatcher,
+    )
+
+    # Apply context parallelism to every transformer block
+    # TODO: make seq_sim configurable once the implementation doesn't assume 2
+    # internally.
+    if use_flex_attn:
+        cp_plan = _ContextParallel(
+            seq_dim=2, attention_type=_ContextParallel.AttentionType.FLEX
+        )
+    else:
+        # This is currently required as DTensor dispatcher is not enabled to
+        # dispatch SDPA to CP implementation. We don't disable the CP
+        # dispatching in TorchTitan as it is not needed. But there is a
+        # corresponding API, _disable_context_parallel_dispatcher to do
+        # that if users have this use case.
+        _enable_context_parallel_dispatcher()
+        cp_plan = _ContextParallel(
+            seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
+        )
+
+    for transformer_block in model.layers.values():
+        parallelize_module(
+            module=transformer_block.attention.inner_attention,
+            device_mesh=cp_mesh,
+            parallelize_plan=cp_plan,
+        )

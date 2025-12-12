@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Generator
+from typing import Any, Generator
 
 import torch
 import torch.nn as nn
@@ -16,6 +16,7 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
+from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -50,6 +51,7 @@ class Validator(BaseValidator):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
+        model_args: BaseModelArgs,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
         validation_context: Generator[None, None, None],
@@ -60,6 +62,8 @@ class Validator(BaseValidator):
         pp_has_last_stage: bool | None = None,
     ):
         self.job_config = job_config
+        self.tokenizer = tokenizer
+        self.model_args = model_args
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
         self.validation_dataloader = build_text_validation_dataloader(
@@ -81,6 +85,75 @@ class Validator(BaseValidator):
                 "Setting validation steps to -1 might cause hangs because of "
                 "unequal sample counts across ranks when dataset is exhausted."
             )
+
+    def post_dataloading_process(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        device: torch.device,
+        model_parts: list[nn.Module],
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+        """
+        Post-processing hook after data loading and before model forward pass.
+
+        This method processes the raw data from the dataloader and prepares it for
+        the model's forward pass. It separates the main input tensor from auxiliary
+        inputs and constructs additional keyword arguments (e.g., attention masks).
+
+        Args:
+            input_dict: Dictionary containing tensors from the dataloader. Must
+                contain an "input" key with the main input tensor. May contain
+                additional keys for auxiliary inputs (e.g., position ids).
+            labels: Target labels for the batch.
+            device: Device to use for creating new tensors (e.g., positions).
+            model_parts: List of model parts for accessing model methods.
+
+        Returns:
+            A tuple of (inputs, labels, extra_inputs, extra_kwargs) where:
+                - inputs: Main input tensor extracted from input_dict["input"].
+                - labels: Target labels (potentially modified by CP sharding).
+                - extra_inputs: Dict of auxiliary input tensors (all keys except
+                    "input" from input_dict). These are passed to the model forward
+                    but are NOT forwarded across pipeline parallel stages.
+                - extra_kwargs: Dict of additional keyword arguments for model forward.
+                    These ARE forwarded across pipeline parallel stages. Contains
+                    attention_masks if flex attention is enabled.
+
+        Note:
+            The distinction between extra_inputs and extra_kwargs is important for
+            pipeline parallelism: extra_kwargs are forwarded to all pipeline stages,
+            while extra_inputs are only available to the first stage.
+        """
+        inputs = input_dict["input"]
+        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+        # For arguments, like attention_masks, we have to put them in a separate
+        # dict as extra_inputs are not forwarded to other stages in PP, but
+        # extra_kwargs are.
+        extra_kwargs: dict[str, Any] = {}
+
+        attn_type = getattr(self.model_args, "attn_type", "sdpa")
+        if attn_type in ["flex", "varlen"]:
+            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
+                extra_inputs=extra_inputs,
+            )
+
+        if self.parallel_dims.cp_enabled:
+            attention_masks = extra_kwargs.get("attention_masks", None)
+            positions = torch.arange(
+                0, inputs.shape[1], dtype=torch.int32, device=device
+            ).expand(inputs.shape)
+            (inputs, labels, positions), attention_masks = dist_utils.cp_shard(
+                self.parallel_dims.world_mesh["cp"],
+                (inputs, labels, positions),
+                attention_masks,
+            )
+            extra_kwargs["positions"] = positions
+            if attention_masks is not None:
+                extra_kwargs["attention_masks"] = attention_masks
+
+        return inputs, labels, extra_inputs, extra_kwargs
 
     @torch.no_grad()
     def validate(
@@ -108,19 +181,14 @@ class Validator(BaseValidator):
             self.metrics_processor.ntokens_since_last_log += labels.numel()
             for k, v in input_dict.items():
                 input_dict[k] = v.to(device_type)
-            inputs = input_dict["input"]
             labels = labels.to(device_type)
 
-            optional_context_parallel_ctx = (
-                dist_utils.create_context_parallel_ctx(
-                    cp_mesh=parallel_dims.world_mesh["cp"],
-                    cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
-                    cp_seq_dims=[1, 1] + [0 for _ in model_parts],
-                    cp_no_restore_buffers={inputs, labels},
-                    cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
-                )
-                if parallel_dims.cp_enabled
-                else None
+            # Create device object for post_dataloading_process
+            device = torch.device(device_type)
+
+            # Process data (extract inputs, handle attention masks, CP sharding)
+            inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
+                input_dict, labels, device, model_parts
             )
 
             if parallel_dims.pp_enabled:
@@ -128,18 +196,24 @@ class Validator(BaseValidator):
                 assert self.pp_has_first_stage is not None
                 assert self.pp_has_last_stage is not None
                 # Pipeline Parallel forward inside eval() call
-                with self.validation_context(optional_context_parallel_ctx):
+                with self.validation_context():
                     targets, losses = (
                         (labels, []) if self.pp_has_last_stage else (None, None)
                     )
                     if self.pp_has_first_stage:
                         self.pp_schedule.eval(
                             inputs,
+                            **extra_inputs,
+                            **extra_kwargs,
                             target=targets,
                             losses=losses,
                         )
                     else:
-                        self.pp_schedule.eval(target=targets, losses=losses)
+                        self.pp_schedule.eval(
+                            **extra_kwargs,
+                            target=targets,
+                            losses=losses,
+                        )
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
@@ -152,10 +226,12 @@ class Validator(BaseValidator):
                     else torch.tensor([-1.0], device=device_type)
                 )
             else:
-                with self.validation_context(optional_context_parallel_ctx):
+                with self.validation_context():
                     assert len(model_parts) == 1
                     with self.maybe_enable_amp:
-                        predictions = model_parts[0](inputs)
+                        predictions = model_parts[0](
+                            inputs, **extra_inputs, **extra_kwargs
+                        )
                         loss = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss.detach())
@@ -184,6 +260,7 @@ def build_validator(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
+    model_args: BaseModelArgs,
     parallel_dims: ParallelDims,
     loss_fn: LossFunction,
     validation_context: Generator[None, None, None],
@@ -199,6 +276,7 @@ def build_validator(
         dp_world_size=dp_world_size,
         dp_rank=dp_rank,
         tokenizer=tokenizer,
+        model_args=model_args,
         parallel_dims=parallel_dims,
         loss_fn=loss_fn,
         validation_context=validation_context,
