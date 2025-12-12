@@ -503,8 +503,9 @@ class CheckpointManager:
 
         begin = time.monotonic()
         if not self.enable_ft_dataloader_checkpoints or (
+            self.ft_manager
             # pyrefly: ignore [missing-attribute]
-            self.ft_manager and self.ft_manager.participating_rank() == 0
+            and self.ft_manager.participating_rank() == 0
         ):
             logger.info("Saving the checkpoint (or staging if async is enabled).")
             checkpoint_id = self._create_checkpoint_id(curr_step)
