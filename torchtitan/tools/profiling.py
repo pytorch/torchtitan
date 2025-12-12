@@ -69,6 +69,7 @@ def maybe_enable_profiling(
         elif torch.xpu.is_available():
             gpu_device_profiled = torch.profiler.ProfilerActivity.XPU
         with torch.profiler.profile(
+            # pyrefly: ignore [bad-argument-type]
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
                 gpu_device_profiled,

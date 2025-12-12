@@ -6,6 +6,7 @@
 
 # imported from black-forest-labs/FLUX
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -34,7 +35,7 @@ def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tenso
 
 
 class EmbedND(nn.Module):
-    def __init__(self, dim: int, theta: int, axes_dim: list[int]):
+    def __init__(self, dim: int, theta: int, axes_dim: Sequence[int]):
         super().__init__()
         self.dim = dim
         self.theta = theta
@@ -213,7 +214,9 @@ class DoubleStreamBlock(nn.Module):
             self.txt_mlp[0],
             self.txt_mlp[2],
         ):
+            # pyrefly: ignore [bad-argument-type]
             nn.init.xavier_uniform_(layer.weight)
+            # pyrefly: ignore [bad-argument-type]
             nn.init.constant_(layer.bias, 0)
 
         # initialize Modulation layers, SelfAttention layers
@@ -346,7 +349,9 @@ class LastLayer(nn.Module):
         )
 
     def init_weights(self):
+        # pyrefly: ignore [bad-argument-type]
         nn.init.constant_(self.adaLN_modulation[-1].weight, 0)
+        # pyrefly: ignore [bad-argument-type]
         nn.init.constant_(self.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.linear.weight, 0)
         nn.init.constant_(self.linear.bias, 0)

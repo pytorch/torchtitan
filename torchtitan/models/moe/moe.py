@@ -77,20 +77,20 @@ def _run_experts_for_loop(
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
     # NOTE: this would incur a synchronization between device and host
-    num_tokens_per_expert = num_tokens_per_expert.tolist()
+    num_tokens_per_expert_list = num_tokens_per_expert.tolist()
 
     # side-effect code due to the usage of generate_permute_indices
-    num_padding = x.shape[0] - sum(num_tokens_per_expert)
+    num_padding = x.shape[0] - sum(num_tokens_per_expert_list)
 
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
-    x = torch.split(
-        x[: sum(num_tokens_per_expert)],
-        split_size_or_sections=num_tokens_per_expert,
+    x_splits = torch.split(
+        x[: sum(num_tokens_per_expert_list)],
+        split_size_or_sections=num_tokens_per_expert_list,
         dim=0,
     )
     out_experts_splits = []
-    for expert_idx, x_expert in enumerate(x):
+    for expert_idx, x_expert in enumerate(x_splits):
         h = F.silu(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
         h = h * torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
         h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
@@ -148,7 +148,9 @@ class GroupedExperts(nn.Module):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
             w1 = self.w1.to_local()
+            # pyrefly: ignore [missing-attribute]
             w2 = self.w2.to_local()
+            # pyrefly: ignore [missing-attribute]
             w3 = self.w3.to_local()
         else:
             w1 = self.w1
@@ -161,6 +163,7 @@ class GroupedExperts(nn.Module):
             #       otherwise, EP will handle the padding.
             if (
                 not isinstance(self.w1, DTensor)
+                # pyrefly: ignore [not-iterable]
                 or "ep" not in self.w1.device_mesh.mesh_dim_names
             ):
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)

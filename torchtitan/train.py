@@ -10,10 +10,11 @@ import json
 import os
 import time
 from datetime import timedelta
-from typing import Any, Generator, Iterable
+from typing import Any, Iterable
 
 import torch
 
+import torch.distributed.checkpoint.stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
@@ -60,7 +61,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # runtime utilities
     device: torch.device
     gc_handler: utils.GarbageCollection
-    train_context: Generator[None, None, None]
+    train_context: dist_utils.TrainContext
     gradient_accumulation_steps: int
     pp_has_first_stage: bool
     pp_has_last_stage: bool
@@ -82,8 +83,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             importlib.import_module(job_config.experimental.custom_import)
 
         device_module, device_type = utils.device_module, utils.device_type
+        # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
+        # pyrefly: ignore [missing-attribute]
         device_module.set_device(self.device)
 
         # init distributed and build meshes
@@ -99,6 +102,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             dp_degree, dp_rank = 1, 0
 
+        # pyrefly: ignore [bad-argument-type]
         self.ft_manager = FTManager(job_config.fault_tolerance)
         dp_degree, dp_rank = self.ft_manager.get_dp_info(dp_degree, dp_rank)
 
@@ -149,6 +153,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
+        # pyrefly: ignore [bad-argument-type]
         model_converters.convert(model)
 
         # metrics logging
@@ -166,6 +171,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
+            # pyrefly: ignore [bad-argument-type]
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
@@ -242,10 +248,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
+                    # pyrefly: ignore [not-callable]
                     m.init_weights(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
+            # pyrefly: ignore [bad-argument-type]
             ensure_pp_loss_visible(parallel_dims, job_config, color)
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
@@ -253,6 +261,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
+                # pyrefly: ignore [not-callable]
                 model.init_weights(buffer_device=buffer_device)
             model.train()
 
@@ -458,6 +467,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         attn_type = getattr(self.model_args, "attn_type", "sdpa")
         if attn_type in ["flex", "varlen"]:
+            # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
@@ -486,6 +496,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],
+                # pyrefly: ignore [bad-argument-type]
                 cp_buffers=cp_buffers,
                 cp_seq_dims=cp_seq_dims,
                 cp_no_restore_buffers={inputs, labels},
@@ -556,6 +567,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # If data runs out during gradient accumulation, that
         # entire step will not be executed.
         for _microbatch in range(self.gradient_accumulation_steps):
+            # pyrefly: ignore [no-matching-overload]
             input_dict, labels = next(data_iterator)
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
@@ -636,6 +648,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 leaf_folder=leaf_folder,
             ) as memory_profiler,
             maybe_semi_sync_training(
+                # pyrefly: ignore [bad-argument-type]
                 job_config.fault_tolerance,
                 ft_manager=self.ft_manager,
                 model=self.model_parts[0],
@@ -652,6 +665,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 ),
             ),
         ):
+            # pyrefly: ignore [bad-argument-type]
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():
                 self.step += 1
@@ -671,7 +685,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     self.job_config.validation.enable
                     and self.validator.should_validate(self.step)
                 ):
+                    # pyrefly: ignore [missing-attribute]
                     with self.loss_fn.no_rescale():
+                        # pyrefly: ignore [bad-argument-count]
                         self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started

@@ -8,6 +8,7 @@ import functools
 from typing import Any, Generic, Iterator, TypeVar
 
 import torch
+import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.state_dict import (
@@ -88,6 +89,7 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
     def __len__(self) -> int:
         return len(self.optimizers)
 
+    # pyrefly: ignore [bad-override]
     def step(self, *args, **kwargs) -> None:
         for optimizer in self.optimizers:
             optimizer.step(*args, **kwargs)
@@ -170,9 +172,11 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         )
         self._post_init(all_params, optimizer_kwargs)
 
+    # pyrefly: ignore [bad-override]
     def step(self) -> None:
         pass
 
+    # pyrefly: ignore [bad-override]
     def zero_grad(self) -> None:
         pass
 
@@ -343,9 +347,12 @@ def build_optimizers_with_moe_load_balancing(
 
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         for model_part in model_parts:
+            # pyrefly: ignore [not-callable]
             for transformer_block in model_part.layers.values():
+                # pyrefly: ignore [missing-attribute]
                 if transformer_block.moe_enabled:
                     # Assumption: load_balance_coeff is set universally on all moe blocks.
+                    # pyrefly: ignore [missing-attribute]
                     return bool(transformer_block.moe.load_balance_coeff)
         return False
 
@@ -364,11 +371,15 @@ def build_optimizers_with_moe_load_balancing(
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_list = []
         for model_part in model_parts:
+            # pyrefly: ignore [not-callable]
             for transformer_block in model_part.layers.values():
+                # pyrefly: ignore [missing-attribute]
                 if not transformer_block.moe_enabled:
                     continue
+                # pyrefly: ignore [missing-attribute]
                 if transformer_block.moe.load_balance_coeff is None:
                     return
+                # pyrefly: ignore [missing-attribute]
                 tokens_per_expert = transformer_block.moe.tokens_per_expert
                 if _is_recomputation_enabled(transformer_block):
                     # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
@@ -398,9 +409,12 @@ def build_optimizers_with_moe_load_balancing(
         moe_layer_idx = 0
         with torch.no_grad():
             for model_part in model_parts:
+                # pyrefly: ignore [not-callable]
                 for transformer_block in model_part.layers.values():
+                    # pyrefly: ignore [missing-attribute]
                     if not transformer_block.moe_enabled:
                         continue
+                    # pyrefly: ignore [missing-attribute]
                     moe = transformer_block.moe
 
                     tokens_per_expert = tokens_per_expert_by_layer[

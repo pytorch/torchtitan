@@ -57,14 +57,19 @@ class MXLinearConverter(QuantizationConverter):
             MXLinearConfig as TorchAOMXLinearConfig,
         )
 
+        # pyrefly: ignore [bad-assignment]
         mx_job_config: TorchAOMXLinearConfig = job_config.quantize.linear.mx
+        # pyrefly: ignore [missing-attribute]
         config = TorchAOMXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
+        # pyrefly: ignore [missing-attribute]
         config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
         ]
+        # pyrefly: ignore [missing-attribute]
         self.filter_fqns = mx_job_config.filter_fqns
         self.config = config
         self.enabled = True
+        # pyrefly: ignore [missing-attribute]
         logger.info(f"MX training active with recipe {mx_job_config.recipe_name}")
 
     def convert(self, model: nn.Module):

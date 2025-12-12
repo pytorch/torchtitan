@@ -81,6 +81,7 @@ class TensorParallel(ParallelStyle):
             module,
             device_mesh,
             self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
             self._prepare_input_fn,
         )
 
@@ -184,7 +185,9 @@ class ExpertParallel(BaseExpertParallel):
             module,
             device_mesh,
             partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
             output_fn=self._token_combine,
         )
 
@@ -210,18 +213,21 @@ class ExpertTensorParallel(ExpertParallel):
         # w1 shape = (experts, out_dim, in_dim)
         mod.register_parameter(
             "w1",
+            # pyrefly: ignore [bad-argument-type]
             nn.Parameter(distribute_tensor(mod.w1, device_mesh, [Shard(0), Shard(1)])),
         )  # Column-wise sharding
 
         # w2 shape = (experts, in_dim, out_dim)
         mod.register_parameter(
             "w2",
+            # pyrefly: ignore [bad-argument-type]
             nn.Parameter(distribute_tensor(mod.w2, device_mesh, [Shard(0), Shard(2)])),
         )  # Row-wise sharding
 
         # w3 shape = (experts, out_dim, in_dim)
         mod.register_parameter(
             "w3",
+            # pyrefly: ignore [bad-argument-type]
             nn.Parameter(distribute_tensor(mod.w3, device_mesh, [Shard(0), Shard(1)])),
         )  # Column-wise sharding
 
@@ -234,7 +240,9 @@ class ExpertTensorParallel(ExpertParallel):
             module,
             device_mesh,
             partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
             output_fn=self._token_combine,
         )
 
@@ -296,6 +304,8 @@ class ReordererSequenceParallel(ParallelStyle):
             module,
             device_mesh,
             partition_fn=None,
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._prepare_inputput_fn,
+            # pyrefly: ignore [bad-argument-type]
             output_fn=self._prepare_output_fn,
         )

@@ -56,6 +56,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
         # Initialize BOS/EOS token attributes (frequently used)
         self.bos_id = None
+        # pyrefly: ignore [bad-assignment]
         self.eos_id = None
         self.bos_token = None
         self.eos_token = None
@@ -144,10 +145,13 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 tokenizer = Tokenizer(bpe_model)
 
                 # Configure GPT-2 style components for proper space handling
+                # pyrefly: ignore [read-only]
                 tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
                     add_prefix_space=False
                 )
+                # pyrefly: ignore [read-only]
                 tokenizer.decoder = decoders.ByteLevel()
+                # pyrefly: ignore [read-only]
                 tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
 
                 return tokenizer

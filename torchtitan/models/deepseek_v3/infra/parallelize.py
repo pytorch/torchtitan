@@ -119,6 +119,7 @@ def parallelize_deepseekv3(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
+            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
@@ -225,6 +226,7 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
@@ -246,6 +248,7 @@ def apply_non_moe_tp(
             "ffn_norm": SequenceParallel(),
         }
 
+        # pyrefly: ignore [missing-attribute]
         if transformer_block.attention.q_lora_rank == 0:
             layer_plan.update(
                 {
@@ -263,6 +266,7 @@ def apply_non_moe_tp(
                 }
             )
 
+        # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
             layer_plan.update(
                 {
@@ -277,8 +281,10 @@ def apply_non_moe_tp(
             )
 
         parallelize_module(
+            # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 

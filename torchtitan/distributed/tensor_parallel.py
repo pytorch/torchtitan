@@ -6,6 +6,7 @@
 
 
 import torch
+import torch._inductor.config
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import JobConfig
