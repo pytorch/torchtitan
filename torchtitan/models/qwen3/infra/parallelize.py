@@ -206,7 +206,7 @@ def apply_non_moe_tp(
             ),
             "norm": SequenceParallel(use_local_output=False),
             "output": ColwiseParallel(
-                input_layouts=Replicate(),
+                input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
             ),
