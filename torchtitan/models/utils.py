@@ -400,6 +400,7 @@ def get_dense_model_nparams_and_flops(
     # 4. we follow the convention and do not account for sparsity in causal attention
     num_flops_per_token = (
         6 * (nparams - nparams_embedding)
+        # pyrefly: ignore [missing-attribute]
         + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
     )
 
@@ -455,6 +456,7 @@ def get_moe_model_nparams_and_flops(
     nparams_sparse_active = (
         nparams_moe_router
         + nparams_shared_experts
+        # pyrefly: ignore [missing-attribute]
         + nparams_experts * model_args.moe_args.top_k // model_args.moe_args.num_experts
     )
 
@@ -465,6 +467,7 @@ def get_moe_model_nparams_and_flops(
 
     num_flops_per_token = (
         6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
+        # pyrefly: ignore [missing-attribute]
         + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
     )
 

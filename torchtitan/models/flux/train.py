@@ -50,6 +50,7 @@ class FluxTrainer(Trainer):
         self.autoencoder = load_ae(
             # pyrefly: ignore [missing-attribute]
             job_config.encoder.autoencoder_path,
+            # pyrefly: ignore [missing-attribute]
             model_args.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
