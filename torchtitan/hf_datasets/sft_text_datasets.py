@@ -135,11 +135,12 @@ class SFTDataset(IterableDataset, Stateful):
         self.response_key = sft_data_config.response_key
         self.tools_key = sft_data_config.tools_key
         self.thinking_key = sft_data_config.thinking_key
-        self.enable_tools = sft_data_config.enable_tools
-        self.enable_thinking = sft_data_config.enable_thinking
+        self.always_thinking = sft_data_config.always_thinking
+
         self.is_multiturn = sft_data_config.is_multiturn
         self.pad_mode = sft_data_config.pad_mode
         self.greedy_packing = sft_data_config.greedy_packing
+        self.ignore_input_ids_mismatch = sft_data_config.ignore_input_ids_mismatch
 
         if self.pad_mode == "no_padding":
             self.collate_fn = partial(
@@ -150,7 +151,7 @@ class SFTDataset(IterableDataset, Stateful):
 
         self.truncation = sft_data_config.truncation
         self.max_length = seq_len
-        self.apply_chat_template_kwargs = {}
+        self.apply_chat_template_kwargs = sft_data_config.chat_template_kwargs
 
         self.apply_chat_template = sft_data_config.apply_chat_template
         if self.apply_chat_template:
@@ -219,14 +220,12 @@ class SFTDataset(IterableDataset, Stateful):
         if self.is_multiturn:
             messages: list = example[self.messages_key]
             for message in messages:
-                content = message["content"]
-                if not isinstance(content, str):
+                content = message.get("content")
+                if isinstance(content, str):
                     continue
-                content_list = []
-                segments = [item for item in content if item != ""]
-                for segment in segments:
-                    content_list.append({"type": "text", "text": segment})
-                message["content"] = content_list
+                else:
+                    # this is placeholder, VeRL uses this to handlde multimodal content
+                    pass
             return messages
         else:
             messages = [
@@ -309,8 +308,6 @@ class SFTDataset(IterableDataset, Stateful):
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            ignore_extra_tokens=True,
-            enable_thinking=False,
             **apply_chat_template_kwargs,
         )
 
@@ -332,8 +329,11 @@ class SFTDataset(IterableDataset, Stateful):
     def _process_one_row(self, row_dict: dict):
         """Convert a dataset row into model-ready tensors with causal labels."""
         messages = self._build_messages(row_dict)
-        tools = row_dict[self.tools_key] if self.enable_tools else None
-        enable_thinking = row_dict[self.thinking_key] if self.enable_thinking else None
+        tools = row_dict.get(self.tools_key, None)
+        enable_thinking = row_dict.get(self.thinking_key, None) or self.always_thinking
+        if isinstance(enable_thinking, str):
+            enable_thinking = enable_thinking == "on"
+        # row_dict[self.thinking_key] = can be True/False <-> or [on/off]
 
         # 1. tokenize each message
         input_ids, loss_mask, attention_mask = [], [], []

@@ -206,14 +206,15 @@ class SFTDataConfig:
     prompt_key: str = "question"
     response_key: str = "answer"
     tools_key: str = "tools"
-    thinking_key: str = "thinking"
-    enable_tools: bool = False
-    enable_thinking: bool = False
+    thinking_key: str = "enable_thinking"
+    always_thinking: bool = False
     is_multiturn: bool = False
     apply_chat_template: bool = False
     greedy_packing: bool = True
     pad_mode: Literal["right", "no_padding"] = "right"
     truncation: Literal["left", "right", "error"] = "right"
+    chat_template_kwargs: dict = field(default_factory=dict)
+    ignore_input_ids_mismatch: bool = False
 
 
 @dataclass
