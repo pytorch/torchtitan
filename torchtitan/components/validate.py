@@ -4,10 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Generator, Any
+from typing import Any, Generator
 
 import torch
 import torch.nn as nn
+import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
@@ -18,7 +19,6 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-import torchtitan.protocols.train_spec as train_spec_module
 
 
 class BaseValidator:
@@ -89,6 +89,31 @@ class Validator(BaseValidator):
                 "unequal sample counts across ranks when dataset is exhausted."
             )
 
+    def post_dataloading_process(
+        self,
+        model_parts: list[nn.Module],
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+        """Post-processing hook after data loading and before model forward pass."""
+
+        inputs = input_dict["input"]
+        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+
+        # prepare attention mask
+        extra_kwargs: dict[str, Any] = (
+            {
+                "attention_masks": model_parts[0].get_attention_masks(
+                    input_batch=input_dict["input"],
+                    tokenizer=self.tokenizer,
+                    extra_inputs={k: v for k, v in input_dict.items() if k != "input"},
+                )
+            }
+            if getattr(self.model_args, "attn_type", "sdpa") in ["flex", "varlen"]
+            else {}
+        )
+
+        return inputs, labels, extra_inputs, extra_kwargs
 
     @torch.no_grad()
     def validate(
@@ -113,18 +138,15 @@ class Validator(BaseValidator):
             ):
                 break
 
-            # prepare attention mask
-            extra_kwargs : dict[str, Any] = {"attention_masks" : model_parts[0].get_attention_masks(
-                input_batch=input_dict["input"],
-                tokenizer=self.tokenizer,
-                extra_inputs={k: v for k, v in input_dict.items() if k != "input"},
-            )} if getattr(self.model_args, "attn_type", "sdpa") in ["flex", "varlen"] else {}
+            inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
+                model_parts, input_dict, labels
+            )
 
             self.metrics_processor.ntokens_since_last_log += labels.numel()
             for k, v in input_dict.items():
                 input_dict[k] = v.to(device_type)
-            inputs = input_dict["input"]
             labels = labels.to(device_type)
+            inputs = inputs.to(device_type)
 
             optional_context_parallel_ctx = (
                 dist_utils.create_context_parallel_ctx(
@@ -154,7 +176,9 @@ class Validator(BaseValidator):
                             losses=losses,
                         )
                     else:
-                        self.pp_schedule.eval(target=targets, losses=losses)
+                        self.pp_schedule.eval(
+                            **extra_kwargs, target=targets, losses=losses
+                        )
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
@@ -170,7 +194,9 @@ class Validator(BaseValidator):
                 with self.validation_context(optional_context_parallel_ctx):
                     assert len(model_parts) == 1
                     with self.maybe_enable_amp:
-                        predictions = model_parts[0](inputs, **extra_kwargs)
+                        predictions = model_parts[0](
+                            inputs, **extra_inputs, **extra_kwargs
+                        )
                         loss = self.loss_fn(predictions, labels)
 
             accumulated_losses.append(loss.detach())
