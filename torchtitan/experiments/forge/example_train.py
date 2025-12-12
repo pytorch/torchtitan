@@ -152,42 +152,93 @@ class Trainer(ForgeEngine):
 
             yield input_dict, labels
 
+    def post_dataloading_process(
+        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+        """
+        Post-processing hook after data loading and before model forward pass.
+
+        This method processes the raw data from the dataloader and prepares it for
+        the model's forward pass. It separates the main input tensor from auxiliary
+        inputs and constructs additional keyword arguments (e.g., attention masks).
+
+        This method can be overridden in subclasses to customize data processing
+        for different training strategies (e.g., converting tensors to DTensors,
+        applying custom transformations, etc.).
+
+        Args:
+            input_dict: Dictionary containing tensors from the dataloader. Must
+                contain an "input" key with the main input tensor. May contain
+                additional keys for auxiliary inputs (e.g., position ids).
+            labels: Target labels for the batch.
+
+        Returns:
+            A tuple of (inputs, labels, extra_inputs, extra_kwargs) where:
+                - inputs: Main input tensor extracted from input_dict["input"].
+                - labels: Target labels (unchanged from input parameter).
+                - extra_inputs: Dict of auxiliary input tensors (all keys except
+                    "input" from input_dict). These are passed to the model forward
+                    but are NOT forwarded across pipeline parallel stages.
+                - extra_kwargs: Dict of additional keyword arguments for model forward.
+                    These ARE forwarded across pipeline parallel stages. Contains
+                    attention_masks if flex attention is enabled.
+
+        Note:
+            The distinction between extra_inputs and extra_kwargs is important for
+            pipeline parallelism: extra_kwargs are forwarded to all pipeline stages,
+            while extra_inputs are only available to the first stage.
+        """
+        inputs = input_dict["input"]
+        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+        # For arguments, like attention_masks, we have to put them in a separate
+        # dict as extra_inputs are not forwarded to other stages in PP, but
+        # extra_kwargs are.
+        extra_kwargs: dict[str, Any] = {}
+
+        attn_type = getattr(self.model_args, "attn_type", "sdpa")
+        if attn_type in ["flex", "varlen"]:
+            extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
+                extra_inputs=extra_inputs,
+            )
+
+        if self.parallel_dims.cp_enabled:
+            attention_masks = extra_kwargs.get("attention_masks", None)
+            positions = torch.arange(
+                0, inputs.shape[1], dtype=torch.int32, device=self.device
+            ).expand(inputs.shape)
+            (inputs, labels, positions), attention_masks = dist_utils.cp_shard(
+                self.parallel_dims.world_mesh["cp"],
+                (inputs, labels, positions),
+                attention_masks,
+            )
+            extra_kwargs["positions"] = positions
+            if attention_masks is not None:
+                extra_kwargs["attention_masks"] = attention_masks
+
+        return inputs, labels, extra_inputs, extra_kwargs
+
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs = input_dict["input"]
-        extra_kwargs = {}
-
-        if getattr(self.model_args, "attn_type", "sdpa") == "flex":
-            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-            )
-
-        optional_context_parallel_ctx = (
-            dist_utils.create_context_parallel_ctx(
-                cp_mesh=parallel_dims.world_mesh["cp"],
-                cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
-                cp_seq_dims=[1, 1] + [0 for _ in model_parts],
-                cp_no_restore_buffers={inputs, labels},
-                cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
-            )
-            if parallel_dims.cp_enabled
-            else None
+        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
+            input_dict, labels
         )
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
+                        **extra_inputs,
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
@@ -211,10 +262,10 @@ class Trainer(ForgeEngine):
             )
         else:
             # Non-PP forward / backward
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context():
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_kwargs)
+                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     loss = self.loss_fn(pred, labels)
                 # need to free to before bwd to avoid peaking memory
                 del pred
