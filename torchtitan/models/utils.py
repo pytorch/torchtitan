@@ -96,12 +96,13 @@ class MoEStateDictAdapter(StateDictAdapter):
         dim_size: int,
         dtensor_placements: tuple,
         device_mesh: DeviceMesh,
-    ) -> tuple[int, int]:
+    ) -> tuple[int | None, int | None]:
 
         mesh_names = []
         dim_i_placements = []
 
         # Find all the device mesh dimensios that shard on dim-i
+        # pyrefly: ignore [bad-argument-type]
         for i, name in enumerate(device_mesh.mesh_dim_names):
             placement = dtensor_placements[i]
             if placement.dim == dim:
@@ -181,7 +182,9 @@ class MoEStateDictAdapter(StateDictAdapter):
         Returns:
             Dictionary mapping individual expert keys to their DTensor weights
         """
+        # pyrefly: ignore [missing-attribute]
         device_mesh = grouped_expert_weight.device_mesh
+        # pyrefly: ignore [missing-attribute]
         dtensor_placements = grouped_expert_weight.placements
 
         # Step 1: Extract dimension-0 placement information
@@ -212,6 +215,7 @@ class MoEStateDictAdapter(StateDictAdapter):
             elif isinstance(placement, _StridedShard):
                 # Keep strided shard with same parameters
                 new_placements.append(
+                    # pyrefly: ignore [unexpected-positional-argument]
                     _StridedShard(placement.dim, placement.split_factor)
                 )
             else:
@@ -284,6 +288,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         sorted_expert_ids = sorted(experts.keys())
         sorted_experts = [experts[i] for i in sorted_expert_ids]
+        # pyrefly: ignore [missing-attribute]
         local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor
 
         assert (
@@ -306,7 +311,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
     def _split_experts_weights(
         self, weight: torch.Tensor, n_experts: int
-    ) -> list[torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         """
         Split the weights of the experts into a list of tensors. Used for offline conversion.
 
@@ -365,7 +370,7 @@ def get_dense_model_nparams_and_flops(
     model: nn.Module,
     head_dims: int,
     seq_len: int,
-) -> tuple[int, float]:
+) -> tuple[int, int]:
     """
     Args:
         model_args: BaseModelArgs object containing model configuration parameters.
@@ -395,6 +400,7 @@ def get_dense_model_nparams_and_flops(
     # 4. we follow the convention and do not account for sparsity in causal attention
     num_flops_per_token = (
         6 * (nparams - nparams_embedding)
+        # pyrefly: ignore [missing-attribute]
         + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
     )
 
@@ -410,7 +416,7 @@ def get_moe_model_nparams_and_flops(
     model: nn.Module,
     head_dims: int,
     seq_len: int,
-) -> tuple[int, float]:
+) -> tuple[int, int]:
     """
     Calculate nparams and nflops for MoE models.
 
@@ -450,6 +456,7 @@ def get_moe_model_nparams_and_flops(
     nparams_sparse_active = (
         nparams_moe_router
         + nparams_shared_experts
+        # pyrefly: ignore [missing-attribute]
         + nparams_experts * model_args.moe_args.top_k // model_args.moe_args.num_experts
     )
 
@@ -460,6 +467,7 @@ def get_moe_model_nparams_and_flops(
 
     num_flops_per_token = (
         6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
+        # pyrefly: ignore [missing-attribute]
         + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
     )
 

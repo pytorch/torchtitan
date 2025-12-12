@@ -7,12 +7,16 @@
 import contextlib
 import math
 import os
-from collections.abc import Generator, Iterable
+from abc import abstractmethod
+from collections.abc import Iterable
 from datetime import timedelta
+from typing import Protocol
 
 import torch
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.distributed_c10d as c10d
+import torch.distributed.tensor._random
+import torch.distributed.tensor.parallel
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
@@ -174,11 +178,15 @@ def set_determinism(
         # Filter out all distinct dimensions to get duplicate_seed_mesh
         duplicate_seed_mesh_dims = [
             name
+            # pyrefly: ignore [not-iterable]
             for name in world_mesh.mesh_dim_names
             if name not in distinct_dims_in_mesh
         ]
         duplicate_seed_mesh = (
-            world_mesh[duplicate_seed_mesh_dims] if duplicate_seed_mesh_dims else None
+            # pyrefly: ignore [bad-index]
+            world_mesh[duplicate_seed_mesh_dims]
+            if duplicate_seed_mesh_dims
+            else None
         )
     else:
         duplicate_seed_mesh = world_mesh
@@ -192,6 +200,7 @@ def set_determinism(
     # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
     # IF PP is also used, this seed is unique per PP rank.
     if duplicate_seed_mesh and duplicate_seed_mesh.get_coordinate() is not None:
+        # pyrefly: ignore [bad-argument-type]
         torch.distributed.tensor._random.manual_seed(seed, duplicate_seed_mesh)
 
 
@@ -205,11 +214,11 @@ def create_context_parallel_ctx(
     try:
         from torch.distributed.tensor.experimental import context_parallel
         from torch.distributed.tensor.experimental._attention import set_rotate_method
-    except ImportError:
-        print(
+    except ImportError as e:
+        raise ValueError(
             f"PyTorch version {torch.__version__} does not include the experimental "
             "Context Parallel API. Please update to a newer version."
-        )
+        ) from e
 
     set_rotate_method(cp_rotate_method)
     return context_parallel(
@@ -220,9 +229,18 @@ def create_context_parallel_ctx(
     )
 
 
-def get_train_context(enable_loss_parallel: bool) -> Generator[None, None, None]:
+class TrainContext(Protocol):
+    @abstractmethod
+    def __call__(
+        self,
+        cp_context: contextlib.AbstractContextManager[None] | None = None,
+    ) -> contextlib.AbstractContextManager[None]:
+        pass
+
+
+def get_train_context(enable_loss_parallel: bool) -> TrainContext:
     @contextlib.contextmanager
-    def context(cp_context: Generator[None, None, None] | None = None):
+    def context(cp_context: contextlib.AbstractContextManager[None] | None = None):
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
@@ -236,8 +254,8 @@ def get_train_context(enable_loss_parallel: bool) -> Generator[None, None, None]
 
 
 def maybe_enable_amp(
-    parallel_dims: ParallelDims, mixed_precision_param: str, device_type: torch.device
-) -> Generator[None, None, None]:
+    parallel_dims: ParallelDims, mixed_precision_param: str, device_type: str
+) -> contextlib.AbstractContextManager[None]:
     if parallel_dims.fsdp_enabled:
         # FSDP handles mixed precision internally
         logger.info("Mixed precision training is handled by fully_shard")
@@ -252,6 +270,7 @@ def maybe_enable_amp(
         else:
             # the following code will only be executed for DDP or single-device training
             logger.info("Mixed precision training is handled by AMP")
+            # pyrefly: ignore [bad-return]
             return torch.autocast(
                 device_type,
                 dtype=TORCH_DTYPE_MAP[mixed_precision_param],
@@ -367,7 +386,9 @@ def set_pg_timeouts(timeout, world_mesh):
     # otherwise, some ranks may issue collectives with the new/shorter timeout and
     # those may time out, before other ranks have finished with initialization done
     # under the old/slow timeout.
+    # pyrefly: ignore [missing-attribute]
     torch.distributed.barrier(device_ids=[device_module.current_device()])
+    # pyrefly: ignore [missing-attribute]
     device_module.synchronize()
 
     groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
@@ -477,6 +498,7 @@ def _clip_grad_norm_with_ep(
         if p.grad is None:
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
+        # pyrefly: ignore [not-iterable]
         if "ep" in p.device_mesh.mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)
@@ -491,6 +513,7 @@ def _clip_grad_norm_with_ep(
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
 
+    # pyrefly: ignore [missing-attribute]
     non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
         non_ep_grads, norm_type, error_if_nonfinite, foreach
     ).full_tensor()
