@@ -381,14 +381,14 @@ def build_mm_dataloader(
     """Build a data loader for multimodal datasets.
 
     Args:
-        dp_world_size: Data parallel world size
-        dp_rank: Data parallel rank
-        tokenizer: Tokenizer for text processing
-        job_config: Job configuration
-        infinite: Whether to loop infinitely
+        dp_world_size: Data parallel world size.
+        dp_rank: Data parallel rank.
+        tokenizer: Tokenizer for text processing.
+        job_config: Job configuration containing dataset and DataLoader settings.
+        infinite: Whether to loop infinitely.
 
     Returns:
-        DataLoader with appropriate parallelism handling
+        DataLoader with appropriate parallelism handling.
     """
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.local_batch_size
@@ -429,12 +429,18 @@ def build_mm_dataloader(
         special_tokens=special_tokens,
     )
 
+    # Merge config kwargs with explicit args (explicit args take precedence)
+    dataloader_kwargs = {
+        **job_config.training.dataloader.kwargs,
+        "batch_size": batch_size,
+        "collate_fn": collate_fn,
+    }
+
     base_dataloader = ParallelAwareDataloader(
         dataset=dataset,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        batch_size=batch_size,
-        collate_fn=collate_fn,
+        **dataloader_kwargs,
     )
 
     return base_dataloader

@@ -199,6 +199,36 @@ class LRScheduler:
 
 
 @dataclass
+class DataLoader:
+    """
+    Configuration for PyTorch DataLoader settings.
+
+    This is a flexible kwargs container that passes all fields directly to
+    StatefulDataLoader. Common options include:
+    - num_workers: Number of worker processes for data loading (default: 0)
+    - persistent_workers: Keep workers alive between epochs (default: False)
+    - prefetch_factor: Batches loaded in advance per worker (default: None)
+    - pin_memory: Copy tensors to CUDA pinned memory (default: False)
+
+    Warning:
+        Some arguments are set internally and will override any values provided
+        in kwargs. These include:
+        - batch_size: Determined by training.local_batch_size
+        - collate_fn: Set by the dataset-specific collator
+
+    Example (TOML config file):
+        [training.dataloader.kwargs]
+        num_workers = 4
+        pin_memory = true
+        persistent_workers = true
+        prefetch_factor = 2
+    """
+
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    """Keyword arguments passed to StatefulDataLoader."""
+
+
+@dataclass
 class Training:
     dataset: str = "c4_test"
     """Dataset to use"""
@@ -262,6 +292,9 @@ class Training:
     Note that you may want to lower the training steps to avoid generating too
     many temporary files.
     """
+
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
 
 
 @dataclass
@@ -913,6 +946,9 @@ class Validation:
     Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset
     WARNING: When setting to -1 there could be hangs due to mismatch among ranks
     """
+
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
 
     def __post_init__(self):
         assert (
