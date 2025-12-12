@@ -17,8 +17,10 @@ from torchtitan.components.tokenizer import BaseTokenizer
 
 from torchtitan.config import JobConfig
 from torchtitan.models.attention import VarlenMetadata
-from torchtitan.models.flux.model.autoencoder import AutoEncoderParams
-from torchtitan.models.moe.moe import MoEArgs
+
+if TYPE_CHECKING:
+    from torchtitan.models.flux.model.autoencoder import AutoEncoderParams
+    from torchtitan.models.moe.moe import MoEArgs
 
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
