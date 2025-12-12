@@ -18,6 +18,7 @@ from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
     get_schedule_class,
+    OVERLAP_F_B,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
     ScheduleDualPipeV,
@@ -27,6 +28,7 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.dual_pipe_v import overlap_callback
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
 
@@ -210,6 +212,11 @@ def build_pipeline_schedule(
         f"Using pipeline schedule {job_config.parallelism.pipeline_parallel_schedule} "
         f"with {n_microbatches} microbatches and {num_total_stages} stages."
     )
+
+    if job_config.parallelism.pipeline_parallel_expert_parallel_overlap and isinstance(
+        schedule, ScheduleDualPipeV
+    ):
+        schedule.register_custom_function(OVERLAP_F_B, overlap_callback)
 
     if pp_schedule_csv:
         assert schedule_class in [

@@ -4,8 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from abc import ABC, abstractmethod
+
 import torch
 import torch.nn as nn
+from torch import Tensor
 from torch.distributed._functional_collectives import (
     all_to_all_single,
     all_to_all_single_autograd,
@@ -22,6 +25,24 @@ from torch.distributed.tensor import (
 from torch.distributed.tensor.parallel import ParallelStyle
 
 from torchtitan.models.moe.utils import _permute, _unpermute
+
+
+class BaseExpertParallel(ParallelStyle, ABC):
+    @abstractmethod
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        ...
+
+    @abstractmethod
+    def _token_dispatch(
+        self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
+        ...
+
+    @abstractmethod
+    def _token_combine(
+        self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
+        ...
 
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
@@ -65,7 +86,7 @@ class TensorParallel(ParallelStyle):
         )
 
 
-class ExpertParallel(ParallelStyle):
+class ExpertParallel(BaseExpertParallel):
     def __init__(self):
         super().__init__()
         self.input_splits = None
@@ -73,8 +94,14 @@ class ExpertParallel(ParallelStyle):
         self.input_shape = None
         self.permuted_indices = None
 
-    # performing all-to-all dispatch on the input
-    def _token_dispatch(self, mod, inputs, device_mesh):
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        for param_name, param in mod.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            mod.register_parameter(param_name, dist_param)
+
+    def _token_dispatch(
+        self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
         # annotate module input placements/sharding with input_layouts
         routed_input, num_tokens_per_expert = inputs
         ep_degree = device_mesh.shape[0]
@@ -138,15 +165,9 @@ class ExpertParallel(ParallelStyle):
 
         return routed_input, num_tokens_per_expert_group
 
-    @staticmethod
-    def _partition_fn(name, mod, device_mesh):
-        # shard on the expert dimension
-        for name, param in mod.named_parameters(recurse=False):
-            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
-            mod.register_parameter(name, dist_param)
-
-    # performing all-to-all combine on the output
-    def _token_combine(self, mod, routed_output, device_mesh):
+    def _token_combine(
+        self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
         routed_output = _unpermute(
             routed_output, self.input_shape, self.permuted_indices
         )
@@ -163,7 +184,7 @@ class ExpertParallel(ParallelStyle):
         return distribute_module(
             module,
             device_mesh,
-            partition_fn=ExpertParallel._partition_fn,
+            partition_fn=self._partition_fn,
             # pyrefly: ignore [bad-argument-type]
             input_fn=self._token_dispatch,
             # pyrefly: ignore [bad-argument-type]
@@ -188,23 +209,23 @@ class ExpertTensorParallel(ExpertParallel):
         # token dispatch happens on the EP mesh, whereas device_mesh is [ep, tp] mesh
         return super()._token_dispatch(mod, inputs, device_mesh["ep"])
 
-    def _partition_fn_2d(self, name, mod, ep_tp_mesh):
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         # w1 shape = (experts, out_dim, in_dim)
         mod.register_parameter(
             "w1",
-            nn.Parameter(distribute_tensor(mod.w1, ep_tp_mesh, [Shard(0), Shard(1)])),
+            nn.Parameter(distribute_tensor(mod.w1, device_mesh, [Shard(0), Shard(1)])),
         )  # Column-wise sharding
 
         # w2 shape = (experts, in_dim, out_dim)
         mod.register_parameter(
             "w2",
-            nn.Parameter(distribute_tensor(mod.w2, ep_tp_mesh, [Shard(0), Shard(2)])),
+            nn.Parameter(distribute_tensor(mod.w2, device_mesh, [Shard(0), Shard(2)])),
         )  # Row-wise sharding
 
         # w3 shape = (experts, out_dim, in_dim)
         mod.register_parameter(
             "w3",
-            nn.Parameter(distribute_tensor(mod.w3, ep_tp_mesh, [Shard(0), Shard(1)])),
+            nn.Parameter(distribute_tensor(mod.w3, device_mesh, [Shard(0), Shard(1)])),
         )  # Column-wise sharding
 
     def _token_combine(self, mod, routed_output, device_mesh):
@@ -215,7 +236,7 @@ class ExpertTensorParallel(ExpertParallel):
         return distribute_module(
             module,
             device_mesh,
-            partition_fn=self._partition_fn_2d,
+            partition_fn=self._partition_fn,
             # pyrefly: ignore [bad-argument-type]
             input_fn=self._token_dispatch,
             # pyrefly: ignore [bad-argument-type]
