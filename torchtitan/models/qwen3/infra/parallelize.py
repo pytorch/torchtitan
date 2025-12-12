@@ -95,6 +95,7 @@ def parallelize_qwen3(
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
+            cp_enabled=parallel_dims.cp_enabled,
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
@@ -189,6 +190,7 @@ def apply_non_moe_tp(
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
+    cp_enabled: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -238,14 +240,18 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    positions_sharding = Replicate() if cp_enabled else None
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
-            # NOTE: when the fourth argument (positions) is not None, its input layout
-            # and desired input layout should be Replicate()
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate(), None, None),
-                desired_input_layouts=(Replicate(), Replicate(), None, None),
+                input_layouts=(Shard(1), Replicate(), None, positions_sharding),
+                desired_input_layouts=(
+                    Replicate(),
+                    Replicate(),
+                    None,
+                    positions_sharding,
+                ),
             ),
             "attention.wq": colwise_parallel(use_local_output=False),
             "attention.wk": colwise_parallel(use_local_output=False),
