@@ -199,9 +199,33 @@ class LRScheduler:
 
 
 @dataclass
+class SFTDataConfig:
+    split: str = "train"
+    dataset_subset: str | None = None
+    messages_key: str = "messages"
+    prompt_key: str = "question"
+    response_key: str = "answer"
+    tools_key: str = "tools"
+    thinking_key: str = "thinking"
+    enable_tools: bool = False
+    enable_thinking: bool = False
+    is_multiturn: bool = False
+    apply_chat_template: bool = False
+    greedy_packing: bool = True
+    pad_mode: Literal["right", "no_padding"] = "right"
+    truncation: Literal["left", "right", "error"] = "right"
+
+
+@dataclass
 class Training:
     dataset: str = "c4_test"
     """Dataset to use"""
+
+    running_sft_training: bool = False
+    """
+    If True, we are running SFT training. And we will overwrite the dataset config
+    from the sft_data_config.
+    """
 
     dataset_path: str | None = None
     """
@@ -937,6 +961,7 @@ class JobConfig:
     profiling: Profiling = field(default_factory=Profiling)
     metrics: Metrics = field(default_factory=Metrics)
     model: Model = field(default_factory=Model)
+    sft_data_config: SFTDataConfig = field(default_factory=SFTDataConfig)
     optimizer: Optimizer = field(default_factory=Optimizer)
     lr_scheduler: LRScheduler = field(default_factory=LRScheduler)
     training: Training = field(default_factory=Training)

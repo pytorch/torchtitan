@@ -272,6 +272,28 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     return sliding_window_mod
 
 
+def get_sft_padding_mask_mod(attention_masks: torch.Tensor) -> _mask_mod_signature:
+    """
+    attention_masks: [B, S] with 1 for real tokens, 0 for pad.
+    Produces a mask modifier that blocks attention to padding keys.
+    Also makes padded queries only attend to themselves to avoid all-masked rows.
+    """
+    am = attention_masks.to(torch.bool)  # [B, S]
+
+    def sft_padding_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        # am_bq: [*,] bool (broadcasted shape of indices)
+        am_bq = am[b, q_idx]
+        am_bk = am[b, kv_idx]
+
+        # If query is real -> allow only real keys
+        # If query is pad  -> allow only self (kv==q) to avoid NaNs / fully-masked softmax rows
+        return torch.where(am_bq, am_bk, kv_idx == q_idx)
+
+    return sft_padding_mask
+
+
 _compiled_create_block_mask = torch.compile(create_block_mask)
 
 
@@ -333,6 +355,73 @@ def create_varlen_metadata_for_document(
         all_seq_lengths = torch.cat(all_seq_lengths)
         # device to host sync but only done once per model forward
         max_seqlen = all_seq_lengths.max().item()
+
+    return VarlenMetadata(
+        cu_seq_q=packed_cu_seqlens,
+        cu_seq_k=packed_cu_seqlens,
+        max_q=max_seqlen,
+        max_k=max_seqlen,
+    )
+
+
+def create_varlen_metadata_for_sft(
+    input_batch: torch.Tensor,
+    attention_masks: torch.Tensor,
+    eos_id: int | None = None,
+) -> VarlenMetadata:
+    """
+    Build VarlenMetadata in the same flattened index space as your current code
+    (offset increments by seq_len), but using attention_masks to find the valid length.
+
+    Assumes RIGHT padding (valid tokens are a prefix).
+    Optionally adds extra boundaries at EOS positions within the valid region.
+    """
+    batch_size, seq_len = input_batch.shape
+    device = input_batch.device
+
+    cu_seqlens_list = []
+    all_seq_lengths = []
+    offset = 0
+
+    for b in range(batch_size):
+        # valid token count (right-padded => [1...1,0...0])
+        valid_len = int(attention_masks[b].sum().item())
+        valid_len = max(0, min(valid_len, seq_len))
+
+        # boundaries within the sample (in [0, seq_len])
+        bnds = [torch.tensor([0], dtype=torch.int32, device=device)]
+
+        if eos_id is not None and valid_len > 0:
+            eos_pos = (
+                (input_batch[b, :valid_len] == eos_id)
+                .nonzero(as_tuple=True)[0]
+                .to(torch.int32)
+            )
+            if eos_pos.numel() > 0:
+                bnds.append(eos_pos + 1)
+
+        # end of "real" tokens
+        bnds.append(torch.tensor([valid_len], dtype=torch.int32, device=device))
+
+        # (optional but recommended for your current scheme)
+        # isolate padding as its own segment so it never mixes with real tokens
+        if valid_len < seq_len:
+            bnds.append(torch.tensor([seq_len], dtype=torch.int32, device=device))
+
+        sample_cu = torch.unique_consecutive(torch.cat(bnds))
+
+        all_seq_lengths.append(torch.diff(sample_cu))
+        cu_seqlens_list.append(sample_cu[:-1] + offset)
+
+        offset += seq_len
+
+    packed_cu_seqlens = torch.cat(
+        cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
+    )
+
+    max_seqlen = 0
+    if len(all_seq_lengths) > 0:
+        max_seqlen = torch.cat(all_seq_lengths).max().item()
 
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,
