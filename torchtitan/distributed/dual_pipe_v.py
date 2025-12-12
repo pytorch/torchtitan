@@ -90,7 +90,7 @@ class DualPipeExpertParallel(BaseExpertParallel):
         return distribute_module(
             module,
             device_mesh,
-            partition_fn=self.inner_ep._partition_fn,
+            partition_fn=self._partition_fn,
             input_fn=self._token_dispatch,
             output_fn=self._token_combine,
         )
