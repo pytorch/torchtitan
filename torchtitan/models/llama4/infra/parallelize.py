@@ -22,7 +22,7 @@ from torch.distributed.tensor.parallel import (
 )
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import NoParallel, ParallelDims, DeepEPExpertParallel
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.distributed.expert_parallel import (
@@ -54,6 +54,14 @@ _op_sac_save_list = {
     torch._higher_order_ops.flex_attention,
     torch._higher_order_ops.inductor_compiled_code,
 }
+
+# Add DeepEP custom ops to SAC save list
+try:
+    import torchtitan.distributed.deepep.deepep  # noqa: F401
+    _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+    _op_sac_save_list.add(torch.ops.deepep.combine.default)
+except (ImportError, AttributeError):
+    pass
 
 
 def parallelize_llama(
@@ -99,6 +107,28 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
+    # Check if using DeepEP for MoE communication
+    use_deepep = (
+        parallel_dims.ep_enabled 
+        and job_config.parallelism.expert_parallel_comm_backend == "deepep"
+    )
+    
+    if (
+        job_config.parallelism.expert_parallel_comm_backend == "deepep" 
+        and not parallel_dims.ep_enabled
+    ):
+        logger.warning(
+            "expert_parallel_comm_backend='deepep' has no effect when EP=1. "
+            "Using standard communication."
+        )
+    
+    # DeepEP + ETP is not supported yet
+    if use_deepep and parallel_dims.etp_enabled:
+        raise NotImplementedError(
+            "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+            "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
+        )
+
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
@@ -112,6 +142,8 @@ def parallelize_llama(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            use_deepep=use_deepep,
+            use_alignment_padding=job_config.parallelism.deepep_use_alignment_padding,
         )
 
     model_compile_enabled = (
@@ -444,6 +476,8 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
+    use_deepep: bool = False,
+    use_alignment_padding: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -494,8 +528,16 @@ def apply_moe_ep_tp(
             experts_plan = TensorParallel()
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
-            # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            if use_deepep:
+                score_before_experts = transformer_block.moe.score_before_experts
+                experts_plan = DeepEPExpertParallel(
+                    score_before_experts=score_before_experts,
+                    use_alignment_padding=use_alignment_padding,
+                )
+                logger.info(f"Applying DeepEP to MoE layer")
+            else:
+                # input / output sharding on the batch / tokens dim
+                experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel()

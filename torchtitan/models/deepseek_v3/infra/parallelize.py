@@ -44,8 +44,20 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
-    torch._higher_order_ops.inductor_compiled_code,
 }
+# Add optional ops if available (requires newer PyTorch)
+try:
+    _op_sac_save_list.add(torch._higher_order_ops.inductor_compiled_code)
+except AttributeError:
+    pass
+
+# Add DeepEP custom ops to SAC save list
+try:
+    import torchtitan.distributed.deepep.deepep  # noqa: F401
+    _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+    _op_sac_save_list.add(torch.ops.deepep.combine.default)
+except (ImportError, AttributeError):
+    pass
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -92,6 +104,29 @@ def parallelize_deepseekv3(
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        # Check if DeepEP is enabled for MoE communication
+        use_deepep = (
+            parallel_dims.ep_enabled 
+            and job_config.parallelism.expert_parallel_comm_backend == "deepep"
+        )
+        
+        # Warn if deepep is configured but EP is not enabled
+        if (
+            job_config.parallelism.expert_parallel_comm_backend == "deepep" 
+            and not parallel_dims.ep_enabled
+        ):
+            logger.warning(
+                "expert_parallel_comm_backend='deepep' has no effect when EP=1. "
+                "Using standard communication."
+            )
+        
+        # DeepEP + ETP is not supported yet
+        if use_deepep and parallel_dims.etp_enabled:
+            raise NotImplementedError(
+                "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+                "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
+            )
+        
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -104,6 +139,8 @@ def parallelize_deepseekv3(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            use_deepep=use_deepep,
+            use_alignment_padding=job_config.parallelism.deepep_use_alignment_padding,
         )
 
     model_compile_enabled = (

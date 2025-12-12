@@ -13,9 +13,14 @@ from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.expert_parallel import DeepEPExpertParallel
 
 
-__all__ = ["ParallelDims", "NoParallel"]
+__all__ = [
+    "ParallelDims",
+    "NoParallel",
+    "DeepEPExpertParallel",
+]
 
 
 # NOTE: This is to achieve replicate computation on the gate module in the MoE router.
