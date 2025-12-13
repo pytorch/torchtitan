@@ -17,9 +17,11 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
     create_varlen_metadata_for_document,
+    create_varlen_metadata_for_sft,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
+    get_sft_padding_mask_mod,
     ScaledDotProductAttentionWrapper,
     VarlenAttentionWrapper,
     VarlenMetadata,
@@ -510,9 +512,17 @@ class Transformer(nn.Module, ModelProtocol):
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
 
+        sft_mask = (
+            extra_inputs.pop("attention_masks", None)
+            if extra_inputs is not None
+            else None
+        )
+        if sft_mask is not None:
+            mask_mods.append(get_sft_padding_mask_mod(sft_mask))
+
         match self.model_args.attn_mask_type:
             case "causal":
-                B = 1
+                B = 1 if sft_mask is None else input_batch.shape[0]
             case "block_causal":
                 B = input_batch.shape[0]
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
@@ -542,9 +552,21 @@ class Transformer(nn.Module, ModelProtocol):
                         f"varlen attention is only supported with block_causal \
                         attention mask type, got {self.model_args.attn_mask_type}"
                     )
-                return create_varlen_metadata_for_document(
-                    input_batch, tokenizer.eos_id
+                sft_mask = (
+                    extra_inputs.pop("attention_masks", None)
+                    if extra_inputs is not None
+                    else None
                 )
+                if sft_mask is None:
+                    return create_varlen_metadata_for_document(
+                        input_batch, tokenizer.eos_id
+                    )
+                else:
+                    return create_varlen_metadata_for_sft(
+                        input_batch,
+                        attention_masks=sft_mask,
+                        eos_id=tokenizer.eos_id,
+                    )
             case _:
                 raise NotImplementedError(
                     "Only varlen and flex attn masks are supported"

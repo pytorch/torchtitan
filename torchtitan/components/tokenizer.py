@@ -14,6 +14,7 @@ from typing import Any, Optional, Union
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
+from transformers import AutoTokenizer
 from typing_extensions import override
 
 
@@ -60,6 +61,8 @@ class HuggingFaceTokenizer(BaseTokenizer):
         self.eos_id = None
         self.bos_token = None
         self.eos_token = None
+        self.pad_id = None  # only used for SFT
+        self.pad_token = None  # only used for SFT
 
         # Load the underlying tokenizer
         self.tokenizer = self._load_tokenizer_from_path(tokenizer_path)
@@ -67,6 +70,10 @@ class HuggingFaceTokenizer(BaseTokenizer):
         # Load configuration files
         self.config = self._load_config(
             os.path.join(tokenizer_path, "tokenizer_config.json")
+        )
+
+        self.backup_hf_tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer_path, use_fast=True
         )
 
         # Infer special tokens and adding BOS/EOS behavior
@@ -218,7 +225,11 @@ class HuggingFaceTokenizer(BaseTokenizer):
             if self.config
             else None
         )
-
+        config_pad_token = (
+            self._get_token_from_config(self.config, "pad_token")
+            if self.config
+            else None
+        )
         # Store BOS/EOS tokens as class attributes if they match
         if token_str == config_bos_token:
             self.bos_token = token_str
@@ -234,7 +245,13 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 if token_id is not None
                 else self.tokenizer.token_to_id(token_str)
             )
-
+        elif token_str == config_pad_token:
+            self.pad_token = token_str
+            self.pad_id = (
+                token_id
+                if token_id is not None
+                else self.tokenizer.token_to_id(token_str)
+            )
         # Create AddedToken object based on config format
         if isinstance(token_config, dict):
             if token_config.get("__type") == "AddedToken" or "content" in token_config:
@@ -305,6 +322,12 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 self.bos_id = self.tokenizer.token_to_id(self.bos_token)
             if self.eos_token:
                 self.eos_id = self.tokenizer.token_to_id(self.eos_token)
+            # FOR SFT, update pad token id if pad token is not in the tokenizer
+            if self.pad_token is not None:
+                self.pad_id = self.tokenizer.token_to_id(self.pad_token)
+            else:
+                self.pad_id = self.eos_id
+                self.pad_token = self.eos_token
 
     def _infer_should_add_bos_eos(self):
         """
@@ -412,6 +435,10 @@ class HuggingFaceTokenizer(BaseTokenizer):
     def id_to_token(self, token_id: int) -> Optional[str]:
         """Convert ID to token."""
         return self.tokenizer.id_to_token(token_id)
+
+    def apply_chat_template(self, conversation, **kwargs):
+
+        return self.backup_hf_tokenizer.apply_chat_template(conversation, **kwargs)
 
 
 def build_hf_tokenizer(

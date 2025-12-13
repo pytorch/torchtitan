@@ -178,21 +178,42 @@ def build_text_dataloader(
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
 
-    hf_ds = HuggingFaceTextDataset(
-        dataset_name=dataset_name,
-        dataset_path=dataset_path,
-        tokenizer=tokenizer,
-        seq_len=seq_len,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=infinite,
-    )
+    collate_fn = None
+    if not job_config.training.running_sft_training:
+        hf_ds = HuggingFaceTextDataset(
+            dataset_name=dataset_name,
+            dataset_path=dataset_path,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+        )
+    else:
+        from torchtitan.hf_datasets.sft_text_datasets import SFTDataset
+
+        sft_data_config = job_config.sft_data_config
+        # TODO: Improving the dataset loading, its easy to fix
+        dataset_split = sft_data_config.split
+        dataset_subset = sft_data_config.dataset_subset
+        dataset = load_dataset(dataset_path, dataset_subset, split=dataset_split)
+        hf_ds = SFTDataset(
+            dataset=dataset,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+            sft_data_config=sft_data_config,
+        )
+        collate_fn = hf_ds.collate_fn
 
     return ParallelAwareDataloader(
         dataset=hf_ds,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         batch_size=batch_size,
+        collate_fn=collate_fn,
     )
 
 
@@ -208,20 +229,40 @@ def build_text_validation_dataloader(
     dataset_path = job_config.validation.dataset_path
     batch_size = job_config.validation.local_batch_size
     seq_len = job_config.validation.seq_len
+    collate_fn = None
+    if not job_config.training.running_sft_training:
+        hf_ds = HuggingFaceTextDataset(
+            dataset_name=dataset_name,
+            dataset_path=dataset_path,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+        )
+    else:
+        from torchtitan.hf_datasets.sft_text_datasets import SFTDataset
 
-    hf_ds = HuggingFaceTextDataset(
-        dataset_name=dataset_name,
-        dataset_path=dataset_path,
-        tokenizer=tokenizer,
-        seq_len=seq_len,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=infinite,
-    )
+        sft_data_config = job_config.sft_data_config
+        # TODO: Improving the dataset loading, its easy to fix
+        dataset_split = sft_data_config.split
+        dataset_subset = sft_data_config.dataset_subset
+        dataset = load_dataset(dataset_path, dataset_subset, split=dataset_split)
+        hf_ds = SFTDataset(
+            dataset=dataset,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+            sft_data_config=sft_data_config,
+        )
+        collate_fn = hf_ds.collate_fn
 
     return ParallelAwareDataloader(
         dataset=hf_ds,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
         batch_size=batch_size,
+        collate_fn=collate_fn,
     )
