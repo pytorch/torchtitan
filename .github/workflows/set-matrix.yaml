@@ -16,7 +16,6 @@ jobs:
       # Event flags evaluated by github actions before the step runs:
       IS_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       IS_SCHEDULE:  ${{ github.event_name == 'schedule' }}
-      IS_PR:        ${{ github.event_name == 'pull_request' }}
       IS_8GPU_TAG:  ${{ startsWith(github.ref, 'refs/tags/ciflow/8gpu/') }}
       TRIGGERED_8GPU_LABEL: ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' }}
 
@@ -46,28 +45,24 @@ jobs:
           # Use default value as 'false' for unset environment variables
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
           IS_SCHEDULE="${IS_SCHEDULE:-false}"
-          IS_PR="${IS_PR:-false}"
           IS_8GPU_TAG="${IS_8GPU_TAG:-false}"
           TRIGGERED_8GPU_LABEL="${TRIGGERED_8GPU_LABEL:-false}"
 
           # Decide which matrix entries to include based on event type
           # Runs ROCm only for push tag OR when PR label gets triggered
           if [[ "$IS_8GPU_TAG" == "true" || "$TRIGGERED_8GPU_LABEL" == "true" ]]; then
-            echo "Runs ROCm only for push tag OR when PR label gets triggered"
             cat > matrix.json <<JSON
           {"include": [$ROCM_MATRIX]}
           JSON
 
           # Runs CUDA and ROCm for normal PR (if PR label is present) OR for push to main, cron schedule
           elif [[ ("$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true") ]]; then
-            echo "Runs CUDA and ROCm for normal PR (if PR label is present) OR for push to main, cron schedule"
             cat > matrix.json <<JSON
           {"include": [$CUDA_MATRIX,$ROCM_MATRIX]}
           JSON
 
           # Runs CUDA only as default (includes normal PR, if PR label is NOT present)
           else
-            echo "Runs CUDA only as default (includes normal PR, if PR label is NOT present)"
             cat > matrix.json <<JSON
           {"include": [$CUDA_MATRIX]}
           JSON
