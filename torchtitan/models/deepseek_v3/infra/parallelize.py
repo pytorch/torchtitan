@@ -196,8 +196,9 @@ def apply_non_moe_tp(
             "tok_embeddings": RowwiseParallel(
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
+                use_local_output=False,
             ),
-            "norm": SequenceParallel(),
+            "norm": SequenceParallel(use_local_output=False),
             "output": ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
@@ -223,7 +224,9 @@ def apply_non_moe_tp(
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     for transformer_block in model.layers.values():
         layer_plan = {
-            "attention_norm": SequenceParallel(),
+            "attention_norm": SequenceParallel(
+                use_local_output=False,
+            ),
             # NOTE: when the fourth argument (positions) is not None, its input layout
             # and desired input layout should be Replicate()
             "attention": prepare_module_input(
@@ -238,8 +241,13 @@ def apply_non_moe_tp(
             "attention.kv_norm": NoParallel(use_local_output=False),
             # NOTE: use_local_output=True so that the inputs to FlexAttention are plain Tensors
             "attention.inner_attention": attention_kernel_plan,
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
+            "attention.wo": rowwise_parallel(
+                output_layouts=Shard(1),
+                use_local_output=False,
+            ),
+            "ffn_norm": SequenceParallel(
+                use_local_output=False,
+            ),
         }
 
         if transformer_block.attention.q_lora_rank == 0:
@@ -266,9 +274,11 @@ def apply_non_moe_tp(
                         input_layouts=(Shard(1),),
                         desired_input_layouts=(Replicate(),),
                     ),
-                    "feed_forward.w1": colwise_parallel(),
-                    "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-                    "feed_forward.w3": colwise_parallel(),
+                    "feed_forward.w1": colwise_parallel(use_local_output=False),
+                    "feed_forward.w2": rowwise_parallel(
+                        output_layouts=Shard(1), use_local_output=False
+                    ),
+                    "feed_forward.w3": colwise_parallel(use_local_output=False),
                 }
             )
 
