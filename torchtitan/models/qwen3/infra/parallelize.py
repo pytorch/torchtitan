@@ -8,6 +8,7 @@
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
 import torch
+import torch._inductor.config
 import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
@@ -23,6 +24,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama4.infra.parallelize import (
     apply_compile,
@@ -37,12 +39,17 @@ _op_sac_save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    torch.ops.aten._scaled_dot_product_attention_math.default,
+    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
     # for low precision training, it's useful to always save
     # the result of max, since the absolute maximum is
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    torch.ops.torch_attn._varlen_attn.default,
+    torch._higher_order_ops.inductor_compiled_code,
 }
 
 
@@ -59,9 +66,9 @@ def parallelize_qwen3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+    attn_type = getattr(model.model_args, "attn_type", "sdpa")
+    if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
+        raise NotImplementedError("CP support is only supported for SDPA.")
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -93,6 +100,8 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
+
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -105,6 +114,7 @@ def parallelize_qwen3(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            dual_pipe_v=dual_pipe_v,
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -112,14 +122,14 @@ def parallelize_qwen3(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
+            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, job_config.compile)
+        apply_compile(model, job_config.compile, parallel_dims.ep_enabled)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -173,7 +183,9 @@ def parallelize_qwen3(
         )
 
     # Enable weight tying after applying parallelisms
+    # pyrefly: ignore [missing-attribute]
     if model.model_args.enable_weight_tying:
+        # pyrefly: ignore [missing-attribute]
         model.output.weight = model.tok_embeddings.weight
 
     return model
@@ -234,12 +246,15 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
+            # NOTE: when the fourth argument (positions) is not None, its input layout
+            # and desired input layout should be Replicate()
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate(), None),
-                desired_input_layouts=(Replicate(), Replicate(), None),
+                input_layouts=(Shard(1), Replicate(), None, None),
+                desired_input_layouts=(Replicate(), Replicate(), None, None),
             ),
             "attention.wq": colwise_parallel(use_local_output=False),
             "attention.wk": colwise_parallel(use_local_output=False),
@@ -250,6 +265,7 @@ def apply_non_moe_tp(
             "ffn_norm": SequenceParallel(),
         }
 
+        # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
             layer_plan.update(
                 {
@@ -264,8 +280,10 @@ def apply_non_moe_tp(
             )
 
         parallelize_module(
+            # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 

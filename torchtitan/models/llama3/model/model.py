@@ -16,10 +16,13 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
+    create_varlen_metadata_for_document,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
+    VarlenAttentionWrapper,
+    VarlenMetadata,
 )
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
@@ -85,19 +88,23 @@ def precompute_freqs_cis(
     return freqs_cis
 
 
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+def reshape_for_broadcast(
+    freqs_cis: torch.Tensor, x: torch.Tensor, positions: torch.Tensor | None = None
+) -> torch.Tensor:
     """
     Reshape frequency tensor for broadcasting it with another tensor.
 
     This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
     for the purpose of broadcasting the frequency tensor during element-wise operations.
 
-    The input freqs_cis tensor is assumed to be of shape (max_seqlen, dim),
+    The input freqs_cis tensor is assumed to be of shape (max_seqlen, dim // 2),
     and the first seqlen elements will be sliced, but dim must match x.
 
     Args:
         freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
         x (torch.Tensor): Target tensor for broadcasting compatibility.
+        positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache.
+            Shape is (1, seqlen) or (bz, seqlen). Defaults to None.
 
     Returns:
         torch.Tensor: Reshaped frequency tensor.
@@ -105,16 +112,35 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Ten
     ndim = x.ndim
     assert ndim > 1
     seqlen = x.shape[1]
-    freqs_cis = freqs_cis[0:seqlen]
-    assert freqs_cis.shape == (seqlen, x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
+    if positions is None:
+        freqs_cis = freqs_cis[0:seqlen]
+        assert freqs_cis.shape == (seqlen, x.shape[-1])
+        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+        return freqs_cis.view(*shape)
+    elif positions.size(0) == 1:
+        assert positions.shape == (1, seqlen)
+        freqs_cis = freqs_cis[positions.squeeze(0)]
+        assert freqs_cis.shape == (seqlen, x.shape[-1])
+        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+        return freqs_cis.view(*shape)
+    else:
+        assert positions.shape == (x.shape[0], seqlen)
+        freqs_cis_expanded = freqs_cis[None, :, None, :].expand(x.shape[0], -1, -1, -1)
+        freqs_cis = torch.gather(
+            freqs_cis_expanded,
+            dim=1,
+            index=positions.view(x.shape[0], seqlen, 1, 1).expand(
+                x.shape[0], seqlen, 1, freqs_cis_expanded.shape[-1]
+            ),
+        )
+        return freqs_cis
 
 
 def apply_rotary_emb(
     xq: torch.Tensor,
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
+    positions: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary embeddings to input tensors using the given frequency tensor.
@@ -128,13 +154,14 @@ def apply_rotary_emb(
         xq (torch.Tensor): Query tensor to apply rotary embeddings.
         xk (torch.Tensor): Key tensor to apply rotary embeddings.
         freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
+        positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache. Defaults to None.
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
     """
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
+    freqs_cis = reshape_for_broadcast(freqs_cis, xq_, positions)
     xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
@@ -191,11 +218,16 @@ class Attention(nn.Module):
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
-        self.use_flex_attn = model_args.use_flex_attn
-        if self.use_flex_attn:
-            self.inner_attention = FlexAttentionWrapper()
-        else:
-            self.inner_attention = ScaledDotProductAttentionWrapper()
+        self.attn_type = model_args.attn_type
+        match self.attn_type:
+            case "flex":
+                self.inner_attention = FlexAttentionWrapper()
+            case "varlen":
+                # pyrefly: ignore [bad-assignment]
+                self.inner_attention = VarlenAttentionWrapper()
+            case _:
+                # pyrefly: ignore [bad-assignment]
+                self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -207,6 +239,7 @@ class Attention(nn.Module):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Forward pass of the attention module.
@@ -214,6 +247,8 @@ class Attention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor.
             freqs_cis (torch.Tensor): Precomputed frequency tensor.
+            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
+            positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache. Defaults to None.
 
         Returns:
             torch.Tensor: Output tensor after attention.
@@ -230,7 +265,7 @@ class Attention(nn.Module):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, positions=positions)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -240,16 +275,24 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        assert (
-            isinstance(attention_masks, BlockMask) or attention_masks is None
-        ), attention_masks
-
-        if self.use_flex_attn:
-            assert isinstance(attention_masks, BlockMask), attention_masks
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
-        else:
-            assert attention_masks is None
-            output = self.inner_attention(xq, xk, xv)
+        match self.attn_type:
+            case "flex":
+                assert isinstance(attention_masks, BlockMask), attention_masks
+                output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+            case "varlen":
+                assert isinstance(attention_masks, VarlenMetadata), attention_masks
+                output = self.inner_attention(
+                    xq,
+                    xk,
+                    xv,
+                    self.head_dim,
+                    attention_masks,
+                )
+            case "sdpa":
+                assert attention_masks is None
+                output = self.inner_attention(xq, xk, xv)
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
         output = output.transpose(
             1, 2
@@ -346,6 +389,7 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -353,12 +397,16 @@ class TransformerBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor.
             freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
+            positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache. Defaults to None.
 
         Returns:
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        h = x + self.attention(self.attention_norm(x), freqs_cis, attention_masks)
+        h = x + self.attention(
+            self.attention_norm(x), freqs_cis, attention_masks, positions
+        )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -428,6 +476,7 @@ class Transformer(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
+                # pyrefly: ignore [not-callable]
                 layer.init_weights()
         if self.norm is not None:
             self.norm.reset_parameters()
@@ -453,13 +502,14 @@ class Transformer(nn.Module, ModelProtocol):
             self.model_args.rope_scaling_args,
         )
 
-    def get_attention_masks(
+    def _get_flex_attention_masks(
         self,
         input_batch: torch.Tensor,
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
+
         match self.model_args.attn_mask_type:
             case "causal":
                 B = 1
@@ -470,14 +520,41 @@ class Transformer(nn.Module, ModelProtocol):
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
                 )
+
         return create_attention_mask(
             and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
         )
+
+    def get_attention_masks(
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
+    ) -> AttentionMasksType:
+        match self.model_args.attn_type:
+            case "flex":
+                return self._get_flex_attention_masks(
+                    input_batch, tokenizer, extra_inputs
+                )
+            case "varlen":
+                if self.model_args.attn_mask_type != "block_causal":
+                    raise ValueError(
+                        f"varlen attention is only supported with block_causal \
+                        attention mask type, got {self.model_args.attn_mask_type}"
+                    )
+                return create_varlen_metadata_for_document(
+                    input_batch, tokenizer.eos_id
+                )
+            case _:
+                raise NotImplementedError(
+                    "Only varlen and flex attn masks are supported"
+                )
 
     def forward(
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Perform a forward pass through the Transformer model.
@@ -487,17 +564,23 @@ class Transformer(nn.Module, ModelProtocol):
                 If pipeline parallelism is enabled, this will be the input token indices
                 for the ranks on the first pipeline stage. This will be the activation of the
                 previous pipeline stage if the current rank is not on the first stage.
+            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
+            positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache. Defaults to None.
 
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        # pyrefly: ignore [not-callable]
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, attention_masks=attention_masks)
-
+            h = layer(
+                h, self.freqs_cis, attention_masks=attention_masks, positions=positions
+            )
+        # pyrefly: ignore [not-callable]
         h = self.norm(h) if self.norm else h
+        # pyrefly: ignore [not-callable]
         output = self.output(h) if self.output else h
         return output

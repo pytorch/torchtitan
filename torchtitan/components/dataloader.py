@@ -41,6 +41,7 @@ class BaseDataLoader(Stateful, ABC):
         ...
 
 
+# pyrefly: ignore [inconsistent-inheritance]
 class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
     """Dataloader that is aware of distributed data parallelism.
 
@@ -58,7 +59,7 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
 
     dp_rank: int
     dp_world_size: int
-    batch_size: int
+    batch_size: int | None
 
     def __init__(
         self,

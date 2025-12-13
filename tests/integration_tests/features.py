@@ -349,6 +349,20 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--activation_checkpoint.mode=selective",
+                    "--activation_checkpoint.selective_ac_option=op",
+                    "--model.flavor=debugmodel_varlen_attn",
+                ]
+            ],
+            "FSDP+VARLEN_ATTN + per op SAC",
+            "fsdp+varlen_attn+per_op_sac",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.context_parallel_degree=4",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]

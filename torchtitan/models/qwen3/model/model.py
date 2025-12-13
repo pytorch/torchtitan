@@ -15,10 +15,13 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
+    create_varlen_metadata_for_document,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
+    VarlenAttentionWrapper,
+    VarlenMetadata,
 )
 from torchtitan.models.moe import MoE
 from torchtitan.protocols.model import AttentionMasksType
@@ -54,7 +57,9 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+def reshape_for_broadcast(
+    rope_cache: torch.Tensor, x: torch.Tensor, positions: torch.Tensor | None = None
+) -> torch.Tensor:
     """
     Reshape frequency tensor (represented by cos, sin) for broadcasting it with another tensor.
 
@@ -67,28 +72,51 @@ def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Te
     Args:
         rope_cache (torch.Tensor): RoPE tensor (cos and sin) to be reshaped.
         x (torch.Tensor): Target tensor for broadcasting compatibility.
+        positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache.
+            Shape is (1, seqlen) or (bz, seqlen). Defaults to None.
 
     Returns:
         torch.Tensor: Reshaped frequency tensor.
     """
     ndim = x.ndim
     assert ndim > 1
-    _, seqlen, _, head_dim = x.shape
-    rope_cache = rope_cache[0:seqlen]
-    # The shape of rope_cache is (seqlen, head_dim * 2) because we concate cos and sin
-    assert rope_cache.shape == (seqlen, head_dim * 2)
-    shape = [-1, seqlen, 1, head_dim * 2]
-    return rope_cache.view(*shape)
+    bz, seqlen, _, head_dim = x.shape
+    if positions is None:
+        rope_cache = rope_cache[0:seqlen]
+        # The shape of rope_cache is (seqlen, head_dim * 2) because we concate cos and sin
+        assert rope_cache.shape == (seqlen, head_dim * 2)
+        shape = [-1, seqlen, 1, head_dim * 2]
+        return rope_cache.view(*shape)
+    elif positions.size(0) == 1:
+        assert positions.shape == (1, seqlen)
+        rope_cache = rope_cache[positions.squeeze(0)]
+        # The shape of rope_cache is (seqlen, head_dim * 2)
+        assert rope_cache.shape == (seqlen, head_dim * 2)
+        shape = [-1, seqlen, 1, head_dim * 2]
+        return rope_cache.view(*shape)
+    else:
+        assert positions.shape == (bz, seqlen)
+        rope_cache_expanded = rope_cache[None, :, None, :].expand(bz, -1, -1, -1)
+        rope_cache = torch.gather(
+            rope_cache_expanded,
+            dim=1,
+            index=positions.view(bz, seqlen, 1, 1).expand(bz, seqlen, 1, head_dim * 2),
+        )
+        # The shape of rope_cache is (bz, seqlen, 1, head_dim * 2)
+        assert rope_cache.shape == (bz, seqlen, 1, head_dim * 2)
+        return rope_cache
 
 
 def apply_rotary_emb(
-    xq: torch.Tensor, xk: torch.Tensor, rope_cache: torch.Tensor
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    rope_cache: torch.Tensor,
+    positions: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # input tensor x has shape [bsz, seq_len, num_heads, head_dim]
     head_dim = xq.shape[-1]
 
-    # reshape for broadcast
-    rope_cache = reshape_for_broadcast(rope_cache, xq)
+    rope_cache = reshape_for_broadcast(rope_cache, xq, positions)
 
     # [bsz, seq_len, 1, head_dim]
     cos = rope_cache[..., :head_dim].to(dtype=xq.dtype, device=xq.device)
@@ -132,6 +160,9 @@ class Attention(nn.Module):
 
     """
 
+    q_norm: nn.RMSNorm | None
+    k_norm: nn.RMSNorm | None
+
     def __init__(self, model_args: Qwen3ModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
@@ -143,7 +174,7 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.head_dim
         self.scaling = self.head_dim**-0.5
-        self.use_flex_attn = getattr(model_args, "use_flex_attn", False)
+        self.attn_type = getattr(model_args, "attn_type", "sdpa")
 
         # RMSNorm added here to the here to include the q-k norm
         # This is one of the main differences between Llama3 and Qwen3
@@ -167,10 +198,17 @@ class Attention(nn.Module):
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
-        if self.use_flex_attn:
-            self.inner_attention = FlexAttentionWrapper()
-        else:
-            self.inner_attention = ScaledDotProductAttentionWrapper()
+        match self.attn_type:
+            case "flex":
+                self.inner_attention = FlexAttentionWrapper()
+            case "varlen":
+                # pyrefly: ignore [bad-assignment]
+                self.inner_attention = VarlenAttentionWrapper()
+            case "sdpa":
+                # pyrefly: ignore [bad-assignment]
+                self.inner_attention = ScaledDotProductAttentionWrapper()
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -186,12 +224,16 @@ class Attention(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Forward pass of the attention module.
 
         Args:
             x (torch.Tensor): Input tensor.
+            rope_cache (torch.Tensor): Precomputed cosine and sine frequencies.
+            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
+            positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache. Defaults to None.
 
         Returns:
             torch.Tensor: Output tensor after attention.
@@ -216,7 +258,7 @@ class Attention(nn.Module):
             xk = self.k_norm(xk)
 
         # Apply rotary embedding
-        xq, xk = apply_rotary_emb(xq, xk, rope_cache)
+        xq, xk = apply_rotary_emb(xq, xk, rope_cache, positions)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
@@ -226,12 +268,24 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        if self.use_flex_attn:
-            assert isinstance(attention_masks, BlockMask), attention_masks
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
-        else:
-            assert attention_masks is None
-            output = self.inner_attention(xq, xk, xv)
+        match self.attn_type:
+            case "flex":
+                assert isinstance(attention_masks, BlockMask), attention_masks
+                output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+            case "varlen":
+                assert isinstance(attention_masks, VarlenMetadata), attention_masks
+                output = self.inner_attention(
+                    xq,
+                    xk,
+                    xv,
+                    self.head_dim,
+                    attention_masks,
+                )
+            case "sdpa":
+                assert attention_masks is None
+                output = self.inner_attention(xq, xk, xv)
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
         output = output.transpose(
             1, 2
@@ -330,6 +384,7 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -337,12 +392,16 @@ class TransformerBlock(nn.Module):
         Args:
             x (torch.Tensor): Input tensor.
             rope_cache (torch.Tensor): Precomputed cosine and sine frequencies.
+            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
+            positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache. Defaults to None.
 
         Returns:
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        x = x + self.attention(self.attention_norm(x), rope_cache, attention_masks)
+        x = x + self.attention(
+            self.attention_norm(x), rope_cache, attention_masks, positions
+        )
 
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
@@ -422,6 +481,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
+                # pyrefly: ignore [not-callable]
                 layer.init_weights(buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
@@ -445,7 +505,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
             self.model_args.rope_theta,
         )
 
-    def get_attention_masks(
+    def _get_flex_attention_masks(
         self,
         input_batch: torch.Tensor,
         tokenizer: BaseTokenizer,
@@ -466,10 +526,36 @@ class Qwen3Model(nn.Module, ModelProtocol):
             and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
         )
 
+    def get_attention_masks(
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
+    ) -> AttentionMasksType:
+        match self.model_args.attn_type:
+            case "flex":
+                return self._get_flex_attention_masks(
+                    input_batch, tokenizer, extra_inputs
+                )
+            case "varlen":
+                if self.model_args.attn_mask_type != "block_causal":
+                    raise ValueError(
+                        f"varlen attention is only supported with block_causal \
+                        attention mask type, got {self.model_args.attn_mask_type}"
+                    )
+                return create_varlen_metadata_for_document(
+                    input_batch, tokenizer.eos_id
+                )
+            case _:
+                raise NotImplementedError(
+                    "Only varlen and flex attn masks are supported"
+                )
+
     def forward(
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Perform a forward pass through the Transformer model.
@@ -479,17 +565,22 @@ class Qwen3Model(nn.Module, ModelProtocol):
                 If pipeline parallelism is enabled, this will be the input token indices
                 for the ranks on the first pipeline stage. This will be the activation of the
                 previous pipeline stage if the current rank is not on the first stage.
+            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
+            positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache. Defaults to None.
 
         Returns:
             torch.Tensor: Output logits after applying the Transformer model.
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        # pyrefly: ignore [not-callable]
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.rope_cache, attention_masks)
+            h = layer(h, self.rope_cache, attention_masks, positions)
 
+        # pyrefly: ignore [not-callable]
         h = self.norm(h) if self.norm else h
+        # pyrefly: ignore [not-callable]
         output = self.output(h) if self.output else h
         return output

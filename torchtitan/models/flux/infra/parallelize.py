@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -77,7 +78,7 @@ def apply_fsdp(
         cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -88,21 +89,27 @@ def apply_fsdp(
         model.txt_in,
     ]
     for layer in linear_layers:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(layer, **fsdp_config)
 
+    # pyrefly: ignore [not-iterable]
     for block in model.double_blocks:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             block,
             **fsdp_config,
         )
 
+    # pyrefly: ignore [not-iterable]
     for block in model.single_blocks:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             block,
             **fsdp_config,
         )
 
     # apply FSDP to last layer. Set reshard_after_forward=False for last layer to avoid gather right after reshard
+    # pyrefly: ignore [no-matching-overload]
     fully_shard(model.final_layer, **fsdp_config, reshard_after_forward=False)
 
     # Wrap all the rest of model
@@ -112,12 +119,16 @@ def apply_fsdp(
 def apply_ac(model: nn.Module, ac_config):
     """Apply activation checkpointing to the model."""
 
+    # pyrefly: ignore [missing-attribute]
     for layer_id, block in model.double_blocks.named_children():
         block = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
+        # pyrefly: ignore [missing-attribute]
         model.double_blocks.register_module(layer_id, block)
 
+    # pyrefly: ignore [missing-attribute]
     for layer_id, block in model.single_blocks.named_children():
         block = ptd_checkpoint_wrapper(block, preserve_rng_state=False)
+        # pyrefly: ignore [missing-attribute]
         model.single_blocks.register_module(layer_id, block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
@@ -139,7 +150,7 @@ def parallelize_encoders(
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
-        fsdp_config = {
+        fsdp_config: dict[str, Any] = {
             "mesh": parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
             "mp_policy": mp_policy,
         }
@@ -148,8 +159,10 @@ def parallelize_encoders(
 
         # NOTE: only apply FSDP to the T5 encoder, not the CLIP text encoder.
         # CLIP Text encoder has low computation / communication ratio, so it's not necessary to apply FSDP to it.
+        # pyrefly: ignore [missing-attribute]
         for block in t5_model.hf_module.encoder.block:
             fully_shard(block, **fsdp_config)
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(t5_model.hf_module, **fsdp_config)
 
         if parallel_dims.dp_replicate_enabled:

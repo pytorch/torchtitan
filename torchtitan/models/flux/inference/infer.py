@@ -25,8 +25,15 @@ def inference(config: JobConfig):
     # Distributed processing setup: Each GPU/process handles a subset of prompts
     world_size = int(os.environ["WORLD_SIZE"])
     global_rank = int(os.environ["RANK"])
+    # pyrefly: ignore [missing-attribute]
     original_prompts = open(config.inference.prompts_path).readlines()
     total_prompts = len(original_prompts)
+
+    if total_prompts < world_size:
+        raise ValueError(
+            f"Number of prompts ({total_prompts}) must be >= number of ranks ({world_size}). "
+            f"FSDP all-gather will hang if some ranks have no prompts to process."
+        )
 
     # Distribute prompts across processes using round-robin assignment
     prompts = original_prompts[global_rank::world_size]
@@ -39,13 +46,14 @@ def inference(config: JobConfig):
 
     if prompts:
         # Generate images for this process's assigned prompts
+        # pyrefly: ignore [missing-attribute]
         bs = config.inference.local_batch_size
 
         output_dir = os.path.join(
             config.job.dump_folder,
+            # pyrefly: ignore [missing-attribute]
             config.inference.save_img_folder,
         )
-
         # Create mapping from local indices to global prompt indices
         global_ids = list(range(global_rank, total_prompts, world_size))
 
@@ -54,6 +62,7 @@ def inference(config: JobConfig):
                 device=trainer.device,
                 dtype=trainer._dtype,
                 job_config=trainer.job_config,
+                # pyrefly: ignore [bad-argument-type]
                 model=trainer.model_parts[0],
                 prompt=prompts[i : i + bs],
                 autoencoder=trainer.autoencoder,

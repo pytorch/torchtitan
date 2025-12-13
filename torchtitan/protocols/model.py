@@ -16,9 +16,10 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
 
 from torchtitan.config import JobConfig
+from torchtitan.models.attention import VarlenMetadata
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask
+AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
 @dataclass
@@ -36,9 +37,7 @@ class BaseModelArgs:
         pass
 
     @abstractmethod
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         pass
 
 

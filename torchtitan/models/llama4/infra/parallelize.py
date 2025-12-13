@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Any
+
 import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -24,8 +26,13 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.dual_pipe_v import (
+    DualPipeExpertParallel,
+    get_dual_pipe_v_flag,
+)
 
 from torchtitan.distributed.expert_parallel import (
+    BaseExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
     ReordererSequenceParallel,
@@ -42,6 +49,9 @@ _op_sac_save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    torch.ops.aten._scaled_dot_product_attention_math.default,
+    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
     torch.ops._c10d_functional.all_to_all_single.default,
     # for low precision training, it's useful to always save
@@ -49,6 +59,7 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    torch._higher_order_ops.inductor_compiled_code,
 }
 
 
@@ -75,10 +86,6 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
-
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
@@ -100,6 +107,8 @@ def parallelize_llama(
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
+
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -112,6 +121,7 @@ def parallelize_llama(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            dual_pipe_v=dual_pipe_v,
         )
 
     model_compile_enabled = (
@@ -122,14 +132,14 @@ def parallelize_llama(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
+            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, job_config.compile)
+        apply_compile(model, job_config.compile, parallel_dims.ep_enabled)
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -238,12 +248,15 @@ def apply_non_moe_tp(
         )
 
     # Apply tensor + sequence parallelism to every transformer block
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
+            # NOTE: when the fourth argument (positions) is not None, its input layout
+            # and desired input layout should be Replicate()
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None, None),
-                desired_input_layouts=(Replicate(), None, None),
+                input_layouts=(Shard(1), None, None, None),
+                desired_input_layouts=(Replicate(), None, None, None),
             ),
             "attention.wq": colwise_parallel(),
             "attention.wk": colwise_parallel(),
@@ -251,6 +264,7 @@ def apply_non_moe_tp(
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }
+        # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
             layer_plan.update(
                 {
@@ -265,8 +279,10 @@ def apply_non_moe_tp(
             )
 
         parallelize_module(
+            # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
@@ -306,7 +322,7 @@ def apply_fsdp(
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -325,12 +341,14 @@ def apply_fsdp(
             )
 
     if model.tok_embeddings is not None:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             model.tok_embeddings,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
 
+    # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
         # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
         # - the router and the shared experts are sharded together with the TransformerBlock
@@ -377,6 +395,7 @@ def apply_fsdp(
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
     if model.norm is not None and model.output is not None:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             [model.norm, model.output],
             **fsdp_config,
@@ -391,49 +410,65 @@ def apply_fsdp(
         return
 
     # forward
+    # pyrefly: ignore [not-callable]
     transformer_blocks = list(model.layers.values())
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
+    # pyrefly: ignore [bad-argument-type]
     if model.tok_embeddings is not None and len(model.layers) > 0:
+        # pyrefly: ignore [missing-attribute]
         model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
 
     for transformer_block, next_transformer_block in zip(
         transformer_blocks, next_transformer_blocks
     ):
         if next_transformer_block is not None:
+            # pyrefly: ignore [missing-attribute]
             if next_transformer_block.moe_enabled:
+                # pyrefly: ignore [missing-attribute]
                 transformer_block.set_modules_to_forward_prefetch(
+                    # pyrefly: ignore [missing-attribute]
                     [next_transformer_block, next_transformer_block.moe.experts]
                 )
             else:
+                # pyrefly: ignore [missing-attribute]
                 transformer_block.set_modules_to_forward_prefetch(
                     [next_transformer_block]
                 )
         elif model.norm is not None and model.output is not None:
+            # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_forward_prefetch(
                 [model.norm, model.output]
             )
 
     # backward
+    # pyrefly: ignore [not-callable]
     reversed_transformer_blocks = list(reversed(model.layers.values()))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
+    # pyrefly: ignore [bad-argument-type]
     if model.norm is not None and model.output is not None and len(model.layers) > 0:
+        # pyrefly: ignore [missing-attribute]
         model.output.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(
         reversed_transformer_blocks, prev_transformer_blocks
     ):
         if prev_transformer_block is not None:
+            # pyrefly: ignore [missing-attribute]
             if prev_transformer_block.moe_enabled:
+                # pyrefly: ignore [missing-attribute]
                 transformer_block.set_modules_to_backward_prefetch(
+                    # pyrefly: ignore [missing-attribute]
                     [prev_transformer_block, prev_transformer_block.moe.experts]
                 )
             else:
+                # pyrefly: ignore [missing-attribute]
                 transformer_block.set_modules_to_backward_prefetch(
                     [prev_transformer_block]
                 )
         elif model.tok_embeddings is not None:
+            # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
 
 
@@ -443,10 +478,13 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
+    dual_pipe_v: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
             continue
 
@@ -468,9 +506,12 @@ def apply_moe_ep_tp(
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
                 # the reorderer, the all-to-all comms, and routed experts computation
                 # are effectively running Sequence Parallel (split along the folded bs*slen dim)
+                # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
+            # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
                 # input Replicate, output Partial
+                # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
                         "moe.shared_experts.w1": ColwiseParallel(),
@@ -481,8 +522,10 @@ def apply_moe_ep_tp(
                     }
                 )
             parallelize_module(
+                # pyrefly: ignore [bad-argument-type]
                 module=transformer_block,
                 device_mesh=tp_mesh,
+                # pyrefly: ignore [bad-argument-type]
                 parallelize_plan=moe_layer_plan,
             )
 
@@ -499,14 +542,18 @@ def apply_moe_ep_tp(
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel()
 
+        if dual_pipe_v and isinstance(experts_plan, BaseExpertParallel):
+            experts_plan = DualPipeExpertParallel(experts_plan)
+
         parallelize_module(
+            # pyrefly: ignore [missing-attribute]
             module=transformer_block.moe.experts,
             device_mesh=experts_mesh,
             parallelize_plan=experts_plan,
         )
 
 
-def apply_compile(model: nn.Module, compile_config: CompileConfig):
+def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: bool):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
@@ -515,7 +562,9 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     # but it is experimental.
     torch._dynamo.config.capture_scalar_outputs = True
     # Workaround for https://github.com/pytorch/pytorch/issues/166926
+    # pyrefly: ignore [missing-attribute]
     torch._C._dynamo.eval_frame._set_lru_cache(False)
+    # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         if transformer_block.moe_enabled:
             # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
@@ -569,13 +618,37 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
                 fullgraph=True,
             )
 
+        # pyrefly: ignore [missing-attribute]
         model.layers.register_module(layer_id, transformer_block)
 
-    moe_module._run_experts_grouped_mm = torch.compile(
-        moe_module._run_experts_grouped_mm,
-        backend=compile_config.backend,
-        fullgraph=True,
+    # Patch some globals only once (apply_compile is called multiple times for PP setup)
+    already_patched = (
+        "_run_experts_grouped_mm_dynamic"
+        in moe_module._run_experts_grouped_mm.__qualname__
     )
+    if not already_patched:
+        moe_module._run_experts_grouped_mm = torch.compile(
+            moe_module._run_experts_grouped_mm,
+            backend=compile_config.backend,
+            fullgraph=True,
+        )
+
+        if ep_enabled:
+            compiled_fn = moe_module._run_experts_grouped_mm
+
+            # keep function logic in sync with `already_patched` above
+            def _run_experts_grouped_mm_dynamic(
+                w1: torch.Tensor,
+                w2: torch.Tensor,
+                w3: torch.Tensor,
+                x: torch.Tensor,
+                num_tokens_per_expert: torch.Tensor,
+            ) -> torch.Tensor:
+                # dynamic number of tokens in expert parallel
+                torch._dynamo.mark_dynamic(x, 0)
+                return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)
+
+            moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
 
     # NOTE: We don't compile for loop code path due to an issue with unbacked symints:
     # https://github.com/pytorch/pytorch/issues/166460

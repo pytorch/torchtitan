@@ -21,7 +21,12 @@ from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.dual_pipe_v import (
+    DualPipeExpertParallel,
+    get_dual_pipe_v_flag,
+)
 from torchtitan.distributed.expert_parallel import (
+    BaseExpertParallel,
     ExpertParallel,
     ReordererSequenceParallel,
 )
@@ -37,6 +42,9 @@ _op_sac_save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    torch.ops.aten._scaled_dot_product_attention_math.default,
+    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
     torch.ops._c10d_functional.all_to_all_single.default,
     # for low precision training, it's useful to always save
@@ -44,6 +52,7 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    torch._higher_order_ops.inductor_compiled_code,
 }
 
 
@@ -61,10 +70,6 @@ def parallelize_gptoss(
         Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
         if (
@@ -93,6 +98,8 @@ def parallelize_gptoss(
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
+
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -105,6 +112,7 @@ def parallelize_gptoss(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            dual_pipe_v=dual_pipe_v,
         )
 
     model_compile_enabled = (
@@ -116,7 +124,6 @@ def parallelize_gptoss(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
         )
 
@@ -258,6 +265,7 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
+    dual_pipe_v: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -303,6 +311,9 @@ def apply_moe_ep_tp(
         else:
             experts_mesh = ep_tp_mesh
             experts_plan = GptossExpertTensorParallel()
+
+        if dual_pipe_v and isinstance(experts_plan, BaseExpertParallel):
+            experts_plan = DualPipeExpertParallel(experts_plan)
 
         parallelize_module(
             module=transformer_block.moe.experts,

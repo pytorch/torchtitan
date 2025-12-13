@@ -373,6 +373,14 @@ class Parallelism:
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
 
+    pipeline_parallel_expert_parallel_overlap: bool = True
+    """Whether to turn on the optimization to overlap expert parallel and pipeline parallel
+    communication. This is only effective when the pipeline parallel schedule is DualPipeV and
+    pipeline_parallel_degree > 1 and expert_parallel_degree > 1.
+
+    TODO: Does not support activation_checkpoint, set mode="none"
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -656,9 +664,7 @@ class Compile:
     enable: bool = False
     """Whether to apply torch.compile"""
 
-    components: list[Literal["model", "loss"]] = field(
-        default_factory=lambda: ["model", "loss"]
-    )
+    components: list[str] = field(default_factory=lambda: ["model", "loss"])
     """Which components to compile"""
     backend: str = "inductor"
 
@@ -790,6 +796,22 @@ class Comm:
 
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
+
+    mode: Literal["default", "fake_backend", "local_tensor"] = "default"
+    """
+    Communication mode for distributed training.
+
+    Options:
+    - "default": Normal distributed training with real communication
+    - "fake_backend": Fake comm backend for dry run mode only (configuration validation without GPU)
+    - "local_tensor": Local tensor mode for debugging purposes. There will be only one process
+      regardless of the number of GPUs. LocalTensor will simulate the computation by running one
+      rank after another. While the performance will be slow, the numerics should be the same.
+      This enables us to verify numerics with fewer GPUs. For example, we can directly run 5D
+      parallelisms within a single node to reduce the combinations we need to use in integration tests.
+
+    NOTE: local_tensor is an experimental feature and automatically uses fake_backend internally.
+    """
 
 
 @dataclass
@@ -945,7 +967,9 @@ class JobConfig:
 
     def maybe_log(self) -> None:
         if self.job.print_config:
-            logger.info(f"Running with configs: {self.to_dict()}")
+            logger.info(
+                f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
+            )
 
         if self.job.save_config_file is not None:
             config_file = os.path.join(self.job.dump_folder, self.job.save_config_file)

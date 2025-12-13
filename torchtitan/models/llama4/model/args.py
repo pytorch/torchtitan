@@ -44,7 +44,7 @@ class TransformerModelArgs(BaseModelArgs):
     # `False`, each uses the total number of transformer blocks
     depth_init: bool = True
 
-    use_flex_attn: bool = False
+    attn_type: str = "sdpa"
     attn_mask_type: str = "causal"
     # iRoPE settings
     # When ``every_n_layers_nope`` is specified, NoPE (no positional embedding) is
@@ -76,18 +76,17 @@ class TransformerModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
-            raise NotImplementedError(
-                "CP support for FlexAttention is still in progress."
-            )
+        if (
+            job_config.parallelism.context_parallel_degree > 1
+            and self.attn_type != "sdpa"
+        ):
+            raise NotImplementedError("CP support is only supported for SDPA.")
 
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
         )
 
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(
             self,
             model,
