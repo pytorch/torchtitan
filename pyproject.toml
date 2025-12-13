@@ -45,21 +45,26 @@ dev = [
     "expecttest", # test_tokenizer
 ]
 
-[tool.setuptools.dynamic]
-version = {file = "assets/version.txt"}
-
 [tool.codespell]
 skip = ["*.json"]
 ignore-words-list = ["assertin", "datas" ,"indx", "inpt", "nd", "socio-economic"]
 
 # ---- Explicit project build information ---- #
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "versioningit>=3.3"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = [""]
 include = ["torchtitan*"]
+
+[tool.versioningit.tag2version]
+rmprefix = "v"
+
+[tool.versioningit.format]
+distance = "{base_version}+git{rev}"
+dirty = "{base_version}+git{rev}.dirty"
+distance-dirty = "{base_version}+git{rev}.dirty"
 
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks
