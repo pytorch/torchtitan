@@ -15,6 +15,12 @@ Key components:
 - Qwen3VLLMCompatModel: vLLM-compatible model with merged projections
 - batch_invariant_backward: Gradient support for vLLM's deterministic operations
 - simple_rl: End-to-end RL training loop
+- TorchTitanVLLMModel: Generic wrapper for TorchTitan models with vLLM
+
+For vLLM inference with TorchTitan models, see:
+- models/vllm_wrapper.py: Core vLLM wrapper
+- models/__init__.py: Auto-registration with vLLM
+- infer.py: Example inference script
 """
 
 from .batch_invariant_backward import (
@@ -24,6 +30,8 @@ from .batch_invariant_backward import (
 )
 from .models import VLLMCompatibleFlashAttention
 from .models.qwen3 import Qwen3VLLMCompatModel
+from .models.vllm_wrapper import TorchTitanVLLMModel
+
 
 __all__ = [
     "VLLMCompatibleFlashAttention",
@@ -31,4 +39,5 @@ __all__ = [
     "enable_batch_invariant_backward_mode",
     "rms_norm_with_gradients",
     "silu_and_mul_with_gradients",
+    "TorchTitanVLLMModel",
 ]
