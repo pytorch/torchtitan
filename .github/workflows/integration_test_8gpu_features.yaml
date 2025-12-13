@@ -3,6 +3,8 @@ name: 8 GPU Feature Tests
 on:
   push:
     branches: [ main ]
+    tags:
+      - ciflow/8gpu/*
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
@@ -27,33 +29,7 @@ permissions:
 jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set.outputs.matrix }}
-    steps:
-      - id: set
-        run: |
-          # Decide which matrix entries to include based on event type
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]] || [[ "${{ github.event_name }}" == "schedule" ]]; then
-          # Include both CUDA and ROCm
-          echo '{"include":[
-            {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"},
-            {"name":"rocm","runner":"linux.rocm.gpu.gfx942.8","gpu-arch-type":"rocm","gpu-arch-version":"7.0","docker-image":"torchtitan-rocm-ubuntu-22.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/rocm7.0"}
-            ]}' > matrix.json
-          else
-          # Include only CUDA
-          echo '{"include":[
-            {"name":"cuda","runner":"linux.g5.48xlarge.nvidia.gpu","gpu-arch-type":"cuda","gpu-arch-version":"12.6","docker-image":"torchtitan-ubuntu-20.04-clang12","index-url":"https://download.pytorch.org/whl/nightly/cu126"}
-            ]}' > matrix.json
-          fi
-
-          # Export matrix to job outputs
-          {
-            echo 'matrix<<EOF'
-            cat matrix.json
-            echo 'EOF'
-          } >> $GITHUB_OUTPUT
-
+    uses: ./.github/workflows/set-matrix.yaml
 
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
