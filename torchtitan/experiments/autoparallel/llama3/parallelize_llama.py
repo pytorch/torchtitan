@@ -91,6 +91,7 @@ def parallelize_llama(
         world_mesh,
         mp_policy=mp_policy,
         compile=job_config.compile,
+        repeated_subgraphs=True,  # makes it run much faster
     ) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
 
