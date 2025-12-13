@@ -76,15 +76,18 @@ def parallelize_deepseekv3(
     with disable_compile(job_config):
         model = simple_fsdp_parallelize_deepseekv3(model, parallel_dims, job_config)
 
+    # Get backend from config
+    backend = job_config.compile.backend
+
     # Get joint custom passes from config
     joint_custom_passes = get_joint_custom_passes_from_config(parallel_dims, job_config)
 
     # Get compiler passes from config
     compiler_passes = get_compiler_passes_from_config(model, job_config)
 
-    # Create compilers with specified passes (defaults to no passes)
+    # Create compilers with specified passes and backend
     fw_compiler, bw_compiler = make_compiler_with_passes(
-        compiler_passes, dump_folder=job_config.job.dump_folder
+        compiler_passes, dump_folder=job_config.job.dump_folder, backend=backend
     )
 
     # Create custom joint_graph_builder with deepseekv3-specific compilers
@@ -94,6 +97,7 @@ def parallelize_deepseekv3(
         bw_compiler=bw_compiler,
         joint_custom_passes=joint_custom_passes,
         dump_folder=job_config.job.dump_folder,
+        backend=backend,
     )
 
     # TODO: CompiledModule should take sample input as well, so that we can

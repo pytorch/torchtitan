@@ -17,6 +17,7 @@ from torch._functorch.aot_autograd import (
     JointWithDescriptors,
 )
 from torch._guards import tracing, TracingContext
+from torch._inductor.decomposition import select_decomp_table
 from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
@@ -37,8 +38,18 @@ def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> No
 
 
 def export_joint(
-    model, args, kwargs=None, dump_folder: str | None = None
+    model, args, kwargs=None, dump_folder: str | None = None, decompositions=None
 ) -> tuple[JointWithDescriptors, TracingContext]:
+    """
+    Export joint forward-backward graph with AOT Autograd.
+
+    Args:
+        model: The model to export
+        args: Tuple of input arguments
+        kwargs: Dict of keyword arguments for the model
+        dump_folder: Optional folder to dump the graph to
+        decompositions: Optional decomposition table for AOT Autograd
+    """
     if kwargs is None:
         kwargs = {}
     assert isinstance(args, tuple)
@@ -62,12 +73,25 @@ def export_joint(
 
     with tracing(tracing_context):
         return (
-            aot_export_joint_with_descriptors_alone(gm, args, kwargs),
+            aot_export_joint_with_descriptors_alone(
+                gm, args, kwargs, decompositions=decompositions
+            ),
             tracing_context,
         )
 
 
-def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
+def aot_export_joint_with_descriptors_alone(
+    model, args, kwargs=None, decompositions=None
+):
+    """
+    Export joint forward-backward graph with AOT Autograd.
+
+    Args:
+        model: The model to export
+        args: Tuple of input arguments
+        kwargs: Dict of keyword arguments for the model
+        decompositions: Optional decomposition table for AOT Autograd.
+    """
     if kwargs is None:
         kwargs = {}
     assert isinstance(args, tuple)
@@ -78,6 +102,7 @@ def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
             model,
             args,
             kwargs,
+            decompositions=decompositions,
         )
         return joint_with_descriptors
 
@@ -90,6 +115,7 @@ def joint_graph_builder(
     bw_compiler: Optional[Callable] = None,
     joint_custom_passes: Optional[List[Callable]] = None,
     dump_folder: str | None = None,
+    backend: str = "aot_eager",
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -102,16 +128,23 @@ def joint_graph_builder(
         bw_compiler: Optional custom backward compiler function
         joint_custom_passes: list of custom passes to run on the joint graph
         dump_folder: Optional folder to dump the graph to
+        backend: Compilation backend ("aot_eager", "inductor")
     """
     assert isinstance(model_args, tuple)
     for idx, arg in enumerate(model_args):
         assert isinstance(arg, DTensor), f"Argument {idx} is of type {type(arg)}"
 
+    # Use Inductor's decomposition table when backend is "inductor"
+    decompositions = select_decomp_table() if backend == "inductor" else None
+
     # get joint graph
-    (
-        joint_with_descriptors,
-        tracing_context,
-    ) = export_joint(model, model_args, model_kwargs, dump_folder=dump_folder)
+    (joint_with_descriptors, tracing_context,) = export_joint(
+        model,
+        model_args,
+        model_kwargs,
+        dump_folder=dump_folder,
+        decompositions=decompositions,
+    )
 
     # run custom passes on joint-graph before partitioner
     if joint_custom_passes is not None:
@@ -270,37 +303,70 @@ def compiler(
 
 
 def make_compiler_with_passes(
-    passes: List[Callable] = None, dump_folder: str | None = None
+    passes: List[Callable] = None,
+    dump_folder: str | None = None,
+    backend: str = "aot_eager",
 ):
     """
-    Create forward and backward compilers with specified passes.
+    Create forward and backward compilers with specified passes and backend.
 
     Args:
         passes: List of compiler pass functions to apply. If None, uses DEFAULT_COMPILER_PASSES.
+        dump_folder: Optional folder to dump graphs
+        backend: Compilation backend ("aot_eager", "inductor")
 
     Returns:
         Tuple of (fw_compiler, bw_compiler) functions
     """
+    from torch._inductor.compile_fx import compile_fx_inner
 
-    def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
-        return compiler(
-            "fwd_gm",
-            gm,
-            example_inputs,
-            passes=passes,
-            dump_folder=dump_folder,
-            is_forward=True,
-        )
+    if backend == "inductor":
+        # Use compile_fx_inner as the final compiler after applying transformation passes
+        def fw_compiler(gm: torch.fx.GraphModule, example_inputs):
+            gm = compiler(
+                "fwd_gm",
+                gm,
+                example_inputs,
+                passes=passes,
+                dump_folder=dump_folder,
+                is_forward=True,
+            )
+            logger.info("Compiling forward graph with Inductor (compile_fx_inner)")
+            return compile_fx_inner(gm, example_inputs)
 
-    def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
-        return compiler(
-            "bwd_gm",
-            gm,
-            example_inputs,
-            passes=passes,
-            dump_folder=dump_folder,
-            is_forward=False,
-        )
+        def bw_compiler(gm: torch.fx.GraphModule, example_inputs):
+            gm = compiler(
+                "bwd_gm",
+                gm,
+                example_inputs,
+                passes=passes,
+                dump_folder=dump_folder,
+                is_forward=False,
+            )
+            logger.info("Compiling backward graph with Inductor (compile_fx_inner)")
+            return compile_fx_inner(gm, example_inputs)
+
+    else:
+
+        def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
+            return compiler(
+                "fwd_gm",
+                gm,
+                example_inputs,
+                passes=passes,
+                dump_folder=dump_folder,
+                is_forward=True,
+            )
+
+        def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
+            return compiler(
+                "bwd_gm",
+                gm,
+                example_inputs,
+                passes=passes,
+                dump_folder=dump_folder,
+                is_forward=False,
+            )
 
     return fw_compiler, bw_compiler
 
