@@ -190,8 +190,8 @@ def apply_non_moe_tp(
         layer_plan = {
             "input_layernorm": SequenceParallel(),
             "self_attn": prepare_module_input(
-                input_kwarg_layouts={"hidden_states": Shard(1)},
-                desired_input_kwarg_layouts={"hidden_states": Replicate()},
+                input_layouts=(Shard(1),),
+                desired_input_layouts=(Replicate(),),
             ),
             "post_attention_layernorm": SequenceParallel(),
         }
