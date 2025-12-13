@@ -257,8 +257,6 @@ def set_torchtitan_fields(orig, new):
         block.moe_enabled = hasattr(block, "moe")
 
 
-# Run workflow with:
-# CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name deepseekv3_autoparallel
 def parallelize_deepseekv3(
     model,
     parallel_dims: ParallelDims,
