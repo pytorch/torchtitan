@@ -17,7 +17,6 @@ jobs:
       IS_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       IS_SCHEDULE:  ${{ github.event_name == 'schedule' }}
       IS_PR:        ${{ github.event_name == 'pull_request' }}
-      HAS_8GPU_LABEL: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ciflow/8gpu') }}
       IS_8GPU_TAG:  ${{ startsWith(github.ref, 'refs/tags/ciflow/8gpu/') }}
       TRIGGERED_8GPU_LABEL: ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' }}
 
@@ -48,7 +47,6 @@ jobs:
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
           IS_SCHEDULE="${IS_SCHEDULE:-false}"
           IS_PR="${IS_PR:-false}"
-          HAS_8GPU_LABEL="${HAS_8GPU_LABEL:-false}"
           IS_8GPU_TAG="${IS_8GPU_TAG:-false}"
           TRIGGERED_8GPU_LABEL="${TRIGGERED_8GPU_LABEL:-false}"
 
@@ -60,7 +58,7 @@ jobs:
           JSON
 
           # Runs CUDA and ROCm for normal PR (if PR label is present) OR for push to main, cron schedule
-          elif [[ ("$HAS_8GPU_LABEL" == "false" && "$IS_PR" == "true") || ("$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true") ]]; then
+          elif [[ ("$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true") ]]; then
             cat > matrix.json <<JSON
           {"include": [$CUDA_MATRIX,$ROCM_MATRIX]}
           JSON
