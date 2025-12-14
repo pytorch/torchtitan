@@ -157,6 +157,57 @@ srun torchrun --nnodes 2
 If your gpu count per node is not 8, adjust `--nproc_per_node` in the torchrun command and `#SBATCH --gpus-per-task` in the SBATCH command section.
 
 
+## SFT
+
+We expose a `submit_sft.py` for SFT on slurm.
+
+```bash
+python submit_sft.py \
+  --config_file torchtitan/models/qwen3/train_configs/qwen3_30b_a3b_sft.toml \
+  --n_nodes 4 \
+  --job_name my-sft-run \
+  --wandb_team nous_research \
+  --wandb_project my_project
+```
+
+### Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--config_file` | (required) | Path to training config TOML |
+| `--n_nodes` | 1 | Number of training nodes |
+| `--partition` | batch | SLURM partition |
+| `--gpus_per_node` | 8 | GPUs per node |
+| `--time` | 72:00:00 | Wall-clock limit |
+| `--job_name` | sft-train | SLURM job name |
+| `--conda` | torchtitan | Conda environment to activate |
+| `--venv` | None | Path to venv to activate (mutually exclusive with `--conda`) |
+| `--dry_run` | False | Print command without submitting |
+| `--wandb_team` | None | WandB team/entity |
+| `--wandb_project` | None | WandB project name |
+| `--wandb_run_name` | None | WandB run name (defaults to `{model}-sft-{date}`) |
+
+Additional SLURM options can be passed with the `slurm_` prefix (e.g., `--slurm_account=myaccount`).
+
+See `python submit_sft.py --help` for more details.
+
+### Block Causal Attention
+
+For packed sequence training, enable block causal attention to prevent cross-document attention. Set both `use_flex_attn=True` and `attn_mask_type="block_causal"` in the model's `__init__.py`. This uses flex attention with EOS token detection to identify document boundaries.
+
+```python
+# torchtitan/models/qwen3/__init__.py
+"30B-A3B": Qwen3ModelArgs(
+    ...
+    use_flex_attn=True,
+    attn_mask_type="block_causal",
+    ...
+),
+```
+
+Llama3 has pre-configured `*_flex_attn` flavor variants (`8B_flex_attn`, `70B_flex_attn`, etc.) with these already set.
+
+
 ## Citation
 
 We provide a detailed look into the parallelisms and optimizations available in `torchtitan`, along with summary advice on when to use various techniques.

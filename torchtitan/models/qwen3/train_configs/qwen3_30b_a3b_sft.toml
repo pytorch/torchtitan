@@ -1,0 +1,81 @@
+# Qwen3-30B-A3B SFT Training Config
+# For multi-node training with preprocessed SFT data
+
+[job]
+dump_folder = "./outputs/qwen3_30b_a3b_sft"
+description = "Qwen3-30B-A3B SFT training"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+
+[metrics]
+log_freq = 10
+enable_tensorboard = true
+save_tb_folder = "tb"
+enable_wandb = true
+
+[model]
+name = "qwen3"
+flavor = "30B-A3B"
+# Path to HF model for tokenizer and initial weights
+hf_assets_path = "/home/hjcpuro/torchtitan/assets/hf/Qwen3-30B-A3B-Instruct-2507"
+
+[optimizer]
+name = "AdamW"
+lr = 8e-5  # Scaled 4x: 2x from TP2->TP1, 2x from microbatch doubling
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 100
+decay_type = "cosine"
+
+[training]
+local_batch_size = 2  # Doubled microbatch
+global_batch_size = 64  # DP=32 * local_batch=2
+seq_len = 65536  # Must match preprocessing pack length
+max_norm = 1.0
+steps = 2990  # 191340 samples / 64 batch = 1 full pass through all 4 epochs
+gc_freq = 50
+
+# SFT dataset settings
+dataset = "preprocessed"
+dataset_type = "preprocessed"
+dataset_path = "/home/shared/data/hillclimb/pdfml/AgentInstruct/preprocessed_qwen3_65536_4epochs_nrows=348551_gemini_3_pro_preview-2025-11-27"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1  # Auto-calculate from remaining GPUs
+fsdp_reshard_after_forward = "default"
+tensor_parallel_degree = 1  # Trying TP1 with compile memory savings
+context_parallel_degree = 1  # CP disabled due to freqs_cis compatibility
+# MoE parallelism
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 1
+# Total: 1 × 4 × 2 × 4 = 32 GPUs
+
+[checkpoint]
+enable = true
+folder = "checkpoint"
+interval = 748  # Per epoch: 2990 total steps / 4 epochs
+last_save_model_only = false
+export_dtype = "bfloat16"
+async_mode = "async_with_pinned_mem"
+# Load from HF checkpoint on first run
+initial_load_path = "/home/hjcpuro/torchtitan/assets/hf/Qwen3-30B-A3B-Instruct-2507"
+initial_load_in_hf = true
+
+[activation_checkpoint]
+mode = "full"  # Required for long sequences
+selective_ac_option = "op"
+
+[compile]
+enable = true  # Block causal verified working
+components = ["model", "loss"]
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output"]
+
