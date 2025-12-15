@@ -101,6 +101,7 @@ def parallelize_llama(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
+            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
@@ -202,6 +203,7 @@ def apply_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
@@ -226,8 +228,10 @@ def apply_tp(
         }
 
         parallelize_module(
+            # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
@@ -242,10 +246,12 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = torch.compile(
             transformer_block, backend=compile_config.backend, fullgraph=True
         )
+        # pyrefly: ignore [missing-attribute]
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
@@ -280,6 +286,7 @@ def apply_fsdp(
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
+        # pyrefly: ignore [bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
     match reshard_after_forward_policy:
@@ -297,11 +304,13 @@ def apply_fsdp(
             )
 
     if model.tok_embeddings is not None:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             model.tok_embeddings,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
+    # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
         fully_shard(
             transformer_block,
@@ -311,6 +320,7 @@ def apply_fsdp(
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
     if model.norm is not None and model.output is not None:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             [model.norm, model.output],
             **fsdp_config,
@@ -327,6 +337,7 @@ def apply_ddp(
     if enable_compile:
         torch._dynamo.config.optimize_ddp = "ddp_optimizer"
 
+    # pyrefly: ignore [invalid-param-spec]
     replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
 
     logger.info("Applied DDP to the model")

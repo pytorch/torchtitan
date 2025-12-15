@@ -19,6 +19,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama4.infra.parallelize import (
@@ -92,6 +93,8 @@ def parallelize_deepseekv3(
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
+
         apply_moe_ep_tp(
             model,
             tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
@@ -104,6 +107,7 @@ def parallelize_deepseekv3(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
+            dual_pipe_v=dual_pipe_v,
         )
 
     model_compile_enabled = (
@@ -115,6 +119,7 @@ def parallelize_deepseekv3(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
+            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
@@ -221,6 +226,7 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
@@ -242,6 +248,7 @@ def apply_non_moe_tp(
             "ffn_norm": SequenceParallel(),
         }
 
+        # pyrefly: ignore [missing-attribute]
         if transformer_block.attention.q_lora_rank == 0:
             layer_plan.update(
                 {
@@ -259,6 +266,7 @@ def apply_non_moe_tp(
                 }
             )
 
+        # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
             layer_plan.update(
                 {
@@ -273,8 +281,10 @@ def apply_non_moe_tp(
             )
 
         parallelize_module(
+            # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
