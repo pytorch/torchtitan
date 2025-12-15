@@ -23,9 +23,12 @@ logger = init_logger(__name__)
 
 def create_parallel_dims_from_vllm_config(vllm_config: VllmConfig) -> ParallelDims:
     """
-    Create ParallelDims from vLLM config.
+    Create ParallelDims from vLLM config and maps vLLM parallelism settings to TorchTitan's ParallelDims dataclass.
 
-    Maps vLLM parallelism settings to TorchTitan's ParallelDims dataclass.
+    This function is needed because vLLM doesn't separate model creation and
+    parallelism application - it requires parallelization to be done inside
+    the model constructor, so we are creating parallel_dims and apply parallelism
+    in TorchTitanVLLMModelWrapper.__init__ function.
 
     Args:
         vllm_config: vLLM configuration object
@@ -58,47 +61,3 @@ def create_parallel_dims_from_vllm_config(vllm_config: VllmConfig) -> ParallelDi
     )
 
     return parallel_dims
-
-
-def build_device_mesh_and_parallelize(
-    model,
-    parallelize_fn,
-    parallel_dims: ParallelDims,
-):
-    """
-    Build device mesh and apply parallelization to the model.
-
-    Uses TorchTitan's ParallelDims to build the device mesh with proper validation
-    and submesh creation, then applies tensor parallelism to the model using the
-    provided parallelize function.
-
-    Args:
-        model: The TorchTitan model to parallelize
-        parallelize_fn: Function to apply tensor parallelism (e.g., apply_qwen3_tp)
-        parallel_dims: ParallelDims object with validated parallelism settings
-
-    Returns:
-        The device mesh object
-    """
-    # Use ParallelDims to build the device mesh
-    # This handles all the complexity of:
-    # - Validation of parallel dimensions
-    # - Building multi-dimensional device mesh
-    # - Creating all required submeshes (dp, dp_shard_cp, dp_cp, etc.)
-    world_mesh = parallel_dims.world_mesh
-
-    logger.info(f"Built device mesh using ParallelDims: {world_mesh}")
-
-    # Apply tensor parallelism using provided function
-    if parallel_dims.tp_enabled:
-        tp_mesh = world_mesh["tp"]
-        parallelize_fn(
-            model=model,
-            tp_mesh=tp_mesh,
-            loss_parallel=False,
-            enable_float8_tensorwise_tp=False,
-            enable_async_tp=False,
-        )
-        logger.info(f"Applied Tensor Parallelism with TP={parallel_dims.tp}")
-
-    return world_mesh

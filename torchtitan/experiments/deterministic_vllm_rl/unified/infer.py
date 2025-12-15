@@ -10,8 +10,8 @@ import argparse
 from vllm import LLM, SamplingParams
 from vllm.logger import init_logger
 
-# Import models module - this automatically registers TorchTitan models with vLLM
-from torchtitan.experiments.deterministic_vllm_rl import models  # noqa: F401
+# Import unified module - this automatically registers TorchTitan models with vLLM
+from torchtitan.experiments.deterministic_vllm_rl import unified  # noqa: F401
 
 
 logger = init_logger(__name__)
@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument(
         "--model_ckpt_path",
         type=str,
-        default="torchtitan/experiments/deterministic_vllm_rl/example_checkpoint/qwen3-0.6B",
+        default="torchtitan/experiments/deterministic_vllm_rl/example_checkpoint",
         help="Path to TorchTitan checkpoint directory",
     )
     parser.add_argument(
@@ -74,7 +74,8 @@ def main():
     llm = LLM(
         model=args.model_ckpt_path,  # Model checkpoint path
         hf_overrides={
-            "checkpoint_dir": args.model_ckpt_path,
+            # Override architectures to use our registered TorchTitan model class
+            "architectures": ["Qwen3TorchTitanForCausalLM"],
         },
         dtype="bfloat16",
         trust_remote_code=True,

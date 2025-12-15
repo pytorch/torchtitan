@@ -25,15 +25,12 @@ from torch.distributed.checkpoint.state_dict import (
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
-from torchtitan.experiments.deterministic_vllm_rl.models.attention import (
-    VLLMPagedFlashAttention,
-)
-from torchtitan.experiments.deterministic_vllm_rl.models.utils import (
-    create_parallel_dims_from_vllm_config,
-)
+from torchtitan.experiments.deterministic_vllm_rl.unified.attention import VLLMAttention
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+
+from .utils import create_parallel_dims_from_vllm_config
 
 
 logger = init_logger(__name__)
@@ -41,12 +38,12 @@ logger = init_logger(__name__)
 ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
 
 
-class TorchTitanVLLMModel(nn.Module):
+class TorchTitanVLLMModelWrapper(nn.Module):
     """
     Generic vLLM-compatible model wrapper for TorchTitan models.
 
     The wrapper handles:
-    - HF config to TorchTitan model args mapping
+    - Direct usage of TorchTitan model args (no HF config mapping needed)
     - Attention replacement with vLLM paged attention
     - Tensor parallelism setup
     - Weight loading from HF checkpoints
@@ -60,8 +57,8 @@ class TorchTitanVLLMModel(nn.Module):
     def __init__(
         self,
         *,
-        model_cls: type[ModelProtocol],  # passing types that is not instantiated
-        model_args_cls: type[BaseModelArgs],
+        model_cls: type[ModelProtocol],
+        model_args: BaseModelArgs,
         state_dict_adapter: type[BaseStateDictAdapter],
         parallelize_fn: ParallelizeFunction,
         vllm_config: VllmConfig,
@@ -73,19 +70,13 @@ class TorchTitanVLLMModel(nn.Module):
 
         # Store components
         self.model_cls = model_cls
-        self.model_args_cls = model_args_cls
         self.state_dict_adapter = state_dict_adapter
         self.parallelize_fn = parallelize_fn
 
-        # Map HF config to TorchTitan ModelArgs
-        hf_config = vllm_config.model_config.hf_config
-        logger.info(f"Mapping HF config to {self.model_args_cls.__name__}")
-        model_args = self._map_hf_config_to_model_args(hf_config, self.model_args_cls)
-
-        # Create TorchTitan model
+        # Use TorchTitan model args directly (no HF config mapping)
+        self.config = model_args
         logger.info(f"Creating {self.model_cls.__name__} with config: {model_args}")
         self.model = self.model_cls(model_args)
-        self.config = model_args
 
         # Setup RoPE cache extension function if provided
         self.rope_cache_extension_fn = partial(
@@ -94,7 +85,7 @@ class TorchTitanVLLMModel(nn.Module):
             base=self.config.rope_theta,
         )
         # Replace attention with vLLM paged attention
-        self._replace_with_vllm_paged_attention(model_args)
+        self._replace_with_vllm_attention(model_args)
 
         # Create ParallelDims from vLLM config and apply parallelization
         # NOTE: We need to apply parallelize within model.__init__ because w
@@ -115,74 +106,44 @@ class TorchTitanVLLMModel(nn.Module):
         else:
             logger.info("Single GPU mode - no parallelization needed")
 
-    def _map_hf_config_to_model_args(self, hf_config, model_args_cls):
-        """
-        Map HuggingFace config to TorchTitan ModelArgs.
-
-        Default implementation that handles common model args fields.
-        Override in subclass if custom mapping is needed.
-        """
-        # Maps TorchTitan parameter name to HF config attribute name
-        mapping = {
-            "vocab_size": "vocab_size",
-            "dim": "hidden_size",
-            "n_layers": "num_hidden_layers",
-            "n_heads": "num_attention_heads",
-            "n_kv_heads": "num_key_value_heads",
-            "head_dim": "head_dim",
-            "hidden_dim": "intermediate_size",
-            "norm_eps": "rms_norm_eps",
-            "max_seq_len": "max_position_embeddings",
-            "rope_theta": "rope_theta",
-            "qk_norm": "qk_norm",
-        }
-
-        # Build kwargs for model args from mapping
-        kwargs = {}
-        for torchtitan_param, hf_attr in mapping.items():
-            # Try to get value from HF config
-            if hasattr(hf_config, hf_attr):
-                kwargs[torchtitan_param] = getattr(hf_config, hf_attr)
-
-        return model_args_cls(**kwargs)
-
-    def _replace_with_vllm_paged_attention(self, model_args):
+    def _replace_with_vllm_attention(self, model_args):
         """
         Replace TorchTitan attention with vLLM paged attention.
 
         Assumes model has .layers dict with .attention.inner_attention structure.
         Override in subclass if different structure.
         """
-        if not hasattr(self.model, "layers"):
-            raise AttributeError(
-                f"Model {type(self.model).__name__} must have .layers attribute"
-            )
+        assert hasattr(
+            self.model, "layers"
+        ), f"Model {type(self.model).__name__} must have .layers attribute"
 
         for layer_name, layer in self.model.layers.items():
-            if not hasattr(layer, "attention"):
-                raise ValueError(f"Layer {layer_name} must have .attention attribute")
+            assert hasattr(
+                layer, "attention"
+            ), f"Layer {layer_name} must have .attention attribute"
 
-            # Create vLLM paged attention
-            vllm_attn = VLLMPagedFlashAttention(
+            vllm_attn = VLLMAttention(
                 hidden_size=model_args.dim,
                 num_heads=model_args.n_heads,
                 num_kv_heads=model_args.n_heads,  # Use n_heads (already replicated)
                 head_dim=model_args.head_dim,
-                causal=True,
+                layer_name=layer_name,
+                scale=model_args.head_dim**-0.5,
             )
 
             # Replace inner attention
             layer.attention.inner_attention = vllm_attn
 
         logger.info(
-            "Successfully replaced TorchTitan attention with vLLM PagedFlashAttention"
+            f"Successfully replaced TorchTitan attention with VLLMAttention "
+            f"({len(self.model.layers)} layers)"
         )
 
     def _extend_rope_cache_if_needed(
         self, rope_cache: torch.Tensor, max_position: int
     ) -> torch.Tensor:
         """
-        Extend RoPE cache if needed during vLLM profiling.
+        Extend RoPE cache if needed during vLLM profiling stage.
 
         Args:
             rope_cache: Current RoPE cache tensor
@@ -309,10 +270,6 @@ class TorchTitanVLLMModel(nn.Module):
             batch_size, seq_len, hidden_size = h.shape
             h = h.view(batch_size * seq_len, hidden_size)
 
-        # TODO(jianiw): finish this conversion when TP is applied
-        if isinstance(h, DTensor):
-            h = h.full_tensor()
-
         return h
 
     def compute_logits(
@@ -324,15 +281,12 @@ class TorchTitanVLLMModel(nn.Module):
         h = self.model.norm(hidden_states)
         logits = self.model.output(h)
 
-        # TODO: This part is to work with TP integration
-        if isinstance(logits, DTensor):
-            logits = logits.to_local()
-
         return logits
 
     def load_weights(self, weights_iter):
         """
         Load weights from HF checkpoint using the provided state dict adapter.
+        vLLM engine would call this function to load model weights.
 
         Args:
             weights_iter: Iterator of (name, tensor) pairs from HF checkpoint

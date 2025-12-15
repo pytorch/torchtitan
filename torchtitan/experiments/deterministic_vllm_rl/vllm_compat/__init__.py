@@ -4,30 +4,26 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+vLLM-Compatible approach for deterministic RL training.
 
-from .unified import (
-    create_parallel_dims_from_vllm_config,
-    register_torchtitan_model_from_train_spec,
-    TorchTitanVLLMModelWrapper,
-)
-from .vllm_compat import (
+This module provides models that match vLLM's weight format (e.g., merged gate_up_proj)
+with custom backward passes for gradient computation during training.
+"""
+
+from .batch_invariant_backward import (
     enable_batch_invariant_backward_mode,
-    Qwen3VLLMCompatModel,
     rms_norm_with_gradients,
     silu_and_mul_with_gradients,
-    VLLMCompatibleFlashAttention,
 )
+from .models.attention import VLLMCompatibleFlashAttention
+from .models.qwen3 import Qwen3VLLMCompatModel
 
 
 __all__ = [
-    # vllm_compat exports
     "VLLMCompatibleFlashAttention",
     "Qwen3VLLMCompatModel",
     "enable_batch_invariant_backward_mode",
     "rms_norm_with_gradients",
     "silu_and_mul_with_gradients",
-    # unified exports
-    "TorchTitanVLLMModelWrapper",
-    "create_parallel_dims_from_vllm_config",
-    "register_torchtitan_model_from_train_spec",
 ]

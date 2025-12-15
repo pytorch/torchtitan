@@ -30,11 +30,11 @@ from transformers import AutoConfig, AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
-from torchtitan.experiments.deterministic_vllm_rl.weights.converter import (
+from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.weights.converter import (
     torchtitan_to_vllm,
     vllm_to_torchtitan,
 )
-from torchtitan.experiments.deterministic_vllm_rl.weights_vllm_compat import (
+from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
@@ -340,7 +340,7 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
 
     if use_vllm_compat:
         # Create and load model (using vLLM-compat for bitwise determinism)
-        from torchtitan.experiments.deterministic_vllm_rl.models.qwen3 import (
+        from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.models.qwen3 import (
             Qwen3VLLMCompatModel,
         )
 
@@ -1058,7 +1058,7 @@ def main():
         print("✓ Batch invariance detected - using vLLM-compatible model")
         # Add backward pass support to vLLM's batch_invariant mode
         print("  Adding gradient support to vLLM's batch_invariant mode...")
-        from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
+        from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.batch_invariant_backward import (
             enable_batch_invariant_backward_mode,
         )
 

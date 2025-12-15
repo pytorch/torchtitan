@@ -13,7 +13,7 @@ This runs the same operation multiple times and checks if results are bit-for-bi
 import torch
 from vllm.model_executor.layers.batch_invariant import disable_batch_invariant_mode
 
-from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
+from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.batch_invariant_backward import (
     enable_batch_invariant_backward_mode,
 )
 

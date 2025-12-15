@@ -13,7 +13,7 @@ from torch import nn
 from torchtitan.components.tokenizer import BaseTokenizer
 
 # Import gradient-enabled operations from experiment utilities
-from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
+from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.batch_invariant_backward import (
     rms_norm_with_gradients,
     silu_and_mul_with_gradients,
 )
