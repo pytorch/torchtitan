@@ -272,7 +272,7 @@ class HFTransformerModel(nn.Module):
 
                 if module.padding_idx is not None:
                     if isinstance(module.weight.data, DTensor):
-                        module.weight.data.to_local()[module.padding_idx].zero_()
+                        module.weight.data._local_tensor[module.padding_idx].zero_()
                     else:
                         module.weight.data[module.padding_idx].zero_()
 
