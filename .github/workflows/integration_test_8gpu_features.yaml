@@ -70,7 +70,7 @@ jobs:
         echo "Checking FSDP8 v.s. HSDP (4, 2) accuracy parity"
         export baseline_options="--parallelism.data_parallel_replicate_degree=1"
         export test_options="--parallelism.data_parallel_replicate_degree=4"
-        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal --steps=10  --import-result tests/assets/losses/llama3.txt
+        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal --steps=10  --export-result ${RUNNER_TEMP}/artifacts-to-be-uploaded/loss_result.txt
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
