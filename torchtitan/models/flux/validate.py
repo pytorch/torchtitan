@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Generator
+from contextlib import AbstractContextManager
 
 import torch
 import torch.nn as nn
@@ -15,7 +15,7 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.components.validate import Validator
+from torchtitan.components.validate import ValidationContext, Validator
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.flux.flux_datasets import build_flux_validation_dataloader
@@ -55,8 +55,8 @@ class FluxValidator(Validator):
         model_args: FluxModelArgs,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
-        validation_context: Generator[None, None, None],
-        maybe_enable_amp: Generator[None, None, None],
+        validation_context: ValidationContext,
+        maybe_enable_amp: AbstractContextManager[None],
         metrics_processor: MetricsProcessor | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
@@ -67,6 +67,7 @@ class FluxValidator(Validator):
         self.model_args = model_args
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
+        # pyrefly: ignore [missing-attribute]
         self.all_timesteps = self.job_config.validation.all_timesteps
         self.validation_dataloader = build_flux_validation_dataloader(
             job_config=job_config,
@@ -78,6 +79,7 @@ class FluxValidator(Validator):
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
+        # pyrefly: ignore [bad-assignment]
         self.metrics_processor = metrics_processor
         self.t5_tokenizer, self.clip_tokenizer = build_flux_tokenizer(self.job_config)
 
@@ -95,6 +97,7 @@ class FluxValidator(Validator):
         t5_encoder: FluxEmbedder,
         clip_encoder: FluxEmbedder,
     ):
+        # pyrefly: ignore [read-only]
         self.device = device
         self._dtype = _dtype
         self.autoencoder = autoencoder
@@ -113,9 +116,12 @@ class FluxValidator(Validator):
         model.eval()
 
         # Disable cfg dropout during validation
+        # pyrefly: ignore [missing-attribute]
         training_cfg_prob = self.job_config.training.classifier_free_guidance_prob
+        # pyrefly: ignore [missing-attribute]
         self.job_config.training.classifier_free_guidance_prob = 0.0
 
+        # pyrefly: ignore [missing-attribute]
         save_img_count = self.job_config.validation.save_img_count
 
         parallel_dims = self.parallel_dims
@@ -124,6 +130,7 @@ class FluxValidator(Validator):
         device_type = dist_utils.device_type
         num_steps = 0
 
+        # pyrefly: ignore [not-iterable]
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
@@ -141,6 +148,7 @@ class FluxValidator(Validator):
                     device=self.device,
                     dtype=self._dtype,
                     job_config=self.job_config,
+                    # pyrefly: ignore [bad-argument-type]
                     model=model,
                     prompt=p,
                     autoencoder=self.autoencoder,
@@ -154,6 +162,7 @@ class FluxValidator(Validator):
                     name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
                     output_dir=os.path.join(
                         self.job_config.job.dump_folder,
+                        # pyrefly: ignore [missing-attribute]
                         self.job_config.validation.save_img_folder,
                     ),
                     x=image,
@@ -217,8 +226,6 @@ class FluxValidator(Validator):
 
             # Apply CP sharding if enabled
             if parallel_dims.cp_enabled:
-                from torchtitan.distributed import utils as dist_utils
-
                 (
                     latents,
                     latent_pos_enc,
@@ -266,6 +273,7 @@ class FluxValidator(Validator):
         model.train()
 
         # re-enable cfg dropout for training
+        # pyrefly: ignore [missing-attribute]
         self.job_config.training.classifier_free_guidance_prob = training_cfg_prob
 
 
@@ -277,8 +285,8 @@ def build_flux_validator(
     model_args: FluxModelArgs,
     parallel_dims: ParallelDims,
     loss_fn: LossFunction,
-    validation_context: Generator[None, None, None],
-    maybe_enable_amp: Generator[None, None, None],
+    validation_context: ValidationContext,
+    maybe_enable_amp: AbstractContextManager[None],
     metrics_processor: MetricsProcessor | None = None,
     pp_schedule: _PipelineSchedule | None = None,
     pp_has_first_stage: bool | None = None,

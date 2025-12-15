@@ -26,7 +26,7 @@ class ParallelDims:
     etp: int
     world_size: int
 
-    _world_mesh: DeviceMesh = None
+    _world_mesh: DeviceMesh | None = None
 
     def __post_init__(self):
         self._validate()
@@ -105,7 +105,7 @@ class ParallelDims:
                 names.append(name)
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+        mesh = init_device_mesh(device_type, tuple(dims), mesh_dim_names=tuple(names))
 
         # Create all the submesh here to ensure all required process groups are
         # initialized:
@@ -156,7 +156,7 @@ class ParallelDims:
                 names.append(name)
 
         logger.info(f"Building {len(dims)}-D device mesh with {names}, {dims}")
-        mesh = init_device_mesh(device_type, dims, mesh_dim_names=names)
+        mesh = init_device_mesh(device_type, tuple(dims), mesh_dim_names=tuple(names))
 
         # Create all the submesh here to ensure all required process groups are
         # initialized:

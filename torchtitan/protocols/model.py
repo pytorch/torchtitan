@@ -37,9 +37,7 @@ class BaseModelArgs:
         pass
 
     @abstractmethod
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         pass
 
 

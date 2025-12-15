@@ -16,6 +16,7 @@ import tyro
 try:
     import tomllib
 except ModuleNotFoundError:
+    # pyrefly: ignore [missing-import]
     import tomli as tomllib
 
 from torchtitan.tools.logging import logger
@@ -253,7 +254,10 @@ if __name__ == "__main__":
     #
     # -----------------------------------------------------------------------------
 
+    # pyrefly: ignore [missing-import]
     from rich import print as rprint
+
+    # pyrefly: ignore [missing-import]
     from rich.pretty import Pretty
 
     config_manager = ConfigManager()
