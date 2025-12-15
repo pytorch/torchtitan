@@ -62,9 +62,7 @@ class TransformerModelArgs(BaseModelArgs):
                 "CP support for FlexAttention is still in progress."
             )
 
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_dense_model_nparams_and_flops(
             self,
             model,

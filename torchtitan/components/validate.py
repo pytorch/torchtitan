@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Generator
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+from typing import Any, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -19,6 +21,8 @@ from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloade
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
+
+ValidationContext: TypeAlias = Callable[[], AbstractContextManager[None]]
 
 
 class BaseValidator:
@@ -54,8 +58,8 @@ class Validator(BaseValidator):
         model_args: BaseModelArgs,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
-        validation_context: Generator[None, None, None],
-        maybe_enable_amp: Generator[None, None, None],
+        validation_context: ValidationContext,
+        maybe_enable_amp: AbstractContextManager[None],
         metrics_processor: MetricsProcessor,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
@@ -133,6 +137,7 @@ class Validator(BaseValidator):
 
         attn_type = getattr(self.model_args, "attn_type", "sdpa")
         if attn_type in ["flex", "varlen"]:
+            # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
@@ -156,6 +161,7 @@ class Validator(BaseValidator):
         return inputs, labels, extra_inputs, extra_kwargs
 
     @torch.no_grad()
+    # pyrefly: ignore [bad-override]
     def validate(
         self,
         model_parts: list[nn.Module],
@@ -171,6 +177,7 @@ class Validator(BaseValidator):
         device_type = utils.device_type
         num_steps = 0
 
+        # pyrefly: ignore [not-iterable]
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
@@ -263,8 +270,8 @@ def build_validator(
     model_args: BaseModelArgs,
     parallel_dims: ParallelDims,
     loss_fn: LossFunction,
-    validation_context: Generator[None, None, None],
-    maybe_enable_amp: Generator[None, None, None],
+    validation_context: ValidationContext,
+    maybe_enable_amp: AbstractContextManager[None],
     metrics_processor: MetricsProcessor | None = None,
     pp_schedule: _PipelineSchedule | None = None,
     pp_has_first_stage: bool | None = None,
@@ -281,6 +288,7 @@ def build_validator(
         loss_fn=loss_fn,
         validation_context=validation_context,
         maybe_enable_amp=maybe_enable_amp,
+        # pyrefly: ignore [bad-argument-type]
         metrics_processor=metrics_processor,
         pp_schedule=pp_schedule,
         pp_has_first_stage=pp_has_first_stage,

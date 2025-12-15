@@ -1,0 +1,6 @@
+"ciflow/8gpu":
+  - .ci/docker/**
+  - .github/workflows/**
+  - scripts/**
+  - tests/**
+  - torchtitan/**
