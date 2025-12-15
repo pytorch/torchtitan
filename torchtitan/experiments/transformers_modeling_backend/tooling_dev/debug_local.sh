@@ -2,15 +2,20 @@
 
 # Parse command line arguments
 COMPILE_FLAG=""
+FLAVOR="debugmodel"
 while [[ $# -gt 0 ]]; do
     case $1 in
         --compile)
             COMPILE_FLAG="--enable_compile"
             shift
             ;;
+        --flavor)
+            FLAVOR="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--compile]"
+            echo "Usage: $0 [--compile] [--flavor FLAVOR]"
             exit 1
             ;;
     esac
@@ -40,25 +45,25 @@ model_names=(
 for model_name in "${model_names[@]}"; do
     rm -rf debug_local_results/${model_name}
 
-    python ./tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir debug_local_results --flavor debugmodel $COMPILE_FLAG
-    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugmodel/seed_checkpoint --qos high
-    while [ ! -f debug_local_results/${model_name}/debugmodel/seed_checkpoint/status.txt ] || [ "$(cat debug_local_results/${model_name}/debugmodel/seed_checkpoint/status.txt)" != "completed" ]; do
+    python ./tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir debug_local_results --flavor $FLAVOR $COMPILE_FLAG
+    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/${FLAVOR}/seed_checkpoint --qos high
+    while [ ! -f debug_local_results/${model_name}/${FLAVOR}/seed_checkpoint/status.txt ] || [ "$(cat debug_local_results/${model_name}/${FLAVOR}/seed_checkpoint/status.txt)" != "completed" ]; do
         echo "Waiting for seed checkpoint from ${model_name} to complete ..."
         sleep 1
     done
-    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugmodel --qos high
+    python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/${FLAVOR} --qos high
     echo "================"
 done
 
 # for model_name in "${moe_model_names[@]}"; do
 #     rm -rf debug_local_results/${model_name}
 
-#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir debug_local_results --flavor debugmodel $COMPILE_FLAG
-#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugmodel/seed_checkpoint --qos high
-#     while [ ! -f debug_local_results/${model_name}/debugmodel/seed_checkpoint/status.txt ] || [ "$(cat debug_local_results/${model_name}/debugmodel/seed_checkpoint/status.txt)" != "completed" ]; do
+#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir debug_local_results --flavor $FLAVOR $COMPILE_FLAG
+#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/${FLAVOR}/seed_checkpoint --qos high
+#     while [ ! -f debug_local_results/${model_name}/${FLAVOR}/seed_checkpoint/status.txt ] || [ "$(cat debug_local_results/${model_name}/${FLAVOR}/seed_checkpoint/status.txt)" != "completed" ]; do
 #         echo "Waiting for seed checkpoint from ${model_name} to complete ..."
 #         sleep 1
 #     done
-#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/debugmodel --qos high
+#     USE_MOE=1 python ./tooling_dev/test_hf_integration.py submit_jobs --inp_dir debug_local_results/${model_name}/${FLAVOR} --qos high
 #     echo "================"
 # done
