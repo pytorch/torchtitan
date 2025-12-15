@@ -60,9 +60,7 @@ class TransformerModelArgs(BaseModelArgs):
         ):
             raise NotImplementedError("CP support for varlen is not supported.")
 
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_dense_model_nparams_and_flops(
             self,
             model,

@@ -37,8 +37,6 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         n_heads (int): Number of attention heads.
         norm_eps (float): Epsilon value used for RMSNorm.
         moe_args (MoEArgs): MoE configuration.
-        n_expert_groups (int): Number of expert groups.
-        n_limited_groups (int): Number of limited groups for MoE routing.
         q_lora_rank (int): LoRA rank for query projections.
         kv_lora_rank (int): LoRA rank for key-value projections.
         qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
@@ -66,9 +64,6 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
 
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
-    # TODO: node-limited routing is not supported yet
-    n_expert_groups: int = 1
-    n_limited_groups: int = 1
 
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
@@ -101,16 +96,17 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
+        if (
+            job_config.parallelism.context_parallel_degree > 1
+            and self.attn_type != "sdpa"
+        ):
             raise NotImplementedError("CP support is only supported for SDPA.")
 
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
         )
 
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(
             self,
             model,

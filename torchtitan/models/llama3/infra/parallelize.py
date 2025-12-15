@@ -26,6 +26,7 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.context_parallel import apply_cp
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
 
@@ -95,7 +96,6 @@ def parallelize_llama(
 
     use_flex_attn = getattr(model.model_args, "attn_type", "sdpa") == "flex"
     if parallel_dims.cp_enabled:
-        logger.info("Applied Context Parallel to the model")
         apply_cp(model, world_mesh["cp"], use_flex_attn)
 
     model_compile_enabled = (
@@ -107,6 +107,7 @@ def parallelize_llama(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
+            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
@@ -206,7 +207,7 @@ def apply_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
@@ -232,8 +233,10 @@ def apply_tp(
         }
 
         parallelize_module(
+            # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
@@ -248,10 +251,12 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = torch.compile(
             transformer_block, backend=compile_config.backend, fullgraph=True
         )
+        # pyrefly: ignore [missing-attribute]
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
@@ -286,6 +291,7 @@ def apply_fsdp(
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
+        # pyrefly: ignore [bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
     match reshard_after_forward_policy:
@@ -303,11 +309,13 @@ def apply_fsdp(
             )
 
     if model.tok_embeddings is not None:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             model.tok_embeddings,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
+    # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
         fully_shard(
             transformer_block,
@@ -317,6 +325,7 @@ def apply_fsdp(
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
     if model.norm is not None and model.output is not None:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             [model.norm, model.output],
             **fsdp_config,
@@ -333,45 +342,7 @@ def apply_ddp(
     if enable_compile:
         torch._dynamo.config.optimize_ddp = "ddp_optimizer"
 
+    # pyrefly: ignore [invalid-param-spec]
     replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
 
     logger.info("Applied DDP to the model")
-
-
-def apply_cp(
-    model: nn.Module,
-    cp_mesh: DeviceMesh,
-    use_flex_attn: bool,
-) -> None:
-    """
-    Apply context parallelism to the model.
-    """
-    from torch.distributed.tensor.experimental._attention import (
-        _ContextParallel,
-        _enable_context_parallel_dispatcher,
-    )
-
-    # Apply context parallelism to every transformer block
-    # TODO: make seq_sim configurable once the implementation doesn't assume 2
-    # internally.
-    if use_flex_attn:
-        cp_plan = _ContextParallel(
-            seq_dim=2, attention_type=_ContextParallel.AttentionType.FLEX
-        )
-    else:
-        # This is currently required as DTensor dispatcher is not enabled to
-        # dispatch SDPA to CP implementation. We don't disable the CP
-        # dispatching in TorchTitan as it is not needed. But there is a
-        # corresponding API, _disable_context_parallel_dispatcher to do
-        # that if users have this use case.
-        _enable_context_parallel_dispatcher()
-        cp_plan = _ContextParallel(
-            seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
-        )
-
-    for transformer_block in model.layers.values():
-        parallelize_module(
-            module=transformer_block.attention.inner_attention,
-            device_mesh=cp_mesh,
-            parallelize_plan=cp_plan,
-        )

@@ -48,23 +48,31 @@ class FluxTrainer(Trainer):
         model_args = self.train_spec.model_args[job_config.model.flavor]
 
         self.autoencoder = load_ae(
+            # pyrefly: ignore [missing-attribute]
             job_config.encoder.autoencoder_path,
+            # pyrefly: ignore [missing-attribute]
             model_args.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
+            # pyrefly: ignore [missing-attribute]
             random_init=job_config.training.test_mode,
         )
 
         self.clip_encoder = FluxEmbedder(
+            # pyrefly: ignore [missing-attribute]
             version=job_config.encoder.clip_encoder,
+            # pyrefly: ignore [missing-attribute]
             random_init=job_config.training.test_mode,
         ).to(device=self.device, dtype=self._dtype)
         self.t5_encoder = FluxEmbedder(
+            # pyrefly: ignore [missing-attribute]
             version=job_config.encoder.t5_encoder,
+            # pyrefly: ignore [missing-attribute]
             random_init=job_config.training.test_mode,
         ).to(device=self.device, dtype=self._dtype)
 
         # Apply FSDP to the T5 model / CLIP model
+        # pyrefly: ignore [bad-assignment]
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
@@ -73,6 +81,7 @@ class FluxTrainer(Trainer):
         )
 
         if job_config.validation.enable:
+            # pyrefly: ignore [missing-attribute]
             self.validator.flux_init(
                 device=self.device,
                 _dtype=self._dtype,
@@ -157,6 +166,7 @@ class FluxTrainer(Trainer):
                 loss = self.loss_fn(latent_noise_pred, target)
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
+            # pyrefly: ignore [unsupported-delete]
             del (latent_noise_pred, noise, target)
             loss.backward()
 
