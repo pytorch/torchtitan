@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Any
+
+import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.experimental._attention import (
@@ -12,6 +15,7 @@ from torch.distributed.tensor.experimental._attention import (
 )
 from torch.distributed.tensor.parallel import parallelize_module
 
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.tools.logging import logger
 
 
@@ -65,3 +69,48 @@ def apply_cp(
         )
 
     logger.info("Applied Context Parallel to the model")
+
+
+def prepare_context_parallel_input(
+    inputs: torch.Tensor,
+    labels: torch.Tensor,
+    extra_kwargs: dict[str, Any],
+    cp_mesh: DeviceMesh,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    """
+    Prepare inputs, labels, and attention masks for Context Parallel forward pass.
+
+    This function prepares tensors for Context Parallel by:
+    1. Creating position indices based on input sequence length
+    2. Sharding inputs, labels, and positions across the CP mesh
+    3. Sharding attention masks if present
+
+    Args:
+        inputs: Input tensor of shape [batch_size, seq_len]
+        labels: Label tensor of shape [batch_size, seq_len]
+        extra_kwargs: Dictionary that may contain 'attention_masks' to be sharded
+        cp_mesh: Device mesh for context parallel dimension
+        device: Device to create position tensor on
+
+    Returns:
+        Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
+            - sharded_inputs: Inputs sharded along sequence dimension
+            - sharded_labels: Labels sharded along sequence dimension
+            - updated_extra_kwargs: Dict with sharded 'positions' and optionally
+              sharded 'attention_masks'
+    """
+    attention_masks = extra_kwargs.get("attention_masks", None)
+    positions = torch.arange(
+        0, inputs.shape[1], dtype=torch.int32, device=device
+    ).expand(inputs.shape)
+    (inputs, labels, positions), attention_masks = dist_utils.cp_shard(
+        cp_mesh,
+        (inputs, labels, positions),
+        attention_masks,
+    )
+    extra_kwargs["positions"] = positions
+    if attention_masks is not None:
+        extra_kwargs["attention_masks"] = attention_masks
+
+    return inputs, labels, extra_kwargs

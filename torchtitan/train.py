@@ -28,6 +28,7 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -476,18 +477,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
 
         if self.parallel_dims.cp_enabled:
-            attention_masks = extra_kwargs.get("attention_masks", None)
-            positions = torch.arange(
-                0, inputs.shape[1], dtype=torch.int32, device=self.device
-            ).expand(inputs.shape)
-            (inputs, labels, positions), attention_masks = dist_utils.cp_shard(
-                self.parallel_dims.world_mesh["cp"],
-                (inputs, labels, positions),
-                attention_masks,
+            inputs, labels, extra_kwargs = prepare_context_parallel_input(
+                inputs, labels, extra_kwargs, self.parallel_dims.world_mesh["cp"], self.device
             )
-            extra_kwargs["positions"] = positions
-            if attention_masks is not None:
-                extra_kwargs["attention_masks"] = attention_masks
 
         return inputs, labels, extra_inputs, extra_kwargs
 
