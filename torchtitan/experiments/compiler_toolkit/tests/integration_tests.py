@@ -131,6 +131,20 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
             "llama3_fsdp_tp_flexattn_manualbucketing_regional_inductor",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.passes inductor_lite",
+                ],
+            ],
+            "llama3 FSDP+TP+inductor_lite",
+            "llama3_fsdp_tp_inductor_lite",
+            ngpu=4,
+        ),
         # deepseek_v3 tests
         OverrideDefinitions(
             [
@@ -156,11 +170,42 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.expert_parallel_degree 4",
                     "--parallelism.expert_tensor_parallel_degree 1",
                     "--activation_checkpoint.mode none",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.passes inductor_lite",
+                ],
+            ],
+            "deepseek_v3 FSDP+TP+EP+Inductor_lite",
+            "deepseekv3_fsdp_tp_ep_inductor_lite",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.deepseek_v3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                    "--activation_checkpoint.mode none",
                     "--model.flavor debugmodel_flex_attn",
                 ],
             ],
             "deepseek_v3 FSDP+TP+EP+FlexAttention",
             "deepseekv3_fsdp_tp_ep_flexattention",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.passes inductor_lite",
+                ],
+            ],
+            "llama3 FSDP+TP+inductor_lite",
+            "llama3_fsdp_tp_inductor_lite",
             ngpu=4,
         ),
     ]
