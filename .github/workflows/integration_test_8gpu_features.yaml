@@ -76,9 +76,11 @@ jobs:
           LOSS_FILE="tests/assets/losses/llama3_cuda.txt"
           STEPS=10
         elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
-          # The loss of ROCm runs start to diverge between FSDP and HSDP
-          # after 5 steps. Leave fore AMD people to fix this if this is
-          # something bother users.
+          # The loss results of FSDP and HSDP start to diverge after 5th
+          # step when running with ROCm, we also need to adjust this.
+          # But this is more an unknown issue that AMD people may want to
+          # figure out the root cause or confirm that this is an expected
+          # behavior.
           LOSS_FILE="tests/assets/losses/llama3_rocm.txt"
           STEPS=5
         else
