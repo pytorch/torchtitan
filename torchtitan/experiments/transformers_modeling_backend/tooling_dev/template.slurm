@@ -8,6 +8,8 @@
 #SBATCH --qos={{ qos }}
 #SBATCH --cpus-per-task=12
 #SBATCH --partition=hopper-prod
+#SBATCH --time=00:30:00
+#SBATCH --reservation=nvshmem_xp
 
 # Misc initializations.
 echo "========================"
