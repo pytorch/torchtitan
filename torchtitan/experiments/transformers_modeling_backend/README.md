@@ -4,7 +4,7 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
 
 ## Quick start
 
-- Requirements `transformers==4.57.1`
+- Requirements `transformers==5.0.0rc0`
 
 - Config: `torchtitan/torchtitan/experiments/transformers_modeling_backend/configs/qwen3.toml`
 ```diff
