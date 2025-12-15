@@ -1,7 +1,27 @@
 #!/usr/bin/bash
 
-# create a list of model_name
+# Parse command line arguments
+COMPILE_FLAG=""
+FLAVOR="debugmodel"
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --compile)
+            COMPILE_FLAG="--enable_compile"
+            shift
+            ;;
+        --flavor)
+            FLAVOR="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--compile] [--flavor FLAVOR]"
+            exit 1
+            ;;
+    esac
+done
 
+# create a list of model_name
 
 model_names=(
     "meta-llama/Llama-3.2-1B" # ✅
@@ -30,25 +50,25 @@ model_names=(
 for model_name in "${model_names[@]}"; do
     rm -rf slurm_results/${model_name}
 
-    python test_hf_integration.py create_configs --model_name "$model_name" --out_dir slurm_results --flavor debugmodel
-    python test_hf_integration.py submit_jobs --inp_dir slurm_results/${model_name}/debugmodel/seed_checkpoint --qos high
-    while [ ! -f slurm_results/${model_name}/debugmodel/seed_checkpoint/status.txt ] || [ "$(cat slurm_results/${model_name}/debugmodel/seed_checkpoint/status.txt)" != "completed" ]; do
+    python tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir slurm_results --flavor $FLAVOR $COMPILE_FLAG
+    python tooling_dev/test_hf_integration.py submit_jobs --inp_dir slurm_results/${model_name}/${FLAVOR}/seed_checkpoint --qos high
+    while [ ! -f slurm_results/${model_name}/${FLAVOR}/seed_checkpoint/status.txt ] || [ "$(cat slurm_results/${model_name}/${FLAVOR}/seed_checkpoint/status.txt)" != "completed" ]; do
         echo "Waiting for seed checkpoint from ${model_name} to complete ..."
         sleep 1
     done
-    python test_hf_integration.py submit_jobs --inp_dir slurm_results/${model_name}/debugmodel --qos high
+    python tooling_dev/test_hf_integration.py submit_jobs --inp_dir slurm_results/${model_name}/${FLAVOR} --qos high
     echo "================"
 done
 
 for model_name in "${moe_model_names[@]}"; do
     rm -rf slurm_results/${model_name}
 
-    USE_MOE=1 python test_hf_integration.py create_configs --model_name "$model_name" --out_dir slurm_results --flavor debugmodel
-    USE_MOE=1 python test_hf_integration.py submit_jobs --inp_dir slurm_results/${model_name}/debugmodel/seed_checkpoint --qos high
-    while [ ! -f slurm_results/${model_name}/debugmodel/seed_checkpoint/status.txt ] || [ "$(cat slurm_results/${model_name}/debugmodel/seed_checkpoint/status.txt)" != "completed" ]; do
+    USE_MOE=1 python tooling_dev/test_hf_integration.py create_configs --model_name "$model_name" --out_dir slurm_results --flavor $FLAVOR $COMPILE_FLAG
+    USE_MOE=1 python tooling_dev/test_hf_integration.py submit_jobs --inp_dir slurm_results/${model_name}/${FLAVOR}/seed_checkpoint --qos high
+    while [ ! -f slurm_results/${model_name}/${FLAVOR}/seed_checkpoint/status.txt ] || [ "$(cat slurm_results/${model_name}/${FLAVOR}/seed_checkpoint/status.txt)" != "completed" ]; do
         echo "Waiting for seed checkpoint from ${model_name} to complete ..."
         sleep 1
     done
-    USE_MOE=1 python test_hf_integration.py submit_jobs --inp_dir slurm_results/${model_name}/debugmodel --qos high
+    USE_MOE=1 python tooling_dev/test_hf_integration.py submit_jobs --inp_dir slurm_results/${model_name}/${FLAVOR} --qos high
     echo "================"
 done
