@@ -10,6 +10,8 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
 
+from torchtitan.components.tokenizer import BaseTokenizer
+
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
@@ -476,3 +478,34 @@ def get_moe_model_nparams_and_flops(
         nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token
+
+
+def validate_tokenizer_model_compatibility(
+    tokenizer: BaseTokenizer | None,
+    model_args: BaseModelArgs,
+) -> None:
+    """
+    Validate that tokenizer configuration is compatible with model configuration.
+
+    Args:
+        tokenizer: Tokenizer instance to validate. Can be None.
+        model_args: Model arguments object containing configuration to validate against.
+
+    Raises:
+        ValueError: If tokenizer vocab_size exceeds model vocab_size, which would
+            cause index out of bounds errors during training.
+    """
+    if tokenizer is None:
+        return
+
+    if hasattr(model_args, "vocab_size"):
+        tokenizer_vocab_size = tokenizer.get_vocab_size()
+        model_vocab_size = model_args.vocab_size
+        if model_vocab_size < tokenizer_vocab_size:
+            raise ValueError(
+                f"Model vocab_size ({model_vocab_size}) is smaller than "
+                f"tokenizer vocab_size ({tokenizer_vocab_size}). "
+                f"This will cause index out of bounds errors during training. "
+                f"The model's embedding layer must be at least as large as the "
+                f"tokenizer's vocabulary size."
+            )
