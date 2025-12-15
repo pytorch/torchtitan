@@ -17,6 +17,7 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools import utils
@@ -145,18 +146,9 @@ class Validator(BaseValidator):
             )
 
         if self.parallel_dims.cp_enabled:
-            attention_masks = extra_kwargs.get("attention_masks", None)
-            positions = torch.arange(
-                0, inputs.shape[1], dtype=torch.int32, device=device
-            ).expand(inputs.shape)
-            (inputs, labels, positions), attention_masks = dist_utils.cp_shard(
-                self.parallel_dims.world_mesh["cp"],
-                (inputs, labels, positions),
-                attention_masks,
+            inputs, labels, extra_kwargs = prepare_context_parallel_input(
+                inputs, labels, extra_kwargs, self.parallel_dims.world_mesh["cp"], device
             )
-            extra_kwargs["positions"] = positions
-            if attention_masks is not None:
-                extra_kwargs["attention_masks"] = attention_masks
 
         return inputs, labels, extra_inputs, extra_kwargs
 

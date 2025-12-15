@@ -20,7 +20,6 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.flux.flux_datasets import build_flux_validation_dataloader
 from torchtitan.models.flux.inference.sampling import generate_image, save_image
-from torchtitan.models.flux.model.args import FluxModelArgs
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 
@@ -52,7 +51,6 @@ class FluxValidator(Validator):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
-        model_args: FluxModelArgs,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
         validation_context: ValidationContext,
@@ -63,8 +61,6 @@ class FluxValidator(Validator):
         pp_has_last_stage: bool | None = None,
     ):
         self.job_config = job_config
-        self.tokenizer = tokenizer
-        self.model_args = model_args
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
         # pyrefly: ignore [missing-attribute]
@@ -224,32 +220,42 @@ class FluxValidator(Validator):
                 latents = pack_latents(latents)
                 target = pack_latents(noise - labels)
 
-            # Apply CP sharding if enabled
-            if parallel_dims.cp_enabled:
-                (
-                    latents,
-                    latent_pos_enc,
-                    t5_encodings,
-                    text_pos_enc,
-                    target,
-                ), _ = dist_utils.cp_shard(
-                    parallel_dims.world_mesh["cp"],
-                    (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
-                    None,  # No attention masks for Flux
+                optional_context_parallel_ctx = (
+                    dist_utils.create_context_parallel_ctx(
+                        cp_mesh=parallel_dims.world_mesh["cp"],
+                        cp_buffers=[
+                            latents,
+                            latent_pos_enc,
+                            t5_encodings,
+                            text_pos_enc,
+                            target,
+                        ],
+                        cp_seq_dims=[1, 1, 1, 1, 1],
+                        cp_no_restore_buffers={
+                            latents,
+                            latent_pos_enc,
+                            t5_encodings,
+                            text_pos_enc,
+                            target,
+                        },
+                        cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+                    )
+                    if parallel_dims.cp_enabled
+                    else None
                 )
 
-            with self.validation_context():
-                with self.maybe_enable_amp:
-                    latent_noise_pred = model(
-                        img=latents,
-                        img_ids=latent_pos_enc,
-                        txt=t5_encodings,
-                        txt_ids=text_pos_enc,
-                        y=clip_encodings,
-                        timesteps=timesteps,
-                    )
+                with self.validation_context(optional_context_parallel_ctx):
+                    with self.maybe_enable_amp:
+                        latent_noise_pred = model(
+                            img=latents,
+                            img_ids=latent_pos_enc,
+                            txt=t5_encodings,
+                            txt_ids=text_pos_enc,
+                            y=clip_encodings,
+                            timesteps=timesteps,
+                        )
 
-                loss = self.loss_fn(latent_noise_pred, target)
+                    loss = self.loss_fn(latent_noise_pred, target)
 
             del noise, target, latent_noise_pred, latents
 
@@ -282,7 +288,6 @@ def build_flux_validator(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
-    model_args: FluxModelArgs,
     parallel_dims: ParallelDims,
     loss_fn: LossFunction,
     validation_context: ValidationContext,
@@ -298,7 +303,6 @@ def build_flux_validator(
         dp_world_size=dp_world_size,
         dp_rank=dp_rank,
         tokenizer=tokenizer,
-        model_args=model_args,
         parallel_dims=parallel_dims,
         loss_fn=loss_fn,
         validation_context=validation_context,
