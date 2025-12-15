@@ -245,7 +245,7 @@ class TokenChoiceTopKRouter(nn.Module):
     def _get_node_limited_routing_scores(
         self,
         scores_for_choice: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """Select num_limited_groups groups based on group scores,
             and set expert scores in non-selected groups as -inf
 
@@ -259,6 +259,7 @@ class TokenChoiceTopKRouter(nn.Module):
             raise ValueError(
                 "num_limited_groups must be set when num_expert_groups is set"
             )
+        assert self.num_expert_groups is not None
         if self.num_experts % self.num_expert_groups != 0:
             raise ValueError(
                 f"num_experts ({self.num_experts}) must be divisible by num_expert_groups ({self.num_expert_groups})"
