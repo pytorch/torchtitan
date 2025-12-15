@@ -10,6 +10,7 @@ import math
 import torch
 from torch import nn
 from torch.nn import init
+from torch.distributed.tensor import DTensor
 from torchtitan.tools.logging import logger
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
@@ -270,7 +271,10 @@ class HFTransformerModel(nn.Module):
                     module.weight.data.normal_(mean=0.0, std=std)
 
                 if module.padding_idx is not None:
-                    module.weight.data[module.padding_idx].zero_()
+                    if isinstance(module.weight.data, DTensor):
+                        module.weight.data.to_local()[module.padding_idx].zero_()
+                    else:
+                        module.weight.data[module.padding_idx].zero_()
 
             elif (
                 isinstance(
