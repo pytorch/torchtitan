@@ -8,6 +8,7 @@ import math
 
 import torch
 from torch import nn
+from torch.distributed.tensor._api import DTensor
 
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
@@ -380,9 +381,15 @@ class TransformerBlock(nn.Module):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        x = x + self.attention(
-            self.attention_norm(x), freqs_cis, attention_masks, positions
+        print(
+            f"before attention norm, is_dtensor(x) {isinstance(x, DTensor)} {x.placements} {x.device_mesh}"
         )
+        t = self.attention_norm(x)
+        print(
+            f"after attention norm, is_dtensor(t) {isinstance(t, DTensor)}  {t.placements} {t.device_mesh}"
+        )
+
+        x = x + self.attention(t, freqs_cis, attention_masks, positions)
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
         else:

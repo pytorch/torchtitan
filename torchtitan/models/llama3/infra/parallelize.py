@@ -166,8 +166,9 @@ def apply_tp(
             "tok_embeddings": RowwiseParallel(
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
+                use_local_output=False,
             ),
-            "norm": SequenceParallel(),
+            "norm": SequenceParallel(use_local_output=False),
             "output": ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
@@ -204,25 +205,31 @@ def apply_tp(
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     for transformer_block in model.layers.values():
         layer_plan = {
-            "attention_norm": SequenceParallel(),
+            "attention_norm": SequenceParallel(
+                use_local_output=False,
+            ),
             # NOTE: when the fourth argument (positions) is not None, its input layout
             # and desired input layout should be Replicate()
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), None, None, None),
-                desired_input_layouts=(Replicate(), None, None, None),
+                input_layouts=(Shard(1), Replicate(), None, None),
+                desired_input_layouts=(Replicate(), Replicate(), None, None),
+                debug=True,
             ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
-            "ffn_norm": SequenceParallel(),
+            "attention.wq": colwise_parallel(use_local_output=False),
+            "attention.wk": colwise_parallel(use_local_output=False),
+            "attention.wv": colwise_parallel(use_local_output=False),
+            "attention.wo": rowwise_parallel(
+                output_layouts=Shard(1), use_local_output=False
+            ),
+            "ffn_norm": SequenceParallel(use_local_output=False),
             "feed_forward": prepare_module_input(
-                input_layouts=(Shard(1),),
-                desired_input_layouts=(Replicate(),),
+                input_layouts=(Shard(1),), desired_input_layouts=(Replicate(),)
             ),
-            "feed_forward.w1": colwise_parallel(),
-            "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-            "feed_forward.w3": colwise_parallel(),
+            "feed_forward.w1": colwise_parallel(use_local_output=False),
+            "feed_forward.w2": rowwise_parallel(
+                output_layouts=Shard(1), use_local_output=False
+            ),
+            "feed_forward.w3": colwise_parallel(use_local_output=False),
         }
 
         parallelize_module(

@@ -402,6 +402,7 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
+        # x is DTensor
         h = x + self.attention(
             self.attention_norm(x), freqs_cis, attention_masks, positions
         )
