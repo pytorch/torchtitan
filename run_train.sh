@@ -20,6 +20,9 @@ set -ex
 # DEBUG=1 DEBUG_WAIT_RANKS="0,1" DEBUG_TIMEOUT=60 ./run_train.sh  # wait for specific ranks with custom timeout
 # DEBUG=1 DEBUG_WAIT_RANKS="0" NGPU=8 CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b.toml" ./run_train.sh
 # NGPU=4 DEBUG=1 DEBUG_WAIT_RANKS="0" CONFIG_FILE="./torchtitan/models/qwen3/train_configs/qwen3_0.6b.toml" ./run_train.sh
+
+# DEBUG=1 DEBUG_WAIT_RANKS="0" NGPU=8 CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b.toml" ./run_train.sh
+
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/debug_model.toml"}

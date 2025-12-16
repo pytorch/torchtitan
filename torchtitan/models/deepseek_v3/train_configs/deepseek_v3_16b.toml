@@ -1,5 +1,5 @@
 [job]
-dump_folder = "./outputs"
+dump_folder = "/mnt/ckpts"
 description = "DeepSeek-V3 16B model training"
 print_config = false
 
@@ -29,7 +29,7 @@ lr = 2.2e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 200  # lr scheduler warm up, normally 20% of the train steps
+warmup_steps = 20  # lr scheduler warm up, normally 20% of the train steps
 decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
 decay_type = "cosine"
 min_lr_factor = 0.1
@@ -38,7 +38,7 @@ min_lr_factor = 0.1
 local_batch_size = 4
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 100
 dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 
 [parallelism]
@@ -55,7 +55,7 @@ expert_tensor_parallel_degree = 1
 [checkpoint]
 enable = true
 folder = "checkpoint"
-interval = 10
+interval = 25
 last_save_model_only = true
 export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
