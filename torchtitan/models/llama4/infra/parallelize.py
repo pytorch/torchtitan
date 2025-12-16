@@ -26,6 +26,7 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.context_parallel import apply_cp
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
     get_dual_pipe_v_flag,
@@ -124,6 +125,10 @@ def parallelize_llama(
             dual_pipe_v=dual_pipe_v,
         )
 
+    use_flex_attn = getattr(model.model_args, "attn_type", "sdpa") == "flex"
+    if parallel_dims.cp_enabled:
+        apply_cp(model, world_mesh["cp"], use_flex_attn)
+
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
@@ -178,9 +183,6 @@ def parallelize_llama(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
 
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
@@ -253,7 +255,8 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             # NOTE: when the fourth argument (positions) is not None, its input layout
-            # and desired input layout should be Replicate()
+            # and desired input layout is still None as we don't convert freqs_cis to
+            # a DTensor for llama4.
             "attention": prepare_module_input(
                 input_layouts=(Shard(1), None, None, None),
                 desired_input_layouts=(Replicate(), None, None, None),
