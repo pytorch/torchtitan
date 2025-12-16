@@ -9,8 +9,8 @@ import math
 
 import torch
 from torch import nn
-from torch.nn import init
 from torch.distributed.tensor import DTensor
+from torch.nn import init
 from torchtitan.tools.logging import logger
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
