@@ -8,8 +8,8 @@ python scripts/checkpoint_conversion/convert_to_hf.py \
 
 
 python scripts/checkpoint_conversion/convert_to_hf.py \
-    /mnt/ckpts/checkpoint/step-25 \
-    /mnt/ckpts/checkpoint/step-25-hf \
+    /mnt/ckpts/checkpoint/step-5 \
+    /mnt/ckpts/checkpoint/step-5-hf \
     --hf_assets_path ./assets/hf/deepseek-moe-16b-base \
     --model_name deepseek_v3 \
     --model_flavor 16B \
@@ -28,3 +28,5 @@ for dir in /mnt/ckpts/checkpoint/*/; do
             --export_dtype bfloat16
     fi
 done
+
+DEBUG=1 DEBUG_WAIT_RANKS="0" NGPU=8 CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b.toml" ./run_train.sh

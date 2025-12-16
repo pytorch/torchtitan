@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import shutil
 from pathlib import Path
 
 import torch
@@ -13,6 +14,33 @@ import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
+
+
+def copy_config_json(hf_assets_path, output_dir):
+    """
+    Copy config.json from hf_assets_path to output_dir.
+    
+    Args:
+        hf_assets_path: Path to the HuggingFace assets directory containing config.json
+        output_dir: Path to the output directory where config.json should be copied
+    """
+    hf_assets_path = Path(hf_assets_path)
+    output_dir = Path(output_dir)
+    
+    config_source = hf_assets_path / "config.json"
+    config_dest = output_dir / "config.json"
+    
+    if not config_source.exists():
+        raise FileNotFoundError(
+            f"config.json not found at {config_source}. "
+            f"Please ensure the HuggingFace assets path is correct."
+        )
+    
+    # Create output directory if it doesn't exist
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Copy the file
+    shutil.copy2(config_source, config_dest)
 
 
 @torch.inference_mode()
@@ -64,6 +92,8 @@ def convert_to_hf(
         hf_state_dict,
         storage_writer=storage_writer,
     )
+
+    copy_config_json(hf_assets_path, output_dir)
 
 
 if __name__ == "__main__":
