@@ -4,12 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""
-vLLM-compatible Flash Attention implementation for deterministic RL training.
-"""
 
 import torch
-from vllm.vllm_flash_attn import flash_attn_varlen_func
+from vllm.attention.utils.fa_utils import flash_attn_varlen_func
 
 
 class VLLMCompatibleFlashAttention(torch.nn.Module):
