@@ -1,4 +1,4 @@
-# Deterministic vLLM RL Training
+# Deterministic RL Training with vLLM
 
 This package provides two approaches for integrating TorchTitan models with vLLM:
 

@@ -12,10 +12,10 @@ tensor parallelism to TorchTitan models in vLLM using TorchTitan's ParallelDims.
 """
 
 import torch.distributed as dist
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
 
 from torchtitan.distributed.parallel_dims import ParallelDims
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
 
 
 logger = init_logger(__name__)

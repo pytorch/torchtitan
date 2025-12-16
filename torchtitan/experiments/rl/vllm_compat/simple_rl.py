@@ -25,20 +25,20 @@ import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
 from torch.utils.tensorboard import SummaryWriter
-from transformers import AutoConfig, AutoTokenizer
 
-from vllm import LLM, SamplingParams
-from vllm.model_executor.layers.batch_invariant import init_batch_invariance
-
-from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.weights.converter import (
+from torchtitan.experiments.rl.vllm_compat.weights.converter import (
     torchtitan_to_vllm,
     vllm_to_torchtitan,
 )
-from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.weights_vllm_compat import (
+from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
+from transformers import AutoConfig, AutoTokenizer
+
+from vllm import LLM, SamplingParams
+from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
 init_batch_invariance()
 

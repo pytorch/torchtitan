@@ -12,7 +12,6 @@ TorchTitan models for vLLM.
 """
 
 from functools import partial
-from typing import Callable, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -22,20 +21,19 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
-
 from torchtitan.experiments.deterministic_vllm_rl.unified.attention import VLLMAttention
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.protocols.train_spec import ParallelizeFunction
+
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
 
 from .utils import create_parallel_dims_from_vllm_config
 
 
 logger = init_logger(__name__)
-
-ParallelizeFunction: TypeAlias = Callable[..., nn.Module]
 
 
 class TorchTitanVLLMModelWrapper(nn.Module):
