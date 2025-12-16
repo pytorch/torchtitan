@@ -107,34 +107,31 @@ def parallelize_llama(
         maybe_enable_async_tp(job_config, world_mesh["tp"])
 
     # Check if using DeepEP for MoE communication
-    use_deepep = (
-        parallel_dims.ep_enabled 
-        and job_config.parallelism.expert_parallel_comm_backend == "deepep"
-    )
-    
-    if (
-        job_config.parallelism.expert_parallel_comm_backend == "deepep" 
-        and not parallel_dims.ep_enabled
-    ):
-        use_deepep = False
-        logger.warning(
-            "expert_parallel_comm_backend='deepep' has no effect when EP=1. "
-            "Using standard communication."
+    if job_config.parallelism.expert_parallel_comm_backend == "deepep":
+        if not parallel_dims.ep_enabled:
+            raise ValueError(
+                "DeepEP requires expert parallelism (ep_degree > 1). "
+                "The DeepEP MoE model code does not support EP=1. "
+                "Please set expert_parallel_degree > 1 or use standard communication backend."
+            )
+        if parallel_dims.etp_enabled:
+            raise NotImplementedError(
+                "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+                "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
         )
     
-    if use_deepep:
+        use_deepep = True
+        
         # Import deepep module to register custom ops before accessing them
         import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
-        _op_sac_save_list.add(torch.ops.deepep.get_dispatch_layout.default)
         _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
         _op_sac_save_list.add(torch.ops.deepep.combine.default)
-    
-    # DeepEP + ETP is not supported yet
-    if use_deepep and parallel_dims.etp_enabled:
-        raise NotImplementedError(
-            "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
-            "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
+        logger.info(
+            "Added DeepEP ops to SAC save list: "
+            f"torch.ops.deepep.dispatch.default, torch.ops.deepep.combine.default"
         )
+    else:
+        use_deepep = False
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
@@ -160,6 +157,11 @@ def parallelize_llama(
         job_config.compile.enable and "model" in job_config.compile.components
     )
     if job_config.activation_checkpoint.mode != "none":
+        if job_config.activation_checkpoint.selective_ac_option == "op":
+            logger.info(
+                f"SAC save list contains {len(_op_sac_save_list)} ops: "
+                f"{sorted([str(op) for op in _op_sac_save_list])}"
+            )
         apply_ac(
             model,
             job_config.activation_checkpoint,

@@ -252,32 +252,32 @@ def get_buffer(group: ProcessGroup, hidden_bytes: int) -> Buffer:
 
 def _indices_to_multihot(
     indices: torch.Tensor, 
-    probs: torch.Tensor, 
+    scores: torch.Tensor, 
     num_local_experts: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Convert topk indices to multihot format for permutation."""
     batch_size = indices.shape[0]
     multihot_routing_map = torch.zeros((batch_size, num_local_experts), dtype=torch.long, device=indices.device)
-    multihot_probs = torch.zeros((batch_size, num_local_experts), dtype=probs.dtype, device=indices.device)
+    multihot_scores = torch.zeros((batch_size, num_local_experts), dtype=scores.dtype, device=indices.device)
     
     mask = indices != -1
     valid_indices = indices[mask]
     row_indices = torch.arange(batch_size, device=indices.device).repeat_interleave(mask.sum(dim=1))
     multihot_routing_map[row_indices, valid_indices] = 1
-    multihot_probs[row_indices, valid_indices] = probs[mask]
+    multihot_scores[row_indices, valid_indices] = scores[mask]
     
-    return multihot_routing_map.bool(), multihot_probs
+    return multihot_routing_map.bool(), multihot_scores
 
 
 def _permute_tokens(
     tokens: torch.Tensor,
     routing_map: torch.Tensor,
-    probs: Optional[torch.Tensor] = None,
+    scores: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     """Permute tokens by expert for grouped_mm.
     
     Returns:
-        (permuted_tokens, permuted_probs, sorted_indices)
+        (permuted_tokens, permuted_scores, sorted_indices)
     """
     num_tokens = tokens.shape[0]
     num_experts = routing_map.shape[1]
@@ -288,12 +288,12 @@ def _permute_tokens(
     sorted_indices = token_indices.masked_select(routing_map_t)
     sorted_tokens = tokens.index_select(0, sorted_indices)
     
-    if probs is not None:
-        sorted_probs = probs.T.contiguous().masked_select(routing_map_t)
+    if scores is not None:
+        sorted_scores = scores.T.contiguous().masked_select(routing_map_t)
     else:
-        sorted_probs = None
+        sorted_scores = None
     
-    return sorted_tokens, sorted_probs, sorted_indices
+    return sorted_tokens, sorted_scores, sorted_indices
 
 
 def _unpermute_tokens(
@@ -367,22 +367,22 @@ def dispatch_tokens(
     num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert_dispatch, is_token_in_rank, _ = \
         buffer.get_dispatch_layout(topk_idx=selected_experts_indices, num_experts=num_experts)
     
-    hidden_states, dispatched_indices, dispatched_scores, tokens_per_expert, cache_id = \
+    hidden_states, dispatched_indices, dispatched_expert_scores, tokens_per_expert, cache_id = \
         torch.ops.deepep.dispatch(
             hidden_states, selected_experts_indices, top_scores,
             num_tokens_per_rank, num_tokens_per_rdma_rank,
             is_token_in_rank, num_tokens_per_expert_dispatch,
         )
     
-    dispatched_routing_map, dispatched_probs_multihot = _indices_to_multihot(
-        dispatched_indices, dispatched_scores, num_local_experts
+    dispatched_routing_map, dispatched_expert_scores_multihot = _indices_to_multihot(
+        dispatched_indices, dispatched_expert_scores, num_local_experts
     )
     
     num_recv_tokens = hidden_states.shape[0]
     
     # Sort tokens by expert for grouped_mm
     hidden_states, permuted_scores, sorted_indices = _permute_tokens(
-        hidden_states, dispatched_routing_map, probs=dispatched_probs_multihot
+        hidden_states, dispatched_routing_map, scores=dispatched_expert_scores_multihot
     )
     
     # Compute tokens_per_expert from routing_map (matches the sorted tokens)

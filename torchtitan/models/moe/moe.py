@@ -568,21 +568,19 @@ class MoE(nn.Module):
 
 
 def build_moe(args: MoEArgs, dim: int, hidden_dim: int, moe_impl: str = "standard") -> nn.Module:
-    """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP).
-
-    If 'deepep' is requested but DeepEP is not installed, falls back to standard with a warning.
-    """
+    """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP)."""
     if moe_impl == "deepep":
         try:
+            import torchtitan.distributed.deepep  # noqa: F401 - Check if DeepEP library is installed
             from .moe_deepep import DeepEPMoE
-            logger.info(f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}")
-            return DeepEPMoE(moe_args=args, dim=dim, hidden_dim=hidden_dim)
         except ImportError as e:
-            logger.warning(
+            raise ImportError(
                 f"DeepEP requested but not available: {e}. "
-                f"Falling back to standard MoE. Install DeepEP from: https://github.com/deepseek-ai/deepep"
-            )
-            # Fall through to standard MoE
+                f"Install DeepEP from: https://github.com/deepseek-ai/deepep"
+            ) from e
+        
+        logger.info(f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}")
+        return DeepEPMoE(moe_args=args, dim=dim, hidden_dim=hidden_dim)
     
     logger.info(f"Standard MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}")
     return MoE(args, dim=dim, hidden_dim=hidden_dim)
