@@ -203,29 +203,33 @@ class DataLoader:
     """
     Configuration for PyTorch DataLoader settings.
 
-    This is a flexible kwargs container that passes all fields directly to
-    StatefulDataLoader. Common options include:
-    - num_workers: Number of worker processes for data loading (default: 0)
-    - persistent_workers: Keep workers alive between epochs (default: False)
-    - prefetch_factor: Batches loaded in advance per worker (default: None)
-    - pin_memory: Copy tensors to CUDA pinned memory (default: False)
+    These settings are passed directly to StatefulDataLoader.
 
-    Warning:
-        Some arguments are set internally and will override any values provided
-        in kwargs. These include:
-        - batch_size: Determined by training.local_batch_size
-        - collate_fn: Set by the dataset-specific collator
+    Note:
+        persistent_workers and prefetch_factor are only valid if num_workers > 0.
 
     Example (TOML config file):
-        [training.dataloader.kwargs]
+        [training.dataloader]
         num_workers = 4
         pin_memory = true
         persistent_workers = true
         prefetch_factor = 2
     """
 
-    kwargs: dict[str, Any] = field(default_factory=dict)
-    """Keyword arguments passed to StatefulDataLoader."""
+    num_workers: int = 0
+    """Number of worker processes for data loading."""
+
+    persistent_workers: bool = False
+    """Keep workers alive between epochs. Only valid when num_workers > 0."""
+
+    pin_memory: bool = False
+    """Copy tensors to CUDA pinned memory before returning them."""
+
+    prefetch_factor: int | None = None
+    """
+    Number of batches loaded in advance by each worker. Only valid when num_workers > 0.
+    Default is 2 when num_workers > 0, otherwise None.
+    """
 
 
 @dataclass

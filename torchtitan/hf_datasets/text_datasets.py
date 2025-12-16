@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import asdict
 from functools import partial
 from typing import Any, Callable
 
@@ -196,9 +197,8 @@ def build_text_dataloader(
         infinite=infinite,
     )
 
-    # Merge config kwargs with explicit args (explicit args take precedence)
     dataloader_kwargs = {
-        **job_config.training.dataloader.kwargs,
+        **asdict(job_config.training.dataloader),
         "batch_size": batch_size,
     }
 
@@ -241,9 +241,8 @@ def build_text_validation_dataloader(
         infinite=infinite,
     )
 
-    # Merge config kwargs with explicit args (explicit args take precedence)
     dataloader_kwargs = {
-        **job_config.validation.dataloader.kwargs,
+        **asdict(job_config.validation.dataloader),
         "batch_size": batch_size,
     }
 

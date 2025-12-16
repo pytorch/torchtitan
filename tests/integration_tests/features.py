@@ -560,10 +560,15 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    '--training.dataloader.kwargs \'{"num_workers": 2, "pin_memory": true, "prefetch_factor": 2}\'',
+                    "--training.dataloader.num_workers",
+                    "2",
+                    "--training.dataloader.pin_memory",
+                    "--training.dataloader.persistent_workers",
+                    "--training.dataloader.prefetch_factor",
+                    "4",
                 ],
             ],
-            "Dataloader kwargs",
+            "Dataloader kwargs (via CLI args)",
             "dataloader_kwargs",
             ngpu=2,
         ),

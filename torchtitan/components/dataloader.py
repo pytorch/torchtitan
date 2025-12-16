@@ -79,7 +79,11 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
 
     @staticmethod
     def _validate_kwargs(kwargs: dict[str, Any]) -> None:
-        """Validate kwargs passed to the dataloader.
+        """Validate and sanitize kwargs passed to the dataloader.
+
+        Args:
+            kwargs: Dictionary of keyword arguments to validate. This dict is
+                modified in-place to remove invalid combinations.
 
         Raises:
             ValueError: If 'dataset' is in kwargs or if any invalid kwargs are passed.
@@ -100,6 +104,12 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
                 f"Invalid dataloader kwargs: {invalid_kwargs}. "
                 f"Valid kwargs are: {sorted(valid_kwargs)}"
             )
+
+        # persistent_workers and prefetch_factor are only valid when num_workers > 0.
+        # Removing them here if num_workers is 0 to avoid StatefulDataLoader errors
+        if kwargs.get("num_workers", 0) == 0:
+            kwargs.pop("persistent_workers", None)
+            kwargs.pop("prefetch_factor", None)
 
     def state_dict(self) -> dict[str, Any]:
         # Store state only for dp rank to avoid replicating the same state across other dimensions.

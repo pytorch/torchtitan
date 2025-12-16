@@ -48,6 +48,37 @@ class DummyTokenizer(BaseTokenizer):
 
 
 class TestParallelAwareDataloader(unittest.TestCase):
+    def test_dataloader_yields_correct_batches(self):
+        """Test that the dataloader correctly yields batched data from the dataset."""
+        dataset = DummyDataset()
+        batch_size = 4
+
+        dataloader = ParallelAwareDataloader(
+            dataset,
+            dp_rank=0,
+            dp_world_size=1,
+            batch_size=batch_size,
+        )
+
+        batches = list(dataloader)
+
+        # DummyDataset yields 100 items, so we expect 25 batches of size 4
+        self.assertEqual(len(batches), 25)
+
+        # Check first batch structure and values
+        first_batch_input, first_batch_label = batches[0]
+        self.assertEqual(len(first_batch_input["input"]), batch_size)
+        self.assertEqual(len(first_batch_label), batch_size)
+
+        # Verify first batch contains expected values (0, 1, 2, 3)
+        self.assertEqual(first_batch_input["input"].tolist(), [0, 1, 2, 3])
+        self.assertEqual(first_batch_label.tolist(), [0, 1, 2, 3])
+
+        # Check last batch
+        last_batch_input, last_batch_label = batches[-1]
+        self.assertEqual(last_batch_input["input"].tolist(), [96, 97, 98, 99])
+        self.assertEqual(last_batch_label.tolist(), [96, 97, 98, 99])
+
     def test_validate_kwargs_rejects_invalid_kwargs(self):
         """Test that passing invalid kwargs raises ValueError."""
         dataset = DummyDataset()
@@ -87,10 +118,8 @@ class TestParallelAwareDataloader(unittest.TestCase):
         # Verify that batch_size is the explicit one, not the config one
         self.assertEqual(dataloader.batch_size, explicit_batch_size)
 
-    def test_build_dataloader_with_job_config_override(self):
-        """Verify batch_size from job_config.training.local_batch_size
-        overrides batch_size in job_config.training.dataloader.kwargs.
-        """
+    def test_build_dataloader_with_job_config(self):
+        """Verify batch_size from job_config.training.local_batch_size is correctly used."""
         from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 
         tokenizer = DummyTokenizer()
@@ -104,11 +133,10 @@ class TestParallelAwareDataloader(unittest.TestCase):
                 "8",
                 "--training.seq_len",
                 "512",
+                "--training.dataloader.num_workers",
+                "2",
             ]
         )
-
-        # Manually set batch_size in dataloader.kwargs to simulate conflict
-        config.training.dataloader.kwargs["batch_size"] = 2
 
         dataloader = build_text_dataloader(
             tokenizer=tokenizer,
@@ -117,8 +145,8 @@ class TestParallelAwareDataloader(unittest.TestCase):
             job_config=config,
         )
 
-        # The dataloader should use training.local_batch_size (8), not kwargs batch_size (2)
         self.assertEqual(dataloader.batch_size, 8)
+        self.assertEqual(dataloader.num_workers, 2)
 
 
 if __name__ == "__main__":

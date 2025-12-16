@@ -11,6 +11,7 @@ including images and text. Images are interleaved with text at native aspect rat
 It supports both streaming and non-streaming datasets from HuggingFace.
 """
 
+from dataclasses import asdict
 from typing import Any, Callable
 
 import torch
@@ -429,9 +430,8 @@ def build_mm_dataloader(
         special_tokens=special_tokens,
     )
 
-    # Merge config kwargs with explicit args (explicit args take precedence)
     dataloader_kwargs = {
-        **job_config.training.dataloader.kwargs,
+        **asdict(job_config.training.dataloader),
         "batch_size": batch_size,
         "collate_fn": collate_fn,
     }

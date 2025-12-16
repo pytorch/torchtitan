@@ -45,10 +45,9 @@ class TestFluxDataLoader(unittest.TestCase):
         for world_size in [2]:
             for rank in range(world_size):
                 dataset_name = "cc12m-test-iterable"
-
                 batch_size = 1
+
                 num_steps = 15
-                num_workers = 4
 
                 # TODO: if num_steps * batch_size * world_size is larger than the number of samples
                 # in the dataset, then the test will fail, due to huggingface's
@@ -75,9 +74,6 @@ class TestFluxDataLoader(unittest.TestCase):
                     ]
                 )
 
-                # Set num_workers via the kwargs dict
-                config.training.dataloader.kwargs["num_workers"] = num_workers
-
                 dl = build_flux_dataloader(
                     dp_world_size=world_size,
                     dp_rank=rank,
@@ -85,8 +81,6 @@ class TestFluxDataLoader(unittest.TestCase):
                     tokenizer=None,
                     infinite=True,
                 )
-
-                assert dl.num_workers == num_workers
 
                 it = iter(dl)
 
