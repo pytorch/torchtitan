@@ -539,6 +539,7 @@ def cp_shard(
     cp_mesh: DeviceMesh,
     inputs: tuple[torch.Tensor, ...],
     attention_masks: AttentionMasksType | None,
+    disable_load_balancer: bool = False,
 ):
     from torch.distributed.tensor.experimental._attention import (
         _context_parallel_shard,
@@ -550,25 +551,26 @@ def cp_shard(
     INPUT_SEQ_DIM = 1
     seq_len = inputs[0].size(INPUT_SEQ_DIM)
     cp_world_size = cp_mesh.size(0)
-    if isinstance(attention_masks, BlockMask):
-        load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
-    elif attention_masks is None or isinstance(attention_masks, dict[str, BlockMask]):
-        # For SDPA, we use the _HeadTailLoadBalancer.
-        #
-        # TODO: For dict[str, BlockMask], _PTRRLoadBalancer currently doesn't
-        # support the case where there are multiple masks. To address multiple
-        # masks usage, _PTRRLoadBalancer also needs to take into account the
-        # usage frequency of each mask. So we default to _HeadTailLoadBalancer
-        # as we have not implemented this feature.
-        load_balancer = _HeadTailLoadBalancer(
-            seq_len, cp_world_size, cp_mesh.device_type
-        )
-    else:
-        ValueError(
-            "cp_shard only support attention_masks is "
-            "None, BlockMask, dict[str, BlockMask]"
-        )
 
+    load_balancer = None
+    if not disable_load_balancer:
+        if isinstance(attention_masks, BlockMask):
+            load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
+        elif attention_masks is None or isinstance(attention_masks, dict):
+            # For SDPA, we use the _HeadTailLoadBalancer.
+            # TODO: For dict[str, BlockMask], _PTRRLoadBalancer currently doesn't
+            # support the case where there are multiple masks. To address multiple
+            # masks usage, _PTRRLoadBalancer also needs to take into account the
+            # usage frequency of each mask. So we default to _HeadTailLoadBalancer
+            # as we have not implemented this feature.
+            load_balancer = _HeadTailLoadBalancer(
+                seq_len, cp_world_size, cp_mesh.device_type
+            )
+        else:
+            ValueError(
+                "cp_shard only support attention_masks is "
+                "None, BlockMask, dict[str, BlockMask]"
+            )
 
     inputs = cast(
         tuple[torch.Tensor, ...],
