@@ -5,16 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Deterministic RL training with vLLM experiment.
+vLLM-Compatible approach for deterministic RL training.
 
-This experiment provides tools for bitwise-deterministic reinforcement learning
-training using vLLM for fast rollouts and TorchTitan for training.
-
-Key components:
-- VLLMCompatibleFlashAttention: Flash attention with custom backward pass
-- Qwen3VLLMCompatModel: vLLM-compatible model with merged projections
-- batch_invariant_backward: Gradient support for vLLM's deterministic operations
-- simple_rl: End-to-end RL training loop
+This module provides models that match vLLM's weight format (e.g., merged gate_up_proj)
+with custom backward passes for gradient computation during training.
 """
 
 from .batch_invariant_backward import (
@@ -22,8 +16,9 @@ from .batch_invariant_backward import (
     rms_norm_with_gradients,
     silu_and_mul_with_gradients,
 )
-from .models import VLLMCompatibleFlashAttention
+from .models.attention import VLLMCompatibleFlashAttention
 from .models.qwen3 import Qwen3VLLMCompatModel
+
 
 __all__ = [
     "VLLMCompatibleFlashAttention",
