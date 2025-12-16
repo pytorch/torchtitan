@@ -6,8 +6,13 @@
 
 """
 Models for deterministic vLLM RL training.
+
+This module provides vLLM-compatible model components.
 """
 
 from .attention import VLLMCompatibleFlashAttention
 
-__all__ = ["VLLMCompatibleFlashAttention"]
+
+__all__ = [
+    "VLLMCompatibleFlashAttention",
+]
