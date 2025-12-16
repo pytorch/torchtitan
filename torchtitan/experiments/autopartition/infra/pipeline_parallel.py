@@ -39,7 +39,7 @@ __all__ = [
     "pipeline_module_split",
 ]
 
-def get_backward_compute_ratio(ac_config: ACConfig, num_layers: int):
+def get_backward_compute_ratio(ac_config: ACConfig, forward_flpos: list):
     """Get the backward computation ratio relative to forward pass for each layer.
     
     This ratio represents how many times more expensive backward computation is
@@ -59,20 +59,24 @@ def get_backward_compute_ratio(ac_config: ACConfig, num_layers: int):
         - 2: Standard case (backward ≈ 2x forward)
         - 3: With activation recomputation (backward ≈ 3x forward)
     """
-    if ac_config.mode in ["full", "memory_budget"]:
-        return [3] * num_layers
+    transformer_flops = max(set(forward_flpos), key=forward_flpos.count)
+    transformer_index = [i for i, v in enumerate(forward_flpos) if v == transformer_flops]
+    backward_compute_ratio = [2] * len(forward_flpos)
 
-    if ac_config.mode == 'selective':
-        if ac_config.selective_ac_option == "op":
-            return [3] * num_layers
+    for i, tf_index in enumerate(transformer_index):
+        if ac_config.mode in ["full", "memory_budget"]:
+            backward_compute_ratio[tf_index] = 3
 
-        checkpoint_interval = int(ac_config.selective_ac_option)
-        return [
-            3 if i % checkpoint_interval else 2
-            for i in range(num_layers)
-        ]
+        if ac_config.mode == 'selective':
+            if ac_config.selective_ac_option == "op":
+                backward_compute_ratio[tf_index] = 3
+            else:
+                checkpoint_interval = int(ac_config.selective_ac_option)
+                for i, tf_index in enumerate(transformer_index):
+                    if i % checkpoint_interval == 0:
+                        backward_compute_ratio[tf_index] = 3
 
-    return [2] * num_layers
+    return backward_compute_ratio
 
 def autopipe_partition(model, num_stages, job_config):
     """Partition layers based on automatic pipeline profiling.
