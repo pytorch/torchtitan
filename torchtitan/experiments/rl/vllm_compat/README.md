@@ -77,7 +77,7 @@ init_batch_invariance()
 ```python
 import torch
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
-from torchtitan.experiments.deterministic_vllm_rl import (
+from torchtitan.experiments.rl.vllm_compat import (
     enable_batch_invariant_backward_mode,
     Qwen3VLLMCompatModel,
 )
@@ -111,7 +111,7 @@ loss.backward()
 Run the RL training loop:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 VLLM_FLASH_ATTN_VERSION=3 python -m torchtitan.experiments.deterministic_vllm_rl.simple_rl
+VLLM_BATCH_INVARIANT=1 VLLM_FLASH_ATTN_VERSION=3 python -m torchtitan.experiments.rl.vllm_compat.simple_rl
 ```
 
 This will:
@@ -177,7 +177,7 @@ assert torch.equal(vllm_logprobs, titan_logprobs)
 Run the test suite:
 
 ```bash
-cd torchtitan/experiments/deterministic_vllm_rl/tests
+cd torchtitan/experiments/rl/vllm_compat/tests
 
 # Test backward passes
 python test_batch_invariant_backward.py
@@ -214,7 +214,7 @@ This implementation uses the same kernels for both rollouts (vLLM) and training 
 ## Project Structure
 
 ```
-deterministic_vllm_rl/
+rl/vllm_compat/
 ├── README.md                          # Documentation
 ├── __init__.py                        # Package initialization
 ├── batch_invariant_backward.py        # Backward passes for vLLM ops
