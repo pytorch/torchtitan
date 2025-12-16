@@ -10,7 +10,7 @@ import os
 from abc import abstractmethod
 from collections.abc import Iterable
 from datetime import timedelta
-from typing import Protocol
+from typing import cast, Protocol
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -23,6 +23,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
@@ -231,22 +232,16 @@ def create_context_parallel_ctx(
 
 class TrainContext(Protocol):
     @abstractmethod
-    def __call__(
-        self,
-        cp_context: contextlib.AbstractContextManager[None] | None = None,
-    ) -> contextlib.AbstractContextManager[None]:
+    def __call__(self) -> contextlib.AbstractContextManager[None]:
         pass
 
 
 def get_train_context(enable_loss_parallel: bool) -> TrainContext:
     @contextlib.contextmanager
-    def context(cp_context: contextlib.AbstractContextManager[None] | None = None):
+    def context():
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
-
-            if cp_context:
-                stack.enter_context(cp_context)
 
             yield
 
@@ -538,3 +533,42 @@ def _clip_grad_norm_with_ep(
     torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
 
     return total_norm
+
+
+def cp_shard(
+    cp_mesh: DeviceMesh,
+    inputs: tuple[torch.Tensor, ...],
+    attention_masks: AttentionMasksType | None,
+    disable_load_balancer: bool = False,
+):
+    from torch.distributed.tensor.experimental._attention import (
+        _context_parallel_shard,
+        _HeadTailLoadBalancer,
+    )
+
+    INPUT_SEQ_DIM = 1
+    seq_len = inputs[0].size(INPUT_SEQ_DIM)
+    cp_world_size = cp_mesh.size(0)
+    if attention_masks is not None:
+        raise ValueError(
+            "FlexAttention CP is not supported yet. Will come in the next PR."
+        )
+    else:
+        # For SDPA, we use the _HeadTailLoadBalancer.
+        load_balancer = (
+            None
+            if disable_load_balancer
+            else _HeadTailLoadBalancer(seq_len, cp_world_size, cp_mesh.device_type)
+        )
+
+    inputs = cast(
+        tuple[torch.Tensor, ...],
+        _context_parallel_shard(
+            mesh=cp_mesh,
+            buffers=inputs,
+            seq_dims=tuple(1 for _ in inputs),
+            load_balancer=load_balancer,
+        ),
+    )
+
+    return inputs, attention_masks

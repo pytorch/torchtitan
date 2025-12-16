@@ -26,6 +26,7 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.context_parallel import apply_cp
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
 
@@ -89,8 +90,13 @@ def parallelize_llama(
             world_mesh["tp"],
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
+            cp_enabled=parallel_dims.cp_enabled,
         )
         maybe_enable_async_tp(job_config, world_mesh["tp"])
+
+    use_flex_attn = getattr(model.model_args, "attn_type", "sdpa") == "flex"
+    if parallel_dims.cp_enabled:
+        apply_cp(model, world_mesh["cp"], use_flex_attn)
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -132,9 +138,6 @@ def parallelize_llama(
         else:
             logger.info("Applied FSDP to the model")
 
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
-
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
@@ -154,6 +157,7 @@ def apply_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
+    cp_enabled: bool = False,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -208,7 +212,8 @@ def apply_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             # NOTE: when the fourth argument (positions) is not None, its input layout
-            # and desired input layout should be Replicate()
+            # and desired input layout is still None as we don't convert freqs_cis to
+            # a DTensor for llama3.
             "attention": prepare_module_input(
                 input_layouts=(Shard(1), None, None, None),
                 desired_input_layouts=(Replicate(), None, None, None),
