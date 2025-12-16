@@ -240,6 +240,7 @@ class SFTDataset(IterableDataset, Stateful):
         else:
             self.pad_id = self.tokenizer.pad_id
             self.pad_token = self.tokenizer.pad_token
+        self.eos_id = self.tokenizer.eos_id
 
         self.buffer_max_length = self.max_length
         # Stateful variables
@@ -326,6 +327,9 @@ class SFTDataset(IterableDataset, Stateful):
                 return_attention_mask=False,
             )
             input_ids = enc["input_ids"][0]
+
+            if message["role"] == "assistant":
+                input_ids = torch.cat([input_ids, input_ids.new_tensor([self.eos_id])])
 
         # remove system prompt if exists
         if index != 0 and message["role"] != "system":
