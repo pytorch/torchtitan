@@ -1,0 +1,141 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Train: DeepSeek V3 16B",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "torchtitan.train",
+            "args": [
+                "--job.config_file",
+                "./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b.toml"
+            ],
+            "env": {
+                "DEBUG": "1",
+                "DEBUG_WAIT_RANKS": "0"
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Attach: Rank 0",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5678
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Attach: Rank 1",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5679
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Attach: Rank 2",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5680
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Attach: Rank 3",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5681
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Attach: Rank 4",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5682
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Attach: Rank 5",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5683
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Attach: Rank 6",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5684
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Attach: Rank 7",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5685
+            },
+            "justMyCode": false
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Attach: All Ranks (2 GPUs)",
+            "configurations": [
+                "Attach: Rank 0",
+                "Attach: Rank 1"
+            ],
+            "stopAll": true
+        },
+        {
+            "name": "Attach: All Ranks (4 GPUs)",
+            "configurations": [
+                "Attach: Rank 0",
+                "Attach: Rank 1",
+                "Attach: Rank 2",
+                "Attach: Rank 3"
+            ],
+            "stopAll": true
+        },
+        {
+            "name": "Attach: All Ranks (8 GPUs)",
+            "configurations": [
+                "Attach: Rank 0",
+                "Attach: Rank 1",
+                "Attach: Rank 2",
+                "Attach: Rank 3",
+                "Attach: Rank 4",
+                "Attach: Rank 5",
+                "Attach: Rank 6",
+                "Attach: Rank 7"
+            ],
+            "stopAll": true
+        }
+    ]
+}
