@@ -173,7 +173,11 @@ class Trainer(ForgeEngine):
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
-                inputs, labels, extra_kwargs, self.parallel_dims.world_mesh["cp"], self.device
+                inputs,
+                labels,
+                extra_kwargs,
+                self.parallel_dims.world_mesh["cp"],
+                self.device,
             )
 
         return inputs, labels, extra_inputs, extra_kwargs

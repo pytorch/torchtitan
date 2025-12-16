@@ -539,6 +539,7 @@ def cp_shard(
     cp_mesh: DeviceMesh,
     inputs: tuple[torch.Tensor, ...],
     attention_masks: AttentionMasksType | None,
+    disable_load_balancer: bool = False,
 ):
     from torch.distributed.tensor.experimental._attention import (
         _context_parallel_shard,
@@ -554,8 +555,10 @@ def cp_shard(
         )
     else:
         # For SDPA, we use the _HeadTailLoadBalancer.
-        load_balancer = _HeadTailLoadBalancer(
-            seq_len, cp_world_size, cp_mesh.device_type
+        load_balancer = (
+            None
+            if disable_load_balancer
+            else _HeadTailLoadBalancer(seq_len, cp_world_size, cp_mesh.device_type)
         )
 
     inputs = cast(

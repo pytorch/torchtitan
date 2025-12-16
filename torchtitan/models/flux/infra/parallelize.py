@@ -14,6 +14,11 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.tensor.experimental._attention import (
+    _ContextParallel,
+    _enable_context_parallel_dispatcher,
+)
+from torch.distributed.tensor.parallel import parallelize_module
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
@@ -27,6 +32,9 @@ def parallelize_flux(
 ):
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
+
+    if parallel_dims.cp_enabled:
+        apply_cp(model, parallel_dims.world_mesh["cp"])
 
     if parallel_dims.fsdp_enabled:
         if parallel_dims.dp_replicate_enabled:
@@ -46,16 +54,6 @@ def parallelize_flux(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-
-        if parallel_dims.cp_enabled:
-            # The attention in Flux does not use causal mask.
-            # Currently, load_balance must be disabled in order to support Context Parallelism
-            # in Pytorch's experimental ring attention module
-            # https://github.com/pytorch/pytorch/blob/v2.9.0/torch/distributed/tensor/experimental/_attention.py#L395
-            from torch.distributed.tensor.experimental._attention import _cp_options
-
-            _cp_options.enable_load_balance = False
-            logger.info("Applied Context Parallel to the model")
 
     return model
 
@@ -132,6 +130,61 @@ def apply_ac(model: nn.Module, ac_config):
         model.single_blocks.register_module(layer_id, block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+
+
+def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
+    """
+    Apply context parallelism to the Flux model.
+
+    Args:
+        model: The Flux model with double_blocks and single_blocks containing
+            inner attention modules.
+        cp_mesh: Device mesh for context parallel dimension
+
+    Note:
+        - Uses SDPA attention type
+        - Applies to double_block.inner_attention for each DoubleStreamBlock
+    """
+    # Apply context parallelism to every DoubleStreamBlock
+    # TODO: make seq_sim configurable once the implementation doesn't assume 2
+    # internally.
+
+    _enable_context_parallel_dispatcher()
+    cp_plan = _ContextParallel(
+        seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
+    )
+
+    # pyrefly: ignore [not-iterable]
+    for double_block in model.double_blocks:
+        parallelize_module(
+            # pyrefly: ignore [missing-attribute]
+            module=double_block.img_attn.inner_attention,
+            device_mesh=cp_mesh,
+            parallelize_plan=cp_plan,
+        )
+        parallelize_module(
+            # pyrefly: ignore [missing-attribute]
+            module=double_block.txt_attn.inner_attention,
+            device_mesh=cp_mesh,
+            parallelize_plan=cp_plan,
+        )
+        parallelize_module(
+            # pyrefly: ignore [missing-attribute]
+            module=double_block.inner_attention,
+            device_mesh=cp_mesh,
+            parallelize_plan=cp_plan,
+        )
+
+    # pyrefly: ignore [not-iterable]
+    for single_block in model.sigle_blocks:
+        parallelize_module(
+            # pyrefly: ignore [missing-attribute]
+            module=single_block.inner_attention,
+            device_mesh=cp_mesh,
+            parallelize_plan=cp_plan,
+        )
+
+    logger.info("Applied Context Parallel to the Flux model")
 
 
 def parallelize_encoders(
