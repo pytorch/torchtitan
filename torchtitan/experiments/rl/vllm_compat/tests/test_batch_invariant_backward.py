@@ -8,9 +8,11 @@
 Test batch_invariant_backward module to ensure it works correctly.
 """
 
+import sys
+
 import torch
 
-from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
+from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.batch_invariant_backward import (
     disable_batch_invariant_backward_mode,
     enable_batch_invariant_backward_mode,
     linear_batch_invariant_backward,
