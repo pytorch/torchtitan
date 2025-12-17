@@ -16,9 +16,6 @@ This demonstrates:
 The architecture mirrors grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 """
 import os
-os.environ["VLLM_BATCH_INVARIANT"] = "1"
-os.environ["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN"
-
 import asyncio
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
@@ -29,8 +26,10 @@ from monarch.rdma import RDMABuffer
 from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
-from vllm.model_executor.layers.batch_invariant import init_batch_invariance
-
+from vllm.model_executor.layers.batch_invariant import (
+    init_batch_invariance,
+    vllm_is_batch_invariant,
+)
 
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
@@ -631,19 +630,13 @@ async def main():
     num_dataset_samples = 5
 
     # vLLM parallelism sizes
-    tp_size = 4
-
-    # Check batch invariance
-    from vllm.model_executor.layers.batch_invariant import (
-        init_batch_invariance,
-        vllm_is_batch_invariant,
-    )
+    tp_size = 1
 
     init_batch_invariance()
-    use_vllm_compat = vllm_is_batch_invariant()
+    batch_invariant = vllm_is_batch_invariant()
     mode = ModelMode.BATCH_INVARIANT
 
-    if use_vllm_compat:
+    if batch_invariant:
         print("Batch invariance detected - using vLLM-compatible model")
         from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
             enable_batch_invariant_backward_mode,
