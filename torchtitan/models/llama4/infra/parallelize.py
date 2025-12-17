@@ -24,7 +24,7 @@ from torch.distributed.tensor.parallel import (
 )
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
-from torchtitan.distributed import NoParallel, ParallelDims, DeepEPExpertParallel
+from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
@@ -33,6 +33,7 @@ from torchtitan.distributed.dual_pipe_v import (
 
 from torchtitan.distributed.expert_parallel import (
     BaseExpertParallel,
+    DeepEPExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
     ReordererSequenceParallel,
@@ -119,17 +120,13 @@ def parallelize_llama(
                 "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
         )
-    
+
         use_deepep = True
-        
+
         # Import deepep module to register custom ops before accessing them
         import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
         _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
         _op_sac_save_list.add(torch.ops.deepep.combine.default)
-        logger.info(
-            "Added DeepEP ops to SAC save list: "
-            f"torch.ops.deepep.dispatch.default, torch.ops.deepep.combine.default"
-        )
     else:
         use_deepep = False
 
@@ -150,7 +147,6 @@ def parallelize_llama(
             etp_enabled=parallel_dims.etp_enabled,
             dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
-            use_alignment_padding=job_config.parallelism.deepep_use_alignment_padding,
         )
 
     model_compile_enabled = (
@@ -514,7 +510,6 @@ def apply_moe_ep_tp(
     etp_enabled: bool,
     dual_pipe_v: bool = False,
     use_deepep: bool = False,
-    use_alignment_padding: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -574,9 +569,9 @@ def apply_moe_ep_tp(
             experts_mesh = ep_mesh
             if use_deepep:
                 score_before_experts = transformer_block.moe.score_before_experts
+
                 experts_plan = DeepEPExpertParallel(
                     score_before_experts=score_before_experts,
-                    use_alignment_padding=use_alignment_padding,
                 )
                 logger.info(f"Applying DeepEP to MoE layer")
             else:
