@@ -26,15 +26,10 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-<<<<<<< HEAD
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
     get_dual_pipe_v_flag,
 )
-=======
-from torchtitan.distributed.dual_pipe_v import DualPipeExpertParallel
->>>>>>> f3e551fb (Enable PP and EP overlap for MoE)
-
 from torchtitan.distributed.expert_parallel import (
     BaseExpertParallel,
     ExpertParallel,
@@ -125,12 +120,7 @@ def parallelize_llama(
                 else None
             ),
             etp_enabled=parallel_dims.etp_enabled,
-<<<<<<< HEAD
             dual_pipe_v=dual_pipe_v,
-=======
-            dual_pipe_v=job_config.parallelism.pipeline_parallel_expert_parallel_overlap
-            and job_config.parallelism.pipeline_parallel_schedule == "dualpipev",
->>>>>>> f3e551fb (Enable PP and EP overlap for MoE)
         )
 
     model_compile_enabled = (
@@ -546,7 +536,7 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = DualPipeExpertParallel() if dual_pipe_v else ExpertParallel()
+            experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel()
