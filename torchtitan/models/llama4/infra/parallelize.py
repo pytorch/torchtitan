@@ -119,7 +119,7 @@ def parallelize_llama(
             raise NotImplementedError(
                 "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
-        )
+            )
 
         use_deepep = True
 
@@ -568,7 +568,8 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             if use_deepep:
-                score_before_experts = transformer_block.moe.score_before_experts  # pyrefly: ignore [missing-attribute]
+                # pyrefly: ignore [missing-attribute]
+                score_before_experts = transformer_block.moe.score_before_experts
 
                 experts_plan = DeepEPExpertParallel(
                     score_before_experts=score_before_experts,
