@@ -21,7 +21,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
-from torchtitan.experiments.deterministic_vllm_rl.unified.attention import VLLMAttention
+from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter

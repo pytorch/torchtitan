@@ -11,10 +11,10 @@ import torch
 from safetensors.torch import load_file
 from transformers import AutoConfig
 
-from torchtitan.experiments.deterministic_vllm_rl.models import (
+from torchtitan.experiments.rl.vllm_compat.models import (
     VLLMCompatibleFlashAttention,
 )
-from torchtitan.experiments.deterministic_vllm_rl.weights_vllm_compat import (
+from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
@@ -28,7 +28,7 @@ class ModelMode(str, Enum):
     STANDARD = "standard"
 
 
-def replace_with_vllm_attention(model):
+def replace_with_vllm_flash_attention(model):
     """
     Replace TorchTitan attention with vLLM paged attention.
     Assumes model has .layers dict with .attention.inner_attention structure.
@@ -61,7 +61,7 @@ def replace_with_vllm_attention(model):
     )
 
 
-def load_model(checkpoint_path: str, model_path: str, model_mode: str = ModelMode.UNIFIED):
+def load_model(checkpoint_path: str, model_path: str, model_mode: str = ModelMode.BATCH_INVARIANT):
     """
     Load TorchTitan model from checkpoint.
 
@@ -116,7 +116,7 @@ def load_model(checkpoint_path: str, model_path: str, model_mode: str = ModelMod
         model.load_state_dict(state_dict, strict=True)
     elif model_mode == ModelMode.BATCH_INVARIANT:
         # Create and load model that has bitwise determinism between training and inference
-        from torchtitan.experiments.deterministic_vllm_rl.models.qwen3 import (
+        from torchtitan.experiments.rl.vllm_compat.models.qwen3 import (
             Qwen3VLLMCompatModel,
         )
 

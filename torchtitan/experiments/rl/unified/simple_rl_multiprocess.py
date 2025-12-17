@@ -32,7 +32,7 @@ from vllm import LLM, SamplingParams
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
 
-from torchtitan.experiments.deterministic_vllm_rl.simple_rl import (
+from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
     compute_grpo_advantages_stable,
     compute_policy_gradient_loss_vllm,
@@ -41,12 +41,12 @@ from torchtitan.experiments.deterministic_vllm_rl.simple_rl import (
     math_reward_function,
     trivial_reward_function,
 )
-from torchtitan.experiments.deterministic_vllm_rl.weights.converter import (
+from torchtitan.experiments.rl.vllm_compat.weights.converter import (
     torchtitan_to_vllm,
 )
 
-from torchtitan.experiments.deterministic_vllm_rl.trainer_utils import ModelMode, load_model
-from torchtitan.experiments.deterministic_vllm_rl.weights_vllm_compat import (
+from torchtitan.experiments.rl.unified.models.utils import ModelMode, load_model
+from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
@@ -114,7 +114,7 @@ class VLLMRolloutEngine:
         temp_checkpoint_dir: Directory to save temporary weight checkpoints
     """
 
-    def __init__(self, model_path: str, temp_checkpoint_dir: str = "./converted"):
+    def __init__(self, model_path: str, temp_checkpoint_dir: str = "./converted", tp_size: int = 1):
         self.base_model_path = model_path
         self.temp_model_dir = os.path.abspath(
             os.path.join(temp_checkpoint_dir, "vllm_temp_model")
@@ -150,6 +150,7 @@ class VLLMRolloutEngine:
             shutil.copy2(index_file, self.temp_model_dir)
 
         self.llm = None
+        self.tp_size = tp_size
         print("vLLM rollout engine initialized (will load on first use)")
 
     def update_weights(self, vllm_compat_state: dict) -> None:
@@ -231,10 +232,10 @@ class VLLMRolloutEngine:
                 trust_remote_code=True,
                 max_model_len=2048,
                 dtype="bfloat16",
-                gpu_memory_utilization=0.3,  # Reduced from 0.5
+                gpu_memory_utilization=0.1,  # Reduced from 0.5
                 seed=42,  # Fixed seed for determinism
                 enforce_eager=True,
-                tensor_parallel_size=2,  # Explicitly single GPU
+                tensor_parallel_size=self.tp_size,  # Explicitly single GPU
             )
             print("✓ Created new vLLM engine")
         else:
@@ -357,6 +358,7 @@ class Generator(Actor):
         use_real_dataset: bool = False,
         grpo_beta: float = 0.1,
         use_stable_grpo: bool = False,
+        tp_size: int = 1,
     ):
         """Initialize the generator.
 
@@ -372,6 +374,7 @@ class Generator(Actor):
             use_real_dataset: Whether using real dataset (GSM8K)
             grpo_beta: Beta for GRPO advantages
             use_stable_grpo: Whether to use stable GRPO
+            tp_size: Tensor Paralell size
         """
         self.weight_buffers = weight_buffers
         self.trajectory_queue = trajectory_queue
@@ -384,13 +387,14 @@ class Generator(Actor):
         self.use_real_dataset = use_real_dataset
         self.grpo_beta = grpo_beta
         self.use_stable_grpo = use_stable_grpo
+        self.tp_size = tp_size
 
         # Initialize vLLM engine
-        self.vllm_engine = VLLMRolloutEngine(model_path)
+        self.vllm_engine = VLLMRolloutEngine(model_path, tp_size=self.tp_size)
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
         # State machine
-        self.state = GeneratorState.READY_TO_UPDATE  # Start waiting for weights
+        self.state = GeneratorState.READY_TO_UPDATE
         self.cond = asyncio.Condition()
         self.policy_version = 0
 
@@ -399,7 +403,7 @@ class Generator(Actor):
             math_reward_function if use_real_dataset else trivial_reward_function
         )
 
-        print(" Generator initialized with vLLM engine")
+        print("Generator initialized with vLLM engine")
 
     @endpoint
     async def generate(self) -> None:
@@ -410,7 +414,7 @@ class Generator(Actor):
                 lambda: self.state == GeneratorState.READY_TO_GENERATE
             )
 
-            print(f"  [Generator] Generating rollouts (policy v{self.policy_version})...")
+            print(f"Generating rollouts (policy v{self.policy_version})...")
 
             # Generate samples using vLLM
             (
@@ -425,8 +429,6 @@ class Generator(Actor):
                 self.temperature,
                 n_samples_per_prompt=self.group_size,
             )
-
-            print(f"  [Generator] Finish generating rollouts (policy v{self.policy_version})...")
 
             # Compute rewards
             if self.reward_fn == trivial_reward_function:
@@ -477,14 +479,14 @@ class Generator(Actor):
 
     @endpoint
     async def update(self, version: int, vllm_compat_state: dict) -> None:
-        """Update policy weights from RDMA buffers.
+        """Update generate weights.
 
         Args:
             version: New policy version number
             vllm_compat_state: vLLM-compatible state dict
         """
         async with self.cond:
-            print(f"  [Generator] Updating weights to policy v{version}...")
+            print(f"Geneartor updating weights to policy v{version}...")
             self.vllm_engine.update_weights(vllm_compat_state)
 
             # Update version and state
@@ -522,7 +524,6 @@ class Trainer(Actor):
         self.trajectory_queue = trajectory_queue
 
         # Load model
-        print("  [Trainer] Loading TorchTitan model...")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = load_model(
             titan_checkpoint_path, model_path, model_mode=model_mode
@@ -532,12 +533,10 @@ class Trainer(Actor):
 
         # Optimizer
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
-
         self.policy_version = 0
         self.generator: Optional[Any] = None
-        self._weights_handle: dict = {}
 
-        print("Trainer initialized")
+        print("Trainer initialized with TorchTitan model")
 
     @endpoint
     async def init_generator(self, generator: Any) -> None:
@@ -559,6 +558,7 @@ class Trainer(Actor):
         vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
         return vllm_compat_state
 
+
     @endpoint
     async def step(self) -> dict:
         """Perform one training step.
@@ -566,7 +566,7 @@ class Trainer(Actor):
         Returns:
             Training metrics
         """
-        print(f"[Trainer] Step {self.policy_version}:")
+        print(f"Trainer step {self.policy_version}:")
 
         # Pull trajectory from queue
         trajectory = await self.trajectory_queue.get.call_one()
@@ -630,6 +630,9 @@ async def main():
     use_real_dataset = False
     num_dataset_samples = 5
 
+    # vLLM parallelism sizes
+    tp_size = 4
+
     # Check batch invariance
     from vllm.model_executor.layers.batch_invariant import (
         init_batch_invariance,
@@ -638,22 +641,19 @@ async def main():
 
     init_batch_invariance()
     use_vllm_compat = vllm_is_batch_invariant()
-    mode = ModelMode.UNIFIED
+    mode = ModelMode.BATCH_INVARIANT
 
     if use_vllm_compat:
-        print(" Batch invariance detected - using vLLM-compatible model")
-        from torchtitan.experiments.deterministic_vllm_rl.batch_invariant_backward import (
+        print("Batch invariance detected - using vLLM-compatible model")
+        from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
             enable_batch_invariant_backward_mode,
         )
 
         enable_batch_invariant_backward_mode()
     else:
-        print("� Batch invariance NOT detected - using standard model")
+        print("Batch invariance NOT detected - using standard model")
 
     # Download and convert model
-    print("=" * 80)
-    print(f"Setting up model: {model_name}")
-    print("=" * 80)
     titan_checkpoint_path, model_path = download_and_convert_model(
         model_name, cache_dir, output_dir
     )
@@ -682,14 +682,8 @@ async def main():
     print(f"Loaded {len(prompt_texts)} prompts")
 
     # ========== Create process meshes ==========
-    print("\n" + "=" * 80)
-    print("Spawning proc meshes")
-
     trainer_mesh = this_host().spawn_procs(per_host={"gpus": 1})
     gen_mesh = this_host().spawn_procs(per_host={"gpus": 1})
-
-    print("Finish spawning proc meshes")
-    print("=" * 80)
 
     # Spawn actors on trainer mesh
     traj_queue = trainer_mesh.spawn("traj_queue", TrajectoryQueue)
@@ -704,17 +698,7 @@ async def main():
     )
 
     # Get initial weights and spawn generator
-    print("Getting initial weights from trainer...")
-    try:
-        initial_weights = await asyncio.wait_for(
-            trainer.get_initial_weights.call_one(), timeout=60.0
-        )
-        print(f"✓ Received initial weights ({len(initial_weights)} parameters)")
-    except asyncio.TimeoutError:
-        print("ERROR: Timeout waiting for initial weights from trainer")
-        raise
-
-    print("Spawning generator actor...")
+    initial_weights = await trainer.get_initial_weights.call_one()
     generator = gen_mesh.spawn(
         "generator",
         Generator,
@@ -729,23 +713,13 @@ async def main():
         use_real_dataset,
         grpo_beta,
         use_stable_grpo,
+        tp_size,
     )
-    print("✓ Generator spawned")
-
-    # Connect trainer and generator
-    print("Connecting trainer and generator...")
     await trainer.init_generator.call(generator)
-    print("✓ Trainer and generator connected")
 
     # Initialize generator with weights
-    print("Initializing generator with weights...")
-    try:
-        await asyncio.wait_for(generator.update.call(0, initial_weights), timeout=120.0)
-        print("✓ Generator initialized with weights")
-    except asyncio.TimeoutError:
-        print("ERROR: Timeout initializing generator with weights")
-        raise
-
+    await generator.update.call(0, initial_weights)
+    
     # ========== Training loop ==========
     print("\n" + "=" * 80)
     print(f"Starting RL training for {num_steps} steps")
@@ -772,7 +746,7 @@ async def main():
             break
 
     print("\n" + "=" * 80)
-    print(" Training complete")
+    print("Training complete")
     print("=" * 80)
 
 
