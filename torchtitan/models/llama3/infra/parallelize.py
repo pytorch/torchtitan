@@ -61,7 +61,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
@@ -84,13 +83,14 @@ def parallelize_llama(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_tp(
             model,
-            world_mesh["tp"],
+            tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
         )
-        maybe_enable_async_tp(job_config, world_mesh["tp"])
+        maybe_enable_async_tp(job_config, tp_mesh)
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -111,15 +111,14 @@ def parallelize_llama(
         apply_compile(model, job_config.compile)
 
     if parallel_dims.fsdp_enabled:
-        # apply FSDP or HSDP, potentially with Context Parallel
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-
+        # dp_mesh is the mesh for FSDP/HSDP
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(names)
         apply_fsdp(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
@@ -138,11 +137,12 @@ def parallelize_llama(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
+        dp_replicate_mesh = parallel_dims.get_mesh("dp_replicate")
+        if parallel_dims.world_size != dp_replicate_mesh.size():
             raise RuntimeError("DDP has not supported > 1D parallelism")
         apply_ddp(
             model,
-            world_mesh,
+            dp_replicate_mesh,
             enable_compile=model_compile_enabled,
         )
 
