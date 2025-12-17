@@ -206,7 +206,7 @@ def monkey_patch_checks(moe):
     assert not list(moe.reorderer.buffers())
 
 
-def monkey_patch_local_map_moe(model, world_mesh):
+def monkey_patch_local_map_moe(model, sparse_mesh):
     """
     TODO: fix HOPs not restoring the original signature.
     TODO: fix tracing with local shapes so that we can use Shard placements
@@ -239,7 +239,7 @@ def monkey_patch_local_map_moe(model, world_mesh):
         ),
         redistribute_inputs=True,
         in_grad_placements=None,
-        device_mesh=world_mesh,
+        device_mesh=sparse_mesh,
     )
 
     for block in model.layers.children():
@@ -280,7 +280,13 @@ def parallelize_deepseekv3(
         job_config.experimental.comms_bucket_reorder_strategy
     )
 
-    world_mesh = parallel_dims.world_mesh
+    sparse_names = ["dp_replicate", "efsdp", "ep", "etp"]
+    sparse_names = [
+        name
+        for name in sparse_names
+        if parallel_dims.get_optional_mesh(name) is not None
+    ]
+    sparse_mesh = parallel_dims.get_mesh(sparse_names)
 
     def input_fn():
         global_batch_size = job_config.training.global_batch_size
@@ -304,7 +310,7 @@ def parallelize_deepseekv3(
     assert parallel_dims.pp_enabled is False, "PP not supported yet"
 
     # apply local_map to MoE
-    monkey_patch_local_map_moe(model, world_mesh)
+    monkey_patch_local_map_moe(model, sparse_mesh)
 
     # torch._inductor.config.bucket_all_gathers_fx_bucket_size_determinator = (
     #     lambda bucket_idx: 500 / parallel_dims.tp
@@ -324,7 +330,7 @@ def parallelize_deepseekv3(
     with AutoParallel(
         model,
         input_fn,
-        world_mesh,
+        sparse_mesh,
         mp_policy=mp_policy,
         compile=job_config.compile,
     ) as autop:
@@ -333,20 +339,21 @@ def parallelize_deepseekv3(
         possible_input_shardings = {
             # maps relative to mesh dim names used in torchtitan
             "dp_replicate": Shard(0),
-            "dp_shard": Shard(0),
-            "tp": Replicate(),
+            "efsdp": Shard(0),
+            "ep": Shard(0),
+            "etp": Replicate(),
         }
         # only used if loss parallel is enabled
         possible_output_shardings = {
             # maps relative to mesh dim names used in torchtitan
-            "dp_shard": Shard(0),
-            "tp": Shard(2),
+            "efsdp": Shard(0),
+            "etp": Shard(2),
         }
         assert all(
-            name in possible_input_shardings for name in world_mesh.mesh_dim_names
+            name in possible_input_shardings for name in sparse_mesh.mesh_dim_names
         ), f"Unsupported mesh dim in world mesh, only {possible_input_shardings.keys()} are supported by AutoParallel"
         x_sharding = tuple(
-            possible_input_shardings[name] for name in world_mesh.mesh_dim_names
+            possible_input_shardings[name] for name in sparse_mesh.mesh_dim_names
         )
         out_sharding = x_sharding
         loss_parallel_enabled = (
@@ -356,7 +363,7 @@ def parallelize_deepseekv3(
         if loss_parallel_enabled:
             out_sharding = tuple(
                 possible_output_shardings[name]
-                for name in world_mesh.mesh_dim_names
+                for name in sparse_mesh.mesh_dim_names
                 if name != "dp_replicate"
             )
         autop.add_input_constraints([x_sharding])
@@ -379,7 +386,7 @@ def parallelize_deepseekv3(
         # it would require putting the loss inside the model as well
         def _return_as_dtensor_for_loss_parallel(module, args, output):
             return torch.distributed.tensor.DTensor.from_local(
-                output, world_mesh["tp"], (Shard(2),)
+                output, sparse_mesh["etp"], (Shard(2),)
             )
 
         # not keeping a reference to the hook, don't plan on

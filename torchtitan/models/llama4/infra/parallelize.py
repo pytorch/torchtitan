@@ -75,7 +75,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
@@ -86,6 +85,7 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
+    tp_mesh = None
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
         float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
@@ -98,29 +98,27 @@ def parallelize_llama(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
             model,
-            world_mesh["tp"],
+            tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
         )
-        maybe_enable_async_tp(job_config, world_mesh["tp"])
+        maybe_enable_async_tp(job_config, tp_mesh)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
+        # tp_mesh might have been set above if tp_enabled, otherwise get it here
+        if tp_mesh is None:
+            tp_mesh = parallel_dims.get_mesh("tp")
         apply_moe_ep_tp(
             model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
-                world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
-            etp_enabled=parallel_dims.etp_enabled,
+            tp_mesh=tp_mesh,
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
         )
 
@@ -141,21 +139,20 @@ def parallelize_llama(
     if model_compile_enabled:
         apply_compile(model, job_config.compile, parallel_dims.ep_enabled)
 
-    dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
-        # apply FSDP or HSDP, potentially with Context Parallel
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+        # dp_mesh is the mesh for FSDP/HSDP
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh_dim_names = []
-        if parallel_dims.ep_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,
@@ -166,11 +163,7 @@ def parallelize_llama(
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=(
-                world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
-                if parallel_dims.ep_enabled
-                else None
-            ),
+            edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
@@ -185,9 +178,9 @@ def parallelize_llama(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
+        dp_mesh = parallel_dims.get_mesh("dp_replicate")
+        if parallel_dims.world_size != dp_mesh.size():
             raise RuntimeError("DDP has not supported > 1D parallelism")
-        dp_mesh = world_mesh
         apply_ddp(
             model,
             dp_mesh,
@@ -301,7 +294,7 @@ def apply_fsdp(
     cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
     ep_degree: int = 1,
-    dp_mod_ep_mesh: DeviceMesh | None = None,
+    edp_mesh: DeviceMesh | None = None,
     gradient_divide_factor: int | None = None,
 ):
     """
@@ -352,10 +345,10 @@ def apply_fsdp(
     for layer_id, transformer_block in model.layers.items():
         # NOTE: When EP is enabled, In an MoE layer, we use the following FSDP wrapping
         # - the router and the shared experts are sharded together with the TransformerBlock
-        # - the routed experts are sharded with the remaining dp_mod_ep_mesh
+        # - the routed experts are sharded with the remaining edp_mesh
         if transformer_block.moe_enabled and ep_degree > 1:
             fsdp_mod_ep_config = fsdp_config.copy()
-            fsdp_mod_ep_config["mesh"] = dp_mod_ep_mesh
+            fsdp_mod_ep_config["mesh"] = edp_mesh
 
             # NOTE: EP alreadys shards the routed experts on dim 0 (num_experts).
             #       When dp_mod_ep * ep > num_experts, FSDP default dim-0 sharding
@@ -364,10 +357,10 @@ def apply_fsdp(
             #       on non-0 dim. For now it may not be worth the complexity to support
             #       shard_placement_fn on the outer TransformerBlock-level FSDP.
             _experts_shard_placement_fn = None
-            assert dp_mod_ep_mesh is not None
+            assert edp_mesh is not None
             assert hasattr(transformer_block, "moe")
             if (
-                dp_mod_ep_mesh.size() * ep_degree
+                edp_mesh["efsdp"].size() * ep_degree
                 > transformer_block.moe.experts.num_experts
             ):
                 _experts_shard_placement_fn = lambda param: Shard(1)
@@ -476,8 +469,8 @@ def apply_moe_ep_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh | None,
     ep_mesh: DeviceMesh | None,
-    ep_tp_mesh: DeviceMesh | None,
-    etp_enabled: bool,
+    etp_mesh: DeviceMesh | None,
+    ep_etp_mesh: DeviceMesh | None,
     dual_pipe_v: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
@@ -502,7 +495,7 @@ def apply_moe_ep_tp(
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(),
             }
-            if ep_mesh is not None and not etp_enabled:
+            if ep_mesh is not None and etp_mesh is None:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
                 # the reorderer, the all-to-all comms, and routed experts computation
                 # are effectively running Sequence Parallel (split along the folded bs*slen dim)
@@ -531,15 +524,17 @@ def apply_moe_ep_tp(
 
         experts_mesh, experts_plan = None, None
         if ep_mesh is None:
+            assert ep_etp_mesh is None
             experts_mesh = tp_mesh
             # input Replicate, output Partial
             experts_plan = TensorParallel()
-        elif tp_mesh is None or not etp_enabled:
+        elif tp_mesh is None or etp_mesh is None:
+            assert ep_etp_mesh is None
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
             experts_plan = ExpertParallel()
         else:
-            experts_mesh = ep_tp_mesh
+            experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()
 
         if dual_pipe_v and isinstance(experts_plan, BaseExpertParallel):

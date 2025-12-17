@@ -200,8 +200,14 @@ class ExpertTensorParallel(ExpertParallel):
         # NOTE: Currently in MoE TP, experts multiplication runs in plain Tensors.
         #       The grad_placements on inputs is set to Partial so that necessary
         #       reductions are performed during backward.
+
+        # NOTE: The mesh used here should be dense_mesh["tp"] as routed_input is
+        #       technically wrapped with the dense_mesh["tp"] but this complicates
+        #       the interface of ExpertTensorParallel and it doesn't matter as etp
+        #       is almost always the same as tp or is 1. To avoid the complexity,
+        #       we use the etp mesh here.
         routed_input = DTensor.from_local(
-            routed_input, device_mesh["tp"], (Replicate(),)
+            routed_input, device_mesh["etp"], (Replicate(),)
         ).to_local(grad_placements=(Partial(),))
 
         inputs = (routed_input, num_tokens_per_expert)
