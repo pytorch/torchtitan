@@ -4,7 +4,7 @@ description = "DeepSeek-V3 debug training"
 print_config = false
 
 [profiling]
-enable_profiling = true
+enable_profiling = false
 save_traces_folder = "profile_trace"
 profile_freq = 1
 profiler_warmup = 0
