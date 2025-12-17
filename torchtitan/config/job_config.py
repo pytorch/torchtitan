@@ -199,9 +199,98 @@ class LRScheduler:
 
 
 @dataclass
+class SFTDataConfig:
+    split: str = "train"
+    """Split to use"""
+    dataset_subset: str | None = None
+    """Subset to use"""
+    stream_dataset: bool = True
+    """Whether to stream the dataset"""
+    is_multiturn: bool = False
+    """
+    At moment we support two types of datasets:
+    1. **Multi-turn (`True`):** Loads data from the column specified by `messages_key`.
+        The content must be a list of dictionaries containing 'role' and 'content'.
+        Example:
+        ```
+        [
+            {
+                "role": "user",
+                "content": "Hello, how are you?"
+            },
+            {
+                "role": "assistant",
+                "content": "I am good, thank you!"
+            }
+        ]
+        ```
+    2. **Single-turn (`False`):** Loads data from two separate columns
+        specified by `prompt_key` and `response_key`.
+
+    """
+
+    messages_key: str = "messages"
+    """
+    Column name in the dataset for multi-turn mode to read "messages" field.
+    """
+    prompt_key: str = "question"
+    """
+    Column name in the dataset to read "prompt" field.
+    Prompt tokens will not be counted in loss calculation.
+    """
+    response_key: str = "answer"
+    """
+    Column name in the dataset to read "response" field.
+    """
+    tools_key: str = "tools"
+    """
+    Column name in the dataset to read "tools" field.
+    """
+    thinking_key: str = "enable_thinking"
+    """
+    Column name in the dataset to read "enable_thinking" field.
+    """
+    always_thinking: bool = False
+    """
+    Whether to always enable thinking for each turn, will override the "enable_thinking" field in the dataset.
+    """
+    apply_chat_template: bool = False
+    """
+    If True, we will apply chat template to the messages, otherwise we will use the raw messages.
+    It is important that chat_templated should be properly configured for the tokenizer and
+    it can render the messages for multi-turn mode.
+    """
+    pad_mode: Literal["right_padding", "greedy_packing"] = "greedy_packing"
+    """
+    Padding mode to use.
+    - "right": One batch contains only one unique sequence, the sequence will be padded to the right to reach the max length.
+    - "greedy_packing": One batch contains multiple short sequences and then be padded to the right to reach the max length.
+    """
+    truncation: Literal["left_trunc", "right_trunc", "error"] = "right_trunc"
+    """
+    Truncation mode to use.
+    """
+    chat_template_kwargs: dict = field(default_factory=dict)
+    """
+    When apply chat template, we will pass these kwargs to the tokenizer.apply_chat_template function.
+    It has to be HF's apply_chat_template kwargs.
+    """
+    ignore_input_ids_mismatch: bool = False
+    """
+    Whether to ignore the input_ids mismatch when apply chat template.
+    """
+
+
+@dataclass
 class Training:
     dataset: str = "c4_test"
     """Dataset to use"""
+
+    running_sft_training: bool = False
+    """
+    If True, we are running SFT training. And we will overwrite the dataset config
+    from the sft_data_config.
+    """
 
     dataset_path: str | None = None
     """
@@ -933,6 +1022,7 @@ class JobConfig:
     profiling: Profiling = field(default_factory=Profiling)
     metrics: Metrics = field(default_factory=Metrics)
     model: Model = field(default_factory=Model)
+    sft_data_config: SFTDataConfig = field(default_factory=SFTDataConfig)
     optimizer: Optimizer = field(default_factory=Optimizer)
     lr_scheduler: LRScheduler = field(default_factory=LRScheduler)
     training: Training = field(default_factory=Training)

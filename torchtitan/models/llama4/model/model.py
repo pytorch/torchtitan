@@ -551,7 +551,9 @@ class Transformer(nn.Module, ModelProtocol):
             case "causal":
                 B = 1
             case "block_causal":
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+                mask_mods.append(
+                    get_document_mask_mod(input_batch, tokenizer.eos_id, extra_inputs)
+                )
                 B = input_batch.shape[0]
             case _:
                 raise ValueError(

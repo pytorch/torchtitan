@@ -515,7 +515,9 @@ class Transformer(nn.Module, ModelProtocol):
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+                mask_mods.append(
+                    get_document_mask_mod(input_batch, tokenizer.eos_id, extra_inputs)
+                )
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
@@ -543,7 +545,7 @@ class Transformer(nn.Module, ModelProtocol):
                         attention mask type, got {self.model_args.attn_mask_type}"
                     )
                 return create_varlen_metadata_for_document(
-                    input_batch, tokenizer.eos_id
+                    input_batch, tokenizer.eos_id, extra_inputs
                 )
             case _:
                 raise NotImplementedError(
