@@ -568,12 +568,12 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             if use_deepep:
-                score_before_experts = transformer_block.moe.score_before_experts
+                score_before_experts = transformer_block.moe.score_before_experts  # pyrefly: ignore [missing-attribute]
 
                 experts_plan = DeepEPExpertParallel(
                     score_before_experts=score_before_experts,
                 )
-                logger.info(f"Applying DeepEP to MoE layer")
+                logger.info("Applying DeepEP to MoE layer")
             else:
                 # input / output sharding on the batch / tokens dim
                 experts_plan = ExpertParallel()

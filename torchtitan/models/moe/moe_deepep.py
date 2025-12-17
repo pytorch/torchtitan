@@ -22,7 +22,7 @@ class DeepEPMoE(MoE):
     def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
         super().__init__(moe_args, dim, hidden_dim)
         # DeepEP doesn't use reorderer - routing handled by DeepEPExpertParallel
-        self.reorderer = None
+        self.reorderer = None  # pyrefly: ignore [bad-assignment]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

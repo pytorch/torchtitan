@@ -362,7 +362,7 @@ class DeepEPExpertParallel(BaseExpertParallel):
         """Combine tokens via DeepEP."""
         from torchtitan.distributed.deepep import combine_tokens
 
-        routed_output = combine_tokens(routed_output, self._state)
+        routed_output = combine_tokens(routed_output, self._state)  # pyrefly: ignore [bad-argument-type]
         self._state = None
         return routed_output
 
@@ -372,6 +372,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
             module,
             device_mesh,
             partition_fn=DeepEPExpertParallel._partition_fn,
-            input_fn=self._token_dispatch,
-            output_fn=self._token_combine,
+            input_fn=self._token_dispatch,  # pyrefly: ignore [bad-argument-type]
+            output_fn=self._token_combine,  # pyrefly: ignore [bad-argument-type]
         )
