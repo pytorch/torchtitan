@@ -315,3 +315,70 @@ class ReordererSequenceParallel(ParallelStyle):
             # pyrefly: ignore [bad-argument-type]
             output_fn=self._prepare_output_fn,
         )
+
+
+class DeepEPExpertParallel(BaseExpertParallel):
+    """Expert Parallel using DeepEP for efficient token dispatch/combine.
+
+    Expects inputs as:
+        (hidden_states, num_tokens_per_expert, selected_experts_indices, top_scores, num_experts)
+
+    Args:
+        score_before_experts: If True, apply routing scores before expert computation.
+    """
+
+    def __init__(self, score_before_experts: bool = True):
+        super().__init__()
+        self._state = None  # State preserved between dispatch and combine
+        self.score_before_experts = score_before_experts
+
+    def _token_dispatch(self, mod, inputs, device_mesh):
+        """Dispatch tokens via DeepEP."""
+        from torchtitan.distributed.deepep import dispatch_tokens
+
+        hidden_states, _, selected_experts_indices, top_scores, num_experts = inputs
+        if isinstance(mod.w1, DTensor):
+            num_local_experts = mod.w1.to_local().shape[0]
+        else:
+            num_local_experts = mod.w1.shape[0]
+        ep_group = device_mesh.get_group()
+
+        hidden_states, tokens_per_expert, self._state = dispatch_tokens(
+            hidden_states,
+            selected_experts_indices,
+            top_scores,
+            num_local_experts,
+            num_experts,
+            ep_group,
+            score_before_experts=self.score_before_experts,
+        )
+
+        return hidden_states, tokens_per_expert
+
+    @staticmethod
+    def _partition_fn(name, mod, device_mesh):
+        """Shard expert weights on expert dimension."""
+        for param_name, param in mod.named_parameters(recurse=False):
+            mod.register_parameter(
+                param_name,
+                nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)])),
+            )
+
+    def _token_combine(self, mod, routed_output, device_mesh):
+        """Combine tokens via DeepEP."""
+        from torchtitan.distributed.deepep import combine_tokens
+
+        # pyrefly: ignore [bad-argument-type]
+        routed_output = combine_tokens(routed_output, self._state)
+        self._state = None
+        return routed_output
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        """Apply DeepEP parallelization."""
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=DeepEPExpertParallel._partition_fn,
+            input_fn=self._token_dispatch,  # pyrefly: ignore [bad-argument-type]
+            output_fn=self._token_combine,  # pyrefly: ignore [bad-argument-type]
+        )

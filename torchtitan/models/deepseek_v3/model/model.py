@@ -8,9 +8,7 @@ import math
 
 import torch
 from torch import nn
-
 from torch.nn.attention.flex_attention import and_masks, BlockMask
-
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
@@ -19,7 +17,7 @@ from torchtitan.models.attention import (
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
 )
-from torchtitan.models.moe import FeedForward, MoE
+from torchtitan.models.moe import build_moe, FeedForward
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -351,10 +349,11 @@ class TransformerBlock(nn.Module):
 
         self.moe_enabled = layer_id >= model_args.n_dense_layers
         if self.moe_enabled:
-            self.moe = MoE(
-                model_args.moe_args,
+            self.moe = build_moe(
+                args=model_args.moe_args,
                 dim=model_args.dim,
                 hidden_dim=model_args.moe_inter_dim,
+                moe_impl=model_args.moe_impl,
             )
         else:
             self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)
@@ -395,6 +394,7 @@ class TransformerBlock(nn.Module):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
+            # pyrefly: ignore [not-callable, missing-attribute]
             self.moe.init_weights(self.weight_init_std, buffer_device)
         else:
             self.feed_forward.init_weights(self.weight_init_std)
