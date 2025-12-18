@@ -23,6 +23,7 @@ from typing import Any, List, Optional, Tuple
 import torch
 from monarch.actor import Actor, endpoint, this_host
 from monarch.rdma import RDMABuffer
+from monarch.utils import setup_env_for_distributed
 from safetensors.torch import load_file, save_file
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
@@ -407,13 +408,14 @@ class Generator(Actor):
     @endpoint
     async def generate(self) -> None:
         """Generate trajectories and compute rewards/advantages."""
+        print(f"{os.getpid()=} Generating start generate (policy v{self.policy_version})...")
         async with self.cond:
             # Wait until ready to generate (weights have been updated)
             await self.cond.wait_for(
                 lambda: self.state == GeneratorState.READY_TO_GENERATE
             )
 
-            print(f"Generating rollouts (policy v{self.policy_version})...")
+            print(f"{os.getpid()=} Generating rollouts (policy v{self.policy_version})...")
 
             # Generate samples using vLLM
             (
@@ -469,12 +471,16 @@ class Generator(Actor):
             )
 
         # Send to trajectory queue
+        print(f"{os.getpid()=} Generator adding trajecotry into the queue")
+        await self.trajectory_queue.put.call(trajectory)
         await self.trajectory_queue.put.call(trajectory)
 
         async with self.cond:
             # Signal ready for update
             self.state = GeneratorState.READY_TO_UPDATE
             self.cond.notify_all()
+
+        print(f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})...")
 
     @endpoint
     async def update(self, version: int, vllm_compat_state: dict) -> None:
@@ -485,13 +491,13 @@ class Generator(Actor):
             vllm_compat_state: vLLM-compatible state dict
         """
         async with self.cond:
-            print(f"Geneartor updating weights to policy v{version}...")
             self.vllm_engine.update_weights(vllm_compat_state)
 
             # Update version and state
             self.policy_version = version
             self.state = GeneratorState.READY_TO_GENERATE
             self.cond.notify_all()
+            print(f"{os.getpid()=} Geneartor updating weights to policy v{version}...")
 
 
 class Trainer(Actor):
@@ -565,10 +571,11 @@ class Trainer(Actor):
         Returns:
             Training metrics
         """
-        print(f"Trainer step {self.policy_version}:")
+        print(f"{os.getpid()=} Trainer start step {self.policy_version}:")
 
         # Pull trajectory from queue
-        trajectory = await self.trajectory_queue.get.call_one()
+        trajectory = (await self.trajectory_queue.get.call()).item(gpus=0)
+        print(f"{os.getpid()=} Trainer starts to train {self.policy_version} on traj:")
 
         # Compute loss
         loss, loss_metrics = compute_policy_gradient_loss_vllm(
@@ -592,7 +599,9 @@ class Trainer(Actor):
         if self.generator:
             titan_state = self.model.state_dict()
             vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
+            print(f"{os.getpid()=} generator begin update")
             await self.generator.update.call(self.policy_version, vllm_compat_state)
+            print(f"{os.getpid()=} generator finish update")
 
         # Return metrics
         metrics = {
@@ -604,7 +613,7 @@ class Trainer(Actor):
             "sample_completion": trajectory.completions[0][:80],
             **loss_metrics,
         }
-
+        print(f"{os.getpid()=} Trainer finish step {self.policy_version} {metrics=}")
         return metrics
 
 
@@ -675,7 +684,7 @@ async def main():
     print(f"Loaded {len(prompt_texts)} prompts")
 
     # ========== Create process meshes ==========
-    trainer_mesh = this_host().spawn_procs(per_host={"gpus": 1})
+    trainer_mesh = this_host().spawn_procs(per_host={"gpus": 2})
     gen_mesh = this_host().spawn_procs(per_host={"gpus": 1})
 
     # Spawn actors on trainer mesh
@@ -690,8 +699,15 @@ async def main():
         mode,
     )
 
+    # set up distributed env vars so that titan actors are connected via c10d
+    await setup_env_for_distributed(
+        trainer_mesh,
+        master_addr="localhost", # TODO: figure out what to set
+        master_port=29500, # TODO: figure out what to set
+    )
+
     # Get initial weights and spawn generator
-    initial_weights = await trainer.get_initial_weights.call_one()
+    initial_weights = trainer.get_initial_weights.call().get().item(gpus=0)
     generator = gen_mesh.spawn(
         "generator",
         Generator,
@@ -722,8 +738,10 @@ async def main():
         # Generate and train in parallel
         _, metrics = await asyncio.gather(
             generator.generate.call(),
-            trainer.step.call_one(),
+            trainer.step.call(),
         )
+
+        metrics = metrics.item(gpus=0)
 
         print(
             f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
