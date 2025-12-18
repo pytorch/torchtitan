@@ -400,11 +400,7 @@ class VLLMPagedFlashAttention(torch.nn.Module):
         output = output.transpose(1, 2)
 
         # When TP is applied, we need to pack plain tensor back to DTensor
-<<<<<<< HEAD
-        if self.tp_size > 1:
-=======
         if self.tp_size > 1 and is_dtensor:
->>>>>>> 7464252a (tp v2)
             output = DTensor.from_local(
                 output, device_mesh=dtensor_device_mesh, placements=dtensor_placement
             )

@@ -16,7 +16,7 @@ from typing import Callable, TypeAlias
 
 import torch
 import torch.nn as nn
-from torch.distributed._tensor import DTensor, Partial, Replicate
+from torch.distributed._tensor import DTensor, Replicate, Shard
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
@@ -239,42 +239,9 @@ class TorchTitanVLLMModel(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings."""
-<<<<<<< HEAD
-        # DEBUG: Use print instead of logger for visibility
-        print(f"\n{'=' * 80}")
-        print("[DEBUG embed_input_ids] Called with:")
-        print(f"  input_ids.shape: {input_ids.shape}")
-        print(f"  input_ids.dtype: {input_ids.dtype}, device: {input_ids.device}")
-        print(
-            f"  input_ids.min: {input_ids.min().item()}, max: {input_ids.max().item()}"
-        )
-        print(f"  config.vocab_size: {self.config.vocab_size}")
-        print(f"  embedding weight type: {type(self.model.tok_embeddings.weight)}")
-
-        # Check embedding weight shape (handle DTensor case)
-        if isinstance(self.model.tok_embeddings.weight, DTensor):
-            local_weight = self.model.tok_embeddings.weight.to_local()
-            print("  embedding is DTensor:")
-            print(f"    - placements: {self.model.tok_embeddings.weight.placements}")
-            print(f"    - global shape: {self.model.tok_embeddings.weight.shape}")
-            print(f"    - local shape: {local_weight.shape}")
-            effective_vocab_size = local_weight.shape[0]
-        else:
-            print(f"  embedding weight.shape: {self.model.tok_embeddings.weight.shape}")
-            effective_vocab_size = self.model.tok_embeddings.weight.shape[0]
-
-        inputs_embeddings = self.model.tok_embeddings(input_ids)
-
-        # When TP is applied, the inputs_embedding will be sharded rowwise (Shard(1))
-        if isinstance(inputs_embeddings, DTensor):
-            # inputs_embeddings = inputs_embeddings.full_tensor()
-            return inputs_embeddings.full_tensor()
-
-=======
         inputs_embeddings = self.model.tok_embeddings(input_ids)
         # NOTE: When TP is applied, the inputs_embedding will be row-wise sharded (Shard(1))
         # and will be a plain tensor, return directly
->>>>>>> 7464252a (tp v2)
         return inputs_embeddings
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -339,8 +306,6 @@ class TorchTitanVLLMModel(nn.Module):
         # Pass through transformer layers
         for layer in self.model.layers.values():
             h = layer(h, rope_cache[positions], attention_masks=None)
-<<<<<<< HEAD
-=======
 
         # To make it work with vLLM Engine, turn it into local tensor
         if isinstance(h, DTensor):
@@ -355,7 +320,6 @@ class TorchTitanVLLMModel(nn.Module):
                 ],
             )
             h = h.full_tensor()
->>>>>>> 7464252a (tp v2)
 
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
@@ -364,14 +328,6 @@ class TorchTitanVLLMModel(nn.Module):
             # so after flatten, h is Shard(0). And this conversion might be wrong
             h = h.view(batch_size * seq_len, hidden_size)
 
-<<<<<<< HEAD
-        # When TP is applied, transformer layer's output is Partial().
-        # To make it work with vllm Engine, turn it into local tensor
-        if isinstance(h, DTensor):
-            h = h.to_local()
-
-=======
->>>>>>> 7464252a (tp v2)
         return h
 
     def compute_logits(
@@ -381,29 +337,6 @@ class TorchTitanVLLMModel(nn.Module):
     ) -> torch.Tensor | None:
         """Compute logits from hidden states."""
 
-<<<<<<< HEAD
-        # When TP is applied, transformer layer's output is Partial(SUM)
-        # Pack tensor back from plain tensor to DTensor
-        if self.parallel_dims.tp_enabled:
-            print("before convert hidden_states")
-            # TODO(jianiw): fix placements to be n-D
-            hidden_states = DTensor.from_local(
-                hidden_states,
-                device_mesh=self.parallel_dims.world_mesh,
-                placements=[
-                    Partial(),
-                ],
-            )
-            print("hidden_states after conversion")
-
-        # print(f"[jianiw] The shape of hidden_state of compute_logits() is: {hidden_states.shape}")
-        # hidden_states: 1024 * 1024, now the placement is Shard(1) according to TP plan
-        h = self.model.norm(hidden_states)
-        logits = self.model.output(h)
-
-        print(f"returned logits {logits.shape}")
-
-=======
         # Here h is returned as a shard(1) plain tensor because rowwise has use_local_output=True
         hidden_states = DTensor.from_local(
             hidden_states,
@@ -416,7 +349,6 @@ class TorchTitanVLLMModel(nn.Module):
         h = self.model.norm(hidden_states)
         logits = self.model.output(h)
 
->>>>>>> 7464252a (tp v2)
         return logits
 
     def load_weights(self, weights_iter):
@@ -464,23 +396,5 @@ class TorchTitanVLLMModel(nn.Module):
         loaded_params = {f"model.{name}" for name in torchtitan_state_dict.keys()}
 
         print(f"Loaded weights successfully, loaded {len(loaded_params)} parameters")
-
-        # DEBUG: Print embedding table info after loading
-        print(f"\n{'=' * 80}")
-        print("[DEBUG load_weights] After loading weights:")
-        print(f"  tok_embeddings.weight type: {type(self.model.tok_embeddings.weight)}")
-        if isinstance(self.model.tok_embeddings.weight, DTensor):
-            print("  tok_embeddings is DTensor:")
-            print(f"    - placements: {self.model.tok_embeddings.weight.placements}")
-            print(f"    - global shape: {self.model.tok_embeddings.weight.shape}")
-            print(
-                f"    - local shape: {self.model.tok_embeddings.weight.to_local().shape}"
-            )
-        else:
-            print(
-                f"  tok_embeddings.weight.shape: {self.model.tok_embeddings.weight.shape}"
-            )
-        print(f"  config.vocab_size: {self.config.vocab_size}")
-        print(f"{'=' * 80}\n")
 
         return loaded_params

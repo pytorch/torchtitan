@@ -309,17 +309,11 @@ def apply_non_moe_tp(
         tp_mesh,
         {
             "tok_embeddings": RowwiseParallel(
-<<<<<<< HEAD
-                input_layouts=Replicate(), output_layouts=Replicate()
-            ),
-            "norm": SequenceParallel(),
-=======
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
                 use_local_output=False,
             ),
             "norm": SequenceParallel(use_local_output=False),
->>>>>>> 7464252a (tp v2)
             "output": ColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
