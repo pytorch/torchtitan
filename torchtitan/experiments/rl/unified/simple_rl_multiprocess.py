@@ -472,8 +472,8 @@ class Generator(Actor):
 
         # Send to trajectory queue
         print(f"{os.getpid()=} Generator adding trajecotry into the queue")
-        await self.trajectory_queue.put.call(trajectory)
-        await self.trajectory_queue.put.call(trajectory)
+        await self.trajectory_queue.put.call_one(trajectory)
+        await self.trajectory_queue.put.call_one(trajectory)
 
         async with self.cond:
             # Signal ready for update
@@ -574,7 +574,7 @@ class Trainer(Actor):
         print(f"{os.getpid()=} Trainer start step {self.policy_version}:")
 
         # Pull trajectory from queue
-        trajectory = (await self.trajectory_queue.get.call()).item(gpus=0)
+        trajectory = await self.trajectory_queue.get.call_one()
         print(f"{os.getpid()=} Trainer starts to train {self.policy_version} on traj:")
 
         # Compute loss
@@ -618,7 +618,7 @@ class Trainer(Actor):
 
 
 async def main():
-    """Run the distributed RL training loop."""
+    """Run the distributed RL training loop using Monarch."""
     # ========== Config ==========
     model_name = "Qwen/Qwen3-1.7B"
     cache_dir = "./models"
@@ -687,8 +687,8 @@ async def main():
     trainer_mesh = this_host().spawn_procs(per_host={"gpus": 2})
     gen_mesh = this_host().spawn_procs(per_host={"gpus": 1})
 
-    # Spawn actors on trainer mesh
-    traj_queue = trainer_mesh.spawn("traj_queue", TrajectoryQueue)
+    # Spawn actors on trainer and generator mesh
+    traj_queue = gen_mesh.spawn("traj_queue", TrajectoryQueue)
     trainer = trainer_mesh.spawn(
         "trainer",
         Trainer,
@@ -727,7 +727,7 @@ async def main():
     await trainer.init_generator.call(generator)
 
     # Initialize generator with weights
-    await generator.update.call(0, initial_weights)
+    await generator.update.call_one(0, initial_weights)
     
     # ========== Training loop ==========
     print("\n" + "=" * 80)
@@ -737,7 +737,7 @@ async def main():
     for step in range(num_steps):
         # Generate and train in parallel
         _, metrics = await asyncio.gather(
-            generator.generate.call(),
+            generator.generate.call_one(),
             trainer.step.call(),
         )
 
