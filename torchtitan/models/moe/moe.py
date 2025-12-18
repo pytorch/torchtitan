@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.tools.logging import logger
 from .utils import indices_padding_wrapper
 
 
@@ -565,3 +566,21 @@ class MoE(nn.Module):
                 self.expert_bias = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
                 )
+
+
+def build_moe(
+    args: MoEArgs, dim: int, hidden_dim: int, moe_impl: str = "standard"
+) -> nn.Module:
+    """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP)."""
+    if moe_impl == "deepep":
+        from .moe_deepep import DeepEPMoE
+
+        logger.info(
+            f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
+        )
+        return DeepEPMoE(moe_args=args, dim=dim, hidden_dim=hidden_dim)
+
+    logger.info(
+        f"Standard MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
+    )
+    return MoE(args, dim=dim, hidden_dim=hidden_dim)

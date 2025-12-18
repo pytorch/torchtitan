@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
-
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
@@ -410,6 +409,17 @@ class Parallelism:
     - [partial dp -> ep] etp = tp
     - [partial dp + all tp -> ep] etp = 1
     Note that this is still an experimental feature.
+    """
+
+    expert_parallel_comm_backend: Literal["standard", "deepep"] = "standard"
+    """
+    Expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
+
+    - "standard": Uses PyTorch all-to-all collectives (default)
+    - "deepep": Uses DeepEP custom kernels for more efficient communication
+
+    DeepEP requires installation:
+    https://github.com/deepseek-ai/DeepEP.
     """
 
 
