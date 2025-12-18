@@ -30,9 +30,9 @@ from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
     get_dual_pipe_v_flag,
 )
-
 from torchtitan.distributed.expert_parallel import (
     BaseExpertParallel,
+    DeepEPExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
     ReordererSequenceParallel,
@@ -42,7 +42,6 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.moe import moe as moe_module
 from torchtitan.tools.logging import logger
-
 
 # for selective op activation checkpointing
 _op_sac_save_list = {
@@ -107,6 +106,30 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, tp_mesh)
 
+    # Check if using DeepEP for MoE communication
+    if job_config.parallelism.expert_parallel_comm_backend == "deepep":
+        if not parallel_dims.ep_enabled:
+            raise ValueError(
+                "DeepEP requires expert parallelism (ep_degree > 1). "
+                "The DeepEP MoE model code does not support EP=1. "
+                "Please set expert_parallel_degree > 1 or use standard communication backend."
+            )
+        if parallel_dims.etp_enabled:
+            raise NotImplementedError(
+                "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+                "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
+            )
+
+        use_deepep = True
+
+        # Import deepep module to register custom ops before accessing them
+        import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
+
+        _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+        _op_sac_save_list.add(torch.ops.deepep.combine.default)
+    else:
+        use_deepep = False
+
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
@@ -120,12 +143,18 @@ def parallelize_llama(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
+            use_deepep=use_deepep,
         )
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
     if job_config.activation_checkpoint.mode != "none":
+        if job_config.activation_checkpoint.selective_ac_option == "op":
+            logger.info(
+                f"SAC save list contains {len(_op_sac_save_list)} ops: "
+                f"{sorted([str(op) for op in _op_sac_save_list])}"
+            )
         apply_ac(
             model,
             job_config.activation_checkpoint,
@@ -472,6 +501,7 @@ def apply_moe_ep_tp(
     etp_mesh: DeviceMesh | None,
     ep_etp_mesh: DeviceMesh | None,
     dual_pipe_v: bool = False,
+    use_deepep: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -531,8 +561,17 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
-            # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            if use_deepep:
+                # pyrefly: ignore [missing-attribute]
+                score_before_experts = transformer_block.moe.score_before_experts
+
+                experts_plan = DeepEPExpertParallel(
+                    score_before_experts=score_before_experts,
+                )
+                logger.info("Applying DeepEP to MoE layer")
+            else:
+                # input / output sharding on the batch / tokens dim
+                experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()
