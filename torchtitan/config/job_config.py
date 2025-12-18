@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
-
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal

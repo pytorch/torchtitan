@@ -8,9 +8,7 @@ import math
 
 import torch
 from torch import nn
-
 from torch.nn.attention.flex_attention import and_masks, BlockMask
-
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,

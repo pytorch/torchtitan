@@ -14,7 +14,6 @@ from torch.distributed.tensor.placement_types import Placement
 
 from torchtitan.distributed.parallel_dims import ParallelDims
 
-
 __all__ = [
     "ParallelDims",
     "NoParallel",

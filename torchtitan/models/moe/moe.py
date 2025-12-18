@@ -13,7 +13,6 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.tools.logging import logger
-
 from .utils import indices_padding_wrapper
 
 

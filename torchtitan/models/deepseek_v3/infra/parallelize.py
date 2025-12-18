@@ -15,7 +15,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -28,7 +27,6 @@ from torchtitan.models.llama4.infra.parallelize import (
     apply_moe_ep_tp,
 )
 from torchtitan.tools.logging import logger
-
 
 # for selective op activation checkpointing
 _op_sac_save_list = {
@@ -48,6 +46,7 @@ _op_sac_save_list = {
     torch._higher_order_ops.inductor_compiled_code,
 }
 
+
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: nn.Module,
@@ -58,9 +57,7 @@ def parallelize_deepseekv3(
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
-    assert (
-        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert job_config.training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """

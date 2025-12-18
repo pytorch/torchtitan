@@ -4,7 +4,7 @@ tomli >= 1.1.0 ; python_version < "3.11"
 tensorboard
 tabulate
 wandb
-fsspec
+fsspec<=2025.10.0
 tyro
 tokenizers >= 0.15.0
 safetensors

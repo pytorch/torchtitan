@@ -30,7 +30,6 @@ from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
     get_dual_pipe_v_flag,
 )
-
 from torchtitan.distributed.expert_parallel import (
     BaseExpertParallel,
     DeepEPExpertParallel,
@@ -43,7 +42,6 @@ from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.moe import moe as moe_module
 from torchtitan.tools.logging import logger
-
 
 # for selective op activation checkpointing
 _op_sac_save_list = {
@@ -80,9 +78,7 @@ def parallelize_llama(
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
-    assert (
-        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
-    ), f"""
+    assert job_config.training.seq_len % parallel_dims.seq_len_divisor == 0, f"""
         Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
@@ -125,6 +121,7 @@ def parallelize_llama(
 
         # Import deepep module to register custom ops before accessing them
         import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
+
         _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
         _op_sac_save_list.add(torch.ops.deepep.combine.default)
     else:
