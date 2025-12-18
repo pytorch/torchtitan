@@ -11,13 +11,13 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
-from torchtitan.datasets.dataloader import build_dataloader
+from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.hf_datasets.dataloader import build_dataloader
 from torchtitan.protocols.train_spec import TrainSpec
 
 from ..llama3 import (
     Llama3StateDictAdapter,
     parallelize_llama,
-    pipeline_llama,
     Transformer,
     TransformerModelArgs,
 )
@@ -46,16 +46,30 @@ qwen2_configs = {
         use_qkv_bias=True,
         rope_theta=1000000,
     ),
+    "7B_flex_attention": TransformerModelArgs(
+        vocab_size=152064,
+        max_seq_len=131072,
+        head_dim=128,
+        dim=3584,
+        hidden_dim=18944,
+        n_layers=28,
+        norm_eps=1e-6,
+        n_heads=28,
+        n_kv_heads=4,
+        use_qkv_bias=True,
+        rope_theta=1000000,
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
+    ),
 }
 
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        name="qwen2",
         model_cls=Transformer,
         model_args=qwen2_configs,
         parallelize_fn=parallelize_llama,
-        pipelining_fn=pipeline_llama,
+        pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_dataloader,

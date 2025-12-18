@@ -71,4 +71,9 @@ class TransformerModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_dense_model_nparams_and_flops(self, model, seq_len)
+        return get_dense_model_nparams_and_flops(
+            self,
+            model,
+            2 * (self.dim // self.n_heads),
+            seq_len,
+        )

@@ -46,9 +46,8 @@ class Qwen3NextModelArgs(BaseModelArgs):
     max_seq_len: int = 4096
     depth_init: bool = True
 
-    use_flex_attn: bool = False
-    attn_mask_type: str = "causal"
-    eos_id: int = 151645
+    use_flex_attn: bool = True
+    attn_mask_type: str = "block_causal"
 
     enable_weight_tying: bool = False
 
@@ -93,7 +92,16 @@ class Qwen3NextModelArgs(BaseModelArgs):
                 for i in range(self.n_layers)
             ]
 
+        if not self.use_flex_attn:
+            raise ValueError("Qwen3-Next requires FlexAttention")
+        if (
+            job_config.compile.enable
+            and "model" in job_config.compile.components
+            and job_config.compile.fullgraph
+        ):
+            raise ValueError("`compile.fullgraph` must be off for Qwen3-Next")
+
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_moe_model_nparams_and_flops(self, model, seq_len)
+        return get_moe_model_nparams_and_flops(self, model, 2 * self.head_dim, seq_len)

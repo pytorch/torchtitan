@@ -1,17 +1,17 @@
-import os
 import warnings
 from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import torch
 from datatrove.utils.dataset import DatatroveFolderDataset
+from numba import jit
+from torch.distributed.checkpoint.stateful import Stateful
+from torch.utils.data import IterableDataset
+
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import Tokenizer
 from torchtitan.config import JobConfig
 from torchtitan.tools.logging import logger
-from torch.distributed.checkpoint.stateful import Stateful
-from torch.utils.data import IterableDataset
-from numba import jit
 
 
 def normalize(weights: List[float]) -> List[np.array]:
@@ -42,9 +42,12 @@ class Nanoset(torch.utils.data.Dataset):
     The Nanoset dataset
     Args:
         dataset_folders (List[str]): List of folders with tokenized datasets
-        dataset_weights (Union[List[float], None]): List with the weights for weighted datasets. If None, consume all samples from all datasets without weighting. Weights are normalized in __init__
+        dataset_weights (Union[List[float], None]): List with the weights for weighted datasets. If None,
+                                                    consume all samples from all datasets without weighting.
+                                                    Weights are normalized in __init__
         sequence_length (int): Sequence length of the built samples
-        token_size (int): Number of bytes for the tokens stored in the processed dataset files. 2 for vocab sizes < 65535, 4 otherwise
+        token_size (int): Number of bytes for the tokens stored in the processed dataset files.
+                          2 for vocab sizes < 65535, 4 otherwise
     """
 
     def __init__(
@@ -81,11 +84,11 @@ class Nanoset(torch.utils.data.Dataset):
             )
 
         # Build Nanoset Index
-        ## To build the index we need the length of each dataset
+        # To build the index we need the length of each dataset
         self.dataset_lengths = [
             len(datatrove_dataset) for datatrove_dataset in self.datatrove_datasets
         ]
-        ## Set dataset weights
+        # Set dataset weights
         if (
             dataset_weights is None
         ):  # Case of training with > 1 datasets without weighting them: Consume both datasets entirely on each epoch
@@ -95,7 +98,7 @@ class Nanoset(torch.utils.data.Dataset):
         assert len(dataset_folders) == len(
             self.dataset_weights
         ), f"Specified {len(self.dataset_weights)} weights but {len(dataset_folders)} datasets were provided."
-        ## Build dataset index and dataset sample index
+        # Build dataset index and dataset sample index
         self.dataset_index, self.dataset_sample_index = self.build_nanoset_index()
 
         self.print_nanoset_info()
@@ -162,7 +165,8 @@ class Nanoset(torch.utils.data.Dataset):
         )
         for index, sample_count in enumerate(dataset_sample_count):
             logger.info(
-                f">   Total number of samples from the {self.dataset_folders[index]} dataset: {sample_count} ({round(normalize(dataset_sample_count).tolist()[index], 2)})",
+                f">   Total number of samples from the {self.dataset_folders[index]} dataset: "
+                f"{sample_count} ({round(normalize(dataset_sample_count).tolist()[index], 2)})",
             )
 
 
@@ -229,19 +233,45 @@ class IterableNanoset(IterableDataset, Stateful):
         self.rank = rank
         self.infinite = infinite
 
-        self._sample_idx = 0
+        if not 0 <= self.rank < self.world_size:
+            raise ValueError(
+                f"Rank {self.rank} is out of bounds for world size {self.world_size}"
+            )
+
+        # Track the next dataset index this rank should consume.
+        self._sample_idx = self.rank
 
     def __iter__(self):
-        while True:
-            # calculate start and end indices for this rank
-            start_idx = self._sample_idx + self.rank
-            end_idx = len(self.base_dataset)
+        dataset_length = len(self.base_dataset)
 
-            for idx in range(start_idx, end_idx, self.world_size):
+        if dataset_length == 0:
+            logger.warning("Nanoset dataset is empty; no samples will be yielded.")
+            return
+
+        if self.rank >= dataset_length:
+            logger.warning(
+                "Rank %d has no data to consume (dataset length: %d).",
+                self.rank,
+                dataset_length,
+            )
+            return
+
+        # Ensure we resume at a valid index for this rank.
+        self._sample_idx = max(self._sample_idx, self.rank)
+
+        while True:
+            if self._sample_idx >= dataset_length:
+                if not self.infinite:
+                    break
+
+                logger.warning("Dataset is being re-looped")
+                self._sample_idx = self.rank
+
+            for idx in range(self._sample_idx, dataset_length, self.world_size):
                 sample = self.base_dataset[idx]
                 tokens = sample["input_ids"]
 
-                x = torch.LongTensor(tokens)
+                x = torch.as_tensor(tokens, dtype=torch.long)
                 input_ids = x[:-1]
                 labels = x[1:]
 
@@ -250,12 +280,17 @@ class IterableNanoset(IterableDataset, Stateful):
 
             if not self.infinite:
                 break
-            else:
-                self._sample_idx = 0
-                logger.warning("Dataset is being re-looped")
 
     def load_state_dict(self, state_dict):
-        self._sample_idx = state_dict["sample_idx"]
+        sample_idx = state_dict.get("sample_idx")
+        if sample_idx is None:
+            logger.warning("IterableNanoset state_dict missing 'sample_idx' entry.")
+            return
+
+        self._sample_idx = max(sample_idx, self.rank)
+        logger.info(
+            "Resuming dataloader on rank %d from index %d", self.rank, self._sample_idx
+        )
 
     def state_dict(self):
         return {"sample_idx": self._sample_idx}

@@ -19,6 +19,11 @@ from torchtitan.tools.logging import logger
 from .utils import indices_padding_wrapper
 
 
+@dataclass
+class ExpertRoutingHistogram:
+    counts: list[float]
+
+
 def moe_init_std(dim_in: int, n_layers: int) -> float:
     return (2 / (dim_in * n_layers)) ** 0.5
 
@@ -111,6 +116,9 @@ class MoEArgs:
                 )
             else:
                 logger.info("[DeepEP optimizations] enabled: none (using defaults)")
+
+    # logging
+    log_expert_routing: bool = False
 
 
 # can be used as dense FFN layer or shared experts in MoE layers
@@ -672,6 +680,12 @@ class MoE(nn.Module):
             torch.zeros(num_experts, dtype=torch.float32),
             persistent=False,
         )
+        self.register_buffer(
+            "expert_routing_counter",
+            torch.zeros(num_experts, dtype=torch.float32),
+            persistent=False,
+        )
+        self.log_expert_routing = moe_args.log_expert_routing
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -699,6 +713,8 @@ class MoE(nn.Module):
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
             self.tokens_per_expert.add_(num_tokens_per_expert)
+            if self.log_expert_routing:
+                self.expert_routing_counter.add_(num_tokens_per_expert)
 
         if self.use_deepep:
             top_scores = top_scores.float()
@@ -767,6 +783,14 @@ class MoE(nn.Module):
             out = out.reshape(bs, slen, dim)
             return out
 
+    def pop_expert_routing_metrics(self) -> torch.Tensor | None:
+        if not self.log_expert_routing:
+            return None
+        with torch.no_grad():
+            counts = self.expert_routing_counter.clone()
+            self.expert_routing_counter.zero_()
+        return counts
+
     def init_weights(self, init_std: float, buffer_device: torch.device, n_layers: int):
         self.experts.init_weights(init_std, n_layers)
         self.router.init_weights(init_std, n_layers)
@@ -781,6 +805,9 @@ class MoE(nn.Module):
 
         with torch.device(buffer_device):
             self.tokens_per_expert = torch.zeros(
+                self.experts.num_experts, dtype=torch.float32
+            )
+            self.expert_routing_counter = torch.zeros(
                 self.experts.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:

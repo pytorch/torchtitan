@@ -23,9 +23,21 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
-def build_cross_entropy_loss(job_config: JobConfig, **kwargs):
+def cross_entropy_loss_unreduced(
+    pred: torch.Tensor, labels: torch.Tensor
+) -> torch.Tensor:
+    """Common cross-entropy loss function for Transformer models training,"""
+    return torch.nn.functional.cross_entropy(
+        pred.flatten(0, 1).float(), labels.flatten(0, 1), reduction="none"
+    ).view(labels.shape)
+
+
+def build_cross_entropy_loss(job_config: JobConfig, reduction: str = "mean", **kwargs):
+    # Added reduction kwarg to support RL training
     del kwargs  # delete any unused arguments
-    loss_fn = cross_entropy_loss
+    loss_fn = (
+        cross_entropy_loss if reduction == "mean" else cross_entropy_loss_unreduced
+    )
     if job_config.compile.enable and "loss" in job_config.compile.components:
         logger.info("Compiling the loss function with torch.compile")
         loss_fn = torch.compile(loss_fn, backend=job_config.compile.backend)
@@ -64,3 +76,17 @@ def rescale_accumulated_loss(unwrapped_loss_fn, accumulation_steps):
     `unwrapped_loss_fn`.
     """
     return RescaleAccumulatedLoss(unwrapped_loss_fn, accumulation_steps)
+
+
+def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Common MSE loss function for Transformer models training."""
+    return torch.nn.functional.mse_loss(pred.float(), labels.float().detach())
+
+
+def build_mse_loss(job_config: JobConfig, **kwargs):
+    del kwargs  # delete any unused arguments
+    loss_fn = mse_loss
+    if job_config.compile.enable and "loss" in job_config.compile.components:
+        logger.info("Compiling the loss function with torch.compile")
+        loss_fn = torch.compile(loss_fn, backend=job_config.compile.backend)
+    return loss_fn
