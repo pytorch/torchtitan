@@ -29,19 +29,20 @@ from torchtitan.models.moe.utils import _permute, _unpermute
 
 class BaseExpertParallel(ParallelStyle, ABC):
     @abstractmethod
-    def _partition_fn(
-        self, name: str, mod: nn.Module, device_mesh: DeviceMesh
-    ) -> None: ...
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        ...
 
     @abstractmethod
     def _token_dispatch(
         self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
-    ) -> tuple[Tensor, Tensor]: ...
+    ) -> tuple[Tensor, Tensor]:
+        ...
 
     @abstractmethod
     def _token_combine(
         self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
-    ) -> Tensor: ...
+    ) -> Tensor:
+        ...
 
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
