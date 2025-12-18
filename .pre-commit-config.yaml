@@ -50,5 +50,6 @@ repos:
       entry: codespell --toml pyproject.toml
       language: python
       types: [text]
+      args: ["--ignore-words-list=MIS"]
       additional_dependencies:
         - tomli

@@ -8,9 +8,10 @@ import importlib
 import os
 import time
 from datetime import timedelta
-from typing import Any, Generator, Iterable, Optional
+from typing import Any, Generator, Iterable
 
 import torch
+
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
@@ -83,20 +84,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
 
-        # init distributed and build meshes
-        dist_utils.init_distributed(
-            job_config.comm,
-            enable_cpu_backend=job_config.training.enable_cpu_offload,
-            base_folder=job_config.job.dump_folder,
-        )
-
         job_config.maybe_log()
 
-        world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = job_config.parallelism
-        self.parallel_dims = parallel_dims = self._create_parallel_dims(
-            parallelism_config, world_size
-        )
+        # init distributed and build meshes
+        self.parallel_dims = parallel_dims = self.init_distributed()
 
         world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
@@ -118,8 +109,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         dist_utils.set_determinism(
             world_mesh,
             self.device,
-            job_config.training.seed,
-            job_config.training.deterministic,
+            job_config.debug,
+            distinct_seed_mesh_dims=["pp"],
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
@@ -338,12 +329,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled and not parallelism_config.disable_loss_parallel
+            parallel_dims.tp_enabled
+            and not job_config.parallelism.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(
-            loss_parallel_enabled,
-            parallelism_config.enable_compiled_autograd,
-        )
+        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
             parallel_dims,
             job_config.training.mixed_precision_param,
@@ -388,7 +377,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"total steps {job_config.training.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
-
+        
         # Calculate global batch size in tokens
         global_batch_size_tokens = global_batch_size * job_config.training.seq_len
         total_tokens_all_dp_ranks = global_batch_size_tokens * dp_degree
@@ -409,7 +398,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"total tokens across all DP ranks per step {format_tokens(total_tokens_all_dp_ranks)}"
         )
 
-    def _create_parallel_dims(self, parallelism_config, world_size) -> ParallelDims:
+    def init_distributed(self) -> ParallelDims:
+        job_config = self.job_config
+        dist_utils.init_distributed(
+            job_config.comm,
+            enable_cpu_backend=job_config.training.enable_cpu_offload,
+            base_folder=job_config.job.dump_folder,
+        )
+
+        world_size = int(os.environ["WORLD_SIZE"])
+        parallelism_config = job_config.parallelism
+
         return ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
@@ -456,29 +455,163 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             yield input_dict, labels
 
+    def post_dataloading_process(
+        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+        """
+        Post-processing hook after data loading and before model forward pass.
+
+        This method processes the raw data from the dataloader and prepares it for
+        the model's forward pass. It separates the main input tensor from auxiliary
+        inputs and constructs additional keyword arguments (e.g., attention masks).
+
+        This method can be overridden in subclasses to customize data processing
+        for different training strategies (e.g., converting tensors to DTensors,
+        applying custom transformations, etc.).
+
+        Args:
+            input_dict: Dictionary containing tensors from the dataloader. Must
+                contain an "input" key with the main input tensor. May contain
+                additional keys for auxiliary inputs (e.g., position ids).
+            labels: Target labels for the batch.
+
+        Returns:
+            A tuple of (inputs, labels, extra_inputs, extra_kwargs) where:
+                - inputs: Main input tensor extracted from input_dict["input"].
+                - labels: Target labels (unchanged from input parameter).
+                - extra_inputs: Dict of auxiliary input tensors (all keys except
+                    "input" from input_dict). These are passed to the model forward
+                    but are NOT forwarded across pipeline parallel stages.
+                - extra_kwargs: Dict of additional keyword arguments for model forward.
+                    These ARE forwarded across pipeline parallel stages. Contains
+                    attention_masks if flex attention is enabled.
+
+        Note:
+            The distinction between extra_inputs and extra_kwargs is important for
+            pipeline parallelism: extra_kwargs are forwarded to all pipeline stages,
+            while extra_inputs are only available to the first stage.
+        """
+        inputs = input_dict["input"]
+        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+        # For arguments, like attention_masks, we have to put them in a separate
+        # dict as extra_inputs are not forwarded to other stages in PP, but
+        # extra_kwargs are.
+        extra_kwargs: dict[str, Any] = {}
+
+        if getattr(self.model_args, "use_flex_attn", False):
+            extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
+                extra_inputs=extra_inputs,
+            )
+
+        return inputs, labels, extra_inputs, extra_kwargs
+
+    def _collect_moe_expert_metrics(self) -> dict[str, Any]:
+        metrics: dict[str, Any] = {}
+
+        if not getattr(self, "model_parts", None):
+            return metrics
+
+        try:
+            from torchtitan.models.moe import ExpertRoutingHistogram
+        except ImportError:
+            return metrics
+
+        try:
+            from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+                CheckpointImpl,
+            )
+        except ImportError:
+            CheckpointImpl = None  # type: ignore[assignment]
+
+        moe_counts: list[torch.Tensor] = []
+        layer_tags: list[str] = []
+
+        with torch.no_grad():
+            for part_idx, model_part in enumerate(self.model_parts):
+                layers = getattr(model_part, "layers", None)
+                if not layers:
+                    continue
+                for layer_name, transformer_block in layers.items():
+                    if not getattr(transformer_block, "moe_enabled", False):
+                        continue
+                    moe_module = getattr(transformer_block, "moe", None)
+                    if moe_module is None:
+                        continue
+
+                    counts = moe_module.pop_expert_routing_metrics()
+                    if counts is None:
+                        continue
+
+                    checkpoint_impl = getattr(transformer_block, "checkpoint_impl", None)
+
+                    if (
+                        CheckpointImpl is not None
+                        and checkpoint_impl is CheckpointImpl.NO_REENTRANT
+                    ):
+                        counts = counts / 2
+
+                    layer_tag = f"part{part_idx}_layer{layer_name}".replace("/", "_")
+                    moe_counts.append(counts)
+                    layer_tags.append(layer_tag)
+
+        if not moe_counts:
+            return metrics
+
+        tokens_per_expert_by_layer = torch.stack(moe_counts)
+
+        dp_group = None
+        if self.parallel_dims.dp_cp_enabled:
+            dp_group = self.parallel_dims.world_mesh["dp_cp"].get_group()
+        elif self.parallel_dims.dp_enabled:
+            dp_group = self.parallel_dims.world_mesh["dp"].get_group()
+
+        if dp_group is not None:
+            torch.distributed.all_reduce(
+                tokens_per_expert_by_layer,
+                group=dp_group,
+                op=torch.distributed.ReduceOp.SUM,
+            )
+
+        tokens_per_expert_by_layer = tokens_per_expert_by_layer.to(torch.float32).cpu()
+
+        for layer_tag, counts_tensor in zip(layer_tags, tokens_per_expert_by_layer):
+            total_tokens = counts_tensor.sum().item()
+            if total_tokens <= 0:
+                continue
+
+            fractions = counts_tensor / total_tokens
+            top_fraction, top_idx = torch.max(fractions, dim=0)
+            active_experts = int((counts_tensor > 0).sum().item())
+            positive_fractions = fractions[fractions > 0]
+            entropy = float(
+                -(positive_fractions * positive_fractions.log()).sum().item()
+            )
+
+            prefix = f"moe/{layer_tag}"
+            metrics[f"{prefix}/tokens_total"] = float(total_tokens)
+            metrics[f"{prefix}/active_experts"] = active_experts
+            metrics[f"{prefix}/top_expert_idx"] = int(top_idx.item())
+            metrics[f"{prefix}/top_expert_fraction"] = float(top_fraction.item())
+            metrics[f"{prefix}/entropy"] = entropy
+            metrics[f"{prefix}/expert_hist"] = ExpertRoutingHistogram(
+                counts=counts_tensor.tolist()
+            )
+
+        return metrics
+
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs = input_dict["input"]
-        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
-        # For arguments, like attention_masks, we have to put them in a separate
-        # dict as extra_inputs are not forwarded to other stages in PP, but
-        # extra_kwargs are.
-        extra_kwargs = {}
-
-        if getattr(self.model_args, "use_flex_attn", False):
-            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
-            )
-
+        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
+            input_dict, labels
+        )
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
-        cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
         optional_context_parallel_ctx = (
             dist_utils.create_context_parallel_ctx(
                 cp_mesh=parallel_dims.world_mesh["cp"],
@@ -506,12 +639,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        return_outputs=False,
                     )
                 else:
                     self.pp_schedule.step(
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
+                        return_outputs=False,
                     )
 
             # accumulate losses across pipeline microbatches
@@ -598,6 +733,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+        extra_metrics.update(self._collect_moe_expert_metrics())
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -709,7 +845,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.metrics_processor.close()
 
 
-if __name__ == "__main__":
+def main(trainer_class: type[Trainer]) -> None:
+    """Main entry point for training with a specified trainer class.
+
+    Args:
+        trainer_class: The trainer class to instantiate (e.g., Trainer, FluxTrainer, TorchCommsTrainer)
+    """
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
@@ -724,10 +865,11 @@ if __name__ == "__main__":
     assume_balanced = getattr(config.training, "debug_moe_force_load_balance", False)
     apply_deepep_empty_expert_fix(assume_load_balanced=assume_balanced)
 
-    trainer: Optional[Trainer] = None
+
+    trainer: Trainer | None = None
 
     try:
-        trainer = Trainer(config)
+        trainer = trainer_class(config)
 
         if config.checkpoint.create_seed_checkpoint:
             assert (
@@ -748,3 +890,7 @@ if __name__ == "__main__":
         trainer.close()
         torch.distributed.destroy_process_group()
         logger.info("Process group destroyed")
+
+
+if __name__ == "__main__":
+    main(Trainer)

@@ -181,12 +181,25 @@ def get_hostname_url():
         return None
 
 
-def param_to_sglang_data(name):
+def param_to_sglang_data(name, needs_permute=False):
     out_permute = False
-    if "attention.w" in name:
+    # check if name is weird
+    if "attention." in name and any(
+        [
+            ".wq" in name,
+            ".wk" in name,
+            ".wv" in name,
+        ]
+    ):
         # column parallel qkv, so...
         out_permute = (".wq" in name) or (".wk" in name)
         out_name = "model." + name.split("attention")[0] + "self_attn.qkv_proj"
+        if ".bias" in name:
+            out_name += ".bias"
+        else:
+            out_name += ".weight"
+    elif "attention." in name and ".wo" in name:
+        out_name = "model." + name.split("attention")[0] + "self_attn.o_proj"
         if ".bias" in name:
             out_name += ".bias"
         else:
@@ -195,6 +208,13 @@ def param_to_sglang_data(name):
         # QK Norm
         out_name = "model." + name.replace("attention", "self_attn")
         out_permute = True
+    elif "moe" in name:
+
+        out_name = "model." + name.replace("moe", "mlp").replace(
+            ".w1", ".w13_weight"
+        ).replace(".w3", ".w13_weight").replace(".w2", ".w2_weight").replace(
+            ".router.gate", ".gate"
+        )
     elif (".w1." in name) or (".w3" in name):
         out_name = "model." + name.replace("feed_forward", "mlp").replace(
             ".w1.", ".gate_up_proj."
@@ -219,7 +239,11 @@ def param_to_sglang_data(name):
         out_name = "model." + name.replace("tok_embeddings", "embed_tokens").replace(
             "output", "lm_head"
         )
-    out_name = out_name.replace("._checkpoint_wrapped_module.", ".")
+    out_name = out_name.replace("._checkpoint_wrapped_module.", ".").replace(
+        "._orig_mod.", "."
+    )
+    if not needs_permute:
+        return out_name, False
     return out_name, out_permute
 
 
@@ -255,6 +279,7 @@ def send_param(
     total_group_size,
     sglang_gloo_group,
     sglang_nccl_group,
+    param_indx,
 ):
     if torch.distributed.get_rank() == 0:
         object_list = [
@@ -269,15 +294,14 @@ def send_param(
         object_list = [
             None,
         ]
-    device = torch.device("cpu")
     desired_dtype = (
         weight_dtypes[name]
         if isinstance(weight_dtypes[name], torch.dtype)
         else getattr(torch, weight_dtypes[name])
     )
-    torch.distributed.broadcast_object_list(
-        object_list, group_src=0, group=sglang_gloo_group, device=device
-    )
+    logger.debug(f"Attempting to send {object_list}")
+    obj_indx = torch.LongTensor([param_indx]).to(device=local_param.device)
+    torch.distributed.broadcast(obj_indx, group_src=0, group=sglang_nccl_group)
     # setup tensor list
     tensor_list = [
         torch.zeros(
@@ -293,10 +317,7 @@ def send_param(
 
 
 @env_fix_wrapper
-def send_wait(sglang_gloo_group):
+def send_wait(sglang_nccl_group, device):
     logger.debug("Sending wait signal to sglang...")
-    if torch.distributed.get_rank() == 0:
-        object_list = [{"name": "none"}]
-    else:
-        object_list = [None]
-    torch.distributed.broadcast_object_list(object_list, 0, group=sglang_gloo_group)
+    indx_tensor = torch.LongTensor([-1]).to(device=device)
+    torch.distributed.broadcast(indx_tensor, 0, group=sglang_nccl_group)

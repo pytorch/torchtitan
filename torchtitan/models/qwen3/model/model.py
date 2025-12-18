@@ -337,7 +337,7 @@ class TransformerBlock(nn.Module):
 
         Args:
             x (torch.Tensor): Input tensor.
-            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
+            rope_cache (torch.Tensor): Precomputed cosine and sine frequencies.
 
         Returns:
             torch.Tensor: Output tensor after applying attention and feedforward layers.

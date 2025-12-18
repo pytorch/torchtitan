@@ -28,22 +28,16 @@ from torchtitan.protocols.train_spec import ModelProtocol
 from .args import Qwen3NextModelArgs
 
 try:
-    from causal_conv1d import causal_conv1d_fn
-
-    HAS_CASUAL_CONV1D = True
-except ImportError:
-    HAS_CASUAL_CONV1D = False
-    causal_conv1d_fn = None
-
-try:
     from fla.modules import FusedRMSNormGated
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+    from fla.modules.convolution import causal_conv1d as causal_conv1d_fn
 
     HAS_FLA = True
 except ImportError:
     HAS_FLA = False
     FusedRMSNormGated = None
     chunk_gated_delta_rule = None
+    causal_conv1d_fn = None
 
 
 # Adapted from https://github.com/pytorch/torchtune/blob/main/torchtune/models/qwen2/_positional_embeddings.py
@@ -203,16 +197,12 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)
         xv = values.transpose(1, 2)
 
-        assert (
-            isinstance(attention_masks, BlockMask) or attention_masks is None
-        ), attention_masks
-
         if self.use_flex_attn:
-            assert isinstance(attention_masks, BlockMask), attention_masks
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+            output = self.inner_attention(
+                xq, xk, xv, block_mask=attention_masks["flex_attn"], scale=self.scaling
+            )
         else:
-            assert attention_masks is None
-            output = self.inner_attention(xq, xk, xv)
+            output = self.inner_attention(xq, xk, xv, scale=self.scaling)
 
         output = output.transpose(1, 2).contiguous().view(bs, seqlen, -1)
         output = output * torch.sigmoid(gate.view(bs, seqlen, -1))
@@ -255,83 +245,325 @@ class GatedDeltaNet(nn.Module):
         )
         self.out_proj = nn.Linear(self.value_dim, model_args.dim, bias=False)
 
+    def fix_query_key_value_ordering(self, mixed_qkvz, mixed_ba):
+        """
+        Derives `query`, `key` and `value` tensors from `mixed_qkvz` and `mixed_ba`.
+        """
+
+        new_tensor_shape_qkvz = mixed_qkvz.size()[:-1] + (
+            self.linear_num_key_heads,
+            2 * self.linear_key_head_dim
+            + 2
+            * self.linear_value_head_dim
+            * self.linear_num_value_heads
+            // self.linear_num_key_heads,
+        )
+        new_tensor_shape_ba = mixed_ba.size()[:-1] + (
+            self.linear_num_key_heads,
+            2 * self.linear_num_value_heads // self.linear_num_key_heads,
+        )
+
+        mixed_qkvz = mixed_qkvz.view(*new_tensor_shape_qkvz)
+        mixed_ba = mixed_ba.view(*new_tensor_shape_ba)
+        split_arg_list_qkvz = [
+            self.linear_key_head_dim,
+            self.linear_key_head_dim,
+            (
+                self.linear_num_value_heads
+                // self.linear_num_key_heads
+                * self.linear_value_head_dim
+            ),
+            (
+                self.linear_num_value_heads
+                // self.linear_num_key_heads
+                * self.linear_value_head_dim
+            ),
+        ]
+        split_arg_list_ba = [
+            self.linear_num_value_heads // self.linear_num_key_heads,
+            self.linear_num_value_heads // self.linear_num_key_heads,
+        ]
+        query, key, value, z = torch.split(mixed_qkvz, split_arg_list_qkvz, dim=3)
+        b, a = torch.split(mixed_ba, split_arg_list_ba, dim=3)
+        # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
+        value = value.reshape(
+            value.size(0), value.size(1), -1, self.linear_value_head_dim
+        )
+        z = z.reshape(z.size(0), z.size(1), -1, self.linear_value_head_dim)
+        b = b.reshape(b.size(0), b.size(1), self.linear_num_value_heads)
+        a = a.reshape(a.size(0), a.size(1), self.linear_num_value_heads)
+        return query, key, value, z, b, a
+
     def forward(
         self,
-        x: torch.Tensor,
+        hidden_states: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         position_ids: torch.Tensor | None,
     ):
-        bs, seqlen, dim = x.shape
-        projected_qkvz = self.in_proj_qkvz(x)
-        projected_ba = self.in_proj_ba(x)
-        new_shape_qkvz = projected_qkvz.size()[:-1] + (
-            self.linear_num_key_heads,
-            2 * self.linear_key_head_dim
-            + 2
-            * (
-                self.linear_num_value_heads
-                // self.linear_num_key_heads
-                * self.linear_value_head_dim
-            ),
+        # hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+
+        # Set up dimensions for reshapes later
+        batch_size, seq_len, _ = hidden_states.shape
+
+        projected_states_qkvz = self.in_proj_qkvz(hidden_states)
+        projected_states_ba = self.in_proj_ba(hidden_states)
+        query, key, value, z, b, a = self.fix_query_key_value_ordering(
+            projected_states_qkvz, projected_states_ba
         )
-        new_shape_ba = projected_ba.size()[:-1] + (
-            self.linear_num_key_heads,
-            2 * (self.linear_num_value_heads // self.linear_num_key_heads),
+        query, key, value = (
+            x.reshape(x.shape[0], x.shape[1], -1) for x in (query, key, value)
         )
-        projected_qkvz = projected_qkvz.view(*new_shape_qkvz)
-        projected_ba = projected_ba.view(*new_shape_ba)
-        split_qkvz = [
-            self.linear_key_head_dim,
-            self.linear_key_head_dim,
-            (
-                self.linear_num_value_heads
-                // self.linear_num_key_heads
-                * self.linear_value_head_dim
-            ),
-            (
-                self.linear_num_value_heads
-                // self.linear_num_key_heads
-                * self.linear_value_head_dim
-            ),
-        ]
-        split_ba = [
-            (self.linear_num_value_heads // self.linear_num_key_heads),
-            (self.linear_num_value_heads // self.linear_num_key_heads),
-        ]
-        query, key, value_pre, z_pre = torch.split(projected_qkvz, split_qkvz, dim=3)
-        b_pre, a_pre = torch.split(projected_ba, split_ba, dim=3)
-        b = b_pre.reshape(b_pre.size(0), b_pre.size(1), self.linear_num_value_heads)
-        a = a_pre.reshape(a_pre.size(0), a_pre.size(1), self.linear_num_value_heads)
-        mixed_qkv = torch.cat((query, key, value_pre), dim=-1).transpose(1, 2)
-        mixed_qkv = mixed_qkv.reshape(bs, -1, seqlen)
-        mixed_qkv = causal_conv1d_fn(
-            mixed_qkv,
-            self.conv1d.weight.squeeze(1),
-            self.conv1d.bias,
+
+        mixed_qkv = torch.cat((query, key, value), dim=-1)
+        mixed_qkv = mixed_qkv.transpose(1, 2)
+        mixed_qkv, _ = causal_conv1d_fn(
+            x=mixed_qkv,
+            weight=self.conv1d.weight.squeeze(1),
+            bias=self.conv1d.bias,
             activation=self.activation,
-        ).transpose(1, 2)
+            seq_idx=(
+                attention_masks.get("seq_idx", None)
+                if isinstance(attention_masks, dict)
+                else None
+            ),
+        )
+
+        mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(
-            mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1
+            mixed_qkv,
+            [
+                self.key_dim,
+                self.key_dim,
+                self.value_dim,
+            ],
+            dim=-1,
         )
-        query = query.reshape(bs, seqlen, -1, self.linear_key_head_dim)
-        key = key.reshape(bs, seqlen, -1, self.linear_key_head_dim)
-        value = value.reshape(bs, seqlen, -1, self.linear_value_head_dim)
-        z = z_pre.reshape(z_pre.size(0), z_pre.size(1), -1, self.linear_value_head_dim)
+        query = query.reshape(
+            query.shape[0], query.shape[1], -1, self.linear_key_head_dim
+        )
+        key = key.reshape(key.shape[0], key.shape[1], -1, self.linear_key_head_dim)
+        value = value.reshape(
+            value.shape[0], value.shape[1], -1, self.linear_value_head_dim
+        )
+
         beta = b.sigmoid()
+        # If the model is loaded in fp16, without the .float() here, A might be -inf
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
-        v_ratio = self.linear_num_value_heads // self.linear_num_key_heads
-        if v_ratio > 1:
-            query = query.repeat_interleave(v_ratio, dim=2)
-            key = key.repeat_interleave(v_ratio, dim=2)
-        core_attn_out, _ = chunk_gated_delta_rule(
-            query, key, value, g=g, beta=beta, use_qk_l2norm_in_kernel=True
+        if self.linear_num_value_heads // self.linear_num_key_heads > 1:
+            query = query.repeat_interleave(
+                self.linear_num_value_heads // self.linear_num_key_heads, dim=2
+            )
+            key = key.repeat_interleave(
+                self.linear_num_value_heads // self.linear_num_key_heads, dim=2
+            )
+
+        use_packed = attention_masks is not None and "cu_seqlens" in attention_masks
+        if use_packed:
+            cu_seqlens = attention_masks["cu_seqlens"]
+            bs, seqlen, num_heads, head_dim = query.shape
+            total_len = bs * seqlen
+            query_flat = query.reshape(1, total_len, num_heads, head_dim).contiguous()
+            key_flat = key.reshape(1, total_len, num_heads, head_dim).contiguous()
+            value_flat = value.reshape(
+                1, total_len, num_heads, self.linear_value_head_dim
+            ).contiguous()
+            g_flat = g.reshape(1, total_len, num_heads).contiguous()
+            beta_flat = beta.reshape(1, total_len, num_heads).contiguous()
+
+            core_attn_out, _ = chunk_gated_delta_rule(
+                query_flat,
+                key_flat,
+                value_flat,
+                g=g_flat,
+                beta=beta_flat,
+                use_qk_l2norm_in_kernel=True,
+                cu_seqlens=cu_seqlens,
+            )
+
+            core_attn_out = core_attn_out.reshape(
+                bs, seqlen, num_heads, self.linear_value_head_dim
+            )
+        else:
+            core_attn_out, _ = chunk_gated_delta_rule(
+                query, key, value, g=g, beta=beta, use_qk_l2norm_in_kernel=True
+            )
+
+        z_shape_og = z.shape
+        # reshape input data into 2D tensor
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = core_attn_out.reshape(
+            core_attn_out.shape[0], core_attn_out.shape[1], -1
         )
-        core_attn_out_flat = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z_flat = z.reshape(-1, z.shape[-1])
-        core_attn_out_flat = self.norm(core_attn_out_flat, z_flat)
-        core_attn_out = core_attn_out_flat.reshape(bs, seqlen, -1)
-        return self.out_proj(core_attn_out)
+
+        output = self.out_proj(core_attn_out)
+        return output
+
+    # def forward(
+    #     self,
+    #     x: torch.Tensor,
+    #     rope_cache: torch.Tensor,
+    #     attention_masks: AttentionMasksType | None,
+    #     position_ids: torch.Tensor | None,
+    # ):
+    #     bs, seqlen, dim = x.shape
+    #     projected_qkvz = self.in_proj_qkvz(x)
+    #     projected_ba = self.in_proj_ba(x)
+    #     new_shape_qkvz = projected_qkvz.size()[:-1] + (
+    #         self.linear_num_key_heads,
+    #         2 * self.linear_key_head_dim
+    #         + 2
+    #         * (
+    #             self.linear_num_value_heads
+    #             // self.linear_num_key_heads
+    #             * self.linear_value_head_dim
+    #         ),
+    #     )
+    #     new_shape_ba = projected_ba.size()[:-1] + (
+    #         self.linear_num_key_heads,
+    #         2 * (self.linear_num_value_heads // self.linear_num_key_heads),
+    #     )
+    #     projected_qkvz = projected_qkvz.view(*new_shape_qkvz)
+    #     projected_ba = projected_ba.view(*new_shape_ba)
+    #     split_qkvz = [
+    #         self.linear_key_head_dim,
+    #         self.linear_key_head_dim,
+    #         (
+    #             self.linear_num_value_heads
+    #             // self.linear_num_key_heads
+    #             * self.linear_value_head_dim
+    #         ),
+    #         (
+    #             self.linear_num_value_heads
+    #             // self.linear_num_key_heads
+    #             * self.linear_value_head_dim
+    #         ),
+    #     ]
+    #     split_ba = [
+    #         (self.linear_num_value_heads // self.linear_num_key_heads),
+    #         (self.linear_num_value_heads // self.linear_num_key_heads),
+    #     ]
+    #     query, key, value_pre, z_pre = torch.split(projected_qkvz, split_qkvz, dim=3)
+    #     b_pre, a_pre = torch.split(projected_ba, split_ba, dim=3)
+    #     b = b_pre.reshape(b_pre.size(0), b_pre.size(1), self.linear_num_value_heads)
+    #     a = a_pre.reshape(a_pre.size(0), a_pre.size(1), self.linear_num_value_heads)
+    #     mixed_qkv = torch.cat((query, key, value_pre), dim=-1).transpose(1, 2)
+    #     mixed_qkv = mixed_qkv.reshape(bs, -1, seqlen).contiguous(memory_format=torch.channels_last)
+    #     mixed_qkv = causal_conv1d_fn(
+    #         mixed_qkv,
+    #         self.conv1d.weight.squeeze(1),
+    #         self.conv1d.bias,
+    #         activation=self.activation,
+    #         seq_idx=attention_masks.get("seq_idx", None) if attention_masks is not None else None,
+    #     ).transpose(1, 2)
+
+    #     query, key, value = torch.split(
+    #         mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1
+    #     )
+    #     query = query.reshape(bs, seqlen, -1, self.linear_key_head_dim)
+    #     key = key.reshape(bs, seqlen, -1, self.linear_key_head_dim)
+    #     value = value.reshape(bs, seqlen, -1, self.linear_value_head_dim)
+    #     z = z_pre.reshape(z_pre.size(0), z_pre.size(1), -1, self.linear_value_head_dim)
+    #     beta = b.sigmoid()
+    #     g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+    #     v_ratio = self.linear_num_value_heads // self.linear_num_key_heads
+    #     if v_ratio > 1:
+    #         query = query.repeat_interleave(v_ratio, dim=2).contiguous()
+    #         key = key.repeat_interleave(v_ratio, dim=2).contiguous()
+
+    #     use_packed = attention_masks is not None and "cu_seqlens" in attention_masks
+    #     if use_packed:
+    #         cu_seqlens = attention_masks["cu_seqlens"]
+    #         bs, seqlen, num_heads, head_dim = query.shape
+    #         total_len = bs * seqlen
+    #         query_flat = query.reshape(1, total_len, num_heads, head_dim).contiguous()
+    #         key_flat = key.reshape(1, total_len, num_heads, head_dim).contiguous()
+    #         value_flat = value.reshape(1, total_len, num_heads, self.linear_value_head_dim).contiguous()
+    #         g_flat = g.reshape(1, total_len, num_heads).contiguous()
+    #         beta_flat = beta.reshape(1, total_len, num_heads).contiguous()
+
+    #         core_attn_out, _ = chunk_gated_delta_rule(
+    #             query_flat, key_flat, value_flat, g=g_flat, beta=beta_flat,
+    #             use_qk_l2norm_in_kernel=True, cu_seqlens=cu_seqlens
+    #         )
+
+    #         core_attn_out = core_attn_out.reshape(bs, seqlen, num_heads, self.linear_value_head_dim)
+    #     else:
+    #         core_attn_out, _ = chunk_gated_delta_rule(
+    #             query, key, value, g=g, beta=beta, use_qk_l2norm_in_kernel=True
+    #         )
+
+    #     core_attn_out_flat = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+    #     z_flat = z.reshape(-1, z.shape[-1])
+    #     core_attn_out_flat = self.norm(core_attn_out_flat, z_flat)
+    #     core_attn_out = core_attn_out_flat.reshape(bs, seqlen, -1)
+    #     return self.out_proj(core_attn_out)
+
+    # def forward(
+    #     self,
+    #     x: torch.Tensor,
+    #     rope_cache: torch.Tensor,
+    #     attention_masks: AttentionMasksType | None,
+    #     position_ids: torch.Tensor | None,
+    # ):
+    #     bs, seqlen, dim = x.shape
+    #     projected_qkvz = self.in_proj_qkvz(x)  # bs, seqlen, 2*key_dim + 2*value_dim
+    #     mixed_qkv = projected_qkvz[..., :self.conv_dim]  # bs, seqlen, conv_dim
+    #     z = projected_qkvz[..., self.conv_dim:]  # bs, seqlen, value_dim
+    #     projected_ba = self.in_proj_ba(x)  # bs, seqlen, 2*num_value_heads
+    #     b = projected_ba[..., :self.linear_num_value_heads]
+    #     a = projected_ba[..., self.linear_num_value_heads:]
+    #     mixed_qkv = mixed_qkv.contiguous().permute(0, 2, 1).contiguous()  # bs, conv_dim, seqlen with seqlen inn
+    #     mixed_qkv = causal_conv1d_fn(
+    #         mixed_qkv,
+    #         self.conv1d.weight.squeeze(1),
+    #         self.conv1d.bias,
+    #         activation=self.activation,
+    #         seq_idx=attention_masks.get("seq_idx", None) if attention_masks is not None else None,
+    #     )
+    #     mixed_qkv = mixed_qkv.permute(0, 2, 1)  # bs, seqlen, conv_dim
+    #     query, key, value = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+    #     query = query.reshape(bs, seqlen, -1, self.linear_key_head_dim)
+    #     key = key.reshape(bs, seqlen, -1, self.linear_key_head_dim)
+    #     value = value.reshape(bs, seqlen, -1, self.linear_value_head_dim)
+    #     z = z.reshape(bs, seqlen, -1, self.linear_value_head_dim)
+    #     beta = b.sigmoid()
+    #     g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+    #     v_ratio = self.linear_num_value_heads // self.linear_num_key_heads
+    #     if v_ratio > 1:
+    #         query = query.repeat_interleave(v_ratio, dim=2)
+    #         key = key.repeat_interleave(v_ratio, dim=2)
+
+    #     use_packed = attention_masks is not None and "cu_seqlens" in attention_masks
+    #     if use_packed:
+    #         cu_seqlens = attention_masks["cu_seqlens"]
+    #         bs, seqlen, num_heads, head_dim = query.shape
+    #         total_len = bs * seqlen
+    #         query_flat = query.reshape(1, total_len, num_heads, head_dim)
+    #         key_flat = key.reshape(1, total_len, num_heads, head_dim)
+    #         value_flat = value.reshape(1, total_len, num_heads, self.linear_value_head_dim)
+    #         g_flat = g.reshape(1, total_len, num_heads)
+    #         beta_flat = beta.reshape(1, total_len, num_heads)
+
+    #         core_attn_out, _ = chunk_gated_delta_rule(
+    #             query_flat, key_flat, value_flat, g=g_flat, beta=beta_flat,
+    #             use_qk_l2norm_in_kernel=True, cu_seqlens=cu_seqlens
+    #         )
+
+    #         core_attn_out = core_attn_out.reshape(bs, seqlen, num_heads, self.linear_value_head_dim)
+    #     else:
+    #         core_attn_out, _ = chunk_gated_delta_rule(
+    #             query, key, value, g=g, beta=beta, use_qk_l2norm_in_kernel=True
+    #         )
+
+    #     core_attn_out_flat = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+    #     z_flat = z.reshape(-1, z.shape[-1])
+    #     core_attn_out_flat = self.norm(core_attn_out_flat, z_flat)
+    #     core_attn_out = core_attn_out_flat.reshape(bs, seqlen, -1)
+    #     return self.out_proj(core_attn_out)
 
     def init_weights(self, init_std: float):
         self.dt_bias.data.fill_(1.0)
@@ -428,16 +660,15 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
             lt == "linear_attention" for lt in model_args.layer_types
         )
         if have_linear_attention:
-            if not HAS_FLA or not HAS_CASUAL_CONV1D:
+            if not HAS_FLA:
                 raise ImportError(
-                    "The 'causal_conv1d' and packages are required for models with 'linear_attention' layers. "
-                    "Please install them to proceed: `pip install flash-linear-attention causal_conv1d`"
+                    "The 'flash-linear-attention' package is required for models with 'linear_attention' layers. "
+                    "Please install it to proceed: `pip install flash-linear-attention`"
                 )
 
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
-        self.eos_id = model_args.eos_id
         self.head_dim = model_args.head_dim
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
@@ -457,7 +688,7 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
         buffer_device = buffer_device or self.rope_cache.device
         with torch.device(buffer_device):
             self.rope_cache = self._precompute_rope_cache()
-        nn.init.normal_(self.tok_embeddings.weight)
+        nn.init.normal_(self.tok_embeddings.weight, mean=0.0, std=0.02)
         for layer in self.layers.values():
             layer.init_weights(buffer_device)
         self.norm.weight.data.zero_()
@@ -484,30 +715,74 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
+        ret = {}
         mask_mods = [get_causal_mask_mod()]
         match self.model_args.attn_mask_type:
             case "causal":
-                B = 1
-            case "block_causal":
-                B = input_batch.shape[0]
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
-            case "block_causal_by_sequence_lengths":
-                sequence_lengths = extra_inputs.pop("sequence_lengths", None)
-                if sequence_lengths is None:
-                    raise RuntimeError(
-                        "`sequence_lengths` required for `block_causal_by_sequence_lengths`"
-                    )
-                B = input_batch.shape[0]
-                mask_mods.append(
-                    get_block_causal_mask_mod_by_seq_lens(sequence_lengths)
+                return create_attention_mask(
+                    and_masks(*mask_mods),
+                    1,
+                    None,
+                    input_batch.shape[1],
+                    input_batch.shape[1],
                 )
+            case "block_causal":
+                B, T = input_batch.shape
+                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+
+                device = input_batch.device
+                reset = torch.zeros(B, T, dtype=torch.bool, device=device)
+                reset[:, 0] = True
+                prev = torch.cat(
+                    [
+                        torch.full(
+                            (B, 1),
+                            tokenizer.eos_id,
+                            dtype=input_batch.dtype,
+                            device=device,
+                        ),
+                        input_batch[:, :-1],
+                    ],
+                    dim=1,
+                )
+                reset |= prev == tokenizer.eos_id
+                seg = (
+                    torch.cumsum(reset.to(torch.int32), dim=1, dtype=torch.int32) - 1
+                ).contiguous()
+                ret["seq_idx"] = seg
+
+                cu_seqlens = [torch.tensor([0], dtype=torch.int32, device=device)]
+                for b in range(B):
+                    if T == 0:
+                        continue
+                    _, segment_counts = torch.unique(seg[b], return_counts=True)
+                    segment_lengths = segment_counts.to(torch.int32)
+                    cumulative_lengths = torch.cumsum(segment_lengths, dim=0)
+                    offset_cumulative = cu_seqlens[-1][-1] + cumulative_lengths
+                    cu_seqlens.append(offset_cumulative)
+                cu_seqlens = torch.cat(cu_seqlens)
+                ret["cu_seqlens"] = cu_seqlens
+
+            # case "block_causal_by_sequence_lengths":
+            #     sequence_lengths = extra_inputs.pop("sequence_lengths", None)
+            #     if sequence_lengths is None:
+            #         raise RuntimeError(
+            #             "`sequence_lengths` required for `block_causal_by_sequence_lengths`"
+            #         )
+            #     B = input_batch.shape[0]
+            #     mask_mods.append(
+            #         get_block_causal_mask_mod_by_seq_lens(sequence_lengths)
+            #     )
+
+            # TODO: calculate seq_idx and cu_seqlens
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
                 )
-        return create_attention_mask(
+        ret["flex_attn"] = create_attention_mask(
             and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
         )
+        return ret
 
     def forward(
         self,

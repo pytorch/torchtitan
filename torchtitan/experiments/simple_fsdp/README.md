@@ -15,13 +15,13 @@ This folder includes an experimental frontend implementation for [SimpleFSDP: Si
 #### Training Llama3 models
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.name simple_fsdp.llama3 --compile.enable
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.name simple_fsdp.llama3 --compile.enable --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config
 ```
 
 #### Training DeepSeek_v3 models
 
 ```bash
-CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name simple_fsdp.deepseek_v3 --compile.enable
+CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name simple_fsdp.deepseek_v3 --compile.enable --activation_checkpoint.mode "none" --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config
 ```
 
 ### Composability Support
@@ -56,7 +56,7 @@ SimpleFSDP relies on compiler backend to perform optimizations (i.e., bucketing 
 users can specify the pass (e.g., "aot_eager_autobucketing") via additional configs:
 
 ```bash
---job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config  --compile.model_backend_override "aot_eager_autobucketing"
+--compile.model_backend_override "aot_eager_autobucketing"
 ```
 
 ### Citation

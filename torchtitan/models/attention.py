@@ -15,7 +15,6 @@ import torch.nn.functional as F
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
-    AuxOutput,
     BlockMask,
     create_block_mask,
     flex_attention,
@@ -27,6 +26,7 @@ __all__ = [
     "ScaledDotProductAttentionWrapper",
     "get_causal_mask_mod",
     "get_document_mask_mod",
+    "get_sliding_window_mask_mod",
     "get_fixed_block_mask_mod",
     "get_block_causal_mask_mod_by_seq_lens",
     "create_attention_mask",
@@ -47,7 +47,8 @@ class FlexAttentionWrapper(torch.nn.Module):
     """
 
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="default" #mode="max-autotune-no-cudagraphs"
+        flex_attention,
+        mode="max-autotune-no-cudagraphs",
     )
 
     def forward(
@@ -58,14 +59,23 @@ class FlexAttentionWrapper(torch.nn.Module):
         *,
         block_mask: BlockMask,
         scale: float | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, AuxOutput]:
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
+        # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
+        #    to convert `lse` to be DTensor.
+
         return FlexAttentionWrapper._compiled_flex_attn(
-            q, k, v, block_mask=block_mask, scale=scale
+            q,
+            k,
+            v,
+            block_mask=block_mask,
+            scale=scale,
+            return_lse=return_lse,
         )
 
 
@@ -91,6 +101,7 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.FLASH_ATTENTION,
                 SDPBackend.EFFICIENT_ATTENTION,
+                SDPBackend.MATH,
             ]
 
     def forward(
@@ -221,6 +232,37 @@ def get_block_causal_mask_mod_by_seq_lens(
         return causal_mask & document_mask
 
     return mask_mod
+
+
+def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
+    """Creates a sliding window mask that only attends to tokens within a fixed window size.
+
+    This implements causal sliding window attention where each token can only attend to:
+    - Itself (current token)
+    - Up to `window_size - 1` previous tokens
+    Args:
+        window_size: The maximum number of tokens to attend to (including current token).
+                    Must be >= 1. A window_size of 1 means attend only to self.
+
+    Returns:
+        A mask modifier function that implements causal sliding window masking.
+    """
+
+    if window_size < 1:
+        raise ValueError(
+            f"window_size must be >= 1 for sliding window attention mask, got {window_size}"
+        )
+
+    def sliding_window_mod(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        # Window mask: can only attend within the window
+        # q_idx - kv_idx < window_size ensures we look at most window_size-1 tokens back
+        return (kv_idx <= q_idx) & (q_idx - kv_idx < window_size)
+
+    sliding_window_mod.__name__ = f"sliding_window_mod_window_size_{window_size}"
+
+    return sliding_window_mod
 
 
 _compiled_create_block_mask = torch.compile(create_block_mask)

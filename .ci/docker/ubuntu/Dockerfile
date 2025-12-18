@@ -1,6 +1,6 @@
-ARG OS_VERSION
+ARG BASE_IMAGE
 
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu${OS_VERSION}
+FROM ${BASE_IMAGE}
 
 ARG OS_VERSION
 

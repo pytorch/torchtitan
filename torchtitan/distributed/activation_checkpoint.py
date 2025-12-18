@@ -19,14 +19,6 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.tools.logging import logger, warn_once
 
-try:
-    from torch.distributed.tensor.experimental._attention import create_cp_block_mask
-except ImportError:
-    print(
-        "create_cp_block_mask not found, skipping, please use the nightly version of torch."
-    )
-    create_cp_block_mask = None
-
 
 _layer_sac_count = 0
 
@@ -46,7 +38,11 @@ def _apply_layer_sac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     ac_freq = int(ac_config.selective_ac_option)
     if not ac_freq or _layer_sac_count % ac_freq == 0:
         return ptd_checkpoint_wrapper(
-            module, preserve_rng_state=False, early_stop=ac_config.early_stop
+            module,
+            preserve_rng_state=ac_config.preserve_rng_state,
+            determinism_check=ac_config.determinism_check,
+            early_stop=ac_config.early_stop,
+            debug=ac_config.debug,
         )
     else:
         return module
@@ -130,19 +126,14 @@ def _apply_op_sac(
         meta = defaultdict(int)
         return create_selective_checkpoint_contexts(_get_custom_policy(meta))
 
-    if create_cp_block_mask is not None:
-        return ptd_checkpoint_wrapper(
-            module,
-            context_fn=selective_checkpointing_context_fn,
-            preserve_rng_state=False,
-            early_stop=ac_config.early_stop,
-        )
-    else:
-        return ptd_checkpoint_wrapper(
-            module,
-            context_fn=selective_checkpointing_context_fn,
-            preserve_rng_state=False,
-        )
+    return ptd_checkpoint_wrapper(
+        module,
+        context_fn=selective_checkpointing_context_fn,
+        preserve_rng_state=ac_config.preserve_rng_state,
+        determinism_check=ac_config.determinism_check,
+        early_stop=ac_config.early_stop,
+        debug=ac_config.debug,
+    )
 
 
 def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
@@ -156,7 +147,11 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
         nn.Module: The module with full activation checkpointing applied.
     """
     return ptd_checkpoint_wrapper(
-        module, preserve_rng_state=False, early_stop=ac_config.early_stop
+        module,
+        preserve_rng_state=ac_config.preserve_rng_state,
+        determinism_check=ac_config.determinism_check,
+        early_stop=ac_config.early_stop,
+        debug=ac_config.debug,
     )
 
 
@@ -172,7 +167,7 @@ def _apply_op_sac_to_transformer_block_with_flex(
 
     Args:
         module (nn.Module): The transformer block to apply SAC to.
-        ac_config (ACConfig): The activation checkpointing config.
+        ac_config (ACConfig): The Activation Checkpoint config.
         base_fqn (str, optional): The base fqn of the module. Defaults to None.
         model_compile_enabled (bool): Whether model compilation is enabled.
             Defaults to False.
@@ -313,7 +308,6 @@ def apply_ac(
     Returns:
         None
     """
-
     if ac_config.mode == "memory_budget":
         assert model_compile_enabled, "Memory budget mode requires model to be compiled"
         if ac_config.visualize_memory_budget_pareto:

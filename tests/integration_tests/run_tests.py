@@ -7,6 +7,7 @@
 import argparse
 import os
 import subprocess
+import time
 
 from torchtitan.tools.logging import logger
 
@@ -22,6 +23,9 @@ _TEST_SUITES_FUNCTION = {
     "models": build_model_tests_list,
     "h100": build_h100_tests_list,
 }
+
+
+TEST_WITH_ROCM = os.getenv("TEST_WITH_ROCM", "0") == "1"
 
 
 def _run_cmd(cmd):
@@ -50,7 +54,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
         if override_arg:
             cmd += " " + " ".join(override_arg)
         logger.info(
-            f"=====Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
+            f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
 
         # save checkpoint (idx == 0) and load it for generation (idx == 1)
@@ -85,6 +89,10 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
             continue
 
         if test_flavor.disabled:
+            continue
+
+        # Skip the test for ROCm
+        if TEST_WITH_ROCM and test_flavor.skip_rocm_test:
             continue
 
         # Check if we have enough GPUs

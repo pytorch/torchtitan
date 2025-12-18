@@ -16,6 +16,7 @@ from .job_config import (
     ActivationCheckpoint,
     Checkpoint,
     Comm,
+    Debug,
     FaultTolerance,
     Job,
     JobConfig,
@@ -49,4 +50,5 @@ __all__ = [
     "Profiling",
     "Training",
     "Validation",
+    "Debug",
 ]

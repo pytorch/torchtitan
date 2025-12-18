@@ -15,12 +15,12 @@ from torchtitan.tools.logging import logger
 
 
 def get_dynamic_batch_gas(
-    batch_size, gradient_accumulation_steps, seq_len, max_token_len
+    batch_size, gradient_accumulation_steps, seq_len, max_token_len, num_microbatches
 ):
-    dynamic_batch_size = (batch_size * seq_len) // max_token_len
+    dynamic_batch_size = (batch_size * seq_len) // (max_token_len)
     dynamic_batch_size = min(
         dynamic_batch_size,
-        batch_size * gradient_accumulation_steps,
+        batch_size * gradient_accumulation_steps // num_microbatches,
     )
     # To nearest power of 2 of dynamic_batch_size so we have clean splits with gradient accumulation
     dynamic_batch_size = dynamic_batch_size // batch_size
@@ -200,7 +200,11 @@ def prep_data(
     )
 
     dynamic_batch_size, dynamic_grad_accum_size = get_dynamic_batch_gas(
-        batch_size, gradient_accumulation_steps, seq_len, max_token_len
+        batch_size,
+        gradient_accumulation_steps,
+        seq_len,
+        max_token_len,
+        num_microbatches,
     )
     # now allocate to new batch/grad sizes
     for i in range(dynamic_grad_accum_size * dp_degree):
@@ -219,12 +223,17 @@ def prep_data(
 
 
 def prep_empty_data_matricies(
-    max_token_len, batch_size, gradient_accumulation_steps, seq_len, dp_degree
+    max_token_len,
+    batch_size,
+    gradient_accumulation_steps,
+    seq_len,
+    dp_degree,
+    num_microbatches=1,
 ):
     dynamic_batch_size = batch_size * seq_len // max_token_len
     dynamic_batch_size = min(
         dynamic_batch_size,
-        batch_size * gradient_accumulation_steps,
+        batch_size * gradient_accumulation_steps // num_microbatches,
     )
     # To nearest power of 2 of dynamic_batch_size so we have clean splits with gradient accumulation
     dynamic_batch_size = dynamic_batch_size // batch_size
@@ -352,7 +361,7 @@ class OnlineDataHandler:
 
     def data_handling(
         self,
-        sglang_gloo_group,
+        sglang_nccl_group,
         cp_degree,
         dp_degree,
         dp_replicate_rank,
@@ -415,11 +424,12 @@ class OnlineDataHandler:
                         grad_accum_size,
                         job_config.training.seq_len,
                         scale_adv_by_len=job_config.grpo.scale_adv_by_len,
+                        num_microbatches=job_config.grpo.num_microbatches,
                     )
                     flag = flag + 1
                     torch.distributed.broadcast(flag, 0)
                     if dp_replicate_rank == 0:
-                        send_wait(sglang_gloo_group)
+                        send_wait(sglang_nccl_group, device)
                     max_token_len = torch.tensor(max_token_len).to(device)
                     torch.distributed.all_reduce(max_token_len)
                     # back to int
@@ -433,12 +443,12 @@ class OnlineDataHandler:
                     logger.debug("No batch yet, retrying...")
                     torch.distributed.broadcast(flag, 0)
                     if dp_replicate_rank == 0:
-                        send_wait(sglang_gloo_group)
+                        send_wait(sglang_nccl_group, device)
             else:
                 logger.debug("Waiting for batch from server...")
                 torch.distributed.broadcast(flag, 0)
                 if dp_replicate_rank == 0:
-                    send_wait(sglang_gloo_group)
+                    send_wait(sglang_nccl_group, device)
                 if flag.item() > 0:
                     # Got the batch
                     max_token_len = torch.tensor(0).to(device)
@@ -465,6 +475,7 @@ class OnlineDataHandler:
                         grad_accum_size,
                         job_config.training.seq_len,
                         dp_degree,
+                        num_microbatches=job_config.grpo.num_microbatches,
                     )
                     # now get the batch
                     torch.distributed.broadcast_object_list(batches, 0)
@@ -512,21 +523,37 @@ class OnlineDataHandler:
 
 
 if __name__ == "__main__":
-    print(
-        pad_data_to_good_offset(
-            {
-                "batch": [
-                    {
-                        "tokens": [[1, 2, 3], [4, 5, 6]],
-                        "masks": [[-100, 2, 3], [-100, 5, 6]],
-                        "scores": [-1, 1.0],
-                        "overrides": None,
-                    }
-                ]
-            },
-            cp_degree=1,
-            dp_degree=1,
-            scale_adv_by_len=True,
-            num_microbatches=1,
-        )
+    with open("/home/dakota/github/torchtitan/temp.json") as f:
+        test_data = json.load(f)
+    (
+        batches,
+        max_token_len,
+        dynamic_batch_size,
+        dynamic_grad_accum_size,
+        data_lens,
+    ) = prep_data(
+        test_data,
+        cp_degree=1,
+        dp_degree=16,
+        batch_size=1,
+        gradient_accumulation_steps=256 // 16,
+        seq_len=32768,
+        scale_adv_by_len=True,
+        num_microbatches=2,
     )
+    print(
+        max_token_len,
+        dynamic_batch_size,
+        dynamic_grad_accum_size,
+        max(*[x[0].shape[1] for x in batches]),
+    )
+    for microbatch_idx in range(2):
+        microbatch = []
+        mb_start = microbatch_idx * dynamic_grad_accum_size // 2
+        print(microbatch_idx * dynamic_grad_accum_size / 2.0)
+        mb_end = (microbatch_idx + 1) * dynamic_grad_accum_size // 2
+        print((microbatch_idx + 1) * dynamic_grad_accum_size / 2.0)
+        mb_batches = batches[mb_start:mb_end]
+        dynamic_batch = list()
+        print(mb_start, mb_end)
+        start_len = mb_batches[0][0].shape[1]

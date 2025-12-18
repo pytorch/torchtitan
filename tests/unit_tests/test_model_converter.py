@@ -3,6 +3,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import pytest
 
 from torchtitan.components.quantization.float8 import Float8LinearConverter
 from torchtitan.config import ConfigManager
@@ -39,6 +40,7 @@ def test_build_model_converters_empty_list():
 
 
 def test_build_model_converters_float8_converter():
+    pytest.importorskip("torchao")
     config_manager = ConfigManager()
     config = config_manager.parse_args(
         [

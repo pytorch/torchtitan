@@ -112,12 +112,27 @@ def parallelize_llama(
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
 
+        match job_config.parallelism.fsdp_reshard_after_forward:
+            case "always":
+                reshard_after_forward = True
+            case "never":
+                reshard_after_forward = False
+            case "default":
+                # For PP, by default do not reshard after forward to avoid per-microbatch
+                # all-gathers, which can be expensive and non-overlapped
+                reshard_after_forward = not parallel_dims.pp_enabled
+            case _:
+                raise ValueError(
+                    f"Invalid reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+                )
+
         model = data_parallel(
             model,
             parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
             mode=dp_mode,
             ac_mode=job_config.activation_checkpoint.mode,
             mp_policy=mp_policy,
+            reshard_after_forward=reshard_after_forward,
         )
         logger.info(
             "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
@@ -126,7 +141,8 @@ def parallelize_llama(
     if job_config.compile.enable and "model" in job_config.compile.components:
         torch._inductor.config.reorder_for_peak_memory = False
         backend = (
-            job_config.compile.model_backend_override or job_config.compile.backend
+            getattr(job_config.compile, "model_backend_override", None)
+            or job_config.compile.backend
         )
         model = torch.compile(
             model,

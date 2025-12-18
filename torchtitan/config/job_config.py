@@ -171,6 +171,92 @@ class Optimizer:
     register_post_accumulate_grad_hook after the optimizer is built.
     """
 
+    # Dion-specific parameters
+    mu: float = 0.95
+    """Momentum factor for Dion optimizer"""
+
+    rank_fraction: float = 1.0
+    """r/d fraction for low-rank approximation in Dion. Used to compute the low-rank dimension."""
+
+    rank_multiple_of: int = 1
+    """Round up the low-rank dimension to a multiple of this number in Dion."""
+
+    algorithm: str = "dion"
+    """Algorithm to use for Dion optimizer. Can be 'dion', 'adamw', or 'lion'."""
+
+    power_iters: int = 1
+    """Number of power iterations for low-rank approximation in Dion."""
+
+    qr_method: str = "rcqr"
+    """Method for computing QR decomposition in Dion."""
+
+    cqr_warmup_steps: int = 150
+    """Warmup steps for CQR method in Dion (currently ignored)."""
+
+    rcqr_oversample: float = 1.25
+    """Random sketch matrix oversampling for RCQR in Dion."""
+
+    replicate_mesh_grad_sync: bool = True
+    """Whether Dion optimizer handles data-parallel gradient sync."""
+
+    # Mixed precision options for Dion
+    momentum_dtype: str | None = None
+    """Dtype for momentum state in Dion. None means same as parameter dtype."""
+
+    Q_dtype: str | None = None
+    """Dtype for Q matrix in Dion. None means same as parameter dtype."""
+
+    variance_dtype: str | None = None
+    """Dtype for variance state in Dion (for AdamW algorithm). None means same as parameter dtype."""
+
+    # Parameter-specific optimizer selection for Dion
+    scalar_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for 1D scalar parameters (biases, layer norms, etc.) when using Dion."""
+
+    embedding_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for embedding layers when using Dion."""
+
+    head_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for model head/output layers when using Dion."""
+
+    expert_optimizer: Literal["adamw", "lion"] | None = None
+    """Optimizer to use for model expert layers when using Dion."""
+
+    routing_optimizer: Literal["adamw", "lion"] | None = None
+    """Optimizer to use for model router parameters when using Dion."""
+
+    head_lr_scaling: bool = True
+    """Whether to apply 1/sqrt(dim) learning rate scaling for head layers."""
+
+    # Learning rate scaling factors for different parameter types
+    scalar_lr_factor: float = 1.0
+    """Learning rate scaling factor for scalar parameters."""
+
+    embedding_lr_factor: float = 1.0
+    """Learning rate scaling factor for embedding parameters."""
+
+    head_lr_factor: float = 1.0
+    """Learning rate scaling factor for head parameters (applied after head_lr_scaling if enabled)."""
+
+    expert_lr_factor: float = 1.0
+    """Learning rate scaling factor for expert parameters."""
+
+    routing_lr_factor: float = 1.0
+    """Learning rate scaling factor for routing parameters."""
+
+    # Muon-specific parameters
+    nesterov: bool = False
+    """Whether to use Nesterov momentum in Muon optimizer."""
+
+    adjust_lr: str | None = "spectral_norm"
+    """How to adjust the learning rate for Muon updates. Options: 'spectral_norm', 'rms_norm', or None."""
+
+    flatten: bool = False
+    """Whether to flatten 3D+ tensors to 2D for Muon updates."""
+
+    use_triton: bool = False
+    """Whether to use Triton kernel for Newton-Schulz in Muon optimizer."""
+
 
 @dataclass
 class LRScheduler:
@@ -215,8 +301,10 @@ class Training:
     loaded from this path instead of downloaded.
     """
 
-    dataset_type: Literal["huggingface", "nanoset", "preprocessed"] = "huggingface"
-    """Type of dataset to use ['huggingface', 'nanoset', 'preprocessed']"""
+    dataset_type: Literal[
+        "huggingface", "nanoset", "preprocessed", "packed_memmap"
+    ] = "huggingface"
+    """Type of dataset to use ['huggingface', 'nanoset', 'preprocessed', 'packed_memmap']"""
 
     dataset_folders: list[str] = field(default_factory=list)
     """List of folders containing tokenized datasets for Nanoset"""
@@ -284,15 +372,6 @@ class Training:
     many temporary files.
     """
 
-    seed: int | None = None
-    """Choose the base RNG seed used for training"""
-
-    deterministic: bool = False
-    """Use deterministic algorithms wherever possible, may be slower"""
-
-    debug_moe_force_load_balance: bool = False
-    """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
-
 
 @dataclass
 class Parallelism:
@@ -306,9 +385,6 @@ class Parallelism:
     parallelism method used is DDP (Distributed Data Parallelism).
     1 means disabled.
     """
-
-    enable_compiled_autograd: bool = False
-    """Enable CompiledAutograd to compile the backward."""
 
     data_parallel_shard_degree: int = -1
     """
@@ -714,6 +790,26 @@ class ActivationCheckpoint:
     https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
     """
 
+    preserve_rng_state: bool = False
+    """
+    If deterministic output compared to non-checkpointed passes is required, set
+    to true. Results in stashing and restoring the RNG state during each checkpoint,
+    may be slower. See https://docs.pytorch.org/docs/stable/checkpoint.html
+    for details.
+    """
+
+    determinism_check: str = "default"
+    """
+    A string specifying the determinism function. See
+    https://docs.pytorch.org/docs/stable/checkpoint.html for details.
+    """
+
+    debug: bool = False
+    """
+    Capture ac debug information. Will be slower. See
+    https://docs.pytorch.org/docs/stable/checkpoint.html for details.
+    """
+
 
 @dataclass
 class Compile:
@@ -723,8 +819,12 @@ class Compile:
     components: list[Literal["model", "loss"]] = field(
         default_factory=lambda: ["model", "loss"]
     )
+
     """Which components to compile"""
     backend: str = "inductor"
+
+    """Use fullgraph when compiling"""
+    fullgraph: bool = True
 
 
 @dataclass
@@ -925,7 +1025,7 @@ class Experimental:
     DEPRECATED (moved to Job.custom_config_module). Will be removed soon.
 
     This option allows users to extend TorchTitan's existing JobConfig by extending
-    a user defined JobConfig dataclass. Similar to ``--experimental.custom_model_path``, the user
+    a user defined JobConfig dataclass. Similar to ``--experimental.custom_import``, the user
     needs to ensure that the path can be imported.
     """
 
@@ -1055,6 +1155,35 @@ class GRPO:
         If None, veto mechanism is disabled.
     """
 
+    ptx_mixin_batchsize: int = 0
+    """
+    Batch size for pretrain/sft mixin. If <= 0, this is ignored.
+    """
+
+    ptx_scale: float = 1.0
+    """
+    Scale factor for pretrain/sft mixin
+    """
+
+    ptx_scale_by_tokens: bool = False
+    """
+    Whether to scale by total tokens.
+    """
+
+
+class Debug:
+    seed: int | None = None
+    """Choose the base RNG seed used for training"""
+
+    deterministic: bool = False
+    """Use deterministic algorithms wherever possible, may be slower"""
+
+    deterministic_warn_only: bool = False
+    """Only warns about ops without deterministic implementations rather than erroring out  """
+
+    moe_force_load_balance: bool = False
+    """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
+
 
 @dataclass
 class JobConfig:
@@ -1083,6 +1212,7 @@ class JobConfig:
     experimental: Experimental = field(default_factory=Experimental)
     validation: Validation = field(default_factory=Validation)
     grpo: GRPO = field(default_factory=GRPO)
+    debug: Debug = field(default_factory=Debug)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
