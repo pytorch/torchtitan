@@ -348,7 +348,6 @@ class Generator(Actor):
     def __init__(
         self,
         weight_buffers: dict,
-        trajectory_queue: Any,
         model_path: str,
         prompt_texts: List[str],
         expected_answers: List[str],
@@ -364,7 +363,6 @@ class Generator(Actor):
 
         Args:
             weight_buffers: RDMA buffers for policy weights
-            trajectory_queue: Queue to put generated trajectories in
             model_path: Path to HuggingFace model
             prompt_texts: List of prompt strings
             expected_answers: List of expected answers
@@ -377,7 +375,6 @@ class Generator(Actor):
             tp_size: Tensor Paralell size
         """
         self.weight_buffers = weight_buffers
-        self.trajectory_queue = trajectory_queue
         self.model_path = model_path
         self.prompt_texts = prompt_texts
         self.expected_answers = expected_answers
@@ -469,18 +466,13 @@ class Generator(Actor):
                 rewards=rewards,
                 advantages=advantages,
             )
-
-        # Send to trajectory queue
-        print(f"{os.getpid()=} Generator adding trajecotry into the queue")
-        await self.trajectory_queue.put.call_one(trajectory)
-        await self.trajectory_queue.put.call_one(trajectory)
-
-        async with self.cond:
+            
             # Signal ready for update
             self.state = GeneratorState.READY_TO_UPDATE
             self.cond.notify_all()
 
-        print(f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})...")
+            print(f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})...")
+            return trajectory
 
     @endpoint
     async def update(self, version: int, vllm_compat_state: dict) -> None:
@@ -510,7 +502,6 @@ class Trainer(Actor):
 
     def __init__(
         self,
-        trajectory_queue: Any,
         titan_checkpoint_path: str,
         model_path: str,
         learning_rate: float = 1e-5,
@@ -519,15 +510,12 @@ class Trainer(Actor):
         """Initialize the trainer.
 
         Args:
-            trajectory_queue: Queue to pull trajectories from
             titan_checkpoint_path: Path to TorchTitan checkpoint
             model_path: Path to HuggingFace model
             learning_rate: Learning rate for optimizer
             model_mode: Inidcates which model to use. Train inferece unified model, batch invariant Torchtitan model,
                 or plain Torchtitan model
         """
-        self.trajectory_queue = trajectory_queue
-
         # Load model
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = load_model(
@@ -565,18 +553,13 @@ class Trainer(Actor):
 
 
     @endpoint
-    async def step(self) -> dict:
+    async def step(self, trajectory: TrajectoryData) -> dict:
         """Perform one training step.
 
         Returns:
             Training metrics
         """
-        print(f"{os.getpid()=} Trainer start step {self.policy_version}:")
-
-        # Pull trajectory from queue
-        trajectory = await self.trajectory_queue.get.call_one()
         print(f"{os.getpid()=} Trainer starts to train {self.policy_version} on traj:")
-
         # Compute loss
         loss, loss_metrics = compute_policy_gradient_loss_vllm(
             self.model,
@@ -688,11 +671,9 @@ async def main():
     gen_mesh = this_host().spawn_procs(per_host={"gpus": 1})
 
     # Spawn actors on trainer and generator mesh
-    traj_queue = gen_mesh.spawn("traj_queue", TrajectoryQueue)
     trainer = trainer_mesh.spawn(
         "trainer",
         Trainer,
-        traj_queue,
         titan_checkpoint_path,
         model_path,
         learning_rate,
@@ -712,7 +693,6 @@ async def main():
         "generator",
         Generator,
         {},  # weight_buffers (not using RDMA in this simple version)
-        traj_queue,
         model_path,
         prompt_texts,
         expected_answers,
@@ -736,12 +716,16 @@ async def main():
 
     for step in range(num_steps):
         # Generate and train in parallel
-        _, metrics = await asyncio.gather(
-            generator.generate.call_one(),
-            trainer.step.call(),
-        )
+        # _, metrics = await asyncio.gather(
+        #     generator.generate.call_one(),
+        #     trainer.step.call(),
+        # )
 
+        # fully sync RL loop
+        batch = await generator.generate.call_one()
+        metrics = await trainer.step.call(batch)
         metrics = metrics.item(gpus=0)
+        print(f"{metrics=}")
 
         print(
             f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
