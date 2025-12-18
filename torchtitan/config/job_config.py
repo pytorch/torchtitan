@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
-
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
@@ -396,19 +395,7 @@ class Parallelism:
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
 
-    Currently, it is supported with the following constraints:
-
-    - when etp = tp:
-
-      - cp <= ep <= dp_shard * cp
-      - ep % cp == 0
-      - dp_shard * cp % ep == 0
-
-    - when etp = 1:
-
-      - cp * tp <= ep <= dp_shard * cp * tp
-      - ep % (cp * tp) == 0
-      - dp_shard * cp * tp % ep == 0
+    Currently, etp is either 1 or is the same as tp.
 
     Note that this is still an experimental feature. Some constraints will be
     relaxed soon when we have more flexible DeviceMesh support.
@@ -422,6 +409,17 @@ class Parallelism:
     - [partial dp -> ep] etp = tp
     - [partial dp + all tp -> ep] etp = 1
     Note that this is still an experimental feature.
+    """
+
+    expert_parallel_comm_backend: Literal["standard", "deepep"] = "standard"
+    """
+    Expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
+
+    - "standard": Uses PyTorch all-to-all collectives (default)
+    - "deepep": Uses DeepEP custom kernels for more efficient communication
+
+    DeepEP requires installation:
+    https://github.com/deepseek-ai/DeepEP.
     """
 
 
