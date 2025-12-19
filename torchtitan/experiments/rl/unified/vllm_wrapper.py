@@ -262,11 +262,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         for layer in self.model.layers.values():
             h = layer(h, rope_cache, attention_masks=None, positions=positions)
 
-        # To make it work with vLLM Engine, turn it into local tensor
+        # When parallelism is applied, get full tensor before return to vLLM Engine
         if isinstance(h, DTensor):
             h = h.full_tensor()
-        else:
-            raise ValueError("Transformer layers' return value should be DTensor")
 
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
