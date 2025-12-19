@@ -215,7 +215,7 @@ class CheckpointManager:
 
         if self.ft_manager and not self.enable_ft_dataloader_checkpoints:
             # pyrefly: ignore [deprecated]
-            logger.warn(
+            logger.warning(
                 "Fault tolerance is enabled but enable_ft_dataloader_checkpoints is False. "
                 "This means replicas can retrain over the same data multiple times, which can result in overfitting."
             )
