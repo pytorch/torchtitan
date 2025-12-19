@@ -21,7 +21,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
-from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
+from torchtitan.experiments.rl.unified.models.utils import replace_with_vllm_attention
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -30,7 +30,7 @@ from torchtitan.protocols.train_spec import ParallelizeFunction
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
-from .utils import create_parallel_dims_from_vllm_config
+from .parallelism_utils import create_parallel_dims_from_vllm_config
 
 
 logger = init_logger(__name__)
@@ -83,7 +83,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             base=self.config.rope_theta,
         )
         # Replace attention with vLLM paged attention
-        self._replace_with_vllm_attention(model_args)
+        replace_with_vllm_attention(self.model)
 
         # Create ParallelDims from vLLM config and apply parallelization
         # NOTE: We need to apply parallelize within model.__init__ because w
@@ -103,39 +103,6 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             )
         else:
             logger.info("Single GPU mode - no parallelization needed")
-
-    def _replace_with_vllm_attention(self, model_args):
-        """
-        Replace TorchTitan attention with vLLM paged attention.
-
-        Assumes model has .layers dict with .attention.inner_attention structure.
-        Override in subclass if different structure.
-        """
-        assert hasattr(
-            self.model, "layers"
-        ), f"Model {type(self.model).__name__} must have .layers attribute"
-
-        for layer_name, layer in self.model.layers.items():
-            assert hasattr(
-                layer, "attention"
-            ), f"Layer {layer_name} must have .attention attribute"
-
-            vllm_attn = VLLMAttention(
-                hidden_size=model_args.dim,
-                num_heads=model_args.n_heads,
-                num_kv_heads=model_args.n_heads,  # Use n_heads (already replicated)
-                head_dim=model_args.head_dim,
-                layer_name=layer_name,
-                scale=model_args.head_dim**-0.5,
-            )
-
-            # Replace inner attention
-            layer.attention.inner_attention = vllm_attn
-
-        logger.info(
-            f"Successfully replaced TorchTitan attention with VLLMAttention "
-            f"({len(self.model.layers)} layers)"
-        )
 
     def _extend_rope_cache_if_needed(
         self, rope_cache: torch.Tensor, max_position: int

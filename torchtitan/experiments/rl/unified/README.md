@@ -48,17 +48,19 @@ pip install -e .
 
 ```
 
-3. Download Qwen3/Qwen3-0.6b checkpoint from HuggingFace and put into `example_checkpoint` folder.
-
+3. Download Qwen/Qwen3-0.6B checkpoint from HuggingFace and put into `torchtitan/experiments/rl/example_checkpoint` folder.
+```
+python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torchtitan/experiments/rl/example_checkpoint --all --hf_token=...
+```
 
 4. Run inference:
 ```
-python torchtitan/experiments/rl/unified/infer.py --model torchtitan/experiments/deterministic_vllm_rl/example_checkpoint/qwen3-0.6B
+python torchtitan/experiments/rl/unified/infer.py --model torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B
 ```
 
 Run with TP: (work in progress)
 ```
-python torchtitan/experiments/rl/unified/infer.py --model torchtitan/experiments/deterministic_vllm_rl/example_checkpoint/qwen3-0.6B --tensor-parallel-size 2
+python torchtitan/experiments/rl/unified/infer.py --model torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B --tensor-parallel-size 2
 
 ```
 
