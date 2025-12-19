@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-from torch.distributed.tensor._api import DTensor
 from vllm.attention.layer import Attention
 from vllm.config import get_current_vllm_config
 
@@ -74,12 +73,6 @@ class VLLMAttention(torch.nn.Module):
         Returns:
             output: [batch, num_heads, seq_len, head_dim]
         """
-
-        if isinstance(q, DTensor):
-            print(f"[DEBUG] the input placement is {q.placements} {q.shape}")
-            print(f"[DEBUG] the input placement is {k.placements} {k.shape}")
-            print(f"[DEBUG] the input placement is {v.placements} {v.shape}")
-
         # Input is (batch, num_heads, seq_len, head_dim)
         batch_size, num_heads, seq_len, head_dim = q.shape
 

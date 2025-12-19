@@ -89,8 +89,6 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Replace attention with vLLM paged attention
         self._replace_with_vllm_attention(model_args)
 
-        print(f"[DEBUG] {self.model}")
-
         # NOTE: We need to apply parallelize within model.__init__ because vllm
         # doesn't separate model creation and parallelism application and instead
         # requires parallelization to be done inside model constructor.
