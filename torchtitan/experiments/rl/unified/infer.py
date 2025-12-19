@@ -23,7 +23,7 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--model_ckpt_path",
+        "--model-ckpt-path",
         type=str,
         default="torchtitan/experiments/rl/example_checkpoint",
         help="Path to TorchTitan checkpoint directory",

@@ -16,6 +16,7 @@ from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
+    PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -74,8 +75,8 @@ def apply_non_moe_tp(
             ),
             "output": ColwiseParallel(
                 input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
+                output_layouts=Replicate(),
+                use_local_output=True,  # return logits and plain tensor
             ),
         },
     )
@@ -93,8 +94,8 @@ def apply_non_moe_tp(
             # NOTE: when the fourth argument (positions) is not None, its input layout
             # and desired input layout should be Replicate()
             "attention": PrepareModuleInput(
-                input_layouts=(Shard(1), Replicate(), None, None),
-                desired_input_layouts=(Replicate(), Replicate(), None, None),
+                input_layouts=(Shard(1), Replicate(), None, Replicate()),
+                desired_input_layouts=(Replicate(), Replicate(), None, Replicate()),
             ),
             "attention.wq": ColwiseParallel(use_local_output=False),
             "attention.wk": ColwiseParallel(use_local_output=False),
@@ -105,6 +106,15 @@ def apply_non_moe_tp(
             ),
             "attention.k_norm": SequenceParallel(
                 sequence_dim=2,
+                use_local_output=False,
+            ),
+            # Apply on vllm.Attention() module to use local tensor
+            "attention.inner_attention": PrepareModuleInputOutput(
+                input_layouts=(Shard(1), Shard(1), Shard(1)),  # xq, xk, xv
+                desired_input_layouts=(None, None, None),
+                use_local_input=True,  # use local tensor for attention calculation
+                output_layouts=(Shard(1)),  # output
+                desired_output_layouts=(Shard(1)),
                 use_local_output=False,
             ),
             "attention.wo": RowwiseParallel(
