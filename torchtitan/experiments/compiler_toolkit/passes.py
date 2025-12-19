@@ -17,6 +17,7 @@ import torch
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
+from torch.fx.passes.regional_inductor_invoke_subgraph import regional_inductor_invoke_subgraph
 from torchtitan.experiments.compiler_toolkit.cudagraph import (
     CUDAGraphWrapper,
     get_static_input_indices,
@@ -61,6 +62,13 @@ def regional_inductor_pass(
     """
     return regional_inductor(gm, example_inputs)
 
+def regional_inductor_invoke_subgraph_pass(
+    gm, example_inputs
+) -> torch.fx.GraphModule:
+    """
+    Apply regional inductor compilation based on invoke_subgraph configs
+    """
+    return regional_inductor_invoke_subgraph(gm, example_inputs)
 
 def cudagraph_pass(
     gm: torch.fx.GraphModule, example_inputs: Sequence[Any], is_forward: bool
@@ -112,4 +120,6 @@ AVAILABLE_COMPILER_PASSES = {
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
     "cudagraph": cudagraph_pass,
+    "regional_inductor_invoke_subgraph": regional_inductor_invoke_subgraph,
+
 }
