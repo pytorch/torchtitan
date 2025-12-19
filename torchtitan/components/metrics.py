@@ -461,7 +461,9 @@ class MetricsProcessor:
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
-    def log_validation(self, loss: float, step: int, extra_metrics: dict[str, Any] | None = None):
+    def log_validation(
+        self, loss: float, step: int, extra_metrics: dict[str, Any] | None = None
+    ):
         time_delta = time.perf_counter() - self.time_last_log
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
