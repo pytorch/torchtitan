@@ -56,6 +56,9 @@ def export_joint(
                 print_output=False, include_stride=True, include_device=True
             )
         )
+        # TODO: get item node on invoke_subgraph not properly DCE'd need to fix this properly
+        gm.graph.eliminate_dead_code()
+        gm.recompile()
         _dump_gm(dump_folder, gm, "dynamo_gm")
 
         tracing_context = gm.meta["tracing_context"]

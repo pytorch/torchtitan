@@ -28,15 +28,33 @@ from torchtitan.experiments.compiler_toolkit.graph_utils import (
 from torchtitan.experiments.simple_fsdp.llama3.parallelize import (
     parallelize_llama as simple_fsdp_parallelize_llama,
 )
+from torchtitan.tools.logging import logger
+from torch._higher_order_ops.invoke_subgraph import get_invoke_subgraph_compile_options
 
 
 def annotate_llama() -> None:
     from torchtitan.models.attention import FlexAttentionWrapper
 
+    logger.info("annotated flex_attention")
     # annotate flex_attention with compile_with_inductor
     FlexAttentionWrapper.forward = annotate_fn(
         {"compile_with_inductor": "flex_attention"}
     )(FlexAttentionWrapper.forward)
+
+def annotate_llama_with_invoke_subgraph() -> None:
+    from torchtitan.models.attention import FlexAttentionWrapper
+
+    torch._dynamo.config.enable_invoke_subgraph_regional_compile = True
+
+    logger.info("annotated flex_attention with invoke_subgraph")
+    nested_config = get_invoke_subgraph_compile_options(
+        decompositions=torch._decomp.core_aten_decompositions()
+    )
+    # annotate flex_attention with compile_with_inductor
+    FlexAttentionWrapper.forward = torch.compiler.nested_compile_region(
+        fn = FlexAttentionWrapper.forward,
+        options = nested_config
+    )
 
 
 def parallelize_llama(
@@ -55,7 +73,8 @@ def parallelize_llama(
     Returns:
         CompiledModule wrapping the parallelized and compiled model
     """
-    annotate_llama()
+    # annotate_llama()
+    annotate_llama_with_invoke_subgraph()
 
     register_blockmask_pytree_node()
 
