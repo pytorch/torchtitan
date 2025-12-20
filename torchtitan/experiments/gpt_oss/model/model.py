@@ -222,6 +222,7 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.n_layers = model_args.n_layers
 
         self.moe = GptOssMoE(
             model_args, dim=model_args.dim, hidden_dim=model_args.moe_inter_dim
@@ -263,7 +264,7 @@ class TransformerBlock(nn.Module):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
-        self.moe.init_weights(self.weight_init_std, buffer_device)
+        self.moe.init_weights(self.weight_init_std, buffer_device, self.n_layers)
 
 
 class GptOssModel(nn.Module, ModelProtocol):
