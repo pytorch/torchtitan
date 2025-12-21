@@ -56,7 +56,6 @@ class Trainer(Actor):
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(local_rank)
 
-        print(f"jessica: {titan_checkpoint_path=} {model_path=}")
         self.model = load_model(
             titan_checkpoint_path, model_path, model_mode=model_mode
         )

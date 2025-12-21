@@ -8,10 +8,8 @@ import logging
 from enum import Enum
 
 import torch
-import torch.distributed as dist
 from safetensors.torch import load_file
 
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
 
 from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
@@ -19,7 +17,6 @@ from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
 )
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
 from transformers import AutoConfig
-from vllm.config import VllmConfig
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +29,10 @@ class ModelMode(str, Enum):
         UNIFIED: Standard TorchTitan model replaced with vLLM attention for unified
             training and inference.
         VLLM_COMPAT: vLLM-compatible TorchTitan model using vLLM's batch invariant kernels,
-            ensuring bitwise determinism between training and inference. 
+            ensuring bitwise determinism between training and inference.
         STANDARD: Plain TorchTitan model without any modifications.
     """
+
     UNIFIED = "unified"
     VLLM_COMPAT = "vllm_compat"
     STANDARD = "standard"

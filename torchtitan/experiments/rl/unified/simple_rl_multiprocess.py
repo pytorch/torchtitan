@@ -24,9 +24,9 @@ import logging
 import torch
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
-from torchtitan.experiments.rl.unified.generator import Generator
+from torchtitan.experiments.rl.unified.actors.generator import Generator
+from torchtitan.experiments.rl.unified.actors.trainer import Trainer
 from torchtitan.experiments.rl.unified.models.utils import ModelMode
-from torchtitan.experiments.rl.unified.trainer import Trainer
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     download_and_convert_model,
     load_gsm8k_dataset,
@@ -37,6 +37,7 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 
 logger = logging.getLogger(__name__)
+
 
 async def main():
     """Run the distributed RL training loop using Monarch."""
