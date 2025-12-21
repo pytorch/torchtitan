@@ -44,7 +44,7 @@ rm -rf build dist *.egg-info
 uv pip uninstall -y vllm
 
 # Rebuild vLLM from source with CUDA 12.4
-pip install -e .
+uv pip install -e .
 
 ```
 
@@ -64,7 +64,12 @@ python torchtitan/experiments/rl/unified/infer.py --model torchtitan/experiments
 
 ```
 
+5. Run simple rl loop
+```
+VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
+```
+
 ## TODO
 1. Rewrite attention part to use vllm.Attention() with backward as the only attention path.
 2. Integrate with simple_rl.py to run end-to-end RL with one canonical model definition.
-3.  Leverage batch-invariant kernels into model definition.
+3. Leverage batch-invariant kernels into model definition.

@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import torch
 from monarch.actor import Actor, endpoint
-from torchtitan.experiments.rl.unified.generator import TrajectoryData
+from torchtitan.experiments.rl.unified.actors.generator import TrajectoryData
 from torchtitan.experiments.rl.unified.models.parallelism_utils import (
     create_trainer_parallel_dims,
 )
@@ -84,15 +84,6 @@ class Trainer(Actor):
         logger.info("Trainer initialized with TorchTitan model")
 
     @endpoint
-    async def init_generator(self, generator: Any) -> None:
-        """Set the generator service for weight updates.
-
-        Args:
-            generator: Service to notify of policy updates
-        """
-        self.generator = generator
-
-    @endpoint
     async def get_weights(self) -> dict:
         """Get vLLM-compatible weights for generator.
 
@@ -132,12 +123,6 @@ class Trainer(Actor):
         self.policy_version += 1
 
         # TODO: save dcp checkpoint to file here instead of sending weight dicts
-
-        # # Notify generator of updated weights
-        # if self.generator:
-        #     titan_state = self.model.state_dict()
-        #     vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
-        #     await self.generator.update.call(self.policy_version, vllm_compat_state)
 
         # Return metrics
         metrics = {

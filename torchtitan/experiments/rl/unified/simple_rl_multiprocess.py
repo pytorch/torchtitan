@@ -147,9 +147,6 @@ async def main():
         generator_tp_size,
     )
 
-    # Connect trainer with generator
-    await trainer.init_generator.call(generator)
-
     # Initialize generator with trainer weights
     initial_weights = trainer.get_weights.call().get().item(gpus=0)
     await generator.update.call_one(0, initial_weights)
