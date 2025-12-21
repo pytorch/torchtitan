@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import logging
 import os
 
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_t
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TrajectoryData:
@@ -104,7 +106,7 @@ class VLLMRolloutEngine:
 
         self.llm = None
         self.tp_size = tp_size
-        print("vLLM rollout engine initialized (will load on first use)")
+        logger.info("vLLM rollout engine initialized (will load on first use)")
 
     def update_weights(self, vllm_compat_state: dict) -> None:
         """
@@ -192,7 +194,7 @@ class VLLMRolloutEngine:
                 enforce_eager=True,
                 tensor_parallel_size=self.tp_size,  # Explicitly single GPU
             )
-            print("Created new vLLM engine")
+            logger.info("Created new vLLM engine")
         else:
             # Use collective_rpc to call reload_weights on all workers
             # This reloads weights from temp_model_dir without recreating the engine
@@ -354,12 +356,12 @@ class Generator(Actor):
             math_reward_function if use_real_dataset else trivial_reward_function
         )
 
-        print("Generator initialized with vLLM engine")
+        logger.info("Generator initialized with vLLM engine")
 
     @endpoint
     async def generate(self) -> None:
         """Generate trajectories and compute rewards/advantages."""
-        print(
+        logger.info(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
         )
         async with self.cond:
@@ -383,14 +385,9 @@ class Generator(Actor):
             )
 
             # Compute rewards
-            if self.reward_fn == trivial_reward_function:
-                rewards = self.reward_fn(
-                    completions, self.tokenizer, self.expected_answers, self.group_size
-                )
-            else:
-                rewards = self.reward_fn(
-                    completions, self.expected_answers, self.group_size
-                )
+            rewards = self.reward_fn(
+                completions, self.expected_answers, self.group_size
+            )
 
             # Normalize rewards
             reward_mean = rewards.mean()
@@ -425,7 +422,7 @@ class Generator(Actor):
             self.state = GeneratorState.READY_TO_UPDATE
             self.cond.notify_all()
 
-            print(
+            logger.info(
                 f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
             )
             return trajectory
@@ -444,4 +441,4 @@ class Generator(Actor):
             self.policy_version = version
             self.state = GeneratorState.READY_TO_GENERATE
             self.cond.notify_all()
-            print(f"{os.getpid()=} Generator updating weights to policy v{version}...")
+            logger.info(f"{os.getpid()=} Generator updating weights to policy v{version}...")

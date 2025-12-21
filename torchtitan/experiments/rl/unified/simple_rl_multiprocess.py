@@ -19,6 +19,7 @@ Command to run:
 VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
 """
 import asyncio
+import logging
 
 import torch
 from monarch.actor import this_host
@@ -35,10 +36,11 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 
+logger = logging.getLogger(__name__)
 
 async def main():
     """Run the distributed RL training loop using Monarch."""
-    # ========== Config ==========
+    # Model Config
     model_name = "Qwen/Qwen3-1.7B"
     cache_dir = "./models"
     output_dir = "./converted"
@@ -57,25 +59,25 @@ async def main():
     use_real_dataset = False
     num_dataset_samples = 5
 
-    # parallelism sizes
+    # Parallelism sizes
     trainer_ddp_size = 2
     trainer_tp_size = 1
     generator_tp_size = 1
 
     init_batch_invariance()
     batch_invariant = vllm_is_batch_invariant()
-    mode = ModelMode.BATCH_INVARIANT
+    mode = ModelMode.VLLM_COMPAT
 
     # Set up batch invariant
     if batch_invariant:
-        print("Batch invariance detected - using vLLM-compatible model")
+        logger.info("Batch invariance detected - using vLLM-compatible model")
         from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
             enable_batch_invariant_backward_mode,
         )
 
         enable_batch_invariant_backward_mode()
     else:
-        print("Batch invariance NOT detected - using standard model")
+        raise RuntimeError("Batch invariance NOT detected - using standard model")
 
     # Download and convert model
     titan_checkpoint_path, model_path = download_and_convert_model(
@@ -84,7 +86,8 @@ async def main():
 
     # Load dataset
     if use_real_dataset:
-        print(f"Loading GSM8K dataset ({num_dataset_samples} samples)...")
+        logger.info(f"Loading GSM8K dataset ({num_dataset_samples} samples)...")
+        # TODO: Refactor into loading torchtitan dataset
         prompt_texts, expected_answers = load_gsm8k_dataset(
             split="train", num_samples=num_dataset_samples
         )
@@ -92,7 +95,7 @@ async def main():
             use_real_dataset = False
 
     if not use_real_dataset:
-        print("Using default prompts")
+        logger.info("Using default prompts")
         prompts_with_answers = [
             ("The capital of France is", "paris"),
             ("What is 7 times 8?", "56"),
@@ -103,7 +106,7 @@ async def main():
         prompt_texts = [p[0] for p in prompts_with_answers]
         expected_answers = [p[1] for p in prompts_with_answers]
 
-    print(f"Loaded {len(prompt_texts)} prompts")
+    logger.info(f"Loaded {len(prompt_texts)} prompts")
 
     # Create process meshes
     trainer_mesh = this_host().spawn_procs(per_host={"gpus": 2})
@@ -151,32 +154,34 @@ async def main():
     await generator.update.call_one(0, initial_weights)
 
     # Training loop
-    print("\n" + "=" * 80)
-    print(f"Starting RL training for {num_steps} steps")
-    print("=" * 80)
+    logger.info("\n" + "=" * 80)
+    logger.info(f"Starting RL training for {num_steps} steps")
+    logger.info("=" * 80)
 
     for step in range(num_steps):
         # Fully sync RL loop
         batch = await generator.generate.call_one()
         metrics = await trainer.step.call(batch)
         metrics = metrics.item(gpus=0)
+        weights = (await trainer.get_weights.call()).item(gpus=0)
+        await generator.update.call_one(metrics["policy_version"], weights)
 
-        print(
+        logger.info(
             f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
             f"Reward: {metrics['reward_mean']:+.3f}"
         )
-        print(f"  Sample: {metrics['sample_completion']}...")
+        logger.info(f"  Sample: {metrics['sample_completion']}...")
 
         # Check for divergence
         if not torch.isfinite(torch.tensor(metrics["loss"])):
-            print("\n" + "!" * 80)
-            print("ERROR: Loss is NaN/Inf! Training diverged.")
-            print("!" * 80)
+            logger.info("\n" + "!" * 80)
+            logger.info("ERROR: Loss is NaN/Inf! Training diverged.")
+            logger.info("!" * 80)
             break
 
-    print("\n" + "=" * 80)
-    print("RL Training complete")
-    print("=" * 80)
+    logger.info("\n" + "=" * 80)
+    logger.info("RL Training complete")
+    logger.info("=" * 80)
 
 
 if __name__ == "__main__":

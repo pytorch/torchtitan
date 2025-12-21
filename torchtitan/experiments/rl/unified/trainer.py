@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import logging
 from typing import Any, Optional
 
 import torch
@@ -21,6 +22,7 @@ from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
+logger = logging.getLogger(__name__)
 
 class Trainer(Actor):
     """
@@ -35,7 +37,7 @@ class Trainer(Actor):
         titan_checkpoint_path: str,
         model_path: str,
         learning_rate: float = 1e-5,
-        model_mode: str = ModelMode.BATCH_INVARIANT,
+        model_mode: str = ModelMode.VLLM_COMPAT,
         ddp_size: int = 1,
         tp_size: int = 1,
     ):
@@ -53,6 +55,7 @@ class Trainer(Actor):
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(local_rank)
 
+        print(f"jessica: {titan_checkpoint_path=} {model_path=}")
         self.model = load_model(
             titan_checkpoint_path, model_path, model_mode=model_mode
         )
@@ -60,13 +63,13 @@ class Trainer(Actor):
         self.tp_size = tp_size
         self.parallel_dims = create_trainer_parallel_dims(self.ddp_size, self.tp_size)
 
-        # apply PT-D Tensor Parallel
+        # apply PT-D Parallelism
         # TODO: right now it only works for qwen3 model, need to formalize this to use parallize_fn from train_spec
         from torchtitan.models.llama3.infra.parallelize import apply_ddp
 
         apply_ddp(
             self.model,
-            self.parallel_dims.world_mesh,
+            self.parallel_dims.get_mesh("dp_replicate"),
             enable_compile=False,
         )
 
@@ -78,7 +81,7 @@ class Trainer(Actor):
         self.policy_version = 0
         self.generator: Optional[Any] = None
 
-        print("Trainer initialized with TorchTitan model")
+        logger.info("Trainer initialized with TorchTitan model")
 
     @endpoint
     async def init_generator(self, generator: Any) -> None:
@@ -107,7 +110,7 @@ class Trainer(Actor):
         Returns:
             Training metrics
         """
-        print(f"{os.getpid()=} Trainer starts to train {self.policy_version} on traj:")
+        logger.info(f"{os.getpid()=} Trainer starts to train {self.policy_version} on traj:")
         # Compute loss
         loss, loss_metrics = compute_policy_gradient_loss_vllm(
             self.model,
@@ -128,11 +131,11 @@ class Trainer(Actor):
 
         # TODO: save dcp checkpoint to file here instead of sending weight dicts
 
-        # Notify generator of updated weights
-        if self.generator:
-            titan_state = self.model.state_dict()
-            vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
-            await self.generator.update.call(self.policy_version, vllm_compat_state)
+        # # Notify generator of updated weights
+        # if self.generator:
+        #     titan_state = self.model.state_dict()
+        #     vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
+        #     await self.generator.update.call(self.policy_version, vllm_compat_state)
 
         # Return metrics
         metrics = {
@@ -142,7 +145,8 @@ class Trainer(Actor):
             "advantage_mean": trajectory.advantages.mean().item(),
             "advantage_std": trajectory.advantages.std().item(),
             "sample_completion": trajectory.completions[0][:80],
+            "policy_version": self.policy_version,
             **loss_metrics,
         }
-        print(f"{os.getpid()=} Trainer finish step {self.policy_version}")
+        logger.info(f"{os.getpid()=} Trainer finish step {self.policy_version}")
         return metrics

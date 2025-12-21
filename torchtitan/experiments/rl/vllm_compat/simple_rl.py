@@ -481,7 +481,6 @@ def load_gsm8k_dataset(split: str = "train", num_samples: int = 100):
 
 def trivial_reward_function(
     completions: list[str],
-    tokenizer=None,
     expected_answers: list[str] | None = None,
     group_size: int = 4,
 ) -> torch.Tensor:
@@ -494,7 +493,6 @@ def trivial_reward_function(
 
     Args:
         completions: List of completion strings
-        tokenizer: Tokenizer to count tokens
         expected_answers: List of expected answers (one per prompt, repeated for group_size)
         group_size: Number of samples per prompt
 
@@ -892,7 +890,7 @@ def rl_update_step(
 
         # Compute rewards using provided reward function
         if reward_fn == trivial_reward_function:
-            rewards = reward_fn(completions, tokenizer, expected_answers, group_size)
+            rewards = reward_fn(completions, expected_answers, group_size)
         elif reward_fn == math_reward_function:
             rewards = reward_fn(completions, expected_answers, group_size)
         else:

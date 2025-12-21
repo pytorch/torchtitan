@@ -25,8 +25,18 @@ logger = logging.getLogger(__name__)
 
 
 class ModelMode(str, Enum):
+    """
+    Enum defining which TorchTitan model to use.
+
+    Attributes:
+        UNIFIED: Standard TorchTitan model replaced with vLLM attention for unified
+            training and inference.
+        VLLM_COMPAT: vLLM-compatible TorchTitan model using vLLM's batch invariant kernels,
+            ensuring bitwise determinism between training and inference. 
+        STANDARD: Plain TorchTitan model without any modifications.
+    """
     UNIFIED = "unified"
-    BATCH_INVARIANT = "batch_invariant"
+    VLLM_COMPAT = "vllm_compat"
     STANDARD = "standard"
 
 
@@ -64,7 +74,7 @@ def replace_with_vllm_attention(model):
 
 
 def load_model(
-    checkpoint_path: str, model_path: str, model_mode: str = ModelMode.BATCH_INVARIANT
+    checkpoint_path: str, model_path: str, model_mode: str = ModelMode.VLLM_COMPAT
 ):
     """
     Load TorchTitan model from checkpoint.
@@ -115,7 +125,7 @@ def load_model(
         replace_with_vllm_attention(model)
         # Load standard TorchTitan format directly
         model.load_state_dict(state_dict, strict=True)
-    elif model_mode == ModelMode.BATCH_INVARIANT:
+    elif model_mode == ModelMode.VLLM_COMPAT:
         # Create and load model that has bitwise determinism between training and inference
         from torchtitan.experiments.rl.vllm_compat.models.qwen3 import (
             Qwen3VLLMCompatModel,
@@ -136,45 +146,3 @@ def load_model(
     model.to(torch.bfloat16)
 
     return model
-
-
-def create_parallel_dims_from_vllm_config(vllm_config: VllmConfig) -> ParallelDims:
-    """
-    Create ParallelDims from vLLM config and maps vLLM parallelism settings to TorchTitan's ParallelDims dataclass.
-
-    This function is needed because vLLM doesn't separate model creation and
-    parallelism application - it requires parallelization to be done inside
-    the model constructor, so we are creating parallel_dims and apply parallelism
-    in TorchTitanVLLMModelWrapper.__init__ function.
-
-    Args:
-        vllm_config: vLLM configuration object
-
-    Returns:
-        ParallelDims object with parallelism settings validated
-
-    Note:
-        vLLM doesn't use FSDP sharding (dp_shard=1) or expert parallelism (ep=1, etp=1)
-        in inference. These are set to default values.
-    """
-    world_size = dist.get_world_size()
-
-    # Map vLLM config to TorchTitan ParallelDims
-    parallel_dims = ParallelDims(
-        dp_replicate=vllm_config.parallel_config.data_parallel_size,
-        dp_shard=1,  # vLLM doesn't use FSDP sharding
-        cp=vllm_config.parallel_config.decode_context_parallel_size,
-        tp=vllm_config.parallel_config.tensor_parallel_size,
-        pp=vllm_config.parallel_config.pipeline_parallel_size,
-        ep=1,  # Expert parallelism not used in vLLM inference yet
-        etp=1,  # Expert tensor parallelism not used in vLLM inference yet
-        world_size=world_size,
-    )
-
-    logger.info(
-        f"Created ParallelDims from vLLM config: "
-        f"DP={parallel_dims.dp_replicate}, TP={parallel_dims.tp}, "
-        f"CP={parallel_dims.cp}, PP={parallel_dims.pp}"
-    )
-
-    return parallel_dims
