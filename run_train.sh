@@ -16,12 +16,23 @@ NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/debug_model.toml"}
 TRAIN_FILE=${TRAIN_FILE:-"torchtitan.train"}
+
+set +x
+copy_args=("$@")
+for ((i=0; i<${#copy_args[@]}; i++)); do
+  if [[ ${copy_args[i]} == --comm.mode ]]; then
+    CONFIG_COMM_MODE="${copy_args[i+1]}"
+  fi
+done
+set -x
+
+CONFIG_COMM_MODE=${CONFIG_COMM_MODE:-"default"}
 # COMM_MODE options: "fake_backend" (dry run), "local_tensor" (debug mode), or empty for normal training
-COMM_MODE=${COMM_MODE:-""}
+COMM_MODE=${COMM_MODE:-$CONFIG_COMM_MODE}
 
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 
-if [ -n "$COMM_MODE" ]; then
+if [ "$COMM_MODE" != "default" ]; then
     # Communication mode specified: validate configuration or run in debug mode
     echo "Running with comm_mode=${COMM_MODE}"
     NGPU="${NGPU}" LOCAL_RANK=0 python3 -m "${TRAIN_FILE}" --job.config_file "${CONFIG_FILE}" "$@" --comm.mode=${COMM_MODE} --training.steps=1
