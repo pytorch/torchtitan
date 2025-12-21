@@ -48,6 +48,27 @@ llama3_args = {
         attn_type="varlen",
         attn_mask_type="block_causal",
     ),
+    # NOTE: The original model checkpoints of Llama 3.2 1B and 3B are provided 
+    # with weight-tying between the embedding layer and the output layer, 
+    # which is not supported in torchtitan.
+    "1B_no_weight_tying": TransformerModelArgs(
+        dim=2048,
+        n_layers=16,
+        n_heads=32,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.5,
+        multiple_of=1024,
+        rope_theta=500000,
+    ),
+    "3B_no_weight_tying": TransformerModelArgs(
+        dim=3072,
+        n_layers=28,
+        n_heads=24,
+        n_kv_heads=8,
+        ffn_dim_multiplier=1.0,
+        multiple_of=1024,
+        rope_theta=500000,
+    ),
     "8B": TransformerModelArgs(
         dim=4096,
         n_layers=32,
