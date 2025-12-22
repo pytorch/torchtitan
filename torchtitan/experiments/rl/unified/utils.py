@@ -7,9 +7,17 @@
 """
 Parallelization utilities for vLLM + TorchTitan models.
 
-This module provides functions for setting up device mesh and applying
-tensor parallelism to TorchTitan models in vLLM using TorchTitan's ParallelDims.
+DEPRECATED: This module contains legacy functions that convert vLLM config -> TorchTitan config.
+This is the WRONG direction!
+
+RECOMMENDED: Use TorchTitanConfigAdapter from config_adapter.py instead, which converts
+TorchTitan config -> vLLM config (making TorchTitan the single source of truth).
+
+Legacy functions in this module are kept for backward compatibility but will be removed
+in a future version.
 """
+
+import warnings
 
 import torch.distributed as dist
 
@@ -24,12 +32,14 @@ logger = init_logger(__name__)
 
 def create_parallel_dims_from_vllm_config(vllm_config: VllmConfig) -> ParallelDims:
     """
-    Create ParallelDims from vLLM config and maps vLLM parallelism settings to TorchTitan's ParallelDims dataclass.
+    DEPRECATED: Create ParallelDims from vLLM config.
 
-    This function is needed because vLLM doesn't separate model creation and
-    parallelism application - it requires parallelization to be done inside
-    the model constructor, so we are creating parallel_dims and apply parallelism
-    in TorchTitanVLLMModelWrapper.__init__ function.
+    WARNING: This function converts vLLM config -> TorchTitan ParallelDims,
+    which makes vLLM the source of truth. This is the WRONG direction!
+
+    RECOMMENDED: Use TorchTitanConfigAdapter.to_parallel_dims() instead, which
+    converts TorchTitan model args -> ParallelDims (making TorchTitan the
+    single source of truth).
 
     Args:
         vllm_config: vLLM configuration object
@@ -41,6 +51,13 @@ def create_parallel_dims_from_vllm_config(vllm_config: VllmConfig) -> ParallelDi
         vLLM doesn't use FSDP sharding (dp_shard=1) or expert parallelism (ep=1, etp=1)
         in inference. These are set to default values.
     """
+    warnings.warn(
+        "create_parallel_dims_from_vllm_config() is deprecated. "
+        "Use TorchTitanConfigAdapter.to_parallel_dims() instead to make "
+        "TorchTitan config the single source of truth.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     world_size = dist.get_world_size()
 
     # Map vLLM config to TorchTitan ParallelDims
@@ -71,9 +88,6 @@ def create_job_config_from_vllm_config(
 ) -> JobConfig:
     """
     Create TorchTitan JobConfig from vLLM configuration.
-
-    This function maps vLLM's configuration to TorchTitan's JobConfig format,
-    which is needed for TorchTitan models to work with vLLM infrastructure.
 
     Args:
         vllm_config: vLLM configuration object containing model, parallel, and cache configs

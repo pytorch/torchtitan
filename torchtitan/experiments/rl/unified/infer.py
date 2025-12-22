@@ -16,6 +16,22 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+from torchtitan.experiments.rl.unified.register import (
+    register_torchtitan_model_from_train_spec,
+)
+from torchtitan.protocols.train_spec import get_train_spec
+
+# TODO: create parallel_dims here
+
+register_torchtitan_model_from_train_spec(
+    train_spec=get_train_spec("qwen3"),
+    model_name="Qwen3TorchTitanForCausalLM",
+    # TODO: Remove the model_flavor args when registering model,
+    # allow passing model flavor option from config system. Now we have to specify
+    # model_flavor during registration because we can not pass torchtitan job_config from LLM() Api
+    model_flavor="0.6B",
+)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -55,7 +71,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def infer():
     args = parse_args()
 
     logger.info("Initializing vLLM with TorchTitan model")
@@ -69,6 +85,8 @@ def main():
     # 3. Create JobConfig and ParallelDims from vLLM config
     # 4. Apply parallelization using parallelize_qwen3
     # 5. Load model weights and prepare for inference
+    # The tensor_parallel_size will be used by vLLM to configure parallelization
+    # and will be available in vllm_config in worker processes
     logger.info("Creating vLLM LLM engine...")
 
     llm = LLM(
@@ -112,4 +130,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    infer()

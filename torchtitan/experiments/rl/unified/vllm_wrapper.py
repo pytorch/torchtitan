@@ -14,6 +14,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.tensor import DTensor, Replicate
+from torchtitan.distributed.parallel_dims import ParallelDims
 
 from torchtitan.experiments.rl.unified.model.attention import VLLMAttention
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
@@ -24,10 +25,7 @@ from torchtitan.protocols.train_spec import ParallelizeFunction
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
-from .utils import (
-    create_job_config_from_vllm_config,
-    create_parallel_dims_from_vllm_config,
-)
+from .utils import create_job_config_from_vllm_config
 
 
 logger = init_logger(__name__)
@@ -57,6 +55,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         model_args: BaseModelArgs,
         state_dict_adapter: type[BaseStateDictAdapter],
         parallelize_fn: ParallelizeFunction,
+        parallel_dims: ParallelDims,
         vllm_config: VllmConfig,
         prefix: str = "",
     ):
@@ -80,10 +79,12 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             dim=self.config.head_dim,
             base=self.config.rope_theta,
         )
+        self.parallel_dims = parallel_dims
 
         # Create ParallelDims and JobConfig from vLLM config and apply parallelization
-        self.parallel_dims = create_parallel_dims_from_vllm_config(vllm_config)
-        self.job_config = create_job_config_from_vllm_config(
+        # vLLM config already contains the tensor_parallel_size from infer.py command-line args
+        # and this will be consistent across all worker processes
+        self.parallel_config = create_job_config_from_vllm_config(
             vllm_config=vllm_config,
         )
         # Replace attention with vLLM paged attention
@@ -95,7 +96,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         self.model = parallelize_fn(
             model=self.model,
             parallel_dims=self.parallel_dims,
-            job_config=self.job_config,
+            job_config=self.parallel_config,
         )
 
     def _replace_with_vllm_attention(self, model_args: BaseModelArgs):
@@ -278,7 +279,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
     ) -> torch.Tensor | None:
         """Compute logits from hidden states."""
         if self.parallel_dims.tp_enabled:
-            # Turn hidden_states back to DTensor
+            # Turn hidden_states back to DTensor then `norm` can redistribute it into Shard(1)
             hidden_states = DTensor.from_local(
                 hidden_states,
                 device_mesh=self.parallel_dims.get_mesh("tp"),
