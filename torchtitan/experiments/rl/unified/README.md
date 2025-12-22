@@ -84,4 +84,4 @@ Work on the RL loop:
 4. Need to properly implement weight saving and loading using TorchTitan's checkpoint mechanism, or use TorchStore.
 5. Right now we only support trainer run on multiple processes using DDP, and generator using TP, need to onboard more parallelism.
 6. Right now we only support VLLM_COMPAT mode to achieve batch invariance and bitwise determinism, need to support UNIFIED mode.
-7. In the longer term, need to add trajectory queue to achieve async, right now trainer adn generator are running synchronously. 
+7. In the longer term, need to add trajectory queue to achieve async, right now trainer and generator are running synchronously.

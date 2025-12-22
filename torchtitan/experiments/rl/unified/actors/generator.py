@@ -138,7 +138,7 @@ class VLLMRolloutEngine:
         index_file = os.path.join(self.temp_model_dir, "model.safetensors.index.json")
 
         # TODO: need to replace this with Torchtitan's checkpoint save and load
-        # right now we hardcoded to work with 2 safe tensor files which we only 
+        # right now we hardcoded to work with 2 safe tensor files which we only
         # tested on Qwen3 1.7B model. In the longer term, need to use TorchStore
         # to achieve the weight communication.
         if len(shard_files) == 2 and os.path.exists(index_file):
@@ -302,8 +302,20 @@ class Generator(Actor):
     Generates rollouts using vLLM engine.
 
     Maintains a vLLM engine that is synchronized with the Trainer
-    via RDMA buffers. Generates completions for given prompts and
+    via weight sync. Generates completions for given prompts and
     computes rewards/advantages.
+
+    Args:
+        model_path: Path to HuggingFace model
+        prompt_texts: List of prompt strings
+        expected_answers: List of expected answers
+        group_size: Number of samples per prompt
+        max_new_tokens: Max tokens to generate
+        temperature: Sampling temperature
+        use_real_dataset: Whether using real dataset (GSM8K)
+        grpo_beta: Beta for GRPO advantages
+        use_stable_grpo: Whether to use stable GRPO
+        tp_size: Tensor Parallel size
     """
 
     def __init__(
@@ -319,20 +331,6 @@ class Generator(Actor):
         use_stable_grpo: bool = False,
         tp_size: int = 1,
     ):
-        """Initialize the generator.
-
-        Args:
-            model_path: Path to HuggingFace model
-            prompt_texts: List of prompt strings
-            expected_answers: List of expected answers
-            group_size: Number of samples per prompt
-            max_new_tokens: Max tokens to generate
-            temperature: Sampling temperature
-            use_real_dataset: Whether using real dataset (GSM8K)
-            grpo_beta: Beta for GRPO advantages
-            use_stable_grpo: Whether to use stable GRPO
-            tp_size: Tensor Parallel size
-        """
         self.model_path = model_path
         self.prompt_texts = prompt_texts
         self.expected_answers = expected_answers

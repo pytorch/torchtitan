@@ -29,8 +29,14 @@ class Trainer(Actor):
     """
     Updates policy based on collected trajectories.
 
-    Run model forward on trajectories, computes loss, and updates model.
-    Notifies generators of weight updates.
+    Run model forward on trajectories, computes loss, and run backward.
+
+    Args:
+        titan_checkpoint_path: Path to TorchTitan checkpoint
+        model_path: Path to HuggingFace model
+        learning_rate: Learning rate for optimizer
+        model_mode: Indicates which model to use. Train inferece unified model, batch invariant Torchtitan model,
+            or plain Torchtitan model
     """
 
     def __init__(
@@ -42,15 +48,6 @@ class Trainer(Actor):
         ddp_size: int = 1,
         tp_size: int = 1,
     ):
-        """Initialize the trainer.
-
-        Args:
-            titan_checkpoint_path: Path to TorchTitan checkpoint
-            model_path: Path to HuggingFace model
-            learning_rate: Learning rate for optimizer
-            model_mode: Indicates which model to use. Train inferece unified model, batch invariant Torchtitan model,
-                or plain Torchtitan model
-        """
         # Explicitly set cuda device for each trainer, otherwise different processes will use the same CUDA device
         local_rank = int(os.environ["LOCAL_RANK"])
         device = torch.device(f"cuda:{local_rank}")
