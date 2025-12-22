@@ -68,8 +68,20 @@ python torchtitan/experiments/rl/unified/infer.py --model torchtitan/experiments
 ```
 VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
 ```
+Right now we only support VLLM_COMPAT mode, which could achieve trainer and generator bitwise identical. We are working on support UNIFIED mode,
+which uses a unified model definition for trainer and generator.
 
 ## TODO
-1. Rewrite attention part to use vllm.Attention() with backward as the only attention path.
-2. Integrate with simple_rl.py to run end-to-end RL with one canonical model definition.
+Work on batch invariance:
+1. Integrate with simple_rl_multiprocess.py to run end-to-end RL with one canonical model definition(UNIFIED mode).
+2. Rewrite attention part to use vllm.Attention() with backward as the only attention path.
 3. Leverage batch-invariant kernels into model definition.
+
+Work on the RL loop:
+1. Design trainer API and integrate with [train.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/train.py#L475)
+2. Remove hardcoded configs and dependency on Qwen3 Model. Use torchtitan's config/TrainSpec instead, to work with any model.
+3. Need to load the gsm8k dataset using TorchTitan dataset.
+4. Need to properly implement weight saving and loading using TorchTitan's checkpoint mechanism, or use TorchStore.
+5. Right now we only support trainer run on multiple processes using DDP, and generator using TP, need to onboard more parallelism.
+6. Right now we only support VLLM_COMPAT mode to achieve batch invariance and bitwise determinism, need to support UNIFIED mode.
+7. In the longer term, need to add trajectory queue to achieve async, right now trainer adn generator are running synchronously. 

@@ -137,6 +137,10 @@ class VLLMRolloutEngine:
         )
         index_file = os.path.join(self.temp_model_dir, "model.safetensors.index.json")
 
+        # TODO: need to replace this with Torchtitan's checkpoint save and load
+        # right now we hardcoded to work with 2 safe tensor files which we only 
+        # tested on Qwen3 1.7B model. In the longer term, need to use TorchStore
+        # to achieve the weight communication.
         if len(shard_files) == 2 and os.path.exists(index_file):
             # Load the index to see which weights go in which shard
             with open(index_file, "r") as f:
@@ -184,7 +188,6 @@ class VLLMRolloutEngine:
             import os
 
             os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-
             self.llm = LLM(
                 model=self.temp_model_dir,
                 trust_remote_code=True,

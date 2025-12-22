@@ -9,9 +9,7 @@ Multiprocess RL training loop using Monarch Actors.
 
 This demonstrates:
 1. Distributed actor architecture with Generator (vLLM) and Trainer (TorchTitan) components
-2. Asynchronous communication via queues
-3. File based weight synchronization between trainer and generator
-4. Event-driven architecture for efficient RL training
+2. File based weight synchronization between trainer and generator
 
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
