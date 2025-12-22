@@ -889,12 +889,7 @@ def rl_update_step(
         )
 
         # Compute rewards using provided reward function
-        if reward_fn == trivial_reward_function:
-            rewards = reward_fn(completions, expected_answers, group_size)
-        elif reward_fn == math_reward_function:
-            rewards = reward_fn(completions, expected_answers, group_size)
-        else:
-            rewards = reward_fn(completions, expected_answers, group_size)
+        rewards = reward_fn(completions, expected_answers, group_size)
 
         # Normalize rewards for stability (mean=0, std=1)
         reward_mean = rewards.mean()

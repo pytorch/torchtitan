@@ -87,6 +87,7 @@ def load_model(
         model: Loaded TorchTitan model
     """
     # Load HuggingFace config
+    # TODO: do not depend on transformers.AutoConfig, use qwen_args directly
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
     # Create model args
