@@ -82,7 +82,7 @@ Work on the RL loop:
 2. Remove hardcoded configs and dependency on Qwen3 Model. Use torchtitan's config/TrainSpec instead, to work with any model.
 3. Need to load the gsm8k dataset using TorchTitan dataset.
 4. Need to properly implement weight saving and loading using TorchTitan's checkpoint mechanism, or use TorchStore. Also need to
-    replace `vllm_to_torchtitan` and `torchtitan_to_vllm` calls to TorchTitan [state dict adaptor](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/qwen3/model/state_dict_adapter.py).torchtitan/experiments/rl/unified/
+    replace `vllm_to_torchtitan` and `torchtitan_to_vllm` calls to TorchTitan [state dict adaptor](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/qwen3/model/state_dict_adapter.py).
 5. Right now we only support trainer run on multiple processes using DDP, and generator using TP, need to onboard more parallelism.
 6. Right now we only support VLLM_COMPAT mode to achieve batch invariance and bitwise determinism, need to support UNIFIED mode.
 7. In the longer term, need to add trajectory queue to achieve async, right now trainer and generator are running synchronously.
