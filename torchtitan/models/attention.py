@@ -33,7 +33,12 @@ __all__ = [
     "get_sliding_window_mask_mod",
     "get_fixed_block_mask_mod",
     "create_attention_mask",
+    "BLACKWELL_FLASH_BLOCK_SIZE",
 ]
+
+
+# Block size (Q, KV) for Blackwell Flash backend
+BLACKWELL_FLASH_BLOCK_SIZE: tuple[int, int] = (256, 128)
 
 
 class VarlenMetadata(NamedTuple):
@@ -99,11 +104,14 @@ class FlexAttentionWrapper(torch.nn.Module):
     Note:
         The forward function must have q, k, v as the first three arguments, and
         block_mask as a keyword argument to be compatible with _ContextParallel.
+
+    Args:
+        kernel_options: Optional dict of kernel options to pass to flex_attention.
+            Use {"BACKEND": "FLASH"} for Flash backend on Blackwell.
     """
 
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention,
-        # This options also encapsulate max-autotune-no-cudagraphs.
         options={
             "wrap_inductor_compiled_regions": True,
             "max_autotune": True,
@@ -111,6 +119,10 @@ class FlexAttentionWrapper(torch.nn.Module):
             "triton.cudagraphs": False,
         },
     )
+
+    def __init__(self, kernel_options: dict | None = None):
+        super().__init__()
+        self.kernel_options = kernel_options
 
     def forward(
         self,
@@ -136,6 +148,7 @@ class FlexAttentionWrapper(torch.nn.Module):
             block_mask=block_mask,
             scale=scale,
             return_lse=return_lse,
+            kernel_options=self.kernel_options,
         )
 
 
