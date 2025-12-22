@@ -372,6 +372,12 @@ class Training:
     many temporary files.
     """
 
+    debug_moe_force_load_balance: bool = False
+    """
+    Force uniform token distribution across experts for debugging MoE models.
+    Only use for testing and benchmarking purposes.
+    """
+
 
 @dataclass
 class Parallelism:
