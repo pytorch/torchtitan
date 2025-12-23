@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 """
 Parallelization utilities for vLLM + TorchTitan models.
@@ -133,6 +134,8 @@ def create_job_config_from_vllm_config(
 
 
 # ===== Merged from models/utils.py =====
+=======
+>>>>>>> e5d0a32d (clean up)
 
 >>>>>>> 83047803 (refactor v3)
 import logging
@@ -141,12 +144,16 @@ from enum import Enum
 import torch
 from safetensors.torch import load_file
 <<<<<<< HEAD
+<<<<<<< HEAD
 from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
 
 from torchtitan.experiments.rl.vllm_compat.models.attention import (
     VLLMCompatibleFlashAttention,
 )
 =======
+=======
+from torchtitan.config.job_config import JobConfig, Model, Parallelism, Training
+>>>>>>> e5d0a32d (clean up)
 
 from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
 >>>>>>> 83047803 (refactor v3)
@@ -156,6 +163,7 @@ from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
 )
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
 from transformers import AutoConfig
+from vllm.config import VllmConfig
 
 <<<<<<< HEAD
 logger = logging.getLogger(__name__)
@@ -327,3 +335,47 @@ def load_model(
     model.to(torch.bfloat16)
 
     return model
+
+
+def create_job_config_from_vllm_config(
+    vllm_config: VllmConfig,
+    model_name: str = "qwen3",
+    hf_assets_path: str = "/path/to/hf/assets",
+) -> JobConfig:
+    """
+    Create TorchTitan JobConfig from vLLM configuration.
+
+    Args:
+        vllm_config: vLLM configuration object containing model, parallel, and cache configs
+        model_name: Model name to use (default: "qwen3")
+        hf_assets_path: Path to HuggingFace assets directory (default: "/path/to/hf/assets")
+
+    Returns:
+        JobConfig object with settings mapped from vLLM config
+    """
+    # Create JobConfig with defaults
+    job_config = JobConfig()
+
+    model_config = vllm_config.model_config
+    job_config.model = Model(
+        name=model_name,
+        hf_assets_path=hf_assets_path,
+    )
+
+    parallel_config = vllm_config.parallel_config
+    job_config.parallelism = Parallelism(
+        data_parallel_replicate_degree=parallel_config.data_parallel_size,
+        data_parallel_shard_degree=1,  # vLLM doesn't use FSDP sharding in inference
+        context_parallel_degree=parallel_config.decode_context_parallel_size,
+        tensor_parallel_degree=parallel_config.tensor_parallel_size,
+        pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
+        expert_parallel_degree=1,  # Not used in vLLM inference yet
+        expert_tensor_parallel_degree=1,  # Not used in vLLM inference yet
+    )
+
+    job_config.training = Training(
+        local_batch_size=1,  # Inference typically processes one batch at a time
+        steps=1,  # Single step for inference
+    )
+
+    return job_config
