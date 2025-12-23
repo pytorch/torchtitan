@@ -15,7 +15,6 @@ from torchtitan.experiments.rl.unified.infra.parallelize import parallelize_qwen
 from torchtitan.protocols.train_spec import get_train_spec, TrainSpec
 from vllm.logger import init_logger
 
-from .models.parallelism_utils import create_parallel_dims_from_vllm_config
 from .models.vllm_wrapper import TorchTitanVLLMModelWrapper
 
 
@@ -90,6 +89,5 @@ register_torchtitan_model_from_train_spec(
 
 __all__ = [
     "TorchTitanVLLMModelWrapper",
-    "create_parallel_dims_from_vllm_config",
     "register_torchtitan_model_from_train_spec",
 ]

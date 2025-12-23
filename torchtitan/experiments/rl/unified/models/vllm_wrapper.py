@@ -4,24 +4,36 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+<<<<<<< HEAD
 """
 Base wrapper for TorchTitan models to work with vLLM V1 engine.
 
 This module provides TorchTitanVLLMModel: Core model class that adapts
 TorchTitan models for vLLM.
 """
+=======
+>>>>>>> 83047803 (refactor v3)
 
 from functools import partial
 
 import torch
 import torch.nn as nn
+<<<<<<< HEAD
 from torch.distributed._tensor import DTensor, Replicate
+=======
+>>>>>>> 83047803 (refactor v3)
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
+<<<<<<< HEAD
 
 from torchtitan.experiments.rl.unified.models.utils import replace_with_vllm_attention
+=======
+from torch.distributed.tensor import DTensor, Replicate
+
+from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
+>>>>>>> 83047803 (refactor v3)
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -30,20 +42,32 @@ from torchtitan.protocols.train_spec import ParallelizeFunction
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
+<<<<<<< HEAD
 from .parallelism_utils import create_parallel_dims_from_vllm_config
 
+=======
+>>>>>>> 83047803 (refactor v3)
 
 logger = init_logger(__name__)
 
 
 class TorchTitanVLLMModelWrapper(nn.Module):
     """
+<<<<<<< HEAD
     Generic vLLM-compatible model wrapper for TorchTitan models.
+=======
+    Generic vLLM-compatible model wrapper for TorchTitan models. Implemented
+    required interface required by vLLM Engine.
+>>>>>>> 83047803 (refactor v3)
 
     The wrapper handles:
     - Direct usage of TorchTitan model args (no HF config mapping needed)
     - Attention replacement with vLLM paged attention
+<<<<<<< HEAD
     - Tensor parallelism setup
+=======
+    - Parallelism setup and DTensor conversion between torchtitan and vLLM
+>>>>>>> 83047803 (refactor v3)
     - Weight loading from HF checkpoints
     - vLLM forward/compute_logits interface
     """
@@ -82,6 +106,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             dim=self.config.head_dim,
             base=self.config.rope_theta,
         )
+<<<<<<< HEAD
         # Replace attention with vLLM's attention
         replace_with_vllm_attention(self.model)
 
@@ -103,6 +128,70 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             )
         else:
             logger.info("Single GPU mode - no parallelization needed")
+=======
+
+        # Create ParallelDims and JobConfig from vLLM config at runtime
+        # vLLM config contains the tensor_parallel_size from command-line args
+        # and this will be consistent across all worker processes
+        from torchtitan.experiments.rl.unified.models.utils import (
+            create_job_config_from_vllm_config,
+            create_parallel_dims_from_vllm_config,
+        )
+
+        self.parallel_dims = create_parallel_dims_from_vllm_config(vllm_config)
+        self.parallel_config = create_job_config_from_vllm_config(
+            vllm_config=vllm_config,
+        )
+        # Replace attention with vLLM paged attention
+        self._replace_with_vllm_attention(model_args)
+
+        # NOTE: We need to apply parallelize within model.__init__ because vllm
+        # doesn't separate model creation and parallelism application and instead
+        # requires parallelization to be done inside model constructor.
+        self.model = parallelize_fn(
+            model=self.model,
+            parallel_dims=self.parallel_dims,
+            job_config=self.parallel_config,
+        )
+
+    def _replace_with_vllm_attention(self, model_args: BaseModelArgs):
+        """
+        Replace TorchTitan attention with vLLM paged attention. This function is parallel-aware,
+        initializing vLLM Attention with local num_heads and num_kv_heads.
+        """
+        assert hasattr(
+            self.model, "layers"
+        ), f"Model {type(self.model).__name__} must have .layers attribute"
+
+        tp_size = self.parallel_dims.tp
+        if tp_size > 1:
+            assert (
+                model_args.n_heads % tp_size == 0
+            ), "Only support when n_heads can be divided by tp_size"
+
+        for layer_name, layer in self.model.layers.items():
+            assert hasattr(
+                layer, "attention"
+            ), f"Layer {layer_name} must have .attention attribute"
+
+            vllm_attn = VLLMAttention(
+                hidden_size=model_args.dim,
+                num_heads=model_args.n_heads // tp_size,
+                num_kv_heads=model_args.n_heads
+                // tp_size,  # Use n_heads (already replicated)
+                head_dim=model_args.head_dim,
+                layer_name=layer_name,
+                scale=model_args.head_dim**-0.5,
+            )
+
+            # Replace inner attention
+            layer.attention.inner_attention = vllm_attn
+
+        logger.info(
+            f"Successfully replaced TorchTitan attention with VLLMAttention "
+            f"({len(self.model.layers)} layers)"
+        )
+>>>>>>> 83047803 (refactor v3)
 
     def _extend_rope_cache_if_needed(
         self, rope_cache: torch.Tensor, max_position: int
@@ -117,8 +206,11 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         Returns:
             Extended RoPE cache if needed, otherwise original cache
         """
+<<<<<<< HEAD
         from torch.distributed._tensor import DTensor, Replicate
 
+=======
+>>>>>>> 83047803 (refactor v3)
         required_len = max_position + 1
 
         # No extension needed
@@ -230,6 +322,13 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         for layer in self.model.layers.values():
             h = layer(h, rope_cache, attention_masks=None, positions=positions)
 
+<<<<<<< HEAD
+=======
+        # When parallelism is applied, get full tensor before return to vLLM Engine
+        if isinstance(h, DTensor):
+            h = h.full_tensor()
+
+>>>>>>> 83047803 (refactor v3)
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
             batch_size, seq_len, hidden_size = h.shape
@@ -243,6 +342,19 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         sampling_metadata=None,
     ) -> torch.Tensor | None:
         """Compute logits from hidden states."""
+<<<<<<< HEAD
+=======
+        if self.parallel_dims.tp_enabled:
+            # Turn hidden_states back to DTensor then `norm` can redistribute it into Shard(1)
+            hidden_states = DTensor.from_local(
+                hidden_states,
+                device_mesh=self.parallel_dims.get_mesh("tp"),
+                placements=[
+                    Replicate(),
+                ],
+            )
+
+>>>>>>> 83047803 (refactor v3)
         h = self.model.norm(hidden_states)
         logits = self.model.output(h)
 
