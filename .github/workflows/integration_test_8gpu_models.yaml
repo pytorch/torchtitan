@@ -36,6 +36,9 @@ jobs:
   build-test:
     needs: set-matrix
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
     with:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
@@ -65,6 +68,6 @@ jobs:
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite models $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
-        python -m tests.integration_tests.flux --gpu_arch_type ${{ matrix.gpu-arch-type }} $RUNNER_TEMP/artifacts-to-be-uploaded/flux --ngpu 8
+        python -m tests.integration_tests.flux $RUNNER_TEMP/artifacts-to-be-uploaded/flux --ngpu 8
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/flux/*/inference_results/
