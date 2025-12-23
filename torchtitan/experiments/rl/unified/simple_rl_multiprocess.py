@@ -111,14 +111,14 @@ async def main():
     trainer_mesh = this_host().spawn_procs(per_host={"gpus": 2})
     gen_mesh = this_host().spawn_procs(per_host={"gpus": 1})
 
-    # Set up distributed env vars so that titan actors are connected via c10d
+    # Set up distributed env vars so that actors are connected via c10d
     await setup_env_for_distributed(
         trainer_mesh,
         master_addr="localhost",  # TODO: figure out what to set
         master_port=29500,  # TODO: figure out what to set
     )
 
-    # Set up distributed env vars so that titan actors are connected via c10d
+    # Set up distributed env vars so that actors are connected via c10d
     await setup_env_for_distributed(
         gen_mesh,
         master_addr="localhost",  # TODO: figure out what to set

@@ -27,7 +27,6 @@ from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     trivial_reward_function,
 )
 from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_to_vllm
-from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 logger = logging.getLogger(__name__)
@@ -362,10 +361,6 @@ class Generator(Actor):
         )
         # Initialize vLLM engine
         self.vllm_engine = VLLMRolloutEngine(model_path, tp_size=self.tp_size)
-        # TODO: do not depend on transformers.AutoTokenizer, use Torchtitan's tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
 
         # State machine
         self.state = GeneratorState.READY_TO_UPDATE
