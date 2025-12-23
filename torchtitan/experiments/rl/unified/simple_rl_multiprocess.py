@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 async def main():
     """Run the distributed RL training loop using Monarch."""
     # Model Config
-    model_name = "Qwen/Qwen3-1.7B"
+    model_name = "Qwen/Qwen3-0.6B"
     cache_dir = "./models"
     output_dir = "./converted"
 
@@ -65,7 +65,7 @@ async def main():
 
     init_batch_invariance()
     batch_invariant = vllm_is_batch_invariant()
-    mode = ModelMode.VLLM_COMPAT
+    mode = ModelMode.UNIFIED
 
     # Set up batch invariant
     if batch_invariant:
@@ -111,6 +111,20 @@ async def main():
     trainer_mesh = this_host().spawn_procs(per_host={"gpus": 2})
     gen_mesh = this_host().spawn_procs(per_host={"gpus": 1})
 
+    # Set up distributed env vars so that titan actors are connected via c10d
+    await setup_env_for_distributed(
+        trainer_mesh,
+        master_addr="localhost",  # TODO: figure out what to set
+        master_port=29500,  # TODO: figure out what to set
+    )
+
+    # Set up distributed env vars so that titan actors are connected via c10d
+    await setup_env_for_distributed(
+        gen_mesh,
+        master_addr="localhost",  # TODO: figure out what to set
+        master_port=29501,  # TODO: figure out what to set
+    )
+
     # Spawn actors on trainer and generator mesh
     trainer = trainer_mesh.spawn(
         "trainer",
@@ -121,13 +135,6 @@ async def main():
         mode,
         trainer_ddp_size,
         trainer_tp_size,
-    )
-
-    # Set up distributed env vars so that titan actors are connected via c10d
-    await setup_env_for_distributed(
-        trainer_mesh,
-        master_addr="localhost",  # TODO: figure out what to set
-        master_port=29500,  # TODO: figure out what to set
     )
 
     generator = gen_mesh.spawn(
@@ -147,7 +154,7 @@ async def main():
 
     # Initialize generator with trainer weights
     initial_weights = trainer.get_weights.call().get().item(gpus=0)
-    await generator.update.call_one(0, initial_weights)
+    await generator.update.call(0, initial_weights)
 
     # Training loop
     logger.info("\n" + "=" * 80)
@@ -156,11 +163,10 @@ async def main():
 
     for step in range(num_steps):
         # Fully sync RL loop
-        batch = await generator.generate.call_one()
-        metrics = await trainer.step.call(batch)
-        metrics = metrics.item(gpus=0)
-        weights = (await trainer.get_weights.call()).item(gpus=0)
-        await generator.update.call_one(metrics["policy_version"], weights)
+        batch = generator.generate.call().get().item(gpus=0)
+        metrics = trainer.step.call(batch).get().item(gpus=0)
+        weights = trainer.get_weights.call().get().item(gpus=0)
+        await generator.update.call(metrics["policy_version"], weights)
 
         logger.info(
             f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "

@@ -9,8 +9,11 @@ from enum import Enum
 
 import torch
 from safetensors.torch import load_file
-
 from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
+
+from torchtitan.experiments.rl.vllm_compat.models.attention import (
+    VLLMCompatibleFlashAttention,
+)
 
 from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
@@ -40,7 +43,7 @@ class ModelMode(str, Enum):
 
 def replace_with_vllm_attention(model):
     """
-    Replace TorchTitan attention with vLLM paged attention.
+    Replace TorchTitan attention with vLLM's Attention.
 
     Assumes model has .layers dict with .attention.inner_attention structure.
     """
@@ -62,6 +65,32 @@ def replace_with_vllm_attention(model):
             layer_name=layer_name,
             scale=model_args.head_dim**-0.5,
         )
+
+        layer.attention.inner_attention = vllm_attn
+
+    logger.info(
+        f"Successfully replaced TorchTitan attention with VLLMAttention "
+        f"({len(model.layers)} layers)"
+    )
+
+
+def replace_with_vllm_compatibel_attention(model):
+    """
+    Replace TorchTitan attention with vLLM compatible flash attention.
+
+    Assumes model has .layers dict with .attention.inner_attention structure.
+    """
+    if not hasattr(model, "layers"):
+        raise AttributeError(
+            f"Model {type(model).__name__} must have .layers attribute"
+        )
+
+    model_args = model.model_args
+    for layer_name, layer in model.layers.items():
+        if not hasattr(layer, "attention"):
+            raise ValueError(f"Layer {layer_name} must have .attention attribute")
+
+        vllm_attn = VLLMCompatibleFlashAttention()
 
         layer.attention.inner_attention = vllm_attn
 
@@ -121,7 +150,7 @@ def load_model(
         # Set global default dtype to bfloat16. This is needed because vLLM's Attention
         # layer uses torch.get_default_dtype() and it doesn't support float32
         torch.set_default_dtype(torch.bfloat16)
-        replace_with_vllm_attention(model)
+        replace_with_vllm_compatibel_attention(model)
         # Load standard TorchTitan format directly
         model.load_state_dict(state_dict, strict=True)
     elif model_mode == ModelMode.VLLM_COMPAT:
