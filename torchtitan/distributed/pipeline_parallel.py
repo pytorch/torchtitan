@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
-
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
@@ -39,6 +38,258 @@ __all__ = [
     "pipeline_module_split",
 ]
 
+lib = torch.library.Library("aten", "IMPL")
+
+
+def _override_torch_ops_for_zero_bubble():
+    class MmSeparateWeightGrad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, i, w, real_output):
+            ctx.save_for_backward(i)
+            return real_output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            (i,) = ctx.saved_tensors
+            grad_weight = i.t().mm(grad_output)
+            return None, grad_weight, None
+
+    class MmSeparateInputGrad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, i, w, real_output):
+            ctx.save_for_backward(w)
+            return real_output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            (w,) = ctx.saved_tensors
+            grad_input = grad_output.mm(w.t())
+            return grad_input, None, None
+
+    class MmPassThrough(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, mm_output, fake_1, fake_2):
+            # we computed the mm earlier, so we could reuse its output shape in the separate input/weight functions
+            # but we need to keep this autograd function to connect the fake_* inputs to the autograd graph and pass
+            # gradients back to them
+            return mm_output
+
+        @staticmethod
+        def backward(ctx, gO):
+            return None, gO, gO
+
+    def split_mm(i, w):
+        # Apply the pass-through node. y is passed to this node so that it can be
+        # saved for backward, but detach because we don't want to actually build
+        # this edge of the graph
+        with torch._C._AutoDispatchBelowAutograd():
+            real_output = torch.mm(i.detach(), w.detach()).detach()
+
+        fake_1 = MmSeparateWeightGrad.apply(i.detach(), w, real_output)
+        fake_2 = MmSeparateInputGrad.apply(i, w.detach(), real_output)
+
+        return MmPassThrough.apply(real_output, fake_1, fake_2)
+
+    # addmm operator: out = beta * input + alpha * (mat1 @ mat2)
+    class AddmmSeparateMat2Grad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, mat1, mat2, alpha):
+            ctx.save_for_backward(mat1)
+            ctx.alpha = alpha
+            return mat2
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            (mat1,) = ctx.saved_tensors
+            # Gradient w.r.t. mat2: alpha * mat1.T @ grad_output
+            grad_mat2 = mat1.t().mm(grad_output) * ctx.alpha
+            return None, grad_mat2, None
+
+    class AddmmSeparateMat1Grad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, mat1, mat2, alpha):
+            ctx.save_for_backward(mat2)
+            ctx.alpha = alpha
+            return mat1
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            (mat2,) = ctx.saved_tensors
+            # Gradient w.r.t. mat1: alpha * grad_output @ mat2.T
+            grad_mat1 = grad_output.mm(mat2.t()) * ctx.alpha
+            return grad_mat1, None, None
+
+    class AddmmSeparateBiasGrad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, bias, beta):
+            ctx.beta = beta
+            return bias
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            # Gradient w.r.t. bias: beta * sum(grad_output, dim=0)
+            grad_bias = grad_output.sum(dim=0) * ctx.beta
+            return grad_bias, None
+
+    class AddmmPassThrough(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, bias, mat1, mat2, beta, alpha):
+            with torch._C._AutoDispatchBelowAutograd():
+                return torch.addmm(bias, mat1, mat2, beta=beta, alpha=alpha)
+
+        @staticmethod
+        def backward(ctx, gO):
+            return gO, gO, gO, None, None
+
+    def split_addmm(bias, mat1, mat2, *, beta=1, alpha=1):
+        mat2_1 = AddmmSeparateMat2Grad.apply(mat1.detach(), mat2, alpha)
+        mat1_1 = AddmmSeparateMat1Grad.apply(mat1, mat2.detach(), alpha)
+        bias_1 = AddmmSeparateBiasGrad.apply(bias, beta)
+        return AddmmPassThrough.apply(bias_1, mat1_1, mat2_1, beta, alpha)
+
+    # rms_norm operator: RMS normalization
+    class FusedRmsNormSeparateWeightGrad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, input, normalized_shape, weight, eps, real_output, rstd):
+            ctx.save_for_backward(input, weight, rstd)
+            ctx.normalized_shape = normalized_shape
+            return real_output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            input, weight, rstd = ctx.saved_tensors
+            # Call _fused_rms_norm_backward with output_mask=[False, True]
+            # We only want gradient w.r.t. weight (index 1)
+            _, grad_weight = torch.ops.aten._fused_rms_norm_backward(
+                grad_output,
+                input,
+                ctx.normalized_shape,
+                rstd,
+                weight,
+                output_mask=[False, True],
+            )
+            return None, None, grad_weight, None, None, None
+
+    class FusedRmsNormSeparateInputGrad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, input, normalized_shape, weight, eps, real_output, rstd):
+            ctx.save_for_backward(input, weight, rstd)
+            ctx.normalized_shape = normalized_shape
+            return real_output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            input, weight, rstd = ctx.saved_tensors
+            # Call _fused_rms_norm_backward with output_mask=[True, False]
+            # We only want gradient w.r.t. input (index 0)
+            grad_input, _ = torch.ops.aten._fused_rms_norm_backward(
+                grad_output,
+                input,
+                ctx.normalized_shape,
+                rstd,
+                weight,
+                output_mask=[True, False],
+            )
+            return grad_input, None, None, None, None, None
+
+    class FusedRmsNormPassThrough(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, real_output, real_std, fake_1, fake_2):
+            return real_output, real_std
+
+        @staticmethod
+        def backward(ctx, gO, gStd):
+            # Pass gradients to fake_1 and fake_2 to trigger their backward methods
+            # Return None for real_output/rstd since they are already detached
+            return None, None, gO, gO
+
+    def split_fused_rms_norm(input, normalized_shape, weight=None, eps=None):
+        # Compute the actual output using _fused_rms_norm which returns (output, rstd)
+        with torch._C._AutoDispatchBelowAutograd():
+            real_output, rstd = torch._fused_rms_norm(
+                input.detach(),
+                normalized_shape,
+                weight.detach() if weight is not None else None,
+                eps,
+            )
+            real_output = real_output.detach()
+            rstd = rstd.detach()
+            rstd2 = rstd.clone().detach()
+
+        weight_1 = FusedRmsNormSeparateWeightGrad.apply(
+            input.detach(), normalized_shape, weight, eps, real_output, rstd
+        )
+        input_1 = FusedRmsNormSeparateInputGrad.apply(
+            input,
+            normalized_shape,
+            weight.detach() if weight is not None else None,
+            eps,
+            real_output,
+            rstd2,
+        )
+        return FusedRmsNormPassThrough.apply(real_output, rstd, weight_1, input_1)
+
+    # _grouped_mm operator: Grouped matrix multiplication for MoE
+    class GroupedMmSeparateMat2Grad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, input, mat2, offs, bias, out_dtype, real_output):
+            ctx.save_for_backward(input)
+            ctx.offs = offs
+            return real_output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            (input,) = ctx.saved_tensors
+            # Gradient w.r.t. mat2 for grouped mm
+            grad_mat2 = torch.ops.aten._grouped_mm.default(
+                input.transpose(-1, -2), grad_output, offs=ctx.offs
+            )
+            return None, grad_mat2, None, None, None, None
+
+    class GroupedMmSeparateInputGrad(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, input, mat2, offs, bias, out_dtype, real_output):
+            ctx.save_for_backward(mat2)
+            ctx.offs = offs
+            return real_output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            (mat2,) = ctx.saved_tensors
+            # Gradient w.r.t. input for grouped mm
+            grad_input = torch.ops.aten._grouped_mm.default(
+                grad_output, mat2.transpose(-1, -2), offs=ctx.offs
+            )
+            return grad_input, None, None, None, None, None
+
+    class GroupedMmPassThrough(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, real_output, fake_1, fake_2):
+            return real_output
+
+        @staticmethod
+        def backward(ctx, gO):
+            return None, gO, gO
+
+    def split_grouped_mm(input, mat2, offs=None, bias=None, out_dtype=None):
+        with torch._C._AutoDispatchBelowAutograd():
+            real_output = torch.ops.aten._grouped_mm.default(
+                input, mat2, offs=offs, bias=bias, out_dtype=out_dtype
+            ).detach()
+        fake_1 = GroupedMmSeparateMat2Grad.apply(
+            input.detach(), mat2, offs, bias, out_dtype, real_output
+        )
+        fake_2 = GroupedMmSeparateInputGrad.apply(
+            input, mat2.detach(), offs, bias, out_dtype, real_output
+        )
+        return GroupedMmPassThrough.apply(real_output, fake_1, fake_2)
+
+    lib.impl("mm", split_mm, "Autograd")
+    lib.impl("addmm", split_addmm, "Autograd")
+    lib.impl("_fused_rms_norm", split_fused_rms_norm, "Autograd")
+    lib.impl("_grouped_mm", split_grouped_mm, "Autograd")
+    torch.autograd.set_detect_anomaly(True, check_nan=False)
+
 
 def pipeline_llm(
     model: nn.Module,
@@ -50,6 +301,9 @@ def pipeline_llm(
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.get_mesh("pp")
+
+    if True:
+        _override_torch_ops_for_zero_bubble()
 
     # Determine the number of virtual stages based on schedule type
     schedule_class = get_schedule_class(
