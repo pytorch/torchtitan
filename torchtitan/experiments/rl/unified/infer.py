@@ -8,7 +8,7 @@
 import argparse
 
 # Import unified module - this automatically registers TorchTitan models with vLLM
-from torchtitan.experiments.deterministic_vllm_rl import unified  # noqa: F401
+from torchtitan.experiments.rl import unified  # noqa: F401
 
 from vllm import LLM, SamplingParams
 from vllm.logger import init_logger
@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument(
         "--model_ckpt_path",
         type=str,
-        default="torchtitan/experiments/deterministic_vllm_rl/example_checkpoint",
+        default="torchtitan/experiments/rl/example_checkpoint",
         help="Path to TorchTitan checkpoint directory",
     )
     parser.add_argument(
