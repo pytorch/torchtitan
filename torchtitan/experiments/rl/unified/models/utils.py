@@ -74,7 +74,7 @@ def replace_with_vllm_attention(model):
     )
 
 
-def replace_with_vllm_compatibel_attention(model):
+def replace_with_vllm_compatible_flash_attention(model):
     """
     Replace TorchTitan attention with vLLM compatible flash attention.
 
@@ -150,7 +150,7 @@ def load_model(
         # Set global default dtype to bfloat16. This is needed because vLLM's Attention
         # layer uses torch.get_default_dtype() and it doesn't support float32
         torch.set_default_dtype(torch.bfloat16)
-        replace_with_vllm_compatibel_attention(model)
+        replace_with_vllm_compatible_flash_attention(model)
         # Load standard TorchTitan format directly
         model.load_state_dict(state_dict, strict=True)
     elif model_mode == ModelMode.VLLM_COMPAT:

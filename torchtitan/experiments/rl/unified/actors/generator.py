@@ -146,6 +146,7 @@ class VLLMRolloutEngine:
         # right now we hardcoded to work with 2 safe tensor files which we only
         # tested on Qwen3 1.7B model. In the longer term, need to use TorchStore
         # to achieve the weight communication.
+        # only generator rank 0 saves the weight
         if torch.distributed.get_rank() == 0:
             logger.info(f"Saving weights to {checkpoint_path}")
             if len(shard_files) == 2 and os.path.exists(index_file):
