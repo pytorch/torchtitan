@@ -41,6 +41,8 @@ class TorchTitanVLLMModelWrapper(nn.Module):
     """
     Generic vLLM-compatible model wrapper for TorchTitan models. Implemented
     required interface required by vLLM Engine.
+    Doc: https://docs.vllm.ai/en/latest/contributing/model/basic/
+    Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py
 
     The wrapper handles:
     - Direct usage of TorchTitan model args (no HF config mapping needed)
@@ -106,7 +108,6 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             )
         else:
             logger.info("Single GPU mode - no parallelization needed")
-=======
 
         # Create ParallelDims and JobConfig from vLLM config at runtime
         # vLLM config contains the tensor_parallel_size from command-line args
@@ -136,3 +137,209 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             parallel_dims=self.parallel_dims,
             job_config=self.parallel_config,
         )
+
+    def _extend_rope_cache_if_needed(
+        self, rope_cache: torch.Tensor, max_position: int
+    ) -> torch.Tensor:
+        """
+        Extend RoPE cache if needed during vLLM profiling stage.
+
+        Args:
+            rope_cache: Current RoPE cache tensor
+            max_position: Maximum position index needed
+
+        Returns:
+            Extended RoPE cache if needed, otherwise original cache
+        """
+        required_len = max_position + 1
+
+        # No extension needed
+        if required_len <= rope_cache.shape[0]:
+            return rope_cache
+
+        # If no extension function provided, return original cache
+        if self.rope_cache_extension_fn is None:
+            logger.warning(
+                f"RoPE cache extension needed (required_len={required_len}, "
+                f"current_len={rope_cache.shape[0]}) but no rope_cache_extension_fn provided. "
+                "Returning original cache."
+            )
+            return rope_cache
+
+        # Handle DTensor case
+        is_dtensor = isinstance(rope_cache, DTensor)
+        if is_dtensor:
+            device_mesh = rope_cache.device_mesh
+            local_rope_cache = rope_cache.to_local()
+            device = local_rope_cache.device
+            dtype = local_rope_cache.dtype
+        else:
+            device = rope_cache.device
+            dtype = rope_cache.dtype
+
+        # Use provided extension function
+        try:
+            extended_cache = self.rope_cache_extension_fn(self.config, required_len)
+            extended_cache = extended_cache.to(device=device, dtype=dtype)
+        except Exception as e:
+            logger.warning(
+                f"Failed to extend RoPE cache using rope_cache_extension_fn: {e}. "
+                "Returning original cache."
+            )
+            return rope_cache
+
+        # Convert back to DTensor if needed
+        if is_dtensor:
+            rope_cache = DTensor.from_local(
+                extended_cache,
+                device_mesh=device_mesh,
+                placements=[Replicate()],
+            )
+        else:
+            rope_cache = extended_cache
+
+        return rope_cache
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Convert input token IDs to embeddings."""
+        return self.model.tok_embeddings(input_ids)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Convert input token IDs to embeddings (deprecated vLLM interface)."""
+        return self.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Forward pass with vLLM interface.
+
+        Args:
+            input_ids: Token IDs [total_tokens] (1D varlen format)
+            positions: Position indices [total_tokens] (1D varlen format)
+            inputs_embeds: Pre-computed embeddings (optional)
+            **kwargs: Additional vLLM kwargs
+
+        Returns:
+            hidden_states: Final hidden states [total_tokens, hidden_size]
+        """
+        if inputs_embeds is not None:
+            raise NotImplementedError("inputs_embeds not yet supported")
+
+        if input_ids is None:
+            raise ValueError("Either input_ids or inputs_embeds must be provided")
+
+        # Convert vLLM interface to TorchTitan interface
+        # vLLM: [total_tokens] → TorchTitan: [batch_size, seq_len]
+        tokens_2d = input_ids.unsqueeze(0)
+
+        # Get embeddings
+        h = self.model.tok_embeddings(tokens_2d)
+
+        # Get RoPE cache (handle model-specific attribute names)
+        # Use hasattr to avoid ambiguous boolean value error with tensors
+        if hasattr(self.model, "rope_cache"):
+            rope_attr = self.model.rope_cache
+        elif hasattr(self.model, "freqs_cis"):
+            rope_attr = self.model.freqs_cis
+        else:
+            rope_attr = None
+
+        # Extend RoPE cache if needed (vLLM profiling may use 2x max_seq_len)
+        if positions is not None:
+            max_position = positions.max().item()
+        else:
+            max_position = 0
+
+        rope_cache = self._extend_rope_cache_if_needed(rope_attr, max_position)
+        positions = positions.unsqueeze(0)
+
+        # Pass through transformer layers
+        for layer in self.model.layers.values():
+            h = layer(h, rope_cache, attention_masks=None, positions=positions)
+
+        # When parallelism is applied, get full tensor before return to vLLM Engine
+        if isinstance(h, DTensor):
+            h = h.full_tensor()
+
+        # Convert to vLLM format: [total_tokens, hidden_size]
+        if h.dim() == 3:
+            batch_size, seq_len, hidden_size = h.shape
+            h = h.view(batch_size * seq_len, hidden_size)
+
+        return h
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata=None,
+    ) -> torch.Tensor | None:
+        """Compute logits from hidden states."""
+
+        # When TP is applied, we return the full tensor (plain tensor) to vLLM engine
+        # at the end of TorchTitanVLLMModelWrapper.forward().
+        # We need to wrap the input from vLLM engine back to DTensor with Replicate() placement.
+        if self.parallel_dims.tp_enabled:
+            hidden_states = DTensor.from_local(
+                hidden_states,
+                device_mesh=self.parallel_dims.get_mesh("tp"),
+                placements=[
+                    Replicate(),
+                ],
+            )
+
+        h = self.model.norm(hidden_states)
+        logits = self.model.output(h)
+
+        return logits
+
+    def load_weights(self, weights_iter):
+        """
+        Load weights from HF checkpoint using the provided state dict adapter.
+        vLLM engine would call this function to load model weights.
+
+        Args:
+            weights_iter: Iterator of (name, tensor) pairs from HF checkpoint
+
+        Returns:
+            Set of loaded parameter names
+        """
+        # Collect weights from iterator
+        hf_state_dict = {}
+        for name, tensor in weights_iter:
+            hf_state_dict[name] = tensor
+
+        # Use adapter to convert HF → TorchTitan format
+        adapter = self.state_dict_adapter(
+            model_args=self.config,
+            hf_assets_path=None,
+        )
+
+        torchtitan_state_dict = adapter.from_hf(hf_state_dict)
+        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
+
+        # Convert to DTensor if target is DTensor
+        for name, tensor in torchtitan_state_dict.items():
+            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
+                target_dtensor = model_state_dict[name]
+                device_mesh = target_dtensor.device_mesh
+                torchtitan_state_dict[name] = DTensor.from_local(
+                    tensor.to(device_mesh.device_type),
+                    device_mesh=device_mesh,
+                    placements=[Replicate()],
+                )
+
+        # Load state dict
+        set_model_state_dict(
+            model=self.model,
+            model_state_dict=torchtitan_state_dict,
+            options=StateDictOptions(strict=False),
+        )
+
+        loaded_params = {f"model.{name}" for name in torchtitan_state_dict.keys()}
+
+        return loaded_params
