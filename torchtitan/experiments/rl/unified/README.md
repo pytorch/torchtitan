@@ -55,11 +55,7 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torch
 
 4. Run inference:
 ```
-<<<<<<< HEAD
-python torchtitan/experiments/rl/unified/infer.py --model torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B
-=======
 python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint>
->>>>>>> 59b0b1d9 (add TP)
 ```
 
 Run with TP: (work in progress)
