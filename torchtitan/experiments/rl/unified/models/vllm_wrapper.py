@@ -82,7 +82,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             dim=self.config.head_dim,
             base=self.config.rope_theta,
         )
-        # Replace attention with vLLM paged attention
+        # Replace attention with vLLM's attention
         replace_with_vllm_attention(self.model)
 
         # Create ParallelDims from vLLM config and apply parallelization

@@ -14,6 +14,11 @@ from typing import List
 import torch
 from monarch.actor import Actor, endpoint
 from safetensors.torch import save_file
+from torchtitan.config.job_config import Comm
+from torchtitan.distributed import utils as dist_utils
+
+# Import unified module - this automatically registers TorchTitan models with vLLM
+from torchtitan.experiments.rl import unified  # noqa: F401
 
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
@@ -22,7 +27,6 @@ from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     trivial_reward_function,
 )
 from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_to_vllm
-from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 logger = logging.getLogger(__name__)
@@ -139,61 +143,70 @@ class VLLMRolloutEngine:
 
         # TODO: need to replace this with Torchtitan's checkpoint save and load
         # right now we hardcoded to work with 2 safe tensor files which we only
-        # tested on Qwen3 1.7B model. In the longer term, need to use TorchStore
+        # tested on Qwen3 0.6B model. In the longer term, need to use TorchStore
         # to achieve the weight communication.
-        if len(shard_files) == 2 and os.path.exists(index_file):
-            # Load the index to see which weights go in which shard
-            with open(index_file, "r") as f:
-                index_data = json.load(f)
+        # only generator rank 0 saves the weight
+        if torch.distributed.get_rank() == 0:
+            logger.info(f"Saving weights to {checkpoint_path}")
+            if len(shard_files) == 2 and os.path.exists(index_file):
+                # Load the index to see which weights go in which shard
+                with open(index_file, "r") as f:
+                    index_data = json.load(f)
 
-            weight_map = index_data["weight_map"]
+                weight_map = index_data["weight_map"]
 
-            # Split weights according to the index
-            shard1_weights = {}
-            shard2_weights = {}
+                # Split weights according to the index
+                shard1_weights = {}
+                shard2_weights = {}
 
-            for key, value in vllm_state.items():
-                shard_file = weight_map.get(key, shard_files[0])
-                if "model-00001-of-00002" in shard_file:
-                    shard1_weights[key] = value
-                else:
-                    shard2_weights[key] = value
+                for key, value in vllm_state.items():
+                    shard_file = weight_map.get(key, shard_files[0])
+                    if "model-00001-of-00002" in shard_file:
+                        shard1_weights[key] = value
+                    else:
+                        shard2_weights[key] = value
 
-            # Ensure weights stay in bfloat16
-            shard1_weights = {
-                k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v
-                for k, v in shard1_weights.items()
-            }
-            shard2_weights = {
-                k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v
-                for k, v in shard2_weights.items()
-            }
+                # Ensure weights stay in bfloat16
+                shard1_weights = {
+                    k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v
+                    for k, v in shard1_weights.items()
+                }
+                shard2_weights = {
+                    k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v
+                    for k, v in shard2_weights.items()
+                }
 
-            # Save to the shard files
-            save_file(shard1_weights, shard_files[0])
-            save_file(shard2_weights, shard_files[1])
-        else:
-            # Ensure weights stay in bfloat16
-            vllm_state = {
-                k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v
-                for k, v in vllm_state.items()
-            }
-            # Fallback: save as single file
-            save_file(vllm_state, checkpoint_path)
+                # Save to the shard files
+                save_file(shard1_weights, shard_files[0])
+                save_file(shard2_weights, shard_files[1])
+            else:
+                # Ensure weights stay in bfloat16
+                vllm_state = {
+                    k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v
+                    for k, v in vllm_state.items()
+                }
+                # Fallback: save as single file
+                save_file(vllm_state, checkpoint_path)
+
+        # Synchronize all ranks before reloading to ensure rank 0 finished writing
+        torch.distributed.barrier()
+        logger.info(
+            f"[Rank {torch.distributed.get_rank()}] Synchronized after weight save"
+        )
 
         # First time: create the engine
         if self.llm is None:
-            # Disable distributed execution to avoid NCCL conflicts in Monarch actors
-            # Use single GPU mode
-            import os
-
-            os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
             self.llm = LLM(
                 model=self.temp_model_dir,
+                hf_overrides={
+                    # Override architectures to use our registered TorchTitan model class
+                    "architectures": ["Qwen3TorchTitanForCausalLM"],
+                },
                 trust_remote_code=True,
                 max_model_len=2048,
                 dtype="bfloat16",
                 gpu_memory_utilization=0.1,  # Reduced from 0.5
+                distributed_executor_backend="external_launcher",  # vllm do not spawn processes
                 seed=42,  # Fixed seed for determinism
                 enforce_eager=True,
                 tensor_parallel_size=self.tp_size,  # Explicitly single GPU
@@ -342,11 +355,12 @@ class Generator(Actor):
         self.use_stable_grpo = use_stable_grpo
         self.tp_size = tp_size
 
+        # Initialize distributed environment for SPMD generator
+        world_size = dist_utils.init_distributed(
+            Comm(),
+        )
         # Initialize vLLM engine
         self.vllm_engine = VLLMRolloutEngine(model_path, tp_size=self.tp_size)
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
 
         # State machine
         self.state = GeneratorState.READY_TO_UPDATE
