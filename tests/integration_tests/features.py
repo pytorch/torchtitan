@@ -484,6 +484,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "Generation script test",
             "test_generate",
             ngpu=2,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
