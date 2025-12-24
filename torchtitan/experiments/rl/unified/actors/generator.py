@@ -143,7 +143,7 @@ class VLLMRolloutEngine:
 
         # TODO: need to replace this with Torchtitan's checkpoint save and load
         # right now we hardcoded to work with 2 safe tensor files which we only
-        # tested on Qwen3 1.7B model. In the longer term, need to use TorchStore
+        # tested on Qwen3 0.6B model. In the longer term, need to use TorchStore
         # to achieve the weight communication.
         # only generator rank 0 saves the weight
         if torch.distributed.get_rank() == 0:
