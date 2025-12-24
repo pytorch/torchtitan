@@ -121,7 +121,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "Checkpoint Integration Test - save load model only checkpoint in HF definition and format",
             "model_only_hf_checkpoint",
-            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
