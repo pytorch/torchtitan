@@ -27,9 +27,9 @@ jobs:
             "name": "rocm",
             "runner": "linux.rocm.gpu.gfx942.8",
             "gpu-arch-type": "rocm",
-            "gpu-arch-version": "7.0",
+            "gpu-arch-version": "7.1",
             "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
-            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.0"
+            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.1"
           }'
 
           # Define CUDA matrix
