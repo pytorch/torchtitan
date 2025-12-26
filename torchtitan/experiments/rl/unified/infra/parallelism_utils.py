@@ -11,8 +11,9 @@ This module provides functions for setting up device mesh and applying
 tensor parallelism to TorchTitan models in vLLM using TorchTitan's ParallelDims.
 """
 
+
 import torch.distributed as dist
-from torchtitan.config.job_config import Comm
+from torchtitan.config.job_config import Comm, JobConfig, Model, Parallelism, Training
 from torchtitan.distributed import utils as dist_utils
 
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -92,3 +93,47 @@ def create_trainer_parallel_dims(ddp_size, tp_size) -> ParallelDims:
         etp=1,
         world_size=world_size,
     )
+
+
+def create_job_config_from_vllm_config(
+    vllm_config: VllmConfig,
+    model_name: str = "qwen3",
+    hf_assets_path: str = "/path/to/hf/assets",
+) -> JobConfig:
+    """
+    Create TorchTitan JobConfig from vLLM configuration.
+
+    Args:
+        vllm_config: vLLM configuration object containing model, parallel, and cache configs
+        model_name: Model name to use (default: "qwen3")
+        hf_assets_path: Path to HuggingFace assets directory (default: "/path/to/hf/assets")
+
+    Returns:
+        JobConfig object with settings mapped from vLLM config
+    """
+    # Create JobConfig with defaults
+    job_config = JobConfig()
+
+    model_config = vllm_config.model_config
+    job_config.model = Model(
+        name=model_name,
+        hf_assets_path=hf_assets_path,
+    )
+
+    parallel_config = vllm_config.parallel_config
+    job_config.parallelism = Parallelism(
+        data_parallel_replicate_degree=parallel_config.data_parallel_size,
+        data_parallel_shard_degree=1,  # vLLM doesn't use FSDP sharding in inference
+        context_parallel_degree=parallel_config.decode_context_parallel_size,
+        tensor_parallel_degree=parallel_config.tensor_parallel_size,
+        pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
+        expert_parallel_degree=1,  # Not used in vLLM inference yet
+        expert_tensor_parallel_degree=1,  # Not used in vLLM inference yet
+    )
+
+    job_config.training = Training(
+        local_batch_size=1,  # Inference typically processes one batch at a time
+        steps=1,  # Single step for inference
+    )
+
+    return job_config

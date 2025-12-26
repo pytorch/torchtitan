@@ -4,13 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+
 import logging
 from enum import Enum
 
 import torch
 from safetensors.torch import load_file
-from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
 
+from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
 from torchtitan.experiments.rl.vllm_compat.models.attention import (
     VLLMCompatibleFlashAttention,
 )
@@ -41,7 +42,7 @@ class ModelMode(str, Enum):
     STANDARD = "standard"
 
 
-def replace_with_vllm_attention(model):
+def replace_with_vllm_attention(model, tp_degree=1):
     """
     Replace TorchTitan attention with vLLM's Attention.
 
@@ -59,8 +60,9 @@ def replace_with_vllm_attention(model):
 
         vllm_attn = VLLMAttention(
             hidden_size=model_args.dim,
-            num_heads=model_args.n_heads,
-            num_kv_heads=model_args.n_heads,  # Use n_heads (already replicated)
+            num_heads=model_args.n_heads // tp_degree,
+            num_kv_heads=model_args.n_heads
+            // tp_degree,  # Use n_heads (already replicated)
             head_dim=model_args.head_dim,
             layer_name=layer_name,
             scale=model_args.head_dim**-0.5,
@@ -95,7 +97,7 @@ def replace_with_vllm_compatible_flash_attention(model):
         layer.attention.inner_attention = vllm_attn
 
     logger.info(
-        f"Successfully replaced TorchTitan attention with VLLMAttention "
+        f"Successfully replaced TorchTitan attention with VLLMCompatibleFlashAttention "
         f"({len(model.layers)} layers)"
     )
 
@@ -104,7 +106,7 @@ def load_model(
     checkpoint_path: str, model_path: str, model_mode: str = ModelMode.VLLM_COMPAT
 ):
     """
-    Load TorchTitan model from checkpoint.
+    Load TorchTitan model from checkpoint for trainer.
 
     Args:
         checkpoint_path: Path to TorchTitan checkpoint
@@ -113,7 +115,7 @@ def load_model(
             or plain Torchtitan model
 
     Returns:
-        model: Loaded TorchTitan model
+        model: Loaded TorchTitan model for trainer.
     """
     # Load HuggingFace config
     # TODO: do not depend on transformers.AutoConfig, use qwen_args directly
@@ -150,7 +152,10 @@ def load_model(
         # Set global default dtype to bfloat16. This is needed because vLLM's Attention
         # layer uses torch.get_default_dtype() and it doesn't support float32
         torch.set_default_dtype(torch.bfloat16)
+        # NOTE: Override attention to vllm compatible attention for backward capability.
+        # Only patch to vllm compatible attention for training.
         replace_with_vllm_compatible_flash_attention(model)
+
         # Load standard TorchTitan format directly
         model.load_state_dict(state_dict, strict=True)
     elif model_mode == ModelMode.VLLM_COMPAT:
