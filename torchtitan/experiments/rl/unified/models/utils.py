@@ -12,6 +12,9 @@ import torch
 from safetensors.torch import load_file
 
 from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
+from torchtitan.experiments.rl.vllm_compat.models.attention import (
+    VLLMCompatibleFlashAttention,
+)
 
 from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
@@ -103,7 +106,7 @@ def load_model(
     checkpoint_path: str, model_path: str, model_mode: str = ModelMode.VLLM_COMPAT
 ):
     """
-    Load TorchTitan model from checkpoint.
+    Load TorchTitan model from checkpoint for trainer.
 
     Args:
         checkpoint_path: Path to TorchTitan checkpoint
@@ -112,7 +115,7 @@ def load_model(
             or plain Torchtitan model
 
     Returns:
-        model: Loaded TorchTitan model
+        model: Loaded TorchTitan model for trainer.
     """
     # Load HuggingFace config
     # TODO: do not depend on transformers.AutoConfig, use qwen_args directly
@@ -149,7 +152,8 @@ def load_model(
         # Set global default dtype to bfloat16. This is needed because vLLM's Attention
         # layer uses torch.get_default_dtype() and it doesn't support float32
         torch.set_default_dtype(torch.bfloat16)
-
+        # NOTE: Override attention to vllm compatible attention for backward capability.
+        # Only patch to vllm compatible attention for training.
         replace_with_vllm_compatible_flash_attention(model)
 
         # Load standard TorchTitan format directly

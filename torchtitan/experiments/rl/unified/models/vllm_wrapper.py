@@ -21,8 +21,12 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
+from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
+    create_job_config_from_vllm_config,
+    create_parallel_dims_from_vllm_config,
+)
+
 from torchtitan.experiments.rl.unified.models.utils import replace_with_vllm_attention
-from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -30,8 +34,6 @@ from torchtitan.protocols.train_spec import ParallelizeFunction
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-
-from .parallelism_utils import create_parallel_dims_from_vllm_config
 
 
 logger = init_logger(__name__)
@@ -87,36 +89,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             base=self.config.rope_theta,
         )
 
-        # Replace attention with vLLM's attention
-        replace_with_vllm_attention(self.model)
-
-        # Create ParallelDims from vLLM config and apply parallelization
-        # NOTE: We need to apply parallelize within model.__init__ because w
-        parallel_dims = create_parallel_dims_from_vllm_config(vllm_config)
-        if parallel_dims.tp_enabled:
-            self.world_mesh = parallel_dims.world_mesh
-            tp_mesh = self.world_mesh["tp"]
-            parallelize_fn(
-                model=self.model,
-                tp_mesh=tp_mesh,
-                loss_parallel=False,
-                enable_float8_tensorwise_tp=False,
-                enable_async_tp=False,
-            )
-            logger.info(
-                f"Successfully initialized model with with TP={parallel_dims.tp}"
-            )
-        else:
-            logger.info("Single GPU mode - no parallelization needed")
-
         # Create ParallelDims and JobConfig from vLLM config at runtime
         # vLLM config contains the tensor_parallel_size from command-line args
         # and this will be consistent across all worker processes
-        from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
-            create_job_config_from_vllm_config,
-            create_parallel_dims_from_vllm_config,
-        )
-
         self.parallel_dims = create_parallel_dims_from_vllm_config(vllm_config)
         self.parallel_config = create_job_config_from_vllm_config(
             vllm_config=vllm_config,
@@ -127,6 +102,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             assert (
                 model_args.n_heads % tp_size == 0
             ), "Only support when n_heads can be divided by tp_size"
+
         replace_with_vllm_attention(self.model, tp_degree=tp_size)
 
         # NOTE: We need to apply parallelize within model.__init__ because vllm
