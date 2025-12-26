@@ -286,6 +286,8 @@ class MoEStateDictAdapter(StateDictAdapter):
         if len(experts) < expected_n_experts:
             return None
 
+        print("Printing type of experts.keys():")
+        print(type(experts.keys()))
         sorted_expert_ids = sorted(experts.keys(), key=int)
         print("Applied sorting fix")
         sorted_experts = [experts[i] for i in sorted_expert_ids]
