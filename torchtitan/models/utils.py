@@ -287,8 +287,8 @@ class MoEStateDictAdapter(StateDictAdapter):
             return None
 
         print("Printing type of experts.keys():")
-        print(type(experts.keys()))
-        sorted_expert_ids = sorted(experts.keys(), key=int)
+        print(type(list(experts.keys())[0]))
+        sorted_expert_ids: list[int] = sorted(experts.keys(), key=int)
         print("Applied sorting fix")
         sorted_experts = [experts[i] for i in sorted_expert_ids]
         # pyrefly: ignore [missing-attribute]
