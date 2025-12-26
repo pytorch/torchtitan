@@ -287,6 +287,7 @@ class MoEStateDictAdapter(StateDictAdapter):
             return None
 
         sorted_expert_ids = sorted(experts.keys(), key=int)
+        print("Applied sorting fix")
         sorted_experts = [experts[i] for i in sorted_expert_ids]
         # pyrefly: ignore [missing-attribute]
         local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor
@@ -355,6 +356,7 @@ class MoEStateDictAdapter(StateDictAdapter):
             return None
 
         sorted_expert_ids = sorted(experts.keys(), key=int)
+        print("Applied sorting fix")
         sorted_experts = [experts[i] for i in sorted_expert_ids]
         stacked_tensor = torch.stack(sorted_experts, dim=0)
 
