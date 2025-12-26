@@ -230,9 +230,13 @@ class Attention(nn.Module):
         match self.attn_type:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
-            case _:
+            case "sdpa":
                 # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
+            case "varlen":
+                raise ValueError("Varlen attention is not supported with Llama 4.")
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):

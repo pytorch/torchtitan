@@ -237,9 +237,13 @@ class Attention(nn.Module):
         match self.attn_type:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
-            case _:
+            case "sdpa":
                 # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
+            case "varlen":
+                raise ValueError("Varlen attention is not supported with Deepseek V3.")
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
     def forward(
         self,
