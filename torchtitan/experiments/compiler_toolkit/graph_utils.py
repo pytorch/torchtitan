@@ -86,6 +86,7 @@ def joint_graph_builder(
     model: torch.nn.Module,
     model_args: tuple,
     model_kwargs: dict,
+    parallel_dims: ParallelDims,
     fw_compiler: Optional[Callable] = None,
     bw_compiler: Optional[Callable] = None,
     joint_custom_passes: Optional[List[Callable]] = None,
@@ -104,8 +105,10 @@ def joint_graph_builder(
         dump_folder: Optional folder to dump the graph to
     """
     assert isinstance(model_args, tuple)
-    for idx, arg in enumerate(model_args):
-        assert isinstance(arg, DTensor), f"Argument {idx} is of type {type(arg)}"
+
+    if parallel_dims.tp_enabled:
+        for idx, arg in enumerate(model_args):
+            assert isinstance(arg, DTensor), f"Argument {idx} is of type {type(arg)}"
 
     # get joint graph
     (
@@ -198,7 +201,7 @@ class CompiledModule(torch.nn.Module):
 
         if self.joint_graph_module is None:
             self.joint_graph_module = self.joint_graph_builder(
-                self.inner, dt_args, dt_kwargs
+                self.inner, dt_args, dt_kwargs, self.parallel_dims,
             )
 
         # calling the line below returns control to torchtitan's runner
