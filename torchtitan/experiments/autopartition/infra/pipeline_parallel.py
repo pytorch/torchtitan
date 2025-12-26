@@ -21,16 +21,30 @@ from torch.distributed.pipelining.schedules import (
     ScheduleDualPipeV,
     ScheduleZBVZeroBubble,
 )
+from torch.utils.flop_counter import FlopCounterMode
 from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.config import JobConfig
-from torchtitan.config import ActivationCheckpoint as ACConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import apply_ac
+
 from torchtitan.experiments.autopartition.infra.autopipe import pipeline
-from torchtitan.experiments.autopartition.infra.profiler import FlopsProfiler
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
+
+# from torchtitan/tests/unit_tests/test_activation_checkpoint.py
+_op_sac_save_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    # for low precision training, it's useful to always save
+    # the result of max, since the absolute maximum is
+    # used to compute the scaling factor for quantization.
+    torch.ops.aten.max.default,
+    torch._higher_order_ops.flex_attention,
+}
 
 __all__ = [
     "pipeline_llm",
@@ -39,53 +53,50 @@ __all__ = [
     "pipeline_module_split",
 ]
 
-def get_backward_compute_ratio(ac_config: ACConfig, forward_flpos: list):
-    """Get the backward computation ratio relative to forward pass for each layer.
-    
-    This ratio represents how many times more expensive backward computation is
-    compared to forward computation for each layer, based on activation 
-    checkpointing configuration.
-    
-    Assume backward is 2x forward. If include recompute, 3x forward.
-    
-    Args:
-        ac_config: Activation checkpointing configuration.
-        num_layers: Total number of layers in the model.
-    
-    Returns:
-        List of integers where each element is the backward-to-forward 
-        compute ratio for the corresponding layer.
-        Typical values:
-        - 2: Standard case (backward ≈ 2x forward)
-        - 3: With activation recomputation (backward ≈ 3x forward)
-    """
-    transformer_flops = max(set(forward_flpos), key=forward_flpos.count)
-    transformer_index = [i for i, v in enumerate(forward_flpos) if v == transformer_flops]
-    backward_compute_ratio = [2] * len(forward_flpos)
+def layerwise_flops(model, x, backward=True):
+    """Return forward and backward FLOPs (float) for each layer of the model."""
+    fwd_mflops, bwd_mflops = [], []
 
-    for i, tf_index in enumerate(transformer_index):
-        if ac_config.mode in ["full", "memory_budget"]:
-            backward_compute_ratio[tf_index] = 3
-
-        if ac_config.mode == 'selective':
-            if ac_config.selective_ac_option == "op":
-                backward_compute_ratio[tf_index] = 3
+    for layer_idx, layer in enumerate(model):
+        # forward
+        with FlopCounterMode(display=False) as mode:
+            if isinstance(x, torch.Tensor):
+                x_new = layer(x)
             else:
-                checkpoint_interval = int(ac_config.selective_ac_option)
-                for i, tf_index in enumerate(transformer_index):
-                    if i % checkpoint_interval == 0:
-                        backward_compute_ratio[tf_index] = 3
+                x_new = layer(*x)
+        fwd_mflops.append(round(mode.get_total_flops() / 1e6))
 
-    return backward_compute_ratio
+        # backward
+        if backward and layer_idx != 0:
 
-def autopipe_partition(model, num_stages, job_config):
+            def layer_scalar(y):
+                return (
+                    y.sum() if isinstance(y, torch.Tensor) else sum(o.sum() for o in y)
+                )
+
+            y = x_new.clone()
+            with FlopCounterMode(display=False) as mode:
+                layer_scalar(y).backward()
+
+            bwd_mflops.append(round(mode.get_total_flops() / 1e6))
+        else:
+            bwd_mflops.append(0)
+
+        x = x_new.detach().requires_grad_(True)
+
+    return fwd_mflops, bwd_mflops
+
+
+def autopipe_partition(model: nn.Module, num_stages: int, job_config: JobConfig):
     """Partition layers based on automatic pipeline profiling.
 
     This method profiles each layer's computational cost (FLOPS) and
     distributes layers to balance computation across stages.
 
     Args:
-        input_to_shard_dict: Dictionary containing input sharding information.
+        model (nn.Module): The neural network model to be partitioned.
+        num_stages (int): Number of pipeline stages to partition the model into.
+        job_config (JobConfig): The job configuration.
 
     Returns:
         List of integers representing the number of layers assigned to each stage.
@@ -102,33 +113,16 @@ def autopipe_partition(model, num_stages, job_config):
         job_config=job_config,
     )
     iterator = iter(dataloader)
-    inputs = next(iterator)[0].values()
+    inputs = list(next(iterator)[0].values())
 
-    # Profile each layer's FLOPS
-    mflops_list = []
-    for _, layer in enumerate(model):
-        prof = FlopsProfiler(layer)
-        prof.start_profile()
-        nparams_dense = 0
-        for p in layer.parameters():
-            nparams_dense += p.numel()
-        if isinstance(inputs, torch.Tensor):
-            inputs = layer(inputs)
-        else:
-            inputs = layer(*inputs)
-        mflops = prof.get_total_flops() / 10**6  # Convert to million FLOPS
-        mflops_list.append(round(mflops))
-        prof.end_profile()
+    mflops_fwd, mflops_bwd = layerwise_flops(model, inputs)
 
-    logger.info(f"Autopipe partitioning with mflops: {mflops_list}")
+    logger.info(f"Autopipe partitioning with mflops: {mflops_fwd}, {mflops_bwd}")
 
     # Partition layers by forward and backward flops
-    backward_compute_ratio = get_backward_compute_ratio(
-        job_config.activation_checkpoint, len(mflops_list)
-    )
     parts = pipeline(
-        mflops_list,
-        [f_flops * backward_compute_ratio[i] for i, f_flops in enumerate(mflops_list)],
+        mflops_fwd,
+        mflops_bwd,
         num_stages,
     )
     parts.append(len(model))  # Add the total number of layers
@@ -273,15 +267,27 @@ def pipeline_llm(
             num_virtual_stages, num_layers, input_weight, output_weight
         )
 
-    # if job_config.custom_config.auto_partition:
+    # use auto_partition
     flatten_module_names = [
         item for sublist in module_names_per_stage for item in sublist
     ]
-    seq_modules = _build_module_for_profile(model, flatten_module_names)
+
+    copied_model = copy.deepcopy(model)
+    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+    apply_ac(
+        copied_model,
+        job_config.activation_checkpoint,
+        model_compile_enabled=job_config.compile.enable,
+        use_flex_attn=use_flex_attn,
+        op_sac_save_list=_op_sac_save_list,
+    )
+    seq_modules = _build_module_for_profile(copied_model, flatten_module_names)
+
     parts = autopipe_partition(seq_modules, parallel_dims.pp, job_config)
     module_names_per_stage = [
         flatten_module_names[parts[i] : parts[i + 1]] for i in range(parallel_dims.pp)
     ]
+    del copied_model, seq_modules
 
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
