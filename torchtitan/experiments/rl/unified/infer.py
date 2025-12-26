@@ -23,7 +23,7 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--model_ckpt_path",
+        "--model-ckpt-path",
         type=str,
         default="torchtitan/experiments/rl/example_checkpoint",
         help="Path to TorchTitan checkpoint directory",
@@ -55,7 +55,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def infer():
     args = parse_args()
 
     logger.info("Initializing vLLM with TorchTitan model")
@@ -69,6 +69,8 @@ def main():
     # 3. Create JobConfig and ParallelDims from vLLM config
     # 4. Apply parallelization using parallelize_qwen3
     # 5. Load model weights and prepare for inference
+    # The tensor_parallel_size will be used by vLLM to configure parallelization
+    # and will be available in vllm_config in worker processes
     logger.info("Creating vLLM LLM engine...")
 
     llm = LLM(
@@ -81,6 +83,7 @@ def main():
         trust_remote_code=True,
         enforce_eager=True,  # Use eager mode
         tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=0.5,
     )
 
     logger.info("vLLM engine initialized successfully")
@@ -112,4 +115,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    infer()

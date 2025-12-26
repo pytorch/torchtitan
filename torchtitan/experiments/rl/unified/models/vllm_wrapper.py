@@ -21,6 +21,11 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
+from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
+    create_job_config_from_vllm_config,
+    create_parallel_dims_from_vllm_config,
+)
+
 from torchtitan.experiments.rl.unified.models.utils import replace_with_vllm_attention
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
@@ -30,20 +35,21 @@ from torchtitan.protocols.train_spec import ParallelizeFunction
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
-from .parallelism_utils import create_parallel_dims_from_vllm_config
-
 
 logger = init_logger(__name__)
 
 
 class TorchTitanVLLMModelWrapper(nn.Module):
     """
-    Generic vLLM-compatible model wrapper for TorchTitan models.
+    Generic vLLM-compatible model wrapper for TorchTitan models. Implemented
+    required interface required by vLLM Engine.
+    Doc: https://docs.vllm.ai/en/latest/contributing/model/basic/
+    Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py
 
     The wrapper handles:
     - Direct usage of TorchTitan model args (no HF config mapping needed)
     - Attention replacement with vLLM paged attention
-    - Tensor parallelism setup
+    - Parallelism setup and DTensor conversion between torchtitan and vLLM
     - Weight loading from HF checkpoints
     - vLLM forward/compute_logits interface
     """
@@ -82,27 +88,31 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             dim=self.config.head_dim,
             base=self.config.rope_theta,
         )
-        # Replace attention with vLLM's attention
-        replace_with_vllm_attention(self.model)
 
-        # Create ParallelDims from vLLM config and apply parallelization
-        # NOTE: We need to apply parallelize within model.__init__ because w
-        parallel_dims = create_parallel_dims_from_vllm_config(vllm_config)
-        if parallel_dims.tp_enabled:
-            self.world_mesh = parallel_dims.world_mesh
-            tp_mesh = self.world_mesh["tp"]
-            parallelize_fn(
-                model=self.model,
-                tp_mesh=tp_mesh,
-                loss_parallel=False,
-                enable_float8_tensorwise_tp=False,
-                enable_async_tp=False,
-            )
-            logger.info(
-                f"Successfully initialized model with with TP={parallel_dims.tp}"
-            )
-        else:
-            logger.info("Single GPU mode - no parallelization needed")
+        # Create ParallelDims and JobConfig from vLLM config at runtime
+        # vLLM config contains the tensor_parallel_size from command-line args
+        # and this will be consistent across all worker processes
+        self.parallel_dims = create_parallel_dims_from_vllm_config(vllm_config)
+        self.parallel_config = create_job_config_from_vllm_config(
+            vllm_config=vllm_config,
+        )
+        # Replace attention with vLLM paged attention
+        tp_size = self.parallel_dims.tp
+        if tp_size > 1:
+            assert (
+                model_args.n_heads % tp_size == 0
+            ), "Only support when n_heads can be divided by tp_size"
+
+        replace_with_vllm_attention(self.model, tp_degree=tp_size)
+
+        # NOTE: We need to apply parallelize within model.__init__ because vllm
+        # doesn't separate model creation and parallelism application and instead
+        # requires parallelization to be done inside model constructor.
+        self.model = parallelize_fn(
+            model=self.model,
+            parallel_dims=self.parallel_dims,
+            job_config=self.parallel_config,
+        )
 
     def _extend_rope_cache_if_needed(
         self, rope_cache: torch.Tensor, max_position: int
@@ -117,8 +127,6 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         Returns:
             Extended RoPE cache if needed, otherwise original cache
         """
-        from torch.distributed._tensor import DTensor, Replicate
-
         required_len = max_position + 1
 
         # No extension needed
@@ -230,6 +238,12 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         for layer in self.model.layers.values():
             h = layer(h, rope_cache, attention_masks=None, positions=positions)
 
+        # When parallelism is applied, get full tensor before return to vLLM Engine
+        # The original placement is Shard(1) (shard on sequence dimension, as it will prepare for sequence parallel in `self.norm`).
+        # vLLM’s engine expects plain, non-distributed tensors to slice the last token for each request.
+        if isinstance(h, DTensor):
+            h = h.full_tensor()
+
         # Convert to vLLM format: [total_tokens, hidden_size]
         if h.dim() == 3:
             batch_size, seq_len, hidden_size = h.shape
@@ -243,6 +257,19 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         sampling_metadata=None,
     ) -> torch.Tensor | None:
         """Compute logits from hidden states."""
+
+        # When TP is applied, we return the full tensor (plain tensor) to vLLM engine
+        # at the end of TorchTitanVLLMModelWrapper.forward().
+        # We need to wrap the input from vLLM engine back to DTensor with Replicate() placement.
+        if self.parallel_dims.tp_enabled:
+            hidden_states = DTensor.from_local(
+                hidden_states,
+                device_mesh=self.parallel_dims.get_mesh("tp"),
+                placements=[
+                    Replicate(),
+                ],
+            )
+
         h = self.model.norm(hidden_states)
         logits = self.model.output(h)
 
