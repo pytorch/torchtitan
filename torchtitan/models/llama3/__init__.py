@@ -39,6 +39,17 @@ llama3_args = {
         attn_type="flex",
         attn_mask_type="block_causal",
     ),
+    "debugmodel_flex_flash": TransformerModelArgs(
+        dim=256,
+        n_layers=6,
+        n_heads=2,  # head_dim=128, required for Flash backend
+        vocab_size=2048,
+        rope_theta=500000,
+        attn_type="flex",
+        attn_mask_type="block_causal",
+        flex_attention_kernel_options={"BACKEND": "FLASH"},
+        flex_attention_block_size=(256, 128),
+    ),
     "debugmodel_varlen_attn": TransformerModelArgs(
         dim=256,
         n_layers=6,
