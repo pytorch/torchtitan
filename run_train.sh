@@ -41,6 +41,8 @@ export DEBUG_TIMEOUT=${DEBUG_TIMEOUT:-""}
 
 # NGPU=8 DEBUG=1 DEBUG_WAIT_RANKS="0" CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b.toml" ./run_train.sh
 
+
+# NGPU=8 DEBUG=1 DEBUG_WAIT_RANKS="0" CONFIG_FILE="./torchtitan/models/qwen3/train_configs/qwen3_0.6b.toml" ./run_train.sh
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 
 if [ -n "$COMM_MODE" ]; then
