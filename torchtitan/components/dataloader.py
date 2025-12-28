@@ -41,6 +41,18 @@ class BaseDataLoader(Stateful, ABC):
     def __iter__(self):
         ...
 
+    def reset(self) -> None:
+        """Reset the dataloader state for a new epoch.
+
+        This method is called when epoch-based training transitions to a new epoch.
+        Subclasses should override this if they need to clear any internal state
+        that would prevent re-iteration from the beginning of the dataset.
+
+        The default implementation does nothing, as most dataloaders automatically
+        reset when __iter__ is called again.
+        """
+        pass
+
 
 # pyrefly: ignore [inconsistent-inheritance]
 class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
