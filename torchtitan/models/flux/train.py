@@ -28,10 +28,10 @@ class FluxTrainer(Trainer):
         # (mainly for debugging, expect perf loss).
         # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
         dist_utils.set_determinism(
-            self.parallel_dims.world_mesh,
+            self.parallel_dims,
             self.device,
             job_config.debug,
-            distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
+            distinct_seed_mesh_dims=["fsdp", "dp_replicate"],
         )
 
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
@@ -136,9 +136,11 @@ class FluxTrainer(Trainer):
             latents = pack_latents(latents)
             target = pack_latents(noise - labels)
 
-        optional_context_parallel_ctx = (
-            dist_utils.create_context_parallel_ctx(
-                cp_mesh=self.parallel_dims.world_mesh["cp"],
+        optional_context_parallel_ctx = None
+        if self.parallel_dims.cp_enabled:
+            cp_mesh = self.parallel_dims.get_mesh("cp")
+            optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
+                cp_mesh=cp_mesh,
                 cp_buffers=[
                     latents,
                     latent_pos_enc,
@@ -156,9 +158,6 @@ class FluxTrainer(Trainer):
                 },
                 cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
             )
-            if self.parallel_dims.cp_enabled
-            else None
-        )
         with self.train_context(optional_context_parallel_ctx):
             with self.maybe_enable_amp:
                 latent_noise_pred = model(

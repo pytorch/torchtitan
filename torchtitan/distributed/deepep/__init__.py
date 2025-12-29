@@ -4,6 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from .moe import build_moe, FeedForward, MoE, MoEArgs
+"""DeepEP distributed communication primitives for MoE."""
 
-__all__ = ["FeedForward", "MoE", "MoEArgs", "build_moe"]
+from .deepep import combine_tokens, dispatch_tokens, DispatchState
+
+__all__ = [
+    "dispatch_tokens",
+    "combine_tokens",
+    "DispatchState",
+]

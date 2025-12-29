@@ -155,6 +155,13 @@ class WandBLogger(BaseLogger):
             entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
             name=os.getenv("WANDB_RUN_NAME", None),
+            id=os.getenv("WANDB_RUN_ID", None),
+            notes=os.getenv("WANDB_RUN_NOTES", None),
+            tags=os.getenv("WANDB_RUN_TAGS", None),
+            group=os.getenv("WANDB_RUN_GROUP", None),
+            job_type=os.getenv("WANDB_RUN_JOB_TYPE", None),
+            resume_from=os.getenv("WANDB_RESUME_FROM", None),
+            fork_from=os.getenv("WANDB_FORK_FROM", None),
             dir=log_dir,
             config=job_config.to_dict(),
         )
@@ -461,7 +468,9 @@ class MetricsProcessor:
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
-    def log_validation(self, loss: float, step: int):
+    def log_validation(
+        self, loss: float, step: int, extra_metrics: dict[str, Any] | None = None
+    ):
         time_delta = time.perf_counter() - self.time_last_log
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
@@ -479,6 +488,10 @@ class MetricsProcessor:
             "validation_metrics/memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
             "validation_metrics/memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
         }
+
+        if extra_metrics:
+            metrics.update(extra_metrics)
+
         self.logger.log(metrics, step)
 
         color = self.color

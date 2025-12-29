@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 
+import math
+
 import torch
 from vllm.attention.utils.fa_utils import flash_attn_varlen_func
 
@@ -52,6 +54,10 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         cu_seqlens = torch.arange(
             0, (batch_size + 1) * seq_len, seq_len, dtype=torch.int32, device=q.device
         )
+
+        # Scaling factor applied prior to softmax. If none, the default value is set to :math:`\frac{1}{\sqrt{E}}`.
+        if scale is None:
+            scale = 1.0 / math.sqrt(q.size(-1))
 
         # Wrap Flash Attention with manual backward pass
         class FlashAttnWithBackward(torch.autograd.Function):
