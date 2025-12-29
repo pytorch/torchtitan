@@ -24,7 +24,6 @@ dependencies = [
     "fsspec",
     "tyro",
     "tensorboard",
-    "psutil",
     "einops",
     "pillow",
 ]

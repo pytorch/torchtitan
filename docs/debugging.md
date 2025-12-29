@@ -99,7 +99,7 @@ NGPU=32 COMM_MODE="local_tensor" ./run_train.sh
 - Runs only one training step by default
 
 **When to use it:**
-- Debugging distributed training logic (FSDP, TP, PP, CP, EP) with data dependencies without multi-GPU setup
+- Debugging distributed training logic (FSDP, TP, PP, CP, EP) with data dependencies without multi-GPU setup. Note that local tensor doesn't support FSDP2 but should support SimpleFSDP.
 - Verifying correctness of parallelism strategies locally
 - Testing gradient synchronization and communication patterns
 - Reproducing distributed training bugs in a simplified environment
