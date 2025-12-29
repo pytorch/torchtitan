@@ -60,6 +60,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
         xv: torch.Tensor,
         head_dim: torch.Tensor,
         attention_masks: VarlenMetadata,
+        scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -83,6 +84,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
             max_q,
             max_k,
             is_causal=True,
+            scale=scale,
         )
 
 
