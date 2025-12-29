@@ -115,7 +115,7 @@ NGPU=16 COMM_MODE="local_tensor" ./run_train.sh \
 ### Limitations
 
 - **Performance testing**: Neither mode provides accurate performance metrics; use actual distributed runs for benchmarking
-- **Memory requirement**: Local tensor runs require more memory on a single GPU than the actul distributed runs
+- **Memory requirement**: Local tensor runs require more memory on a single GPU than the actual distributed runs
 
 ## Troubleshooting jobs that timeout
 
