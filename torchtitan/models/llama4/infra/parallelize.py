@@ -135,7 +135,7 @@ def parallelize_llama(
 
         # tp_mesh might have been set above if tp_enabled, otherwise get it here
         if tp_mesh is None:
-            tp_mesh = parallel_dims.get_mesh("tp")
+            tp_mesh = parallel_dims.get_optional_mesh("tp")
         apply_moe_ep_tp(
             model,
             tp_mesh=tp_mesh,
