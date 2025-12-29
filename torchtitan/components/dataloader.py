@@ -151,3 +151,13 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         # We don't have to use pickle as DCP will serialize the state_dict. However, we have to
         # keep this for backward compatibility.
         super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
+
+    def reset(self) -> None:
+        """Reset the dataloader state for a new epoch.
+
+        Delegates to the underlying dataset's reset method if available,
+        allowing stateful datasets to clear their internal state and
+        restart iteration from the beginning.
+        """
+        if hasattr(self.dataset, "reset"):
+            self.dataset.reset()
