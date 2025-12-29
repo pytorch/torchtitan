@@ -263,6 +263,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             self.model_parts = [model]
 
+            if "unembed_and_loss" in self.job_config.compile.components:
+                old_loss_fn = self.loss_fn
+
+                def unembed_and_loss(pred, loss):
+                    # pyrefly: ignore [missing-attribute]
+                    return old_loss_fn(model.output(pred), loss)
+
+                self.loss_fn = torch.compile(
+                    unembed_and_loss, options={"auto_chunker.enable": True}
+                )
+
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
         # initialize device memory monitor and get peak flops for MFU calculation
@@ -537,6 +548,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # Non-PP forward / backward
+            if "unembed_and_loss" in self.job_config.compile.components:
+                extra_kwargs["unembed"] = False
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:

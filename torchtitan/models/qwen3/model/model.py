@@ -560,6 +560,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        unembed: bool = True,
     ):
         """
         Perform a forward pass through the Transformer model.
@@ -586,5 +587,5 @@ class Qwen3Model(nn.Module, ModelProtocol):
         # pyrefly: ignore [not-callable]
         h = self.norm(h) if self.norm else h
         # pyrefly: ignore [not-callable]
-        output = self.output(h) if self.output else h
+        output = self.output(h) if self.output and unembed else h
         return output
