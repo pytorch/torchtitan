@@ -133,12 +133,9 @@ def parallelize_llama(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
-        # tp_mesh might have been set above if tp_enabled, otherwise get it here
-        if tp_mesh is None:
-            tp_mesh = parallel_dims.get_optional_mesh("tp")
         apply_moe_ep_tp(
             model,
-            tp_mesh=tp_mesh,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
