@@ -226,14 +226,16 @@ class FluxValidator(Validator):
 
             # Apply CP sharding if enabled
             if parallel_dims.cp_enabled:
+                from torchtitan.distributed.context_parallel import cp_shard
+
                 (
                     latents,
                     latent_pos_enc,
                     t5_encodings,
                     text_pos_enc,
                     target,
-                ), _ = dist_utils.cp_shard(
-                    parallel_dims.world_mesh["cp"],
+                ), _ = cp_shard(
+                    parallel_dims.get_mesh("cp"),
                     (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                     None,  # No attention masks for Flux
                     disable_load_balancer=True,
@@ -263,7 +265,7 @@ class FluxValidator(Validator):
         loss /= num_steps
         if parallel_dims.dp_cp_enabled:
             global_avg_loss = dist_utils.dist_mean(
-                loss, parallel_dims.world_mesh["dp_cp"]
+                loss, parallel_dims.get_optional_mesh("loss")
             )
         else:
             global_avg_loss = loss.item()

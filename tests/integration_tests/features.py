@@ -121,7 +121,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "Checkpoint Integration Test - save load model only checkpoint in HF definition and format",
             "model_only_hf_checkpoint",
-            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -556,6 +555,21 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "Validation test with tp, cp, pp",
             "validation_tp_cp_pp",
             ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.dataloader.num_workers",
+                    "2",
+                    "--training.dataloader.pin_memory",
+                    "--training.dataloader.persistent_workers",
+                    "--training.dataloader.prefetch_factor",
+                    "4",
+                ],
+            ],
+            "Dataloader kwargs (via CLI args)",
+            "dataloader_kwargs",
+            ngpu=2,
         ),
     ]
 

@@ -225,9 +225,11 @@ class Attention(nn.Module):
             case "varlen":
                 # pyrefly: ignore [bad-assignment]
                 self.inner_attention = VarlenAttentionWrapper()
-            case _:
+            case "sdpa":
                 # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
