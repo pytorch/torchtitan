@@ -28,10 +28,10 @@ class FluxTrainer(Trainer):
         # (mainly for debugging, expect perf loss).
         # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
         dist_utils.set_determinism(
-            self.parallel_dims.world_mesh,
+            self.parallel_dims,
             self.device,
             job_config.debug,
-            distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
+            distinct_seed_mesh_dims=["fsdp", "dp_replicate"],
         )
 
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
@@ -138,7 +138,7 @@ class FluxTrainer(Trainer):
 
         # Apply CP sharding if enabled
         if self.parallel_dims.cp_enabled:
-            from torchtitan.distributed import utils as dist_utils
+            from torchtitan.distributed.context_parallel import cp_shard
 
             (
                 latents,
@@ -146,8 +146,8 @@ class FluxTrainer(Trainer):
                 t5_encodings,
                 text_pos_enc,
                 target,
-            ), _ = dist_utils.cp_shard(
-                self.parallel_dims.world_mesh["cp"],
+            ), _ = cp_shard(
+                self.parallel_dims.get_mesh("cp"),
                 (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                 None,  # No attention masks for Flux
                 disable_load_balancer=True,

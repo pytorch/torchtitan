@@ -4,66 +4,67 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.experimental._attention import (
+    _context_parallel_shard,
     _ContextParallel,
     _enable_context_parallel_dispatcher,
+    _HeadTailLoadBalancer,
+    _PTRRLoadBalancer,
 )
 from torch.distributed.tensor.parallel import parallelize_module
+from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.tools.logging import logger
 
 
-def apply_cp(
-    model: nn.Module,
+def apply_cp_to_attention_module(
+    attention_modules: Sequence[nn.Module],
     cp_mesh: DeviceMesh,
     use_flex_attn: bool,
 ) -> None:
     """
-    Apply context parallelism to the model.
+    Apply context parallelism to attention modules.
 
     Context Parallelism (CP) splits the sequence dimension across devices to enable
-    training with longer sequences. This function applies CP to the attention modules
-    of all transformer blocks in the model.
+    training with longer sequences. This function applies CP to the provided attention
+    modules.
 
     Args:
-        model: The transformer model with layers containing attention modules
+        attention_modules: Sequence of attention modules to apply CP to
         cp_mesh: Device mesh for context parallel dimension
-        use_flex_attn: Whether the model uses FlexAttention (True) or SDPA (False)
+        use_flex_attn: Whether to use FlexAttention (True) or SDPA (False)
 
     Note:
         - For FlexAttention: CP plan uses FLEX attention type
         - For SDPA: Enables CP dispatcher and uses SDPA attention type
-        - Applies to transformer_block.attention.inner_attention for each layer
     """
-    # Apply context parallelism to every transformer block
-    # TODO: make seq_sim configurable once the implementation doesn't assume 2
+    # Apply context parallelism to every attention module
+    # TODO: make seq_dim configurable once the implementation doesn't assume 2
     # internally.
     if use_flex_attn:
         cp_plan = _ContextParallel(
             seq_dim=2, attention_type=_ContextParallel.AttentionType.FLEX
         )
     else:
-        # This is currently required as DTensor dispatcher is not enabled to
-        # dispatch SDPA to CP implementation. We don't disable the CP
-        # dispatching in TorchTitan as it is not needed. But there is a
-        # corresponding API, _disable_context_parallel_dispatcher to do
-        # that if users have this use case.
+        # Enable the DTensor dispatcher to route SDPA operations to the Context Parallel
+        # implementation. This is required for CP to work with SDPA (but not FlexAttention).
+        # Note: Use _disable_context_parallel_dispatcher() if you need to turn this off.
+        #       In TorchTitan, we currently don't disable the CP dispatcher.
         _enable_context_parallel_dispatcher()
         cp_plan = _ContextParallel(
             seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
         )
 
-    # pyrefly: ignore [not-callable]
-    for transformer_block in model.layers.values():
+    for attention_module in attention_modules:
         parallelize_module(
-            # pyrefly: ignore [missing-attribute]
-            module=transformer_block.attention.inner_attention,
+            module=attention_module,
             device_mesh=cp_mesh,
             parallelize_plan=cp_plan,
         )
@@ -104,7 +105,7 @@ def prepare_context_parallel_input(
     positions = torch.arange(
         0, inputs.shape[1], dtype=torch.int32, device=device
     ).expand(inputs.shape)
-    (inputs, labels, positions), attention_masks = dist_utils.cp_shard(
+    (inputs, labels, positions), attention_masks = cp_shard(
         cp_mesh,
         (inputs, labels, positions),
         attention_masks,
@@ -114,3 +115,70 @@ def prepare_context_parallel_input(
         extra_kwargs["attention_masks"] = attention_masks
 
     return inputs, labels, extra_kwargs
+
+
+def cp_shard(
+    cp_mesh: DeviceMesh,
+    inputs: tuple[torch.Tensor, ...],
+    attention_masks: AttentionMasksType | None,
+    disable_load_balancer: bool = False,
+):
+
+    INPUT_SEQ_DIM = 1
+    seq_len = inputs[0].size(INPUT_SEQ_DIM)
+    cp_world_size = cp_mesh.size(0)
+
+    load_balancer = None
+    if not disable_load_balancer:
+        if isinstance(attention_masks, BlockMask):
+            load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
+        elif attention_masks is None or isinstance(attention_masks, dict):
+            # For SDPA, we use the _HeadTailLoadBalancer.
+            # TODO: For dict[str, BlockMask], _PTRRLoadBalancer currently doesn't
+            # support the case where there are multiple masks. To address multiple
+            # masks usage, _PTRRLoadBalancer also needs to take into account the
+            # usage frequency of each mask. So we default to _HeadTailLoadBalancer
+            # as we have not implemented this feature.
+            load_balancer = _HeadTailLoadBalancer(
+                seq_len, cp_world_size, cp_mesh.device_type
+            )
+        else:
+            ValueError(
+                "cp_shard only support attention_masks is "
+                "None, BlockMask, dict[str, BlockMask]"
+            )
+
+    inputs = cast(
+        tuple[torch.Tensor, ...],
+        _context_parallel_shard(
+            mesh=cp_mesh,
+            buffers=inputs,
+            seq_dims=tuple(1 for _ in inputs),
+            load_balancer=load_balancer,
+        ),
+    )
+
+    # BlockMask, has shape, [B, H, Q, KV], and we can only shard
+    # on the Q seq dimension, not KV.
+    MASK_Q_SEQ_DIM = 2
+    if attention_masks is not None:
+        assert isinstance(attention_masks, (BlockMask, dict[str, BlockMask]))
+        masks = (
+            [attention_masks]
+            if isinstance(attention_masks, BlockMask)
+            else list(attention_masks.values())
+        )
+        masks = _context_parallel_shard(
+            mesh=cp_mesh,
+            buffers=masks,
+            seq_dims=(MASK_Q_SEQ_DIM,) * len(masks),
+            load_balancer=load_balancer,
+        )
+        attention_masks = cast(
+            (BlockMask | dict[str, BlockMask]),
+            masks[0]
+            if isinstance(attention_masks, BlockMask)
+            else {k: v for k, v in zip(attention_masks.keys(), masks)},
+        )
+
+    return inputs, attention_masks

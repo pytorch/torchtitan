@@ -44,25 +44,45 @@ rm -rf build dist *.egg-info
 uv pip uninstall -y vllm
 
 # Rebuild vLLM from source with CUDA 12.4
-pip install -e .
+uv pip install -e .
 
 ```
 
-3. Download Qwen3/Qwen3-0.6b checkpoint from HuggingFace and put into `example_checkpoint` folder.
-
+3. Download Qwen/Qwen3-0.6B checkpoint from HuggingFace and put into `torchtitan/experiments/rl/example_checkpoint` folder.
+```
+python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torchtitan/experiments/rl/example_checkpoint --all --hf_token=...
+```
 
 4. Run inference:
 ```
-python torchtitan/experiments/rl/unified/infer.py --model torchtitan/experiments/deterministic_vllm_rl/example_checkpoint/qwen3-0.6B
+python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint>
 ```
 
 Run with TP: (work in progress)
 ```
-python torchtitan/experiments/rl/unified/infer.py --model torchtitan/experiments/deterministic_vllm_rl/example_checkpoint/qwen3-0.6B --tensor-parallel-size 2
+python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint> --tensor-parallel-size 2
 
 ```
 
+5. Run simple rl loop
+```
+VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
+```
+Right now we only support VLLM_COMPAT mode, which could achieve trainer and generator bitwise identical. We are working on support UNIFIED mode,
+which uses a unified model definition for trainer and generator.
+
 ## TODO
-1. Rewrite attention part to use vllm.Attention() with backward as the only attention path.
-2. Integrate with simple_rl.py to run end-to-end RL with one canonical model definition.
-3.  Leverage batch-invariant kernels into model definition.
+Work on batch invariance:
+1. Integrate with simple_rl_multiprocess.py to run end-to-end RL with one canonical model definition(UNIFIED mode).
+2. Rewrite attention part to use vllm.Attention() with backward as the only attention path.
+3. Leverage batch-invariant kernels into model definition.
+
+Work on the RL loop:
+1. Design trainer API and integrate with [train.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/train.py#L475)
+2. Remove hardcoded configs and dependency on Qwen3 Model. Use torchtitan's config/TrainSpec instead, to work with any model.
+3. Need to load the gsm8k dataset using TorchTitan dataset.
+4. Need to properly implement weight saving and loading using TorchTitan's checkpoint mechanism, or use TorchStore. Also need to
+    replace `vllm_to_torchtitan` and `torchtitan_to_vllm` calls to TorchTitan [state dict adaptor](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/qwen3/model/state_dict_adapter.py).
+5. Right now we only support trainer run on multiple processes using DDP, and generator using TP, need to onboard more parallelism.
+6. Right now we only support VLLM_COMPAT mode to achieve batch invariance and bitwise determinism, need to support UNIFIED mode.
+7. In the longer term, need to add trajectory queue to achieve async, right now trainer and generator are running synchronously.

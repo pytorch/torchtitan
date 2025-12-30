@@ -15,11 +15,10 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.context_parallel import apply_cp
+from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
@@ -29,7 +28,6 @@ from torchtitan.models.llama4.infra.parallelize import (
     apply_moe_ep_tp,
 )
 from torchtitan.tools.logging import logger
-
 
 # for selective op activation checkpointing
 _op_sac_save_list = {
@@ -56,7 +54,6 @@ def parallelize_deepseekv3(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
@@ -69,7 +66,11 @@ def parallelize_deepseekv3(
 
     attn_type = getattr(model.model_args, "attn_type", "sdpa")
     if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
-        raise NotImplementedError("CP support is only supported for SDPA.")
+        raise NotImplementedError(
+            f"Context Parallel only supports SDPA attention. "
+            f"Got attn_type='{attn_type}'. "
+            f"FlexAttention and varlen attention are not supported with CP."
+        )
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
@@ -85,36 +86,61 @@ def parallelize_deepseekv3(
                 "Currently, float8 tensorwise TP is not tested for deepseekv3"
             )
 
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_non_moe_tp(
             model,
-            world_mesh["tp"],
+            tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
             cp_enabled=parallel_dims.cp_enabled,
         )
-        maybe_enable_async_tp(job_config, world_mesh["tp"])
+        maybe_enable_async_tp(job_config, tp_mesh)
+
+    # Check if using DeepEP for MoE communication
+    if job_config.parallelism.expert_parallel_comm_backend == "deepep":
+        if not parallel_dims.ep_enabled:
+            raise ValueError(
+                "DeepEP requires expert parallelism (ep_degree > 1). "
+                "The DeepEP MoE model code does not support EP=1. "
+                "Please set expert_parallel_degree > 1 or use standard communication backend."
+            )
+        if parallel_dims.etp_enabled:
+            raise NotImplementedError(
+                "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+                "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
+            )
+
+        use_deepep = True
+
+        # Import deepep module to register custom ops before accessing them
+        import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
+
+        _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+        _op_sac_save_list.add(torch.ops.deepep.combine.default)
+    else:
+        use_deepep = False
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
         apply_moe_ep_tp(
             model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
-                world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
-            etp_enabled=parallel_dims.etp_enabled,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
+            use_deepep=use_deepep,
         )
 
     if parallel_dims.cp_enabled:
         use_flex_attn = attn_type == "flex"
-        apply_cp(model, world_mesh["cp"], use_flex_attn)
+        apply_cp_to_attention_module(
+            # pyrefly: ignore [missing-attribute, not-callable]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+            use_flex_attn,
+        )
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -136,18 +162,18 @@ def parallelize_deepseekv3(
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
         # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh_dim_names = []
-        if parallel_dims.ep_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         apply_fsdp(
             model,
@@ -158,11 +184,7 @@ def parallelize_deepseekv3(
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
-            dp_mod_ep_mesh=(
-                world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
-                if parallel_dims.ep_enabled
-                else None
-            ),
+            edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
@@ -174,9 +196,9 @@ def parallelize_deepseekv3(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
+        dp_mesh = parallel_dims.get_mesh("dp_replicate")
+        if dp_mesh.ndim > 1:
             raise RuntimeError("DDP has not supported > 1D parallelism")
-        dp_mesh = world_mesh
         apply_ddp(
             model,
             dp_mesh,
