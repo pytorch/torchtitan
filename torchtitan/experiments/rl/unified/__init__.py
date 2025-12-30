@@ -11,12 +11,13 @@ This module automatically registers TorchTitan models with vLLM when imported.
 Uses the canonical TorchTitan model definition directly with vLLM inference engine.
 """
 
+from torchtitan.experiments.rl.unified.infra.parallelize import parallelize_qwen3
 from torchtitan.protocols.train_spec import get_train_spec, TrainSpec
 from vllm.logger import init_logger
 
-from .utils import create_parallel_dims_from_vllm_config
-from .vllm_wrapper import TorchTitanVLLMModelWrapper
+from .infra.parallelism_utils import create_parallel_dims_from_vllm_config
 
+from .models.vllm_wrapper import TorchTitanVLLMModelWrapper
 
 logger = init_logger(__name__)
 
@@ -57,7 +58,8 @@ def register_torchtitan_model_from_train_spec(
                 model_cls=train_spec.model_cls,
                 model_args=model_args,
                 state_dict_adapter=train_spec.state_dict_adapter,
-                parallelize_fn=train_spec.parallelize_fn,
+                # NOTE: This should be replaced with qwen3 parallelization plan in torchtitan core
+                parallelize_fn=parallelize_qwen3,
                 vllm_config=vllm_config,
                 prefix=prefix,
             )
