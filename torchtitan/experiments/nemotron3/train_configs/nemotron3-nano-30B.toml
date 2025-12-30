@@ -3,7 +3,7 @@
 
 [job]
 dump_folder = "./outputs"
-description = "NemotronH nano-30B bf16 training"
+description = "Nemotron3 Nano 30B"
 
 [profiling]
 enable_profiling = false

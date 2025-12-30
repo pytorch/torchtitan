@@ -35,19 +35,16 @@ def parallelize_nemotron3(
     Returns:
         The parallelized model
     """
-    world_mesh = parallel_dims.world_mesh
-
     # TODO: Add activation checkpointing support
     # TODO: Add tensor parallelism support
     # TODO: Add torch.compile support
 
     if parallel_dims.fsdp_enabled:
         # Determine the data parallel mesh dimensions
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
+        dp_mesh_names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
         apply_fsdp(
             model,
