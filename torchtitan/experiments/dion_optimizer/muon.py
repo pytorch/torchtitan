@@ -622,6 +622,7 @@ def muon_update_newton_schulz(
 ) -> Tensor:
     """
     Flatten the input tensor if needed and call the Newton-Schulz function.
+    Always normalizes to 3D before calling newton_schulz_func to avoid torch.compile recompilations.
     """
     original_shape = X.shape
     if flatten and X.ndim >= 3:
@@ -631,7 +632,19 @@ def muon_update_newton_schulz(
         # Given 4D+ batch, flatten to 3D batch
         X = X.flatten(end_dim=-3)
 
-    return newton_schulz_func(X, epsilon=epsilon).reshape(original_shape)
+    # Always ensure 3D input to newton_schulz_func to avoid torch.compile recompilations
+    # due to rank mismatch (2D vs 3D tensors triggering separate traces)
+    added_batch_dim = False
+    if X.ndim == 2:
+        X = X.unsqueeze(0)  # Add batch dimension: [M, N] -> [1, M, N]
+        added_batch_dim = True
+
+    result = newton_schulz_func(X, epsilon=epsilon)
+
+    if added_batch_dim:
+        result = result.squeeze(0)  # Remove batch dimension: [1, M, N] -> [M, N]
+
+    return result.reshape(original_shape)
 
 
 def adjust_lr_rms_norm(lr, param_shape):
