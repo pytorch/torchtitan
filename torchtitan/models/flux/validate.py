@@ -20,7 +20,6 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.flux.flux_datasets import build_flux_validation_dataloader
 from torchtitan.models.flux.inference.sampling import generate_image, save_image
-from torchtitan.models.flux.model.args import FluxModelArgs
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 
@@ -52,7 +51,6 @@ class FluxValidator(Validator):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
-        model_args: FluxModelArgs,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
         validation_context: ValidationContext,
@@ -64,7 +62,6 @@ class FluxValidator(Validator):
     ):
         self.job_config = job_config
         self.tokenizer = tokenizer
-        self.model_args = model_args
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
         # pyrefly: ignore [missing-attribute]
@@ -285,7 +282,6 @@ def build_flux_validator(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
-    model_args: FluxModelArgs,
     parallel_dims: ParallelDims,
     loss_fn: LossFunction,
     validation_context: ValidationContext,
@@ -301,7 +297,6 @@ def build_flux_validator(
         dp_world_size=dp_world_size,
         dp_rank=dp_rank,
         tokenizer=tokenizer,
-        model_args=model_args,
         parallel_dims=parallel_dims,
         loss_fn=loss_fn,
         validation_context=validation_context,
