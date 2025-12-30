@@ -10,7 +10,7 @@ import os
 from abc import abstractmethod
 from collections.abc import Iterable
 from datetime import timedelta
-from typing import cast, Protocol
+from typing import Protocol
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -23,7 +23,6 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
@@ -31,7 +30,7 @@ from torchtitan.tools.utils import device_module, device_type
 def _dist_reduce(
     x: torch.Tensor,
     reduceOp: str,
-    mesh: DeviceMesh,
+    mesh: DeviceMesh | None,
     extra_pg: dist.ProcessGroup | None,
 ) -> float:
     """Perform distributed reduction on a tensor.
@@ -39,7 +38,8 @@ def _dist_reduce(
     Args:
         x (torch.Tensor): Input tensor.
         reduceOp (str): Reduce operation to perform.
-        mesh (DeviceMesh): Device mesh to use for reduction.
+        mesh (DeviceMesh | None): Device mesh to use for reduction.
+            If None, no reduction is performed but simply convert the tensor to a float.
         extra_pg (dist.ProcessGroup, optional): Extra process group to use for reduction.
             Defaults to None. If provided, this all_reduce will be called for the extra
             process group, and then the result will be all_reduced for the mesh.
@@ -51,13 +51,17 @@ def _dist_reduce(
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
 
+    if mesh is None:
+        return x.item()
+
     assert x.numel() == 1  # required by `.item()`
     return funcol.all_reduce(x, reduceOp=reduceOp, group=mesh).item()
 
 
+# TODO: rename this to maybe_dist_max
 def dist_max(
     x: torch.Tensor,
-    mesh: DeviceMesh,
+    mesh: DeviceMesh | None = None,
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
     return _dist_reduce(
@@ -67,7 +71,7 @@ def dist_max(
 
 def dist_sum(
     x: torch.Tensor,
-    mesh: DeviceMesh,
+    mesh: DeviceMesh | None = None,
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
     return _dist_reduce(
@@ -77,7 +81,7 @@ def dist_sum(
 
 def dist_mean(
     x: torch.Tensor,
-    mesh: DeviceMesh,
+    mesh: DeviceMesh | None = None,
     extra_pg: dist.ProcessGroup | None = None,
 ) -> float:
     return _dist_reduce(
@@ -86,7 +90,7 @@ def dist_mean(
 
 
 def set_determinism(
-    world_mesh: DeviceMesh | None,
+    parallel_dims: ParallelDims,
     device: torch.device,
     debug_config: DebugConfig,
     distinct_seed_mesh_dims: list[str],
@@ -104,9 +108,8 @@ def set_determinism(
     Args:
         world_mesh: Device mesh for distributed training
         device: Device to use
+        debug_config: Debug config to use
         distinct_seed_mesh_dims: List of mesh dimension names to have distinct seeds across.
-        seed: Base seed value (if None, will be determined automatically)
-        deterministic: Whether to enable deterministic algorithms
     """
     if debug_config.deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
@@ -129,7 +132,7 @@ def set_determinism(
         FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
 
     seed = debug_config.seed
-    if not world_mesh:
+    if parallel_dims.world_size == 1:
         if seed is not None:
             torch.manual_seed(seed)
             os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
@@ -144,25 +147,25 @@ def set_determinism(
         seed_tensor = torch.get_rng_state()[:8].to(device)
         torch.distributed.broadcast(seed_tensor, src=0)
         seed = seed_tensor.to("cpu").view(torch.uint64).item()
+    assert isinstance(seed, int)
 
     # Set distinct seed for each rank in mesh dimensions, with dimension names provided by `distinct_seed_mesh_dims`
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
     # and choose a unique seed for each rank on the PP mesh.
     # We support multiple distinct dimensions by adding each distinct dimension's local rank to the seed.
-    distinct_dims_in_mesh = [
-        dim
-        for dim in distinct_seed_mesh_dims
-        if world_mesh.mesh_dim_names and dim in world_mesh.mesh_dim_names
+    distinct_seed_meshes = [
+        parallel_dims.get_optional_mesh(dim) for dim in distinct_seed_mesh_dims
     ]
+    distinct_seed_meshes = [mesh for mesh in distinct_seed_meshes if mesh is not None]
+    assert all(mesh is not None for mesh in distinct_seed_meshes)
 
-    if c10d.get_world_size() > 1 and distinct_dims_in_mesh:
+    if distinct_seed_meshes:
         # Each dimension contributes: local_rank * (product of all previous dimension sizes)
         # This guarantees uniqueness like multi-dimensional array indexing
         seed_offset = 0
         cumulative_size = 1
 
-        for dim in distinct_dims_in_mesh:
-            distinct_mesh = world_mesh[dim]
+        for distinct_mesh in distinct_seed_meshes:
             local_rank = distinct_mesh.get_local_rank()
             # Add contribution from this dimension
             seed_offset += local_rank * cumulative_size
@@ -173,24 +176,10 @@ def set_determinism(
         seed %= 2**64
 
         logger.debug(
-            f"Distinct dims {distinct_dims_in_mesh}, Global rank {c10d.get_rank()} using seed: {seed}"
+            f"Distinct dims {distinct_seed_mesh_dims}, Global rank {c10d.get_rank()} using seed: {seed}"
         )
 
-        # Filter out all distinct dimensions to get duplicate_seed_mesh
-        duplicate_seed_mesh_dims = [
-            name
-            # pyrefly: ignore [not-iterable]
-            for name in world_mesh.mesh_dim_names
-            if name not in distinct_dims_in_mesh
-        ]
-        duplicate_seed_mesh = (
-            # pyrefly: ignore [bad-index]
-            world_mesh[duplicate_seed_mesh_dims]
-            if duplicate_seed_mesh_dims
-            else None
-        )
     else:
-        duplicate_seed_mesh = world_mesh
         logger.debug(f"Global Rank {c10d.get_rank()} using seed: {seed}")
 
     # The native RNGs and python RNG may not be important, except for the 1-D PP case, but we seed them for consistency.
@@ -198,11 +187,14 @@ def set_determinism(
     # PYTHONHASHSEED can be a decimal number in the range [0, 2**32 - 1]
     os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
 
-    # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for all ranks of the SPMD mesh.
-    # IF PP is also used, this seed is unique per PP rank.
-    if duplicate_seed_mesh and duplicate_seed_mesh.get_coordinate() is not None:
-        # pyrefly: ignore [bad-argument-type]
-        torch.distributed.tensor._random.manual_seed(seed, duplicate_seed_mesh)
+    # As long as we are not in the 1-D (PP-only) case, we will have a seed to use for
+    # all ranks of the SPMD mesh. If PP is also used, this seed is unique per PP rank.
+    # TODO: remove the need of passing in a mesh once
+    # torch.distributed.tensor._random.manual_seed doesn't require a mesh input.
+    if parallel_dims.world_size > parallel_dims.pp:
+        # We just need to pass the world_mesh as the device_id is the only information
+        # this API uses.
+        torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
 
 
 def create_context_parallel_ctx(
@@ -365,7 +357,10 @@ def init_distributed(
     return torch.distributed.get_world_size()
 
 
-def set_pg_timeouts(timeout, world_mesh):
+def set_pg_timeouts(
+    timeout: timedelta,
+    parallel_dims: ParallelDims,
+):
     """
     Sets the timeout for all PGs in the provided mesh, and the default (world) group.
 
@@ -386,10 +381,11 @@ def set_pg_timeouts(timeout, world_mesh):
     # pyrefly: ignore [missing-attribute]
     device_module.synchronize()
 
-    groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
-
     # None represents the 'default' PG, not part of the mesh
-    groups.append(None)
+    groups: list[torch.distributed.ProcessGroup | None] = [
+        mesh.get_group()
+        for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
+    ] + [None]
     for group in groups:
         torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
 
@@ -533,42 +529,3 @@ def _clip_grad_norm_with_ep(
     torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
 
     return total_norm
-
-
-def cp_shard(
-    cp_mesh: DeviceMesh,
-    inputs: tuple[torch.Tensor, ...],
-    attention_masks: AttentionMasksType | None,
-    disable_load_balancer: bool = False,
-):
-    from torch.distributed.tensor.experimental._attention import (
-        _context_parallel_shard,
-        _HeadTailLoadBalancer,
-    )
-
-    INPUT_SEQ_DIM = 1
-    seq_len = inputs[0].size(INPUT_SEQ_DIM)
-    cp_world_size = cp_mesh.size(0)
-    if attention_masks is not None:
-        raise ValueError(
-            "FlexAttention CP is not supported yet. Will come in the next PR."
-        )
-    else:
-        # For SDPA, we use the _HeadTailLoadBalancer.
-        load_balancer = (
-            None
-            if disable_load_balancer
-            else _HeadTailLoadBalancer(seq_len, cp_world_size, cp_mesh.device_type)
-        )
-
-    inputs = cast(
-        tuple[torch.Tensor, ...],
-        _context_parallel_shard(
-            mesh=cp_mesh,
-            buffers=inputs,
-            seq_dims=tuple(1 for _ in inputs),
-            load_balancer=load_balancer,
-        ),
-    )
-
-    return inputs, attention_masks

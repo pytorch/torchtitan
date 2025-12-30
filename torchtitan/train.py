@@ -13,7 +13,6 @@ from datetime import timedelta
 from typing import Any, Iterable
 
 import torch
-
 import torch.distributed.checkpoint.stateful
 from torch.distributed.elastic.multiprocessing.errors import record
 
@@ -93,19 +92,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
 
-        # Logging needs to happen after distributed initialized
-        job_config.maybe_log()
-
-        world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
-            dp_mesh = world_mesh["dp"]
-            dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
+            batch_mesh = parallel_dims.get_mesh("batch")
+            batch_degree, batch_rank = batch_mesh.size(), batch_mesh.get_local_rank()
         else:
-            dp_degree, dp_rank = 1, 0
+            batch_degree, batch_rank = 1, 0
 
         # pyrefly: ignore [bad-argument-type]
         self.ft_manager = FTManager(job_config.fault_tolerance)
-        dp_degree, dp_rank = self.ft_manager.get_dp_info(dp_degree, dp_rank)
+        batch_degree, batch_rank = self.ft_manager.get_dp_info(batch_degree, batch_rank)
 
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
@@ -115,7 +110,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
         dist_utils.set_determinism(
-            world_mesh,
+            parallel_dims,
             self.device,
             job_config.debug,
             distinct_seed_mesh_dims=["pp"],
@@ -130,8 +125,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         self.dataloader = self.train_spec.build_dataloader_fn(
-            dp_world_size=dp_degree,
-            dp_rank=dp_rank,
+            dp_world_size=batch_degree,
+            dp_rank=batch_rank,
             tokenizer=self.tokenizer,
             job_config=job_config,
         )
@@ -200,19 +195,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if global_batch_size < 0:
             # This global batch size results in 1 gradient accumulation
             # step.
-            global_batch_size = job_config.training.local_batch_size * dp_degree
+            global_batch_size = job_config.training.local_batch_size * batch_degree
         assert global_batch_size > 0
         assert (
-            global_batch_size % (job_config.training.local_batch_size * dp_degree) == 0
+            global_batch_size % (job_config.training.local_batch_size * batch_degree)
+            == 0
         ), (
             f"global batch size must be multiple of local batch size times "
             f"data-parallel degree ({global_batch_size} "
-            f"% ({job_config.training.local_batch_size} * {dp_degree}) != 0)"
+            f"% ({job_config.training.local_batch_size} * {batch_degree}) != 0)"
         )
 
         # calculate gradient accumulation steps
         self.gradient_accumulation_steps = global_batch_size // (
-            job_config.training.local_batch_size * dp_degree
+            job_config.training.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
         self.loss_fn = rescale_accumulated_loss(
@@ -349,10 +345,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             self.validator = self.train_spec.build_validator_fn(
                 job_config=job_config,
-                dp_world_size=dp_degree,
-                dp_rank=dp_rank,
+                dp_world_size=batch_degree,
+                dp_rank=batch_rank,
                 tokenizer=self.tokenizer,
-                model_args=self.model_args,
                 parallel_dims=parallel_dims,
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
@@ -481,7 +476,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 inputs,
                 labels,
                 extra_kwargs,
-                self.parallel_dims.world_mesh["cp"],
+                self.parallel_dims.get_mesh("cp"),
                 self.device,
             )
 
@@ -567,9 +562,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
-            pp_mesh=(
-                parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
-            ),
+            pp_mesh=parallel_dims.get_optional_mesh("pp"),
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
@@ -586,14 +579,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
             global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_mean(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
-                dist_utils.dist_max(loss, parallel_dims.world_mesh["dp_cp"], ft_pg),
+                dist_utils.dist_mean(loss, loss_mesh, ft_pg),
+                dist_utils.dist_max(loss, loss_mesh, ft_pg),
                 dist_utils.dist_sum(
                     torch.tensor(
                         self.ntokens_seen, dtype=torch.int64, device=self.device
                     ),
-                    parallel_dims.world_mesh["dp_cp"],
+                    loss_mesh,
                     ft_pg,
                 ),
             )
@@ -694,7 +688,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         timeout=timedelta(
                             seconds=job_config.comm.train_timeout_seconds
                         ),
-                        world_mesh=self.parallel_dims.world_mesh,
+                        parallel_dims=self.parallel_dims,
                     )
 
         if torch.distributed.get_rank() == 0:

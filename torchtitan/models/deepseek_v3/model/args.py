@@ -10,7 +10,6 @@
 from dataclasses import dataclass, field
 
 from torch import nn
-
 from torchtitan.config import JobConfig
 from torchtitan.models.moe import MoEArgs
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -65,6 +64,9 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
 
+    # Expert parallel communication backend (set from config)
+    expert_parallel_comm_backend: str = "standard"  # "standard" or "deepep"
+
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
     kv_lora_rank: int = 512
@@ -100,11 +102,18 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             job_config.parallelism.context_parallel_degree > 1
             and self.attn_type != "sdpa"
         ):
-            raise NotImplementedError("CP support is only supported for SDPA.")
+            raise NotImplementedError(
+                f"Context Parallel only supports SDPA attention. "
+                f"Got attn_type='{self.attn_type}'. "
+                f"FlexAttention and varlen attention are not supported with CP."
+            )
 
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
         )
+
+        # Configure expert parallel communication backend from config (defaults to "standard")
+        self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(

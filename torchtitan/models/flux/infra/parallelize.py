@@ -14,14 +14,10 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor.experimental._attention import (
-    _ContextParallel,
-    _enable_context_parallel_dispatcher,
-)
-from torch.distributed.tensor.parallel import parallelize_module
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.tools.logging import logger
 
 
@@ -34,17 +30,17 @@ def parallelize_flux(
         apply_ac(model, job_config.activation_checkpoint)
 
     if parallel_dims.cp_enabled:
-        apply_cp(model, parallel_dims.world_mesh["cp"])
+        apply_cp(model, parallel_dims.get_mesh("cp"))
 
     if parallel_dims.fsdp_enabled:
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
 
+        dp_mesh = parallel_dims.get_mesh(names)
         apply_fsdp(
             model,
-            parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             cpu_offload=job_config.training.enable_cpu_offload,
@@ -143,46 +139,27 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
 
     Note:
         - Uses SDPA attention type
-        - Applies to double_block.inner_attention for each DoubleStreamBlock
+        - Applies to all inner_attention modules in double_blocks and single_blocks
     """
-    # Apply context parallelism to every DoubleStreamBlock
-    # TODO: make seq_sim configurable once the implementation doesn't assume 2
-    # internally.
-
-    _enable_context_parallel_dispatcher()
-    cp_plan = _ContextParallel(
-        seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
-    )
+    # Collect all inner_attention modules from the Flux model
+    attention_modules = []
 
     # pyrefly: ignore [not-iterable]
     for double_block in model.double_blocks:
-        parallelize_module(
-            # pyrefly: ignore [missing-attribute]
-            module=double_block.img_attn.inner_attention,
-            device_mesh=cp_mesh,
-            parallelize_plan=cp_plan,
-        )
-        parallelize_module(
-            # pyrefly: ignore [missing-attribute]
-            module=double_block.txt_attn.inner_attention,
-            device_mesh=cp_mesh,
-            parallelize_plan=cp_plan,
-        )
-        parallelize_module(
-            # pyrefly: ignore [missing-attribute]
-            module=double_block.inner_attention,
-            device_mesh=cp_mesh,
-            parallelize_plan=cp_plan,
-        )
+        # pyrefly: ignore [missing-attribute]
+        attention_modules.append(double_block.img_attn.inner_attention)
+        # pyrefly: ignore [missing-attribute]
+        attention_modules.append(double_block.txt_attn.inner_attention)
+        # pyrefly: ignore [missing-attribute]
+        attention_modules.append(double_block.inner_attention)
 
     # pyrefly: ignore [not-iterable]
-    for single_block in model.sigle_blocks:
-        parallelize_module(
-            # pyrefly: ignore [missing-attribute]
-            module=single_block.inner_attention,
-            device_mesh=cp_mesh,
-            parallelize_plan=cp_plan,
-        )
+    for single_block in model.single_blocks:
+        # pyrefly: ignore [missing-attribute]
+        attention_modules.append(single_block.inner_attention)
+
+    # Apply CP using the shared implementation (always uses SDPA for Flux)
+    apply_cp_to_attention_module(attention_modules, cp_mesh, use_flex_attn=False)
 
     logger.info("Applied Context Parallel to the Flux model")
 
@@ -194,17 +171,17 @@ def parallelize_encoders(
     job_config: JobConfig,
 ):
     if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard")
-        else:
-            dp_mesh_dim_names = ("dp_shard",)
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
 
         mp_policy = MixedPrecisionPolicy(
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
+        dp_mesh = parallel_dims.get_mesh(names)
         fsdp_config: dict[str, Any] = {
-            "mesh": parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
+            "mesh": dp_mesh,
             "mp_policy": mp_policy,
         }
         if job_config.training.enable_cpu_offload:

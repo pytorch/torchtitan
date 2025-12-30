@@ -19,7 +19,6 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
-from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -56,7 +55,6 @@ class Validator(BaseValidator):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
-        model_args: BaseModelArgs,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
         validation_context: ValidationContext,
@@ -68,7 +66,6 @@ class Validator(BaseValidator):
     ):
         self.job_config = job_config
         self.tokenizer = tokenizer
-        self.model_args = model_args
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
         self.validation_dataloader = build_text_validation_dataloader(
@@ -95,7 +92,6 @@ class Validator(BaseValidator):
         self,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        device: torch.device,
         model_parts: list[nn.Module],
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
         """
@@ -110,7 +106,6 @@ class Validator(BaseValidator):
                 contain an "input" key with the main input tensor. May contain
                 additional keys for auxiliary inputs (e.g., position ids).
             labels: Target labels for the batch.
-            device: Device to use for creating new tensors (e.g., positions).
             model_parts: List of model parts for accessing model methods.
 
         Returns:
@@ -136,22 +131,23 @@ class Validator(BaseValidator):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
-        attn_type = getattr(self.model_args, "attn_type", "sdpa")
-        if attn_type in ["flex", "varlen"]:
+        try:
             # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
+        except NotImplementedError:
+            pass
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
                 inputs,
                 labels,
                 extra_kwargs,
-                self.parallel_dims.world_mesh["cp"],
-                device,
+                self.parallel_dims.get_mesh("cp"),
+                inputs.device,
             )
 
         return inputs, labels, extra_inputs, extra_kwargs
@@ -186,12 +182,9 @@ class Validator(BaseValidator):
                 input_dict[k] = v.to(device_type)
             labels = labels.to(device_type)
 
-            # Create device object for post_dataloading_process
-            device = torch.device(device_type)
-
             # Process data (extract inputs, handle attention masks, CP sharding)
             inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-                input_dict, labels, device, model_parts
+                input_dict, labels, model_parts
             )
 
             if parallel_dims.pp_enabled:
@@ -246,7 +239,7 @@ class Validator(BaseValidator):
         loss /= num_steps
         if parallel_dims.dp_cp_enabled:
             global_avg_loss = dist_utils.dist_mean(
-                loss, parallel_dims.world_mesh["dp_cp"]
+                loss, parallel_dims.get_optional_mesh("loss")
             )
         else:
             global_avg_loss = loss.item()
@@ -263,7 +256,6 @@ def build_validator(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
-    model_args: BaseModelArgs,
     parallel_dims: ParallelDims,
     loss_fn: LossFunction,
     validation_context: ValidationContext,
@@ -279,7 +271,6 @@ def build_validator(
         dp_world_size=dp_world_size,
         dp_rank=dp_rank,
         tokenizer=tokenizer,
-        model_args=model_args,
         parallel_dims=parallel_dims,
         loss_fn=loss_fn,
         validation_context=validation_context,
