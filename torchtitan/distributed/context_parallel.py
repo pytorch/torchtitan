@@ -15,8 +15,10 @@ from torch.distributed.tensor.experimental._attention import (
     _ContextParallel,
     _enable_context_parallel_dispatcher,
     _HeadTailLoadBalancer,
+    _PTRRLoadBalancer,
 )
 from torch.distributed.tensor.parallel import parallelize_module
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.tools.logging import logger
@@ -121,20 +123,30 @@ def cp_shard(
     attention_masks: AttentionMasksType | None,
     disable_load_balancer: bool = False,
 ):
+
     INPUT_SEQ_DIM = 1
     seq_len = inputs[0].size(INPUT_SEQ_DIM)
     cp_world_size = cp_mesh.size(0)
-    if attention_masks is not None:
-        raise ValueError(
-            "FlexAttention CP is not supported yet. Will come in the next PR."
-        )
-    else:
-        # For SDPA, we use the _HeadTailLoadBalancer.
-        load_balancer = (
-            None
-            if disable_load_balancer
-            else _HeadTailLoadBalancer(seq_len, cp_world_size, cp_mesh.device_type)
-        )
+
+    load_balancer = None
+    if not disable_load_balancer:
+        if isinstance(attention_masks, BlockMask):
+            load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
+        elif attention_masks is None or isinstance(attention_masks, dict):
+            # For SDPA, we use the _HeadTailLoadBalancer.
+            # TODO: For dict[str, BlockMask], _PTRRLoadBalancer currently doesn't
+            # support the case where there are multiple masks. To address multiple
+            # masks usage, _PTRRLoadBalancer also needs to take into account the
+            # usage frequency of each mask. So we default to _HeadTailLoadBalancer
+            # as we have not implemented this feature.
+            load_balancer = _HeadTailLoadBalancer(
+                seq_len, cp_world_size, cp_mesh.device_type
+            )
+        else:
+            ValueError(
+                "cp_shard only support attention_masks is "
+                "None, BlockMask, dict[str, BlockMask]"
+            )
 
     inputs = cast(
         tuple[torch.Tensor, ...],
@@ -145,5 +157,28 @@ def cp_shard(
             load_balancer=load_balancer,
         ),
     )
+
+    # BlockMask, has shape, [B, H, Q, KV], and we can only shard
+    # on the Q seq dimension, not KV.
+    MASK_Q_SEQ_DIM = 2
+    if attention_masks is not None:
+        assert isinstance(attention_masks, (BlockMask, dict[str, BlockMask]))
+        masks = (
+            [attention_masks]
+            if isinstance(attention_masks, BlockMask)
+            else list(attention_masks.values())
+        )
+        masks = _context_parallel_shard(
+            mesh=cp_mesh,
+            buffers=masks,
+            seq_dims=(MASK_Q_SEQ_DIM,) * len(masks),
+            load_balancer=load_balancer,
+        )
+        attention_masks = cast(
+            (BlockMask | dict[str, BlockMask]),
+            masks[0]
+            if isinstance(attention_masks, BlockMask)
+            else {k: v for k, v in zip(attention_masks.keys(), masks)},
+        )
 
     return inputs, attention_masks
