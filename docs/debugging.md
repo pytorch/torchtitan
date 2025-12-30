@@ -54,6 +54,69 @@ python -m torchtitan.config.manager --help
 
 This will print a structured configuration to `stdout`, allowing you to verify that overrides are being applied correctly.
 
+## Communication Mode (COMM_MODE) for Debugging
+
+The `COMM_MODE` environment variable provides specialized debugging modes that allow you to test and validate your training setup without requiring full multi-GPU distributed execution. This is particularly useful for rapid iteration during development and debugging.
+
+### Available Modes
+
+#### 1. `fake_backend` - Configuration Validation Mode
+
+This mode enables dry-run validation of your configuration, model setup, and rank-0 program logic without actual distributed communication:
+
+```bash
+NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
+```
+
+**What it does:**
+- Uses fake process groups that simulate distributed communication without actual data transfer
+- Runs on a single GPU without `torchrun` or NCCL initialization
+- Validates configuration parsing, model initialization, and overall training workflow
+- Executes only one training step by default
+
+**When to use it:**
+- Quick validation of configuration files before launching expensive multi-GPU jobs
+- Debugging training and parallelism logic that doesn't require actual communication. Note that No data-dependent logic should be validated with "fake_backend".
+
+**Example use case:**
+```bash
+# Validate a 128-GPU configuration on a single GPU
+NGPU=128 COMM_MODE="fake_backend" CONFIG_FILE="./train_configs/llama3_70b.toml" ./run_train.sh
+```
+
+#### 2. `local_tensor` - Single-GPU Distributed Simulation
+
+This mode simulates the full distributed training workflow on a single GPU by executing all communication and computation locally:
+
+```bash
+NGPU=32 COMM_MODE="local_tensor" ./run_train.sh
+```
+
+**What it does:**
+- Simulates multi-GPU behavior on a single shared GPU
+- Executes all collectives (all-reduce, all-gather, etc.) locally without network communication
+- Maintains the same code paths as distributed training for accurate debugging
+- Runs only one training step by default
+
+**When to use it:**
+- Debugging distributed training logic (FSDP, TP, PP, CP, EP) with data dependencies without multi-GPU setup. Note that local tensor doesn't support FSDP2 but should support SimpleFSDP.
+- Verifying correctness of parallelism strategies locally
+- Testing gradient synchronization and communication patterns
+- Reproducing distributed training bugs in a simplified environment
+
+**Example use case:**
+```bash
+# Debug 8-way TP + 2-way FSDP on a single GPU
+NGPU=16 COMM_MODE="local_tensor" ./run_train.sh \
+  --parallelism.tensor_parallel_degree 8 \
+  --parallelism.data_parallel_shard_degree 2
+```
+
+### Limitations
+
+- **Performance testing**: Neither mode provides accurate performance metrics; use actual distributed runs for benchmarking
+- **Memory requirement**: Local tensor runs require more memory on a single GPU than the actual distributed runs
+
 ## Troubleshooting jobs that timeout
 
 If you encounter jobs that timeout, you'll need to debug them to identify the root cause. To help with this process, we've enabled Flight Recorder, a tool that continuously collects diagnostic information about your jobs.
