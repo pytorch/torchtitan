@@ -14,10 +14,13 @@ This demonstrates:
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
 Command to run:
-VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
+python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
 """
 import asyncio
 import logging
+import os
+
+os.environ["VLLM_BATCH_INVARIANT"] = "1"
 
 import torch
 from monarch.actor import this_host
@@ -27,6 +30,7 @@ from torchtitan.experiments.rl.unified.actors.trainer import Trainer
 from torchtitan.experiments.rl.unified.models.utils import ModelMode
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     download_and_convert_model,
+    get_vllm_flash_attention_backend,
     load_gsm8k_dataset,
 )
 from vllm.model_executor.layers.batch_invariant import (
@@ -63,7 +67,7 @@ async def main():
     trainer_tp_size = 1
     generator_tp_size = 1
 
-    init_batch_invariance()
+    init_batch_invariance(get_vllm_flash_attention_backend())
     batch_invariant = vllm_is_batch_invariant()
     mode = ModelMode.UNIFIED
 
