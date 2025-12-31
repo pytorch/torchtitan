@@ -12,7 +12,11 @@ import torch
 import torchcomms
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
-from torchcomms.device_mesh import _flatten_with_comm, init_device_mesh
+from torchcomms.device_mesh import (
+    _flatten_with_comm,
+    init_device_mesh,
+    init_native_device_mesh,
+)
 
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
@@ -94,11 +98,19 @@ def _create_device_mesh(
     # Initialize device mesh with communicators
     mesh_dim_comms = tuple(comm_per_dim[name] for name in mesh_dim_names)
     try:
-        device_mesh = init_device_mesh(
-            mesh_dim_comms=mesh_dim_comms,
-            mesh_dim_names=tuple(mesh_dim_names),
-            _global_comm=comm,
-        )
+        if os.environ.get("TORCHCOMMS_PATCH_FOR_COMPILE", "0") == "1":
+            logger.info("calling init_native_device_mesh")
+            device_mesh = init_native_device_mesh(
+                mesh_dim_comms=mesh_dim_comms,
+                mesh_dim_names=tuple(mesh_dim_names),
+            )
+        else:
+            logger.info("calling init_device_mesh")
+            device_mesh = init_device_mesh(
+                mesh_dim_comms=mesh_dim_comms,
+                mesh_dim_names=tuple(mesh_dim_names),
+                _global_comm=comm,
+            )
     except TypeError as e:
         # TODO: remove this once PT 2.10 is released
         if "_rank" in str(e):
@@ -133,21 +145,33 @@ def _flatten_comms(
         comm_per_dim: Dictionary to store the created communicators
     """
     for flatten_dim_name, ranks in flatten_ranks_per_dim.items():
+        # Create the torchcomms communicator for the flattened dimension
         comm_per_dim[flatten_dim_name] = comm.split(ranks, flatten_dim_name)
-        sizes = []
-        strides = []
-        for dim_name in flatten_mesh_dim_names[flatten_dim_name]:
-            layout = device_mesh[dim_name]._layout
-            sizes.append(layout.sizes)
-            strides.append(layout.strides)
-        flatten_layout = _MeshLayout(tuple(sizes), tuple(strides))
-        _flatten_with_comm(
-            device_mesh,
-            flatten_dim_name,
-            comm_per_dim[flatten_dim_name],
-            ranks,
-            flatten_layout,
-        )
+
+        if os.environ.get("TORCHCOMMS_PATCH_FOR_COMPILE", "0") == "1":
+            root_mesh = device_mesh._get_root_mesh()
+            root_mesh.register_comm_backend(
+                "torchcomms", {flatten_dim_name: comm_per_dim[flatten_dim_name]}
+            )
+            dim_names_to_flatten = tuple(flatten_mesh_dim_names[flatten_dim_name])
+            submesh = device_mesh[dim_names_to_flatten]
+            submesh._flatten(mesh_dim_name=flatten_dim_name)
+        else:
+            # Use torchcomms _flatten_with_comm (uses process groups)
+            sizes = []
+            strides = []
+            for dim_name in flatten_mesh_dim_names[flatten_dim_name]:
+                layout = device_mesh[dim_name]._layout
+                sizes.append(layout.sizes)
+                strides.append(layout.strides)
+            flatten_layout = _MeshLayout(tuple(sizes), tuple(strides))
+            _flatten_with_comm(
+                device_mesh,
+                flatten_dim_name,
+                comm_per_dim[flatten_dim_name],
+                ranks,
+                flatten_layout,
+            )
 
 
 @dataclass
