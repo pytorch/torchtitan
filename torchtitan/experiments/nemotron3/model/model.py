@@ -14,14 +14,14 @@ Nemotron3 (NemotronH) Hybrid Model Implementation.
 This module implements the Nemotron3 hybrid architecture which combines:
 - Mamba2 layers (M): State space model layers for efficient sequence modeling
 - Attention layers (*): Standard multi-head attention with GQA support
-- MLP layers (E): Simple feed-forward layers
-- MoE layers: Mixture of Experts (optional)
+- MLP layers (-): Simple feed-forward layers
+- MoE layers (E/O or any other char): Mixture of Experts
 
 The layer pattern is defined by the `hybrid_override_pattern` configuration.
 """
 
 import math
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -80,7 +80,7 @@ def reshape_into_chunks(
 def segment_sum(input_tensor: torch.Tensor) -> torch.Tensor:
     """
     Stable segment sum calculation using cumulative sums and masking.
-    
+
     Uses a large negative value instead of -inf to avoid NaN when combined
     with exp() in downstream operations (0 * inf = NaN).
     """
@@ -90,7 +90,9 @@ def segment_sum(input_tensor: torch.Tensor) -> torch.Tensor:
 
     # Lower triangular mask (diagonal=-1 to zero out elements above diag)
     mask = torch.tril(
-        torch.ones(chunk_size, chunk_size, device=input_tensor.device, dtype=torch.bool),
+        torch.ones(
+            chunk_size, chunk_size, device=input_tensor.device, dtype=torch.bool
+        ),
         diagonal=-1,
     )
     input_tensor = input_tensor.masked_fill(~mask, 0)
@@ -102,7 +104,9 @@ def segment_sum(input_tensor: torch.Tensor) -> torch.Tensor:
     # Use a large negative value instead of -inf to avoid NaN in exp() operations
     # -1e9 is small enough that exp(-1e9) ≈ 0 but avoids inf * 0 = NaN issues
     mask = torch.tril(
-        torch.ones(chunk_size, chunk_size, device=input_tensor.device, dtype=torch.bool),
+        torch.ones(
+            chunk_size, chunk_size, device=input_tensor.device, dtype=torch.bool
+        ),
         diagonal=0,
     )
 
@@ -130,10 +134,7 @@ def apply_mask_to_padding_states(
 # =============================================================================
 # Activation Functions
 # =============================================================================
-
-
 def relu2(x: torch.Tensor) -> torch.Tensor:
-    """ReLU squared activation function."""
     return F.relu(x).square()
 
 
@@ -150,8 +151,6 @@ ACT2FN: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
 # =============================================================================
 # RoPE (Rotary Position Embedding)
 # =============================================================================
-
-
 def precompute_freqs_cis(
     dim: int,
     max_seq_len: int,
@@ -217,8 +216,6 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 # =============================================================================
 # Normalization Layers
 # =============================================================================
-
-
 class RMSNorm(nn.Module):
     """RMS Normalization layer (equivalent to LlamaRMSNorm)."""
 
@@ -266,8 +263,6 @@ class MambaRMSNormGated(nn.Module):
 # =============================================================================
 # Mamba2 Mixer (State Space Model)
 # =============================================================================
-
-
 class Mamba2Mixer(nn.Module):
     """
     Mamba2 SSM Mixer layer.
@@ -329,12 +324,14 @@ class Mamba2Mixer(nn.Module):
         self.D._no_weight_decay = True
 
         # Output projection
-        self.out_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=self.use_bias)
+        self.out_proj = nn.Linear(
+            self.intermediate_size, self.hidden_size, bias=self.use_bias
+        )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass using naive torch implementation (SSD algorithm).
@@ -370,9 +367,13 @@ class Mamba2Mixer(nn.Module):
 
         # 2. Convolution
         hidden_states_B_C = self.act(
-            self.conv1d(hidden_states_B_C.transpose(1, 2))[..., :seq_len].transpose(1, 2)
+            self.conv1d(hidden_states_B_C.transpose(1, 2))[..., :seq_len].transpose(
+                1, 2
+            )
         )
-        hidden_states_B_C = apply_mask_to_padding_states(hidden_states_B_C, attention_mask)
+        hidden_states_B_C = apply_mask_to_padding_states(
+            hidden_states_B_C, attention_mask
+        )
 
         # Split into hidden_states, B, C
         groups_time_state_size = self.n_groups * self.ssm_state_size
@@ -408,7 +409,9 @@ class Mamba2Mixer(nn.Module):
         pad_size = (self.chunk_size - seq_len % self.chunk_size) % self.chunk_size
 
         # D residual connection
-        D_residual = self.D[..., None] * pad_tensor_by_size(hidden_states_inner, pad_size)
+        D_residual = self.D[..., None] * pad_tensor_by_size(
+            hidden_states_inner, pad_size
+        )
 
         # Discretize x and A
         hidden_states_inner = hidden_states_inner * dt[..., None]
@@ -446,9 +449,7 @@ class Mamba2Mixer(nn.Module):
         # 3. Inter-chunk SSM recurrence
         previous_states = torch.zeros_like(states[:, :1])
         states = torch.cat([previous_states, states], dim=1)
-        decay_chunk = torch.exp(
-            segment_sum(F.pad(A_cumsum[:, :, :, -1], (1, 0)))
-        )
+        decay_chunk = torch.exp(segment_sum(F.pad(A_cumsum[:, :, :, -1], (1, 0))))
         decay_chunk = decay_chunk.transpose(1, 3)
         new_states = (decay_chunk[..., None, None] * states[:, :, None, ...]).sum(dim=1)
         states = new_states[:, :-1]
@@ -478,33 +479,20 @@ class Mamba2Mixer(nn.Module):
 
     def init_weights(self, init_std: float) -> None:
         """Initialize weights for Mamba2Mixer."""
-        # Initialize dt_bias using inverse softplus
-        # Use in-place operations to be compatible with DTensor after FSDP
-
-        # OLD
-        """
-        dt = torch.exp(
-        torch.rand(self.num_heads)
-            * (math.log(0.1) - math.log(0.001))
-            + math.log(0.001)
-        ).clamp(min=1e-4)
-        inv_dt = dt + torch.log(-torch.expm1(-dt))
-        """
-
         with torch.no_grad():
             # =================================================================
             # FIX: NaN Loss Bug - dt_bias initialization produces -inf in bf16
             # =================================================================
-            # 
+            #
             # PROBLEM:
-            # When training with bf16/mixed precision, the inverse softplus
+            # When training with bf16, the inverse softplus
             # computation `log(1 - exp(-x))` produces -inf values, which then
             # propagate through the forward pass causing NaN loss.
             #
             # ROOT CAUSE:
             # After clamping, dt_bias has small values like 0.0001. When computing
             # `exp(-0.0001)` in bf16, the result is ~0.9999, but bf16's limited
-            # precision (only 7 mantissa bits) can round this to exactly 1.0.
+            # precision can round this to exactly 1.0.
             # Then `1 - exp(-x) = 0`, and `log(0) = -inf`.
             #
             # Example failure path:
@@ -520,22 +508,21 @@ class Mamba2Mixer(nn.Module):
             # 3. Clamp neg_exp to ensure 1-neg_exp never becomes exactly 0
             # 4. Copy the result back to the original dtype
             # =================================================================
-            
-            original_dtype = self.dt_bias.dtype
+
             dt_bias_f32 = self.dt_bias.float()
-            
+
             # Generate uniform values in log space, then transform
             dt_bias_f32.uniform_(math.log(0.001), math.log(0.1))
             dt_bias_f32.exp_()
             dt_bias_f32.clamp_(min=1e-4)
-            
+
             # Apply inverse softplus: inv_softplus(x) = x + log(1 - exp(-x))
             # Use log1p for numerical stability: log1p(-y) = log(1 - y)
             neg_exp = torch.exp(-dt_bias_f32)
             # Clamp to ensure (1 - neg_exp) > 0, preventing log(0) = -inf
             log_term = torch.log1p(-neg_exp.clamp(max=1.0 - 1e-7))
             dt_bias_f32.add_(log_term)
-            
+
             # Copy back to original dtype (e.g., bf16)
             self.dt_bias.copy_(dt_bias_f32)
 
@@ -560,8 +547,6 @@ class Mamba2Mixer(nn.Module):
 # =============================================================================
 # Attention Layer
 # =============================================================================
-
-
 class Attention(nn.Module):
     """Multi-headed attention with GQA support."""
 
@@ -579,10 +564,14 @@ class Attention(nn.Module):
             self.hidden_size, self.num_heads * self.head_dim, bias=model_args.attn_bias
         )
         self.wk = nn.Linear(
-            self.hidden_size, self.num_kv_heads * self.head_dim, bias=model_args.attn_bias
+            self.hidden_size,
+            self.num_kv_heads * self.head_dim,
+            bias=model_args.attn_bias,
         )
         self.wv = nn.Linear(
-            self.hidden_size, self.num_kv_heads * self.head_dim, bias=model_args.attn_bias
+            self.hidden_size,
+            self.num_kv_heads * self.head_dim,
+            bias=model_args.attn_bias,
         )
         self.wo = nn.Linear(
             self.num_heads * self.head_dim, self.hidden_size, bias=model_args.attn_bias
@@ -611,9 +600,15 @@ class Attention(nn.Module):
         value_states = self.wv(hidden_states)
 
         # Reshape
-        query_states = query_states.view(bsz, q_len, -1, self.head_dim) # [batch_size, sequence_length, computed_num_heads, head_dim]
-        key_states = key_states.view(bsz, q_len, -1, self.head_dim) # [batch_size, sequence_length, computed_num_heads, head_dim]
-        value_states = value_states.view(bsz, q_len, -1, self.head_dim) # [batch_size, sequence_length, computed_num_heads, head_dim]
+        query_states = query_states.view(
+            bsz, q_len, -1, self.head_dim
+        )  # [batch_size, sequence_length, computed_num_heads, head_dim]
+        key_states = key_states.view(
+            bsz, q_len, -1, self.head_dim
+        )  # [batch_size, sequence_length, computed_num_heads, head_dim]
+        value_states = value_states.view(
+            bsz, q_len, -1, self.head_dim
+        )  # [batch_size, sequence_length, computed_num_heads, head_dim]
 
         # Apply RoPE
         query_states, key_states = apply_rotary_emb(query_states, key_states, freqs_cis)
@@ -704,25 +699,27 @@ class TopkRouter(nn.Module):
         self.norm_topk_prob = model_args.norm_topk_prob
         self.hidden_size = model_args.dim
 
-        # Note: HF model uses float32 for these, but we use the default dtype (bfloat16)
-        # for FSDP compatibility. The state_dict_adapter handles dtype conversion during loading.
+        # Note: Reference model uses float32 for these, but we use the default dtype (bfloat16)
         self.weight = nn.Parameter(
             torch.empty((self.n_routed_experts, self.hidden_size))
         )
         self.register_buffer(
-            "e_score_correction_bias",
-            torch.zeros(self.n_routed_experts)
+            "e_score_correction_bias", torch.zeros(self.n_routed_experts)
         )
 
     @torch.no_grad()
     def get_topk_indices(self, scores: torch.Tensor) -> torch.Tensor:
         """Get top-k expert indices."""
         scores_for_choice = scores.view(-1, self.n_routed_experts)
-        scores_for_choice = scores_for_choice + self.e_score_correction_bias.unsqueeze(0)
+        scores_for_choice = scores_for_choice + self.e_score_correction_bias.unsqueeze(
+            0
+        )
 
         # Group-based expert selection
         group_scores = (
-            scores_for_choice.view(-1, self.n_group, self.n_routed_experts // self.n_group)
+            scores_for_choice.view(
+                -1, self.n_group, self.n_routed_experts // self.n_group
+            )
             .topk(2, dim=-1)[0]
             .sum(dim=-1)
         )
@@ -736,12 +733,12 @@ class TopkRouter(nn.Module):
             .reshape(-1, self.n_routed_experts)
         )
         scores_for_choice = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)
-        topk_indices = torch.topk(scores_for_choice, k=self.top_k, dim=-1, sorted=False)[1]
+        topk_indices = torch.topk(
+            scores_for_choice, k=self.top_k, dim=-1, sorted=False
+        )[1]
         return topk_indices
 
-    def forward(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass of router.
 
@@ -779,7 +776,9 @@ class MoE(nn.Module):
 
         self.experts = nn.ModuleList(
             [
-                MoEExpert(model_args, intermediate_size=model_args.moe_intermediate_size)
+                MoEExpert(
+                    model_args, intermediate_size=model_args.moe_intermediate_size
+                )
                 for _ in range(model_args.n_routed_experts)
             ]
         )
@@ -846,8 +845,12 @@ class MoEExpert(nn.Module):
         super().__init__()
         self.hidden_size = model_args.dim
 
-        self.up_proj = nn.Linear(self.hidden_size, intermediate_size, bias=model_args.mlp_bias)
-        self.down_proj = nn.Linear(intermediate_size, self.hidden_size, bias=model_args.mlp_bias)
+        self.up_proj = nn.Linear(
+            self.hidden_size, intermediate_size, bias=model_args.mlp_bias
+        )
+        self.down_proj = nn.Linear(
+            intermediate_size, self.hidden_size, bias=model_args.mlp_bias
+        )
         self.act_fn = ACT2FN[model_args.mlp_hidden_act]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -865,8 +868,6 @@ class MoEExpert(nn.Module):
 # =============================================================================
 # Nemotron3 Block (Hybrid Layer)
 # =============================================================================
-
-
 class Nemotron3Block(nn.Module):
     """
     Hybrid block that can be Mamba2, Attention, MLP, or MoE.
@@ -942,8 +943,6 @@ class Nemotron3Block(nn.Module):
 # =============================================================================
 # Nemotron3 Model
 # =============================================================================
-
-
 class Nemotron3Model(nn.Module, ModelProtocol):
     """
     Nemotron3 (NemotronH) Hybrid Model.
@@ -962,7 +961,9 @@ class Nemotron3Model(nn.Module, ModelProtocol):
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
         # Precompute RoPE frequencies for attention layers
-        self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=False)
+        self.register_buffer(
+            "freqs_cis", self._precompute_freqs_cis(), persistent=False
+        )
 
         # Build layers
         self.layers = nn.ModuleDict()
@@ -994,7 +995,9 @@ class Nemotron3Model(nn.Module, ModelProtocol):
         logger.info(f"  n_kv_heads: {self.model_args.n_kv_heads}")
         logger.info(f"  head_dim: {self.model_args.head_dim}")
         logger.info(f"  max_seq_len: {self.model_args.max_seq_len}")
-        logger.info(f"  hybrid_override_pattern: {self.model_args.hybrid_override_pattern}")
+        logger.info(
+            f"  hybrid_override_pattern: {self.model_args.hybrid_override_pattern}"
+        )
 
         # Count layer types
         block_types = self.model_args.layers_block_type
@@ -1002,7 +1005,6 @@ class Nemotron3Model(nn.Module, ModelProtocol):
         for bt in block_types:
             type_counts[bt] = type_counts.get(bt, 0) + 1
         logger.info(f"  layer_type_counts: {type_counts}")
-        logger.info("=" * 60)
 
     def _precompute_freqs_cis(self) -> torch.Tensor:
         """Precompute RoPE frequencies."""
@@ -1024,7 +1026,9 @@ class Nemotron3Model(nn.Module, ModelProtocol):
 
         # Initialize embeddings
         if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight, std=self.model_args.initializer_range)
+            nn.init.normal_(
+                self.tok_embeddings.weight, std=self.model_args.initializer_range
+            )
 
         # Initialize layers
         for layer in self.layers.values():
@@ -1037,7 +1041,7 @@ class Nemotron3Model(nn.Module, ModelProtocol):
 
         # Initialize output projection
         if self.output is not None and not self.model_args.enable_weight_tying:
-            final_out_std = self.model_args.dim ** -0.5
+            final_out_std = self.model_args.dim**-0.5
             cutoff_factor = 3
             nn.init.trunc_normal_(
                 self.output.weight,

@@ -24,6 +24,7 @@ class Nemotron3ModelArgs(BaseModelArgs):
     - Mamba2 layers (M)
     - Attention layers (*)
     - MLP layers (-)
+    - MoE layers (any other character, typically 'E')
 
     The layer pattern is defined by `hybrid_override_pattern`.
 
@@ -36,8 +37,10 @@ class Nemotron3ModelArgs(BaseModelArgs):
     hidden_dim: int = 21504  # intermediate_size
     n_layers: int = 52  # num_hidden_layers
 
-    # Hybrid layer pattern: M=Mamba2, *=Attention, -=MLP
-    hybrid_override_pattern: str = "M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-"
+    # Hybrid layer pattern: M=Mamba2, *=Attention, -=MLP, other (E/O)=MoE
+    hybrid_override_pattern: str = (
+        "M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-"
+    )
 
     # Attention configuration
     n_heads: int = 32  # num_attention_heads
@@ -82,7 +85,9 @@ class Nemotron3ModelArgs(BaseModelArgs):
     mamba_hidden_act: str = "silu"
     mamba_dt_min: float = 0.001
     mamba_dt_max: float = 0.1
-    mamba_dt_limit: tuple[float, float] = field(default_factory=lambda: (0.0, float("inf")))
+    mamba_dt_limit: tuple[float, float] = field(
+        default_factory=lambda: (0.0, float("inf"))
+    )
     mamba_dt_init_floor: float = 1e-4
     mamba_conv_bias: bool = True
     mamba_proj_bias: bool = False
@@ -118,9 +123,9 @@ class Nemotron3ModelArgs(BaseModelArgs):
         )
 
         # Validate hybrid_override_pattern contains only valid characters
-        assert re.match(r"^[*MEO]+$", self.hybrid_override_pattern), (
+        assert re.match(r"^[*M\-EO]+$", self.hybrid_override_pattern), (
             "hybrid_override_pattern must only contain characters 'M' (Mamba2), "
-            "'E' (MLP), 'O' (MoE), or '*' (Attention)"
+            "'*' (Attention), '-' (MLP), or 'E'/'O' (MoE)"
         )
 
         # Set n_kv_heads to n_heads if not specified (for backward compatibility)
@@ -130,10 +135,15 @@ class Nemotron3ModelArgs(BaseModelArgs):
     @property
     def layers_block_type(self):
         return [
-            "mamba" if self.hybrid_override_pattern[i] == "M" else
-            "attention" if self.hybrid_override_pattern[i] == "*" else
-            "mlp" if self.hybrid_override_pattern[i] == "-" else "moe"
-            for i in range(self.n_layers)]
+            "mamba"
+            if self.hybrid_override_pattern[i] == "M"
+            else "attention"
+            if self.hybrid_override_pattern[i] == "*"
+            else "mlp"
+            if self.hybrid_override_pattern[i] == "-"
+            else "moe"
+            for i in range(self.n_layers)
+        ]
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         """Update model args from job config."""
@@ -155,8 +165,7 @@ class Nemotron3ModelArgs(BaseModelArgs):
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        # TODO(aghilann): verify if this is right, it was AI generated
-        """Calculate number of parameters and FLOPs for the model."""
+        # TODO(aghilann): this number should accurately consider the {Mambda, Attention, MoE layers}
         return get_dense_model_nparams_and_flops(
             self,
             model,

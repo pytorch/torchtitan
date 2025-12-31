@@ -26,7 +26,7 @@ __all__ = [
 
 
 # NemotronH model flavors
-# Pattern key: M=Mamba2, *=Attention, E=MLP, O=MoE
+# Pattern key: M=Mamba2, *=Attention, -=MLP, E=MoE
 nemotron3_args = {
     # Debug model for testing
     "debugmodel": Nemotron3ModelArgs(
@@ -44,7 +44,6 @@ nemotron3_args = {
     ),
     # NemotronH-nano-30B configuration
     # From https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/main/config.json
-    # Uses MoE (O) layers for feed-forward, giving ~30B total params with ~3B active per token
     "nano-30B": Nemotron3ModelArgs(
         vocab_size=131072,
         dim=2688,  # hidden_size
