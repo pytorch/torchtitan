@@ -7,8 +7,6 @@
 import re
 from typing import Any
 
-from torch import dtype
-
 from torchtitan.models.utils import MoEStateDictAdapter
 from torchtitan.tools.logging import logger
 
@@ -115,7 +113,7 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
 
     def _get_abstract_key(self, key: str) -> str:
         """Convert a concrete key to an abstract key with {} placeholders for layer/expert numbers.
-        
+
         Only replaces numbers that appear between dots (e.g., layer indices, expert indices),
         not numbers that are part of component names (e.g., 'conv1d').
         """
@@ -123,9 +121,7 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
         # Pattern: matches numbers that come after a dot and before a dot
         return re.sub(r"\.(\d+)\.", ".{}.", key)
 
-    def _extract_layer_and_expert_nums(
-        self, key: str
-    ) -> tuple[str | None, str | None]:
+    def _extract_layer_and_expert_nums(self, key: str) -> tuple[str | None, str | None]:
         """Extract layer number and optionally expert number from a key."""
         # Match patterns like backbone.layers.5.mixer.experts.42.up_proj.weight
         numbers = re.findall(r"(\d+)", key)
@@ -143,7 +139,7 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
 
         Returns:
             The converted HuggingFace format state dict
-            
+
         Raises:
             ValueError: If any keys could not be converted or if extraction fails.
         """
@@ -165,10 +161,14 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
                 layer_num, expert_num = self._extract_layer_and_expert_nums(key)
 
                 if abstract_key not in moe_experts_to_hf_map:
-                    raise ValueError(f"to_hf: No mapping for MoE expert key '{abstract_key}'")
+                    raise ValueError(
+                        f"to_hf: No mapping for MoE expert key '{abstract_key}'"
+                    )
                 if layer_num is None or expert_num is None:
-                    raise ValueError(f"to_hf: Failed to extract layer/expert nums from '{key}'")
-                
+                    raise ValueError(
+                        f"to_hf: Failed to extract layer/expert nums from '{key}'"
+                    )
+
                 new_key = moe_experts_to_hf_map[abstract_key]
                 new_key = new_key.format(layer_num, expert_num)
                 hf_state_dict[new_key] = value
@@ -181,10 +181,12 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
                 layer_num, _ = self._extract_layer_and_expert_nums(key)
 
                 if abstract_key not in to_hf_map:
-                    raise ValueError(f"to_hf: No mapping for layer key '{abstract_key}'")
+                    raise ValueError(
+                        f"to_hf: No mapping for layer key '{abstract_key}'"
+                    )
                 if layer_num is None:
                     raise ValueError(f"to_hf: Failed to extract layer num from '{key}'")
-                
+
                 new_key = to_hf_map[abstract_key]
                 if new_key is not None:
                     new_key = new_key.format(layer_num)
@@ -202,9 +204,13 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
 
         # Fail if any keys were not processed
         if remaining_keys:
-            raise ValueError(f"to_hf: {len(remaining_keys)} keys not converted: {list(remaining_keys)[:5]}")
+            raise ValueError(
+                f"to_hf: {len(remaining_keys)} keys not converted: {list(remaining_keys)[:5]}"
+            )
 
-        logger.info(f"StateDictAdapter.to_hf: Converted {len(hf_state_dict)} keys (native -> HF)")
+        logger.info(
+            f"StateDictAdapter.to_hf: Converted {len(hf_state_dict)} keys (native -> HF)"
+        )
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -215,11 +221,10 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
 
         Returns:
             The converted native model state dict
-            
+
         Raises:
             ValueError: If any HF keys could not be converted or if extraction fails.
         """
-        import torch
         state_dict = {}
 
         for key, value in hf_state_dict.items():
@@ -229,10 +234,14 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
                 layer_num, expert_num = self._extract_layer_and_expert_nums(key)
 
                 if abstract_key not in self.moe_experts_from_hf_map:
-                    raise ValueError(f"from_hf: No mapping for MoE expert key '{abstract_key}'")
+                    raise ValueError(
+                        f"from_hf: No mapping for MoE expert key '{abstract_key}'"
+                    )
                 if layer_num is None or expert_num is None:
-                    raise ValueError(f"from_hf: Failed to extract layer/expert nums from '{key}'")
-                
+                    raise ValueError(
+                        f"from_hf: Failed to extract layer/expert nums from '{key}'"
+                    )
+
                 new_key = self.moe_experts_from_hf_map[abstract_key]
                 if new_key is not None:
                     new_key = new_key.format(layer_num, expert_num)
@@ -245,10 +254,14 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
                 layer_num, _ = self._extract_layer_and_expert_nums(key)
 
                 if abstract_key not in self.from_hf_map:
-                    raise ValueError(f"from_hf: No mapping for layer key '{abstract_key}'")
+                    raise ValueError(
+                        f"from_hf: No mapping for layer key '{abstract_key}'"
+                    )
                 if layer_num is None:
-                    raise ValueError(f"from_hf: Failed to extract layer num from '{key}'")
-                
+                    raise ValueError(
+                        f"from_hf: Failed to extract layer num from '{key}'"
+                    )
+
                 new_key = self.from_hf_map[abstract_key]
                 if new_key is not None:
                     new_key = new_key.format(layer_num)
@@ -261,5 +274,7 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
                 if new_key is not None:
                     state_dict[new_key] = value
 
-        logger.info(f"StateDictAdapter.from_hf: Converted {len(state_dict)} keys (HF -> native)")
+        logger.info(
+            f"StateDictAdapter.from_hf: Converted {len(state_dict)} keys (HF -> native)"
+        )
         return state_dict

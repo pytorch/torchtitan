@@ -10,8 +10,8 @@ The model uses a configurable layer pattern defined by `hybrid_override_pattern`
 |--------|------------|-------------|
 | `M` | Mamba2 | State-space model layer for efficient long-range sequence modeling |
 | `*` | Attention | Multi-head attention with Grouped Query Attention (GQA) |
-| `E` | MLP | Standard feed-forward layer |
-| `O` | MoE | Mixture of Experts (128 experts, 6 active per token) |
+| `-` | MLP | Standard feed-forward layer |
+| `E` | MoE | Mixture of Experts (any char other than M, *, - maps to MoE) |
 
 ### nano-30B Configuration
 

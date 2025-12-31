@@ -9,7 +9,11 @@
 
 import torch.nn as nn
 
-from torch.distributed._composable.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed._composable.fsdp import (
+    CPUOffloadPolicy,
+    fully_shard,
+    MixedPrecisionPolicy,
+)
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
@@ -35,9 +39,27 @@ def parallelize_nemotron3(
     Returns:
         The parallelized model
     """
-    # TODO: Add activation checkpointing support
-    # TODO: Add tensor parallelism support
-    # TODO: Add torch.compile support
+    # Validate unsupported parallelisms
+    if parallel_dims.tp_enabled:
+        raise NotImplementedError(
+            "Tensor Parallelism (TP) is not yet supported for Nemotron3. "
+            "Please set parallelism.tensor_parallel_degree = 1."
+        )
+    if parallel_dims.pp_enabled:
+        raise NotImplementedError(
+            "Pipeline Parallelism (PP) is not yet supported for Nemotron3. "
+            "Please set parallelism.pipeline_parallel_degree = 1."
+        )
+    if parallel_dims.cp_enabled:
+        raise NotImplementedError(
+            "Context Parallelism (CP) is not yet supported for Nemotron3. "
+            "Please set parallelism.context_parallel_degree = 1."
+        )
+    if parallel_dims.ep_enabled:
+        raise NotImplementedError(
+            "Expert Parallelism (EP) is not yet supported for Nemotron3. "
+            "Please set parallelism.expert_parallel_degree = 1."
+        )
 
     if parallel_dims.fsdp_enabled:
         # Determine the data parallel mesh dimensions
