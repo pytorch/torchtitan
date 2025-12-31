@@ -14,9 +14,9 @@ from typing import Any, Generator, Iterable
 
 import torch
 
-from torch.distributed.elastic.multiprocessing.errors import record
-
 import torchtitan.protocols.train_spec as train_spec_module
+
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
@@ -248,10 +248,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
         else:
-            # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-            model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
-
+            # Materialize model from meta device to actual CUDA memory BEFORE parallelization
+            # This is required for torchcomms which needs real tensors for NCCL broadcasts
             model.to_empty(device=init_device)
+            model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
             model.train()
