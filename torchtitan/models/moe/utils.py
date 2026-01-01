@@ -39,10 +39,39 @@ def set_token_group_alignment_size_m(
     TOKEN_GROUP_ALIGN_SIZE_M = alignment_size
 
 
-def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
+def _permute(
+    tensor: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+    ep_degree: int,
+    num_local_experts: int,
+) -> tuple[torch.Size, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Permute and pad the input tokens x based on the number of tokens per expert.
+    This ensures that each expert receives a number of tokens that is a multiple of TOKEN_GROUP_ALIGN_SIZE_M.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape (num_tokens, feature_dim).
+        num_tokens_per_expert (torch.Tensor): Tensor containing the number of tokens assigned to each expert.
+        ep_degree (int): Expert parallelism degree.
+        num_local_experts (int): Number of local experts.
+
+    Returns:
+        input_shape (torch.Size): shape of input tensor after a dummy padding row is added.
+        x (torch.Tensor): Permuted and padded input tensor.
+        permuted_indices (torch.Tensor): Indices used for permutation.
+        num_tokens_per_expert (torch.Tensor): Updated number of tokens per expert after padding.
+    """
     global TOKEN_GROUP_ALIGN_SIZE_M
+
+    # Unwrap MXTensor into quantized data and scales if applicable.
+    x = tensor.qdata if isinstance(tensor, MXTensor) else tensor
+    scales = tensor.scales if isinstance(tensor, MXTensor) else None
+
+    # Assume worst case where each token group needs to be padded with TOKEN_GROUP_ALIGN_SIZE_M tokens.
     x_padded_per_expert = x.shape[0] + num_local_experts * TOKEN_GROUP_ALIGN_SIZE_M
     padded_max_len = _round_up(x_padded_per_expert, TOKEN_GROUP_ALIGN_SIZE_M)
+
+    # Generate permuted indices and updated num_tokens_per_expert with padding.
     with torch.no_grad():
         (permuted_indices, num_tokens_per_expert, _offsets,) = generate_permute_indices(
             num_tokens_per_expert,
@@ -52,9 +81,28 @@ def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
             TOKEN_GROUP_ALIGN_SIZE_M,
         )
 
+    # Append row of zeros to x to act as a dummy padding row. Every time `permuted_indices` selects this index,
+    # it will correspond to a padded token.
     x = torch.vstack((x, x.new_zeros((x.shape[-1]))))
     input_shape = x.shape
     x = x[permuted_indices, :]
+
+    # Permute scales to match data if applicable. If so, wrap back into MXTensor.
+    if isinstance(tensor, MXTensor):
+        scales = torch.vstack((scales, scales.new_zeros((scales.shape[-1]))))
+        scales = scales[
+            permuted_indices:,
+        ]
+        x = MXTensor(
+            x,
+            scales,
+            tensor._elem_dtype,
+            tensor.block_size,
+            tensor._orig_dtype,
+            tensor.kernel_preference,
+            tensor.act_quant_kwargs,
+            tensor._is_swizzled_scales,
+        )
 
     return input_shape, x, permuted_indices, num_tokens_per_expert
 
