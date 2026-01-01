@@ -192,6 +192,131 @@ class ExpertParallel(BaseExpertParallel):
         )
 
 
+class MXFP8ExpertParallel(BaseExpertParallel):
+    def __init__(self):
+        super().__init__()
+        self.input_splits = None
+        self.output_splits = None
+        self.input_shape = None
+        self.permuted_indices = None
+        try:
+            from torchao.prototype.moe_training.ep import (
+                a2a_combine as mxfp8_a2a_combine,
+                a2a_dispatch as mxpf8_a2a_dispatch,
+                permute as mxfp8_permute,
+                unpermute as mxf8_unpermute,
+            )
+
+            self.mxfp8_a2a_dispatch = mxpf8_a2a_dispatch
+            self.mxfp8_permute = mxfp8_permute
+            self.mxfp8_unpermute = mxf8_unpermute
+            self.mxfp8_a2a_combine = mxfp8_a2a_combine
+        except ImportError as e:
+            raise ImportError(
+                "MXFP8 expert parallel ops are not available."
+                "Please install torchao nightly build for CUDA 12.8+: "
+                "https://github.com/pytorch/ao/tree/main?tab=readme-ov-file#-installation."
+            ) from e
+
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        for param_name, param in mod.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            mod.register_parameter(param_name, dist_param)
+
+    def _token_dispatch(
+        self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
+        # annotate module input placements/sharding with input_layouts
+        routed_input, num_tokens_per_expert = inputs
+        ep_degree = device_mesh.shape[0]
+        num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
+
+        # generate the input splits and output splits for all-to-all
+        with torch.no_grad():
+            num_tokens_per_expert_group = all_to_all_single(
+                num_tokens_per_expert,
+                None,
+                None,
+                group=device_mesh.get_group(),
+            )
+            # Need to wait explicitly because it is used by a triton kernel later
+            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+                num_tokens_per_expert_group
+            )
+            input_splits = (
+                num_tokens_per_expert.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=True)
+            )
+            # NOTE: this would incur a device-to-host sync
+            output_splits = (
+                num_tokens_per_expert_group.view(ep_degree, -1)
+                .sum(dim=1)
+                .to(torch.device("cpu"), non_blocking=False)
+            )
+            self.input_splits = input_splits.tolist()
+            self.output_splits = output_splits.tolist()
+
+        # perform all-to-all
+        routed_input = self.mxfp8_a2a_dispatch(
+            routed_input,
+            self.output_splits,
+            self.input_splits,
+            device_mesh.get_group(),
+        )
+
+        # NOTE: After this all-to-all, the routed input is put on proper EP rank.
+        # However, the num_tokens_per_expert_group is not of the final target format
+        # [#tokens for local expert 0, #tokens for local expert 1, ...]
+        # Rather, it is of the format
+        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
+        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
+        # We need to perform another shuffle to get the correct layout, via the _permute function
+        # below, which also does padding to make sure the number of tokens each expert gets locally
+        # is a multiple of TOKEN_GROUP_ALIGN_SIZE_M.
+        # Note that this will create side effects when wrapping the for-loop implementation
+        # of GroupedExperts, as it does not need padding.
+        (
+            self.input_shape,
+            routed_input,
+            self.permuted_indices,
+            num_tokens_per_expert_group,
+            _,
+        ) = self.mxfp8_permute(
+            routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+        )
+
+        return routed_input, num_tokens_per_expert_group
+
+    def _token_combine(
+        self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
+        routed_output = self.mxfp8_unpermute(
+            routed_output, self.permuted_indices, self.input_shape
+        )
+
+        routed_output = self.mxfp8_a2a_combine(
+            routed_output,
+            self.input_splits,
+            self.output_splits,
+            device_mesh.get_group(),
+            mxfp8_bwd=False,  # temp workaround since torch.compile requires tensor metadata in bwd to match fwd
+        )
+        return routed_output
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
+            input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
+            output_fn=self._token_combine,
+        )
+
+
 # This class is for dp2ep with TP (without TP we can just use ExpertParallel)
 class ExpertTensorParallel(ExpertParallel):
     def _token_dispatch(self, mod, inputs, device_mesh):
