@@ -120,6 +120,10 @@ def parallelize_deepseekv3(
     else:
         use_deepep = False
 
+    use_mxfp8_a2a = (
+        "quantize.grouped_mm.mx" in job_config.model.converters
+        and job_config.quantize.grouped_mm.mx.recipe_name == "mxfp8_wgrad_with_hp"
+    )
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
@@ -131,6 +135,7 @@ def parallelize_deepseekv3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
+            use_mxfp8_a2a=use_mxfp8_a2a,
         )
 
     if parallel_dims.cp_enabled:

@@ -793,6 +793,36 @@ class MXGroupedMM:
         - "mxfp8_wgrad_with_hp": Use MXFP8 for forward output and dgrad, but keep wgrad in high-precision.
              This can be used to trade-off some performance for improved accuracy. For some smaller expert shapes,
              it is also better for performance.
+
+             This recipe also reduces communication volume by doing certain all-to-all operations in MXFP8.
+             Specifically, instead of doing MXFP8 quantization right before the MXFP8 grouped GEMMs for the
+             routed experts, we do the quantization earlier, before the preceding all-to-all dispatch, and
+             stay in MXFP8 through the token shuffle.
+
+             This speeds up the all-to-all by sending fewer bytes over the network. Similarly, in the backward
+             pass, we quantize before the all-to-all combine, stay in MXFP8 through token unpermutation, and then
+             do the MXFP8 grouped GEMM. The diagram below visualzes this:
+
+               Forward flow:
+                1. a2a dispatch forward: high-precision input, MXFP8 output
+                2. permute forward: MXFP8 input, MXFP8 output
+                3. MXFP8 grouped GEMM: MXFP8 input, high-precision output
+                4. unpermute forward: high-precision input and output
+                5. a2a combine forward: high-precision input and output
+
+               Backward flow:
+                1. a2a combine backward: high-precision input, MXFP8 output
+                2. unpermute backward: MXFP8 input, MXFP8 output
+                3. MXFP8 grouped GEMM: MXFP8 input, high-precision output
+                4. permute backward: high-precision input and output
+                5. a2a dispatch backward: high-precision input and output
+
+               Limitations:
+                - Not compatible with DeepEP
+
+               MXFP8 requires installation of torchao nightly build for CUDA 12.8+: https://github.com/pytorch/ao
+
+
     Example: --quantize.grouped_mm.mx.recipe_name="mxfp8"
     """
 
