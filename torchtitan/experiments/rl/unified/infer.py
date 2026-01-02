@@ -18,10 +18,6 @@ Run: torchrun --nproc_per_node=2 \
 
 
 from torchtitan.config import ConfigManager
-
-# Import unified module - this automatically registers TorchTitan models with vLLM
-from torchtitan.experiments.rl import unified  # noqa: F401
-
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.logger import init_logger
 
@@ -33,6 +29,12 @@ def infer():
 
     config_manager = ConfigManager()
     job_config = config_manager.parse_args()
+
+    # Load TorchTitan plugin at runtime (like native_sampler does)
+    from torchtitan.experiments.rl.unified.plugin import register
+
+    register()
+    logger.info("Loaded TorchTitan vLLM plugin")
 
     logger.info("Initializing vLLM LLMEngine with TorchTitan model")
     logger.info(f"Model: {job_config.checkpoint.initial_load_path}")
