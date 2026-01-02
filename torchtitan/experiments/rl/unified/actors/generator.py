@@ -163,6 +163,12 @@ class VLLMRolloutEngine:
 
         # First time: create the engine using LLMEngine and EngineArgs
         if self.engine is None:
+            # Load TorchTitan plugin at runtime (like native_sampler does)
+            from torchtitan.experiments.rl.unified.plugin import register
+
+            register()
+            logger.info("Loaded TorchTitan vLLM plugin")
+
             generation = self.job_config.generation
 
             engine_args = EngineArgs(
