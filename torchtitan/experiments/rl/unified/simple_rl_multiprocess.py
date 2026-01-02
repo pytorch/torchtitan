@@ -163,6 +163,8 @@ async def main():
 
     for step in range(num_steps):
         # Fully sync RL loop
+        # NOTE: This is only getting Trajectory generated from trainer 0, and trainer 1's data is ignored.
+        # .get() is a blocking method which makes the loop fully sync
         batch = generator.generate.call().get().item(gpus=0)
         metrics = trainer.step.call(batch).get().item(gpus=0)
         weights = trainer.get_weights.call().get().item(gpus=0)
