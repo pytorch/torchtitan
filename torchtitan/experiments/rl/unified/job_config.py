@@ -61,7 +61,6 @@ class Inference:
     Backend for distributed execution.
     'external_launcher' means vLLM does not spawn processes (use torchrun/external launcher)
     """
-
     seed: int = 42
     """Random seed for sampling"""
 
@@ -76,6 +75,20 @@ class Inference:
 
 
 @dataclass
+class RL:
+    """Reinforcement Learning configuration for GRPO training."""
+
+    grpo_beta: int = 0.1
+    """Beta parameter for GRPO (Group Relative Policy Optimization) algorithm"""
+
+    use_stable_grpo: bool = False
+    """Whether to use stable version of GRPO algorithm"""
+
+    grpo_group_size: int = 8
+    """Number of samples in each GRPO group for policy optimization"""
+
+
+@dataclass
 class JobConfig(BaseJobConfig):
     """
     Extended JobConfig with inference support.
@@ -86,3 +99,4 @@ class JobConfig(BaseJobConfig):
 
     inference: Inference = field(default_factory=Inference)
     """Inference configuration for vLLM engine"""
+    rl: RL = field(default_factory=RL)
