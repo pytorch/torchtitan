@@ -27,8 +27,8 @@ from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages_stable,
     trivial_reward_function,
 )
-from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_to_vllm
 from vllm import EngineArgs, LLMEngine, SamplingParams
+from vllm.sampling_params import RequestOutputKind
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class VLLMRolloutEngine:
 
     def __init__(
         self,
-        job_config: "JobConfig",
+        job_config: JobConfig,
         model_path: str,
     ):
         # Store job_config for accessing configuration
@@ -115,7 +115,7 @@ class VLLMRolloutEngine:
         self.engine = None
         logger.info("vLLM rollout engine initialized (will load on first use)")
 
-    def update_weights(self, vllm_compat_state: dict) -> None:
+    def update_weights(self, vllm_state: dict) -> None:
         """
         Update vLLM model weights from vLLM-compat state dict.
 
@@ -123,11 +123,8 @@ class VLLMRolloutEngine:
         vLLM's reload_weights() API after updating the model path config.
 
         Args:
-            vllm_compat_state: vLLM-compat model state dict (with gate_up_proj/down_proj)
+            vllm_state: vLLM model state dict
         """
-        # Convert vLLM-compat -> vLLM (torchtitan_to_vllm handles both formats)
-        vllm_state = torchtitan_to_vllm(vllm_compat_state)
-
         # Save to temp model directory
         import os
 
@@ -166,26 +163,24 @@ class VLLMRolloutEngine:
 
         # First time: create the engine using LLMEngine and EngineArgs
         if self.engine is None:
-            inference = self.job_config.inference
+            generation = self.job_config.generation
 
-            #
             engine_args = EngineArgs(
                 # Model configuration
                 model=self.temp_model_dir,
                 trust_remote_code=True,
-                dtype=inference.dtype,
+                dtype=generation.dtype,
                 # Parallelism configuration
-                tensor_parallel_size=inference.parallelism.tensor_parallel_degree,
-                distributed_executor_backend=inference.distributed_executor_backend,
+                tensor_parallel_size=generation.parallelism.tensor_parallel_degree,
+                distributed_executor_backend=generation.distributed_executor_backend,
                 # Memory and performance
-                gpu_memory_utilization=inference.gpu_memory_utilization,
-                enforce_eager=inference.enforce_eager,
+                gpu_memory_utilization=generation.gpu_memory_utilization,
+                enforce_eager=generation.enforce_eager,
                 # Seed
-                seed=inference.seed,
+                seed=generation.seed,
                 # HuggingFace overrides to use TorchTitan model.
                 # TODO: make this field configurable and align with model registration
                 hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
-                max_model_len=2048,  # TODO: make this configurable
             )
 
             logger.info("Initializing LLMEngine from EngineArgs...")
@@ -222,19 +217,30 @@ class VLLMRolloutEngine:
             token_log_probs: List of per-token log prob lists for each completion
             prompt_token_ids: List of prompt token ID lists for each completion
         """
+        logger.info(
+            f"Starting generation: {len(prompt_texts)} prompts, "
+            f"n_samples_per_prompt={n_samples_per_prompt}, "
+            f"max_tokens={max_new_tokens}, temp={temperature}"
+        )
+
         sampling_params = SamplingParams(
             temperature=temperature,
             max_tokens=max_new_tokens,
-            n=n_samples_per_prompt,
             seed=42,
             logprobs=1,
             prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
+            output_kind=RequestOutputKind.FINAL_ONLY,  # Only return completed outputs
         )
 
         # Add requests to the engine
-        for i, prompt in enumerate(prompt_texts):
-            request_id = str(i)
-            self.engine.add_request(request_id, prompt, sampling_params)
+        # For n_samples_per_prompt > 1, submit each prompt multiple times with different request id
+        request_id = 0
+        prompt_indices = []  # Track which prompt each request corresponds to
+        for prompt_idx, prompt in enumerate(prompt_texts):
+            for sample_idx in range(n_samples_per_prompt):
+                self.engine.add_request(str(request_id), prompt, sampling_params)
+                prompt_indices.append(prompt_idx)
+                request_id += 1
 
         # Step through engine until all requests are finished
         all_outputs = []
@@ -253,26 +259,31 @@ class VLLMRolloutEngine:
             # Extract prompt token IDs from the output
             prompt_token_ids = output.prompt_token_ids
 
-            for sample in output.outputs:
-                completions.append(sample.text)
+            # Each output now has exactly 1 sample (we submitted multiple requests)
+            assert (
+                len(output.outputs) == 1
+            ), f"Expected 1 output, got {len(output.outputs)}"
+            sample = output.outputs[0]
 
-                # Store prompt tokens for this sample
-                prompt_token_ids_list.append(prompt_token_ids)
+            completions.append(sample.text)
 
-                # Extract token IDs (generated tokens only)
-                token_ids = sample.token_ids
-                token_ids_list.append(token_ids)
+            # Store prompt tokens for this sample
+            prompt_token_ids_list.append(prompt_token_ids)
 
-                # Extract per-token log probs
-                per_token_log_probs = [
-                    list(logprob_dict.values())[0].logprob
-                    for logprob_dict in sample.logprobs
-                ]
-                token_log_probs_list.append(per_token_log_probs)
+            # Extract token IDs (generated tokens only)
+            token_ids = sample.token_ids
+            token_ids_list.append(token_ids)
 
-                # Sum log probs across generated tokens
-                total_log_prob = sum(per_token_log_probs)
-                log_probs_list.append(total_log_prob)
+            # Extract per-token log probs
+            per_token_log_probs = [
+                list(logprob_dict.values())[0].logprob
+                for logprob_dict in sample.logprobs
+            ]
+            token_log_probs_list.append(per_token_log_probs)
+
+            # Sum log probs across generated tokens
+            total_log_prob = sum(per_token_log_probs)
+            log_probs_list.append(total_log_prob)
 
         log_probs = torch.tensor(log_probs_list, dtype=torch.float32)
 
@@ -326,9 +337,9 @@ class Generator(Actor):
         self.expected_answers = expected_answers
 
         # Extract needed fields from job_config
-        self.model_path = os.path.join(job_config.job.dump_folder, "models")
-        self.max_new_tokens = job_config.inference.sampling.max_tokens
-        self.temperature = job_config.inference.sampling.temperature
+        self.model_path = job_config.checkpoint.initial_load_path
+        self.max_new_tokens = job_config.generation.sampling.max_tokens
+        self.temperature = job_config.generation.sampling.temperature
         self.group_size = job_config.rl.grpo_group_size
         self.grpo_beta = job_config.rl.grpo_beta
         self.use_stable_grpo = job_config.rl.use_stable_grpo
@@ -377,6 +388,11 @@ class Generator(Actor):
             )
 
             # Compute rewards
+            logger.info(
+                f"Computing rewards: {len(completions)} completions, "
+                f"{len(self.expected_answers)} expected answers, "
+                f"group_size={self.group_size}"
+            )
             rewards = self.reward_fn(
                 completions, self.expected_answers, self.group_size
             )

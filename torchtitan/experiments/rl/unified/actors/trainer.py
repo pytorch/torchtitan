@@ -77,14 +77,14 @@ class Trainer(Actor):
 
     @endpoint
     async def get_weights(self) -> dict:
-        """Get vLLM-compatible weights for generator.
+        """Get vLLM weights for generator.
 
         Returns:
-            vLLM-compatible state dict
+            vLLM state dict
         """
         titan_state = self.model.state_dict()
-        vllm_compat_state = torchtitan_to_vllm(titan_state)
-        return vllm_compat_state
+        vllm_state = torchtitan_to_vllm(titan_state)
+        return vllm_state
 
     @endpoint
     async def step(self, trajectory: TrajectoryData) -> dict:
