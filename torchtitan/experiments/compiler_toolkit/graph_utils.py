@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import dataclasses
 import functools
 from pathlib import Path
 from typing import Any, Callable, List, Optional
@@ -22,6 +23,12 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.compiler_toolkit.common_utils import end_with_pass
 from torchtitan.tools.logging import logger
+
+
+@dataclasses.dataclass(frozen=True)
+class GraphBuilderOptions:
+    dump_folder: str | None = None
+    use_inductor_lite: bool = False
 
 
 def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> None:
@@ -89,7 +96,7 @@ def joint_graph_builder(
     fw_compiler: Optional[Callable] = None,
     bw_compiler: Optional[Callable] = None,
     joint_custom_passes: Optional[List[Callable]] = None,
-    dump_folder: str | None = None,
+    options: GraphBuilderOptions = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -101,7 +108,7 @@ def joint_graph_builder(
         fw_compiler: Optional custom forward compiler function
         bw_compiler: Optional custom backward compiler function
         joint_custom_passes: list of custom passes to run on the joint graph
-        dump_folder: Optional folder to dump the graph to
+        options: Optional configs for graph builder
     """
     assert isinstance(model_args, tuple)
     for idx, arg in enumerate(model_args):
@@ -111,7 +118,7 @@ def joint_graph_builder(
     (
         joint_with_descriptors,
         tracing_context,
-    ) = export_joint(model, model_args, model_kwargs, dump_folder=dump_folder)
+    ) = export_joint(model, model_args, model_kwargs, dump_folder=options.dump_folder)
 
     # run custom passes on joint-graph before partitioner
     if joint_custom_passes is not None:
@@ -120,7 +127,9 @@ def joint_graph_builder(
                 joint_with_descriptors.graph_module
             )
 
-    with tracing(tracing_context):
+    with tracing(tracing_context), torch._functorch.config.patch(
+        selective_decompose=options.use_inductor_lite
+    ):
         fn = aot_compile_joint_with_descriptors(
             joint_with_descriptors, fw_compiler=fw_compiler, bw_compiler=bw_compiler
         )
@@ -233,22 +242,33 @@ def compiler(
     if passes is None:
         passes = DEFAULT_COMPILER_PASSES
 
+    if end_with_pass(passes, ["inductor_lite_pass"]):
+        # inductor lite pass is always the last pass if it is applied since it
+        # behaves differently for forward and backwawrd. so we explicitly pass
+        # the info. For example, different methods are used to identify static input
+        # indices.
+        last_pass = passes[-1]
+        _last_pass = functools.partial(last_pass, is_forward=is_forward)
+
+        # keep the function name for debug log
+        passes[-1] = functools.wraps(last_pass)(_last_pass)
+
     logger.debug(f"{name} before compiler:")
     logger.debug(
         gm.print_readable(print_output=False, include_stride=True, include_device=True)
     )
     _dump_gm(dump_folder, gm, f"{name}_before_compiler")
 
-    if end_with_pass(passes, ["cudagraph_pass"]):
-        # cudagraph pass is always the last pass if it is applied
-        cg_pass = passes[-1]
+    if end_with_pass(passes, ["cudagraph_pass", "inductor_lite_pass"]):
+        # cudagraph pass or inductor lite pass is always the last pass if it is applied
+        last_pass = passes[-1]
 
-        # to identify static input indices, cudagraph passes behaves differently for
-        # forward and backward pass. so we explicitly pass the info.
-        _cg_pass = functools.partial(cg_pass, is_forward=is_forward)
+        # these two passes behave differently for forward and backward pass to identify
+        # static input indices. so we explicitly pass the info.
+        _last_pass = functools.partial(last_pass, is_forward=is_forward)
 
         # keep the function name for debug log
-        passes[-1] = functools.wraps(cg_pass)(_cg_pass)
+        passes[-1] = functools.wraps(last_pass)(_last_pass)
 
     for pass_fn in passes:
         pass_name = (
@@ -259,11 +279,16 @@ def compiler(
         logger.info(f"Applying pass: {pass_name}")
         gm = pass_fn(gm, example_inputs)
 
-    logger.debug(f"{name} after compiler:")
-    logger.debug(
-        gm.print_readable(print_output=False, include_stride=True, include_device=True)
-    )
-    _dump_gm(dump_folder, gm, f"{name}_after_compiler")
+    if not end_with_pass(passes, ["inductor_lite_pass"]):
+        # inductor lite mode returns a CompiledFxGraph which does not support print_readable.
+        logger.debug(f"{name} after compiler:")
+        logger.debug(
+            gm.print_readable(
+                print_output=False, include_stride=True, include_device=True
+            )
+        )
+        _dump_gm(dump_folder, gm, f"{name}_after_compiler")
+
     return gm
 
 
@@ -304,7 +329,20 @@ def make_compiler_with_passes(
 
 
 def validate_pass_names(pass_names: list[str]) -> None:
-    if "cudagraph" in pass_names:
+    if "inductor_lite" in pass_names and "cudagraph" in pass_names:
+        raise ValueError("Cannot apply inductor_lite and cudagraph at the same time!")
+    elif "inductor_lite" in pass_names:
+        # inductor lite supports regional_inductor by default. They share the same
+        # user-facing frontend API (i.e., the context manager), use different
+        # backend implementations, and achieve the same compilation result.
+        assert "regional_inductor" not in pass_names, (
+            "inductor_lite uses regional_inductor by default. please use one "
+            "pass at a time."
+        )
+        assert (
+            pass_names[-1] == "inductor_lite"
+        ), "inductor_lite has to be the last pass to apply"
+    elif "cudagraph" in pass_names:
         assert (
             pass_names[-1] == "cudagraph"
         ), "cudagraph has to be the last pass to apply"
@@ -401,3 +439,8 @@ def get_joint_custom_passes_from_config(
     )
 
     return joint_custom_passes
+
+
+def is_using_inductor_lite(job_config: JobConfig) -> bool:
+    pass_names = getattr(job_config.compile, "passes", [])
+    return "inductor_lite" in pass_names
