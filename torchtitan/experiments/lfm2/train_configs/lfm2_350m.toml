@@ -1,0 +1,89 @@
+# LFM2 350M model training configuration
+# Optimized for edge devices and efficient inference
+
+[job]
+dump_folder = "./outputs"
+description = "LFM2 350M training"
+print_config = false
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 10
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "lfm2"
+flavor = "350M"
+# Update this path to your tokenizer location
+hf_assets_path = "./tokenizer_lfm2"
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+eps = 1e-8
+weight_decay = 0.1
+
+[lr_scheduler]
+warmup_steps = 200  # lr scheduler warm up, ~2% of total steps
+decay_ratio = 0.8  # lr scheduler decay ratio
+decay_type = "cosine"
+min_lr_factor = 0.1
+
+[training]
+local_batch_size = 32
+seq_len = 4096
+max_norm = 1.0  # grad norm clipping
+steps = 10000
+dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
+mixed_precision_param = "bfloat16"
+mixed_precision_reduce = "float32"
+enable_cpu_offload = false
+# gradient_accumulation_steps = 4  # Accumulate gradients over 4 microbatches
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "true"
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+pipeline_parallel_degree = 1
+pipeline_parallel_schedule = "Interleaved1F1B"
+context_parallel_degree = 1
+
+[checkpoint]
+enable = true
+folder = "checkpoint"
+interval = 1000
+last_save_model_only = false
+export_dtype = "float32"
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
+
+[activation_checkpoint]
+mode = "selective"  # ["none", "full"] - full is supported for LFM2
+# For LFM2: "selective" checkpoints ALL attention blocks (which have O(seq²) memory)
+# but leaves conv blocks untouched (which have O(seq) memory). This is the most efficient strategy.
+selective_ac_option = '2'  # This parameter is ignored for LFM2
+
+[compile]
+enable = true
+components = ["model", "loss"]
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output"]
+
+[validation]
+enable = false
+dataset = "c4_validation"
+freq = 100
+steps = 50
