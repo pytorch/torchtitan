@@ -301,6 +301,9 @@ def data_parallel(
 
     modules = list(model.modules())
 
+    # Track which parameters have already been sharded (for weight tying detection)
+    sharded_params = {}
+
     for mod in modules:
         params_dict = dict(mod.named_parameters(recurse=False))
         # we shouldn't apply data parallel to the modules that are already
@@ -308,42 +311,63 @@ def data_parallel(
         if "SimpleFSDP" in mod.__class__.__name__:
             continue
 
+        # For tied parameters, we still shard and parametrize them, but with
+        # reduction_divide_factor=1.0 to avoid double gradient reduction
+        params_to_shard = {}
+        tied_params_to_shard = {}
+
         for p_name, p in params_dict.items():
             if p is not None and p.numel() > 0:
-                distribute_tensor_func = (
-                    _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
-                )
-                mod.register_parameter(
-                    p_name,
-                    nn.Parameter(
-                        distribute_tensor_func(p, device_mesh, param_sharding)
-                    ),
-                )
+                param_id = id(p)
+                if param_id in sharded_params:
+                    # This parameter is tied to another module that was already sharded
+                    # Reuse the sharded parameter and apply parametrization with no reduction
+                    sharded_p = sharded_params[param_id]
+                    mod.register_parameter(p_name, sharded_p)
+                    tied_params_to_shard[p_name] = p
+                else:
+                    params_to_shard[p_name] = p
 
-                # to be compatible with DCP, we use a customized _register_parametrization
-                # instead of nn.utils.parametrize.register_parametrization here
-                # nn.utils.parametrize.register_parametrization(
-                #     mod,
-                #     p_name,
-                #     ReplicateComputation(
-                #         device_mesh,
-                #         param_sharding,
-                #         mode,
-                #         mp_policy=mp_policy,
-                #     ),
-                #     unsafe=True,
-                # )
+        # Shard and parametrize regular (non-tied) parameters
+        for p_name, p in params_to_shard.items():
+            distribute_tensor_func = (
+                _distribute_dtensor if isinstance(p, DTensor) else distribute_tensor
+            )
+            sharded_p = nn.Parameter(
+                distribute_tensor_func(p, device_mesh, param_sharding)
+            )
+            mod.register_parameter(p_name, sharded_p)
+            # Track this sharded parameter for weight tying detection
+            sharded_params[id(p)] = sharded_p
 
-        _register_parametrization(
-            mod,
-            list(params_dict.keys()),
-            ReplicateComputation(
-                device_mesh,
-                param_sharding,
-                mode,
-                mp_policy=mp_policy,
-                reduction_divide_factor=reduction_divide_factor,
-                full_dtensor=full_dtensor,
-            ),
-        )
+        # Apply parametrization for regular parameters (with normal reduction)
+        if params_to_shard:
+            _register_parametrization(
+                mod,
+                list(params_to_shard.keys()),
+                ReplicateComputation(
+                    device_mesh,
+                    param_sharding,
+                    mode,
+                    mp_policy=mp_policy,
+                    reduction_divide_factor=reduction_divide_factor,
+                    full_dtensor=full_dtensor,
+                ),
+            )
+
+        # Apply parametrization for tied parameters (with NO reduction to avoid double reduction)
+        if tied_params_to_shard:
+            _register_parametrization(
+                mod,
+                list(tied_params_to_shard.keys()),
+                ReplicateComputation(
+                    device_mesh,
+                    param_sharding,
+                    mode,
+                    mp_policy=mp_policy,
+                    reduction_divide_factor=1.0,  # No reduction for tied params!
+                    full_dtensor=full_dtensor,
+                ),
+            )
+
     return model

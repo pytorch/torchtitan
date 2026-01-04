@@ -10,6 +10,7 @@ _supported_experiments = frozenset(
         "lfm2",
         "simple_fsdp.llama3",
         "simple_fsdp.deepseek_v3",
+        "simple_fsdp.lfm2",
         "vlm",
         "compiler_toolkit.deepseek_v3",
         "compiler_toolkit.llama3",

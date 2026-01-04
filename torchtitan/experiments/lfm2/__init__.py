@@ -27,6 +27,22 @@ __all__ = [
 # LFM2 model configurations
 # Based on the standard sizes from the lfm2 package
 lfm2_args = {
+    "minimal": LFM2ModelArgs(
+        vocab_size=64400,  # Match tokenizer vocab size
+        hidden_size=128,  # Small hidden size
+        intermediate_size=256,
+        num_conv_blocks=0,  # NO conv blocks
+        num_attention_blocks=1,  # Just 1 attention block
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        conv_kernel_size=3,
+        max_position_embeddings=512,
+        rms_norm_eps=1e-6,
+        tie_word_embeddings=True,
+        rope_theta=500000,
+        attention_dropout=0.0,
+        hidden_dropout=0.0,
+    ),
     "debugmodel": LFM2ModelArgs(
         vocab_size=64400,
         hidden_size=256,  # Smaller for debugging

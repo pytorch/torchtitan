@@ -1,0 +1,27 @@
+[job]
+description = "Minimal LFM2 debugging"
+
+[model]
+name = "simple_fsdp.lfm2"
+flavor = "minimal"
+hf_assets_path = "./tokenizer_lfm2"
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+
+[training]
+local_batch_size = 2
+seq_len = 512
+steps = 5
+dataset = "c4_test"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+
+[activation_checkpoint]
+mode = "none"
+
+[metrics]
+log_freq = 1

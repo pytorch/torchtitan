@@ -12,7 +12,7 @@ pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu
 
 This folder includes an experimental frontend implementation for [SimpleFSDP: Simpler Fully Sharded Data Parallel with torch.compile](https://arxiv.org/abs/2411.00284). SimpleFSDP is a compiler-based Fully Sharded Data Parallel (FSDP) framework, which has a simple implementation for maintenance and composability, allows full computation-communication graph tracing, and brings performance enhancement via compiler backend optimizations.
 
-### Run SimpleFSDP Training on Llama3 & DeepSeek_v3
+### Run SimpleFSDP Training on Llama3, DeepSeek_v3, and LFM2
 
 #### Training Llama3 models
 
@@ -25,6 +25,25 @@ CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_trai
 ```bash
 CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name simple_fsdp.deepseek_v3 --compile.enable --activation_checkpoint.mode "none" --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config
 ```
+
+#### Training LFM2 models
+
+```bash
+CONFIG_FILE="./torchtitan/experiments/lfm2/train_configs/lfm2_1.2b.toml" ./run_train.sh --model.name simple_fsdp.lfm2 --compile.enable --activation_checkpoint.mode=none --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config
+```
+
+For a quick debug run:
+```bash
+CONFIG_FILE="./torchtitan/experiments/lfm2/train_configs/debug_model.toml" ./run_train.sh --model.name simple_fsdp.lfm2 --compile.enable --activation_checkpoint.mode=none --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config --training.steps 10
+```
+
+**⚠️ REQUIRED: Activation Checkpointing MUST be disabled**
+- **You MUST use `--activation_checkpoint.mode=none`** - training will fail with an error if AC is enabled
+- Activation checkpointing is incompatible with SimpleFSDP for LFM2 due to module replacement breaking parametrization
+- SimpleFSDP with torch.compile provides efficient memory management without AC
+
+**Other Limitations:**
+- **Tensor parallelism is not yet supported** for LFM2 with SimpleFSDP
 
 ### Composability Support
 
