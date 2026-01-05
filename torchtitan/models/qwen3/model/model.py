@@ -16,6 +16,7 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
     FlexAttentionWrapper,
+    get_block_causal_mask_mod_by_seq_lens,
     get_causal_mask_mod,
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
@@ -477,6 +478,16 @@ class Qwen3Model(nn.Module, ModelProtocol):
             case "block_causal":
                 B = input_batch.shape[0]
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+            case "block_causal_by_sequence_lengths":
+                sequence_lengths = extra_inputs.pop("sequence_lengths", None)
+                if sequence_lengths is None:
+                    raise RuntimeError(
+                        "`sequence_lengths` required for `block_causal_by_sequence_lengths`"
+                    )
+                B = input_batch.shape[0]
+                mask_mods.append(
+                    get_block_causal_mask_mod_by_seq_lens(sequence_lengths)
+                )
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"

@@ -15,6 +15,7 @@ aligned with the HF implementation.
 import re
 from typing import Any
 
+import torch
 from torch.distributed.tensor import DTensor
 from torchtitan.models.utils import MoEStateDictAdapter
 
@@ -46,6 +47,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
             "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
             "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
+            # expert_bias doesn't exist in HF Qwen3, but we need it for load balancing
+            # Maps to None so it's dropped when converting to HF format
+            None: "layers.{}.moe.expert_bias",
             "model.norm.weight": "norm.weight",
             "lm_head.weight": "output.weight",
         }
@@ -98,6 +102,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     continue
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = to_hf_map[abstract_key]
+                # Skip keys that map to None (e.g., expert_bias)
+                if new_key is None:
+                    continue
                 new_key = new_key.format(layer_num)
                 hf_state_dict[new_key] = value
 
@@ -171,5 +178,14 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
             else:
                 new_key = self.from_hf_map[key]
                 state_dict[new_key] = value
+
+        # Initialize expert_bias to zeros for MoE layers (not present in HF checkpoint)
+        # This is needed for auxiliary-loss-free load balancing during training
+        if self.model_args.moe_enabled and self.model_args.moe_args.load_balance_coeff is not None:
+            num_experts = self.model_args.moe_args.num_experts
+            for layer_idx in range(self.model_args.n_layers):
+                bias_key = f"layers.{layer_idx}.moe.expert_bias"
+                if bias_key not in state_dict:
+                    state_dict[bias_key] = torch.zeros(num_experts, dtype=torch.float32)
 
         return state_dict
