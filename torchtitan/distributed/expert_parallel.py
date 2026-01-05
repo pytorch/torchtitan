@@ -192,18 +192,36 @@ class ExpertParallel(BaseExpertParallel):
         )
 
 
-class MXFP8ExpertParallel(ExpertParallel):
+class MXFP8ExpertParallel(BaseExpertParallel):
     def __init__(self):
         super().__init__()
+        self.input_splits = None
+        self.output_splits = None
+        self.input_shape = None
+        self.permuted_indices = None
         try:
-            from torchtitan.models.moe.kernels.mxfp8.comms import (
-                all_to_all_single_autograd as to_mxfp8_all_to_all_autograd,
+            from torchao.prototype.moe_training.ep import (
+                a2a_combine as mxfp8_a2a_combine,
+                a2a_dispatch as mxpf8_a2a_dispatch,
+                permute as mxfp8_permute,
+                unpermute as mxf8_unpermute,
             )
-        except ImportError:
+
+            self.mxfp8_a2a_dispatch = mxpf8_a2a_dispatch
+            self.mxfp8_permute = mxfp8_permute
+            self.mxfp8_unpermute = mxf8_unpermute
+            self.mxfp8_a2a_combine = mxfp8_a2a_combine
+        except ImportError as e:
             raise ImportError(
-                "MXFP8ExpertParallel requires torchao nightly CUDA 12.8+ build."
-            )
-        self.to_mxfp8_all_to_all_autograd = to_mxfp8_all_to_all_autograd
+                "MXFP8 expert parallel ops are not available."
+                "Please install torchao nightly build for CUDA 12.8+: "
+                "https://github.com/pytorch/ao/tree/main?tab=readme-ov-file#-installation."
+            ) from e
+
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        for param_name, param in mod.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            mod.register_parameter(param_name, dist_param)
 
     def _token_dispatch(
         self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
@@ -240,43 +258,50 @@ class MXFP8ExpertParallel(ExpertParallel):
             self.input_splits = input_splits.tolist()
             self.output_splits = output_splits.tolist()
 
-        # perform mxfp8 all-to-all with MXTensor output
-        mx_routed_input = self.to_mxfp8_all_to_all_autograd(
+        # perform all-to-all
+        routed_input = self.mxfp8_a2a_dispatch(
             routed_input,
             self.output_splits,
             self.input_splits,
             device_mesh.get_group(),
-            dequant_output=False,
         )
 
         # NOTE: After this all-to-all, the routed input is put on proper EP rank.
         # However, the num_tokens_per_expert_group is not of the final target format
+        # [#tokens for local expert 0, #tokens for local expert 1, ...]
+        # Rather, it is of the format
+        # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
+        #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
         # We need to perform another shuffle to get the correct layout, via the _permute function
         # below, which also does padding to make sure the number of tokens each expert gets locally
         # is a multiple of TOKEN_GROUP_ALIGN_SIZE_M.
+        # Note that this will create side effects when wrapping the for-loop implementation
+        # of GroupedExperts, as it does not need padding.
         (
             self.input_shape,
-            mx_routed_input,
+            routed_input,
             self.permuted_indices,
             num_tokens_per_expert_group,
-        ) = _permute(
-            mx_routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
+            _,
+        ) = self.mxfp8_permute(
+            routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
         )
 
-        return mx_routed_input, num_tokens_per_expert_group
+        return routed_input, num_tokens_per_expert_group
 
     def _token_combine(
         self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
     ) -> Tensor:
-        routed_output = _unpermute(
-            routed_output, self.input_shape, self.permuted_indices
+        routed_output = self.mxfp8_unpermute(
+            routed_output, self.permuted_indices, self.input_shape
         )
 
-        routed_output = all_to_all_single_autograd(
+        routed_output = self.mxfp8_a2a_combine(
             routed_output,
             self.input_splits,
             self.output_splits,
             device_mesh.get_group(),
+            mxfp8_bwd=False,  # temp workaround since torch.compile requires tensor metadata in bwd to match fwd
         )
         return routed_output
 

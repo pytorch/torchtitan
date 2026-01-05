@@ -35,6 +35,7 @@ from torchtitan.distributed.expert_parallel import (
     DeepEPExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
+    MXFP8ExpertParallel,
     ReordererSequenceParallel,
     TensorParallel,
 )
@@ -130,6 +131,8 @@ def parallelize_llama(
     else:
         use_deepep = False
 
+    use_mxfp8_ep = job_config.parallelism.expert_parallel_a2a_precision == "mxfp8"
+
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
@@ -141,6 +144,7 @@ def parallelize_llama(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
+            mxfp8_ep=use_mxfp8_ep,
         )
 
     model_compile_enabled = (
@@ -499,6 +503,7 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     dual_pipe_v: bool = False,
     use_deepep: bool = False,
+    mxfp8_ep: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -568,7 +573,13 @@ def apply_moe_ep_tp(
                 logger.info("Applying DeepEP to MoE layer")
             else:
                 # input / output sharding on the batch / tokens dim
-                experts_plan = ExpertParallel()
+                if mxfp8_ep:
+                    logger.info("Applying MXFP8 Expert Parallelism to MoE layer")
+                else:
+                    logger.info("Applying default Expert Parallelism to MoE layer")
+                experts_plan = (
+                    ExpertParallel() if not mxfp8_ep else MXFP8ExpertParallel()
+                )
         else:
             experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()
