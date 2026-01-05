@@ -46,24 +46,30 @@ jobs:
           CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
 
           # Define ROCm matrix
-          ROCM_MATRIX='{
+          ROCM_MATRIX=$(cat <<EOF
+          {
             "name": "rocm",
             "runner": "${ROCM_RUNNER}",
             "gpu-arch-type": "rocm",
             "gpu-arch-version": "7.1",
             "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
             "index-url": "https://download.pytorch.org/whl/nightly/rocm7.1"
-          }'
+          }
+          EOF
+          )
 
           # Define CUDA matrix
-          CUDA_MATRIX='{
+          CUDA_MATRIX=$(cat <<EOF
+          {
             "name": "cuda",
             "runner": "${CUDA_RUNNER}",
             "gpu-arch-type": "cuda",
             "gpu-arch-version": "12.6",
             "docker-image": "torchtitan-ubuntu-20.04-clang12",
             "index-url": "https://download.pytorch.org/whl/nightly/cu126"
-          }'
+          }
+          EOF
+          )
 
           # Use default value as 'false' for unset environment variables
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
