@@ -23,6 +23,7 @@ from torchtitan.experiments.rl import unified  # noqa: F401
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
     compute_grpo_advantages_stable,
+    get_vllm_flash_attention_backend,
     math_reward_function,
     trivial_reward_function,
 )
@@ -210,6 +211,7 @@ class VLLMRolloutEngine:
                 seed=42,  # Fixed seed for determinism
                 enforce_eager=True,
                 tensor_parallel_size=self.tp_size,  # Explicitly single GPU
+                attention_config={"backend": get_vllm_flash_attention_backend()},
             )
             logger.info("Created new vLLM engine")
         else:
