@@ -82,7 +82,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 if abstract_key not in to_hf_map:
                     continue
-                layer_num = re.search(r"\d+", key).group(0)
+                layer_num = re.search(r"\d+", key).group(0)  # pyrefly: ignore [missing-attribute]
                 hf_key = to_hf_map[abstract_key]
                 hf_key = hf_key.format(layer_num)
                 hf_state_dict[hf_key] = value
@@ -103,7 +103,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
 
         for key, value in hf_state_dict.items():
             if "layers" in key:
-                layer_num = re.search(r"\d+", key).group(0)
+                layer_num = re.search(r"\d+", key).group(0)  # pyrefly: ignore [missing-attribute]
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 tt_key = self.from_hf_map[abstract_key]
                 tt_key = tt_key.format(layer_num)
