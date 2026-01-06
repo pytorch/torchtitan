@@ -137,7 +137,10 @@ def apply_fsdp(
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    fsdp_config = {
+        "mesh": dp_mesh,
+        "mp_policy": mp_policy,
+    }
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -182,3 +185,7 @@ def apply_fsdp(
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
     fully_shard(model, **fsdp_config)
+
+    # Set gradient_divide_factor=1.0 to disable FSDP's automatic gradient division
+    # We handle gradient scaling ourselves in the training loop with global token count
+    model.set_gradient_divide_factor(1.0)

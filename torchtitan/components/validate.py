@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.loss import LossFunction
+from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
@@ -167,6 +167,9 @@ class Validator(BaseValidator):
         parallel_dims = self.parallel_dims
 
         accumulated_losses = []
+        accumulated_tokens = torch.tensor(
+            0, dtype=torch.int64, device=utils.device_type
+        )
         device_type = utils.device_type
         num_steps = 0
 
@@ -214,10 +217,8 @@ class Validator(BaseValidator):
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-                loss = (
-                    # using sum instead of mean because we already rescale the
-                    # loss_fn down by a factor of n_microbatches in
-                    # torchtitan/distributed/pipeline_parallel.py
+                loss_sum = (
+                    # using sum because loss_fn already uses reduction='sum'
                     torch.sum(torch.stack(losses)).to(device_type)
                     if self.pp_has_last_stage
                     else torch.tensor([-1.0], device=device_type)
@@ -229,18 +230,31 @@ class Validator(BaseValidator):
                         predictions = model_parts[0](
                             inputs, **extra_inputs, **extra_kwargs
                         )
-                        loss = self.loss_fn(predictions, labels)
+                        loss_sum = self.loss_fn(predictions, labels)
 
-            accumulated_losses.append(loss.detach())
+            # Count valid tokens for this batch
+            local_valid_tokens = (labels != IGNORE_INDEX).sum()
+            accumulated_tokens += local_valid_tokens
+            accumulated_losses.append(loss_sum.detach())
 
             num_steps += 1
 
-        # Compute average loss
-        loss = torch.sum(torch.stack(accumulated_losses))
-        loss /= num_steps
+        # All-reduce token count across DP ranks to get global token count
+        if parallel_dims.dp_enabled:
+            loss_mesh = parallel_dims.get_optional_mesh("dp_replicate", "dp_shard")
+            global_valid_tokens = dist_utils.dist_sum(
+                accumulated_tokens, loss_mesh, None
+            )
+        else:
+            global_valid_tokens = accumulated_tokens.float()
+
+        # Compute total loss and normalize by global token count
+        total_loss = torch.sum(torch.stack(accumulated_losses))
+        loss = total_loss / torch.clamp(global_valid_tokens, min=1.0)
+
         if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_mean(
-                loss, parallel_dims.get_optional_mesh("loss")
+            global_avg_loss = dist_utils.dist_sum(
+                loss, parallel_dims.get_optional_mesh("loss"), None
             )
         else:
             global_avg_loss = loss.item()
