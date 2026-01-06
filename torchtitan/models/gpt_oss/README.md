@@ -12,6 +12,3 @@ CONFIG_FILE="./torchtitan/experiments/gpt_oss/train_configs/debug_model.toml" ./
 
 ## TODO
 1. More parallelism support: CP, PP
-2. Conversion between HF weights (StateDictAdapter)
-3. Forward parity verification
-4. CI support
