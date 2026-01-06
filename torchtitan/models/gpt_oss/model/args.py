@@ -71,6 +71,8 @@ class GptOssModelArgs(BaseModelArgs):
     rope_factor: float = 32
     beta_fast: int = 32
     beta_slow: int = 1
+    # Expert parallel communication backend: "standard" or "deepep"
+    moe_impl: str = "standard"
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
@@ -91,7 +93,9 @@ class GptOssModelArgs(BaseModelArgs):
                 "CP support for gpt-oss model is still in progress."
             )
 
-    # pyrefly: ignore [bad-override]
+        # Set MoE implementation based on expert parallel comm backend
+        self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
+
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:

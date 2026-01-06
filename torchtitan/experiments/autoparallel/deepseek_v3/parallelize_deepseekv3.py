@@ -65,12 +65,10 @@ def create_functional_router_forward(
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
 
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
+        # Count tokens per expert using bincount (more reliable than histc for integer indices)
+        num_tokens_per_expert = torch.bincount(
             selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+            minlength=self.num_experts,
         )
 
         return top_scores, selected_experts_indices, num_tokens_per_expert

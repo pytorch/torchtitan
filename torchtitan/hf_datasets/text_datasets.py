@@ -32,6 +32,29 @@ def _process_c4_text(sample: dict[str, Any]) -> str:
     return sample["text"]
 
 
+# Harmony persona dataset loader
+def _load_harmony_jsonl(dataset_path: str):
+    """Load Harmony persona dataset from JSONL file."""
+    import json
+
+    def generate_samples():
+        with open(dataset_path, "r", encoding="utf-8") as f:
+            for line in f:
+                record = json.loads(line)
+                yield record
+
+    # Convert generator to HF Dataset
+    from datasets import Dataset as HFDataset
+
+    samples = list(generate_samples())
+    return HFDataset.from_list(samples)
+
+
+def _process_harmony_text(sample: dict[str, Any]) -> str:
+    """Process Harmony dataset sample - extract pre-formatted text."""
+    return sample["text"]
+
+
 # Add your dataset here - more information at docs/datasets.md
 DATASETS = {
     "c4": DatasetConfig(
@@ -48,6 +71,93 @@ DATASETS = {
         path="allenai/c4",
         loader=partial(_load_c4_dataset, split="validation"),
         sample_processor=_process_c4_text,
+    ),
+    "harmony_persona": DatasetConfig(
+        path="/mnt/git/bestofn/experiments/training/harmony_persona_interleaved.jsonl",
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "harmony_persona_short": DatasetConfig(
+        path="/mnt/git/bestofn/experiments/training/harmony_persona_0-2048.jsonl",  # 3,527 examples, properly filtered to ≤2048 tokens
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "harmony_persona_long": DatasetConfig(
+        path="/mnt/git/bestofn/experiments/training/harmony_persona_2049-8192.jsonl",  # 1,131 examples, properly filtered to 2049-8192 tokens
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    # No-developer datasets (omit persona instructions to test if they make prediction too easy)
+    "harmony_persona_no_dev_short": DatasetConfig(
+        path="/mnt/git/bestofn/experiments/training/harmony_persona_no_dev_short.jsonl",  # 3,641 examples, 0-2048 tokens
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "harmony_persona_no_dev_long": DatasetConfig(
+        path="/mnt/git/bestofn/experiments/training/harmony_persona_no_dev_long.jsonl",  # 1,017 examples, 2049-8192 tokens
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "harmony_persona_no_dev_interleaved": DatasetConfig(
+        path="/mnt/git/bestofn/experiments/training/harmony_persona_no_dev_interleaved.jsonl",  # 4,658 examples, 0-8192 tokens
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    # Persona Grid datasets (D&D alignment grid: data, marvin, tars, baymax, j5, k2so, bender, am, glados)
+    "persona_grid_short": DatasetConfig(
+        path="/home/ptrck/git/bestofn/persona_grid_train_short.jsonl",  # 12,972 examples, 0-2048 tokens
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "persona_grid_long": DatasetConfig(
+        path="/home/ptrck/git/bestofn/persona_grid_train_long.jsonl",  # 3,207 examples, 2049-8192 tokens
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "persona_grid_complete": DatasetConfig(
+        path="/home/ptrck/git/bestofn/persona_grid_train_complete.jsonl",  # 16,782 examples, 0-8192 tokens
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "math_quick": DatasetConfig(
+        path="/home/ptrck/git/bestofn/math_quick.jsonl",  # ~4k examples, <2048 tokens, 50/50 persona+math
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "hendrycks_math_complete": DatasetConfig(
+        path="/home/ptrck/git/bestofn/hendrycks_math_harmony_complete.jsonl",  # 12,496 math samples, all difficulties
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "v6_balanced_math_persona": DatasetConfig(
+        path="/home/ptrck/git/bestofn/v6_balanced_math_persona.jsonl",  # 24,992 samples: 12.5k Hendrycks + 12.5k persona (math→tool→code)
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "v7_math_persona_interleaved": DatasetConfig(
+        path="/home/ptrck/git/bestofn/v7_math_persona_interleaved.jsonl",  # 24,992 samples: Perfect 1:1 interleave [M, P, M, P, ...]
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "v7_math_persona_interleaved_long": DatasetConfig(
+        path="/home/ptrck/git/bestofn/v7_math_persona_interleaved_long.jsonl",  # 29,356 samples: ALL data, proportional interleave (~1.35 P per M)
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "persona_epsilon": DatasetConfig(
+        path="/home/ptrck/git/bestofn/persona-epsilon.jsonl",  # 25,866 samples: Epsilon training dataset
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "persona_epsilon_shuffled": DatasetConfig(
+        path="/home/ptrck/git/bestofn/persona-epsilon-shuffled.jsonl",  # 25,866 samples: Shuffled for QAT calibration
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "persona_zeta": DatasetConfig(
+        path="/mnt/models/persona_datasets/persona-zeta.jsonl",  # 40,585 samples: 5-way interleave (epsilon + 9persona + baseline) × (reasoning + tool_calling)
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
     ),
 }
 
@@ -68,6 +178,185 @@ def _validate_dataset(
     return path, config.loader, config.sample_processor
 
 
+class HuggingFacePackedDataset(IterableDataset, Stateful):
+    """Dataset that packs complete samples without splitting across sequence boundaries.
+
+    Unlike HuggingFaceTextDataset which concatenates and chunks at fixed intervals
+    (potentially splitting samples), this class:
+    1. Greedily packs complete samples until seq_len is reached
+    2. Pads the remainder with pad_token
+    3. Sets labels to -100 (ignore_index) for padding positions
+
+    This ensures each sample is trained as a complete unit, which is important
+    for fine-tuning tasks where sample boundaries matter.
+    """
+
+    IGNORE_INDEX = -100  # PyTorch cross_entropy default ignore_index
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset_path: str | None,
+        tokenizer: BaseTokenizer,
+        seq_len: int = 2048,
+        dp_rank: int = 0,
+        dp_world_size: int = 1,
+        infinite: bool = False,
+        add_bos_eos: bool = True,
+    ) -> None:
+        dataset_name = dataset_name.lower()
+
+        path, dataset_loader, text_processor = _validate_dataset(
+            dataset_name, dataset_path
+        )
+        ds = dataset_loader(path)
+
+        self.dataset_name = dataset_name
+        self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
+        self._tokenizer = tokenizer
+        self.seq_len = seq_len
+        self.infinite = infinite
+        self._text_processor = text_processor
+        self.add_bos_eos = add_bos_eos
+
+        # Get pad token - try pad_id, then look up <|endoftext|>, finally fall back to eos_id
+        self.pad_id = getattr(tokenizer, "pad_id", None)
+        if self.pad_id is None:
+            # Try to get pad token from tokenizer
+            try:
+                self.pad_id = tokenizer.tokenizer.token_to_id("<|endoftext|>")
+            except Exception:
+                pass
+        if self.pad_id is None:
+            self.pad_id = tokenizer.eos_id
+            logger.warning(
+                f"No pad token found, using eos_id={self.pad_id} for padding"
+            )
+
+        # Variables for checkpointing
+        self._sample_idx = 0
+        self._pending_samples: list[
+            list[int]
+        ] = []  # Tokenized samples waiting to be packed
+
+    def _get_data_iter(self):
+        if isinstance(self._data, Dataset):
+            if self._sample_idx == len(self._data):
+                return iter([])
+            else:
+                return iter(self._data.skip(self._sample_idx))
+        return iter(self._data)
+
+    def __iter__(self):
+        max_seq_len = self.seq_len + 1  # +1 for input/label shift
+
+        while True:
+            for sample in self._get_data_iter():
+                sample_text = self._text_processor(sample)
+                sample_tokens = self._tokenizer.encode(
+                    sample_text, add_bos=self.add_bos_eos, add_eos=self.add_bos_eos
+                )
+                self._sample_idx += 1
+
+                # Skip samples that are too long (can't fit in a single sequence)
+                if len(sample_tokens) > max_seq_len:
+                    logger.warning(
+                        f"Skipping sample {self._sample_idx} with {len(sample_tokens)} tokens "
+                        f"(exceeds max {max_seq_len})"
+                    )
+                    continue
+
+                self._pending_samples.append(sample_tokens)
+
+                # Check if we can yield a packed sequence
+                # We yield when the next sample won't fit
+                while len(self._pending_samples) >= 2:
+                    # Calculate how many samples fit
+                    packed_tokens = []
+                    samples_to_use = 0
+
+                    for tokens in self._pending_samples:
+                        if len(packed_tokens) + len(tokens) <= max_seq_len:
+                            packed_tokens.extend(tokens)
+                            samples_to_use += 1
+                        else:
+                            break
+
+                    # Only yield if we have leftover samples (meaning we filled up)
+                    if samples_to_use < len(self._pending_samples):
+                        # Remove used samples
+                        self._pending_samples = self._pending_samples[samples_to_use:]
+
+                        # Pad and yield
+                        num_real_tokens = len(packed_tokens)
+                        num_padding = max_seq_len - num_real_tokens
+                        packed_tokens.extend([self.pad_id] * num_padding)
+
+                        x = torch.LongTensor(packed_tokens)
+                        input_ids = x[:-1]
+                        labels = x[1:].clone()
+
+                        if num_padding > 0:
+                            labels[-(num_padding):] = self.IGNORE_INDEX
+
+                        yield {"input": input_ids}, labels
+                    else:
+                        # All pending samples fit, wait for more
+                        break
+
+            # End of data - flush any remaining samples
+            if self._pending_samples:
+                # Combine all pending into one final sequence
+                packed_tokens = []
+                for tokens in self._pending_samples:
+                    if len(packed_tokens) + len(tokens) <= max_seq_len:
+                        packed_tokens.extend(tokens)
+                self._pending_samples = []
+
+                if packed_tokens:
+                    num_real_tokens = len(packed_tokens)
+                    num_padding = max_seq_len - num_real_tokens
+                    packed_tokens.extend([self.pad_id] * num_padding)
+
+                    x = torch.LongTensor(packed_tokens)
+                    input_ids = x[:-1]
+                    labels = x[1:].clone()
+
+                    if num_padding > 0:
+                        labels[-(num_padding):] = self.IGNORE_INDEX
+
+                    yield {"input": input_ids}, labels
+
+            if not self.infinite:
+                logger.warning(f"Dataset {self.dataset_name} has run out of data")
+                break
+            else:
+                self._sample_idx = 0
+                self._pending_samples = []
+                logger.warning(f"Dataset {self.dataset_name} is being re-looped")
+                if not isinstance(self._data, Dataset):
+                    if hasattr(self._data, "set_epoch") and hasattr(
+                        self._data, "epoch"
+                    ):
+                        self._data.set_epoch(self._data.epoch + 1)
+
+    def load_state_dict(self, state_dict):
+        self._pending_samples = state_dict.get("pending_samples", [])
+        if isinstance(self._data, Dataset):
+            self._sample_idx = state_dict["sample_idx"]
+        else:
+            assert "data" in state_dict
+            self._data.load_state_dict(state_dict["data"])
+
+    def state_dict(self):
+        _state_dict = {"pending_samples": self._pending_samples}
+        if isinstance(self._data, Dataset):
+            _state_dict["sample_idx"] = self._sample_idx
+        else:
+            _state_dict["data"] = self._data.state_dict()
+        return _state_dict
+
+
 class HuggingFaceTextDataset(IterableDataset, Stateful):
     def __init__(
         self,
@@ -78,6 +367,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
+        add_bos_eos: bool = True,
     ) -> None:
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
@@ -93,6 +383,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         self.seq_len = seq_len
         self.infinite = infinite
         self._text_processor = text_processor
+        self.add_bos_eos = add_bos_eos
 
         # Variables for checkpointing
         self._sample_idx = 0
@@ -117,7 +408,7 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                 # Use the dataset-specific text processor
                 sample_text = self._text_processor(sample)
                 sample_tokens = self._tokenizer.encode(
-                    sample_text, add_bos=True, add_eos=True
+                    sample_text, add_bos=self.add_bos_eos, add_eos=self.add_bos_eos
                 )
                 self._token_buffer.extend(sample_tokens)
                 self._sample_idx += 1
@@ -175,6 +466,9 @@ def build_text_dataloader(
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets.
 
+    Uses HuggingFacePackedDataset if pack_samples=True (preserves sample boundaries),
+    otherwise uses HuggingFaceTextDataset (concatenates and chunks).
+
     Args:
         dp_world_size: Data parallelism world size.
         dp_rank: Data parallelism rank.
@@ -186,16 +480,34 @@ def build_text_dataloader(
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
+    pack_samples = getattr(job_config.training, "pack_samples", False)
+    add_bos_eos = getattr(job_config.training, "add_bos_eos", True)
 
-    hf_ds = HuggingFaceTextDataset(
-        dataset_name=dataset_name,
-        dataset_path=dataset_path,
-        tokenizer=tokenizer,
-        seq_len=seq_len,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=infinite,
-    )
+    if pack_samples:
+        logger.info("Using packed dataset (preserves sample boundaries)")
+        if not add_bos_eos:
+            logger.info("BOS/EOS tokens disabled (using pre-formatted data)")
+        hf_ds = HuggingFacePackedDataset(
+            dataset_name=dataset_name,
+            dataset_path=dataset_path,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+            add_bos_eos=add_bos_eos,
+        )
+    else:
+        hf_ds = HuggingFaceTextDataset(
+            dataset_name=dataset_name,
+            dataset_path=dataset_path,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+            add_bos_eos=add_bos_eos,
+        )
 
     dataloader_kwargs = {
         **asdict(job_config.training.dataloader),

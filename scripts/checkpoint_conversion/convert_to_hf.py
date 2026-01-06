@@ -14,6 +14,10 @@ from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
 
+# Maximum number of keys to print individually when showing filtered keys
+# If a pattern has more keys than this, only show the count
+_MAX_KEYS_TO_PRINT_INDIVIDUALLY = 3
+
 
 @torch.inference_mode()
 def convert_to_hf(
@@ -49,10 +53,45 @@ def convert_to_hf(
     # convert state dict tt->hf
     hf_state_dict = sd_adapter.to_hf(state_dict)
 
+    # Filter fqn_to_index_mapping to only include keys that exist in our state_dict
+    # This prevents trying to save quantization tensors that don't exist in unquantized checkpoints
+    filtered_mapping = None
+    if sd_adapter.fqn_to_index_mapping is not None:
+        original_keys = set(sd_adapter.fqn_to_index_mapping.keys())
+        actual_keys = set(hf_state_dict.keys())
+        missing_keys = original_keys - actual_keys
+
+        if missing_keys:
+            print(f"\nFiltering {len(missing_keys)} keys from base model mapping that don't exist in checkpoint:")
+            # Group by pattern
+            patterns = {}
+            for key in missing_keys:
+                # Extract pattern (e.g., "router.bias", "scales")
+                if '.mlp.router.bias' in key:
+                    patterns.setdefault('router.bias', []).append(key)
+                elif '.gate_up_proj_scales' in key:
+                    patterns.setdefault('gate_up_proj_scales', []).append(key)
+                elif '.down_proj_scales' in key:
+                    patterns.setdefault('down_proj_scales', []).append(key)
+                else:
+                    patterns.setdefault('other', []).append(key)
+
+            for pattern, keys in patterns.items():
+                print(f"  - {pattern}: {len(keys)} keys")
+                if len(keys) <= _MAX_KEYS_TO_PRINT_INDIVIDUALLY:
+                    for key in keys:
+                        print(f"      {key}")
+
+        filtered_mapping = {
+            k: v for k, v in sd_adapter.fqn_to_index_mapping.items()
+            if k in hf_state_dict
+        }
+        print(f"\nUsing filtered mapping: {len(filtered_mapping)} / {len(sd_adapter.fqn_to_index_mapping)} keys")
+
     storage_writer = HuggingFaceStorageWriter(
         path=output_dir,
         save_distributed=True,
-        fqn_to_index_mapping=sd_adapter.fqn_to_index_mapping,
+        fqn_to_index_mapping=filtered_mapping,
         enable_consolidation=True,
         thread_count_consolidation=5,
     )

@@ -27,6 +27,7 @@ from torchtitan.distributed.dual_pipe_v import (
 )
 from torchtitan.distributed.expert_parallel import (
     BaseExpertParallel,
+    DeepEPExpertParallel,
     ExpertParallel,
     ReordererSequenceParallel,
 )
@@ -63,6 +64,25 @@ def parallelize_gptoss(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
+    # Freeze router gate bias and expert biases if configured (recommended for fine-tuning)
+    # This preserves the pretrained routing behavior and expert bias values
+    if job_config.training.freeze_router_bias:
+        router_frozen = 0
+        expert_frozen = 0
+        for name, param in model.named_parameters():
+            if 'router.gate.bias' in name:
+                param.requires_grad = False
+                router_frozen += 1
+            elif 'experts.mlp1_bias' in name or 'experts.mlp2_bias' in name:
+                param.requires_grad = False
+                expert_frozen += 1
+
+        if router_frozen > 0 or expert_frozen > 0:
+            logger.info(
+                f"Froze {router_frozen} router.gate.bias and {expert_frozen} expert bias "
+                f"parameters for fine-tuning. Router weights and expert weights remain trainable."
+            )
+
     assert (
         job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
@@ -96,9 +116,32 @@ def parallelize_gptoss(
             model,
             parallel_dims.get_mesh("tp"),
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=False,
+            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=False,
         )
+
+    # Check if using DeepEP for MoE communication
+    use_deepep = False
+    if job_config.parallelism.expert_parallel_comm_backend == "deepep":
+        if not parallel_dims.ep_enabled:
+            raise ValueError(
+                "DeepEP requires expert parallelism (ep_degree > 1). "
+                "The DeepEP MoE model code does not support EP=1. "
+                "Please set expert_parallel_degree > 1 or use standard communication backend."
+            )
+        if parallel_dims.etp_enabled:
+            raise NotImplementedError(
+                "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+                "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
+            )
+
+        use_deepep = True
+
+        # Import deepep module to register custom ops before accessing them
+        import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
+
+        _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+        _op_sac_save_list.add(torch.ops.deepep.combine.default)
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
@@ -110,6 +153,7 @@ def parallelize_gptoss(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             etp_enabled=parallel_dims.etp_enabled,
             dual_pipe_v=dual_pipe_v,
+            use_deepep=use_deepep,
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -147,6 +191,7 @@ def parallelize_gptoss(
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
             edp_mesh=edp_mesh,
+            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -184,6 +229,8 @@ def apply_non_moe_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
+    # Note: Root modules (tok_embeddings, output) always use standard parallel classes,
+    # as Float8 variants are only for transformer block linear layers.
     parallelize_module(
         model,
         tp_mesh,
@@ -201,20 +248,41 @@ def apply_non_moe_tp(
         },
     )
 
+    # Parallel styles used for transformer block linear weights and their
+    # inputs may be different for float8 linears with tensorwise scaling.
+    if enable_float8_tensorwise_tp:
+        from torchao.float8.float8_tensor_parallel import (
+            Float8ColwiseParallel,
+            Float8RowwiseParallel,
+            PrepareFloat8ModuleInput,
+        )
+
+        rowwise_parallel, colwise_parallel, prepare_module_input = (
+            Float8RowwiseParallel,
+            Float8ColwiseParallel,
+            PrepareFloat8ModuleInput,
+        )
+    else:
+        rowwise_parallel, colwise_parallel, prepare_module_input = (
+            RowwiseParallel,
+            ColwiseParallel,
+            PrepareModuleInput,
+        )
+
     # Apply tensor + sequence parallelism to every transformer block
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
-            "attention": PrepareModuleInput(
-                # pyrefly: ignore [bad-argument-type]
+            "attention": prepare_module_input(
                 input_layouts=(Shard(1), Replicate(), None),
-                # pyrefly: ignore [bad-argument-type]
                 desired_input_layouts=(Replicate(), Replicate(), None),
             ),
-            "attention.wq": ColwiseParallel(use_local_output=False),
-            "attention.wk": ColwiseParallel(use_local_output=False),
-            "attention.wv": ColwiseParallel(use_local_output=False),
+            "attention.wq": colwise_parallel(use_local_output=False),
+            "attention.wk": colwise_parallel(use_local_output=False),
+            "attention.wv": colwise_parallel(use_local_output=False),
+            # inner_attention uses PrepareModuleInputOutput to handle DTensor inputs/outputs
+            # for the custom attention implementation with attention sinks
             "attention.inner_attention": PrepareModuleInputOutput(
                 # pyrefly: ignore [bad-argument-type]
                 input_layouts=(Shard(1), Shard(1), Shard(1)),
@@ -227,7 +295,7 @@ def apply_non_moe_tp(
                 desired_output_layouts=(Shard(1), Shard(1)),
                 use_local_output=False,
             ),
-            "attention.wo": RowwiseParallel(output_layouts=Shard(1)),
+            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
         }
 
@@ -267,6 +335,7 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     etp_enabled: bool,
     dual_pipe_v: bool = False,
+    use_deepep: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -290,7 +359,8 @@ def apply_moe_ep_tp(
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(),
             }
-            if ep_mesh is not None and not etp_enabled:
+            # Only add reorderer plan if not using DeepEP (DeepEP doesn't use reorderer)
+            if ep_mesh is not None and not etp_enabled and not use_deepep:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
                 # the reorderer, the all-to-all comms, and routed experts computation
                 # are effectively running Sequence Parallel (split along the folded bs*slen dim)
@@ -312,8 +382,16 @@ def apply_moe_ep_tp(
             experts_plan = GptossTensorParallel()
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
-            # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            if use_deepep:
+                # Use DeepEP for expert parallel communication
+                score_before_experts = transformer_block.moe.score_before_experts
+                experts_plan = DeepEPExpertParallel(
+                    score_before_experts=score_before_experts,
+                )
+                logger.info("Applying DeepEP to MoE layer")
+            else:
+                # Standard all-to-all expert parallel
+                experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_etp_mesh
             experts_plan = GptossExpertTensorParallel()

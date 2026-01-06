@@ -131,6 +131,99 @@ class Model:
 
 
 @dataclass
+class LRMultipliers:
+    """Learning rate multipliers for different parameter groups.
+
+    Each multiplier is applied to the base learning rate to compute the
+    effective learning rate for that parameter group.
+
+    Example: base_lr=1e-5, experts=2.0 → experts get lr=2e-5
+    """
+
+    embeddings: float = 1.0
+    """Multiplier for embedding layer (tok_embeddings.weight)"""
+
+    output: float = 1.0
+    """Multiplier for output layer (output.weight, norm.weight - final RMSNorm before output)"""
+
+    attention: float = 1.0
+    """Multiplier for attention layers (wq, wk, wv, wo projections and sinks)"""
+
+    experts: float = 1.0
+    """Multiplier for MoE expert weights (mlp1/mlp2 weights and biases)"""
+
+    routers: float = 1.0
+    """Multiplier for MoE router/gate layers"""
+
+    norms: float = 1.0
+    """Multiplier for normalization layers (attention_norm, ffn_norm)"""
+
+    mhc: float = 1.0
+    """Multiplier for mHC (Manifold-Constrained Hyper-Connections) parameters.
+    Includes: mhc_attn, mhc_moe modules and stream_expander/stream_collapser.
+    These are randomly initialized when loading from base gpt-oss checkpoint,
+    so typically need higher LR (e.g., 10.0 for 1e-4 effective LR with 1e-5 base)."""
+
+    def __post_init__(self):
+        """Validate multipliers are positive."""
+        for name in ['embeddings', 'output', 'attention', 'experts', 'routers', 'norms', 'mhc']:
+            multiplier = getattr(self, name)
+            if multiplier <= 0:
+                raise ValueError(f"LR multiplier '{name}' must be positive, got {multiplier}")
+            if multiplier > 20.0:
+                logger.warning(
+                    f"LR multiplier '{name}' is very high ({multiplier}), "
+                    "this may cause training instability"
+                )
+
+
+@dataclass
+class WeightDecayMultipliers:
+    """Weight decay multipliers for different parameter groups.
+
+    Each multiplier is applied to the base weight_decay to compute the
+    effective weight decay for that parameter group. Use 0.0 to disable
+    weight decay for specific groups (recommended for embeddings, norms, biases).
+
+    Example: base weight_decay=0.1, embeddings=0.0 -> embeddings get wd=0
+
+    Recommended settings for LLM training:
+        embeddings=0.0, output=0.0, norms=0.0, bias=0.0
+    """
+
+    embeddings: float = 1.0
+    """Multiplier for embedding layer (recommend 0.0)"""
+
+    output: float = 1.0
+    """Multiplier for output layer and final norm (recommend 0.0)"""
+
+    attention: float = 1.0
+    """Multiplier for attention layers (wq, wk, wv, wo projections)"""
+
+    experts: float = 1.0
+    """Multiplier for MoE expert weights"""
+
+    routers: float = 1.0
+    """Multiplier for MoE router/gate layers"""
+
+    norms: float = 1.0
+    """Multiplier for normalization layers (recommend 0.0)"""
+
+    mhc: float = 1.0
+    """Multiplier for mHC parameters"""
+
+    bias: float = 1.0
+    """Multiplier for all bias parameters (recommend 0.0)"""
+
+    def __post_init__(self):
+        """Validate multipliers are non-negative."""
+        for name in ['embeddings', 'output', 'attention', 'experts', 'routers', 'norms', 'mhc', 'bias']:
+            multiplier = getattr(self, name)
+            if multiplier < 0:
+                raise ValueError(f"Weight decay multiplier '{name}' must be non-negative, got {multiplier}")
+
+
+@dataclass
 class Optimizer:
     name: str = "AdamW"
     """Optimizer to use"""
@@ -163,6 +256,20 @@ class Optimizer:
     is not compatible with gradients clipping, users should not call
     register_post_accumulate_grad_hook after the optimizer is built.
     """
+
+    cpu_offload: bool = False
+    """
+    Whether to offload optimizer state and computation to CPU using DeepSpeed's
+    CPUAdam. This reduces GPU memory usage by keeping optimizer states (momentum,
+    variance) on CPU. Useful for training larger models or on systems where CPU
+    memory is abundant. Requires: pip install deepspeed
+    """
+
+    lr_multipliers: LRMultipliers = field(default_factory=LRMultipliers)
+    """Per-group learning rate multipliers for fine-grained control over parameter updates"""
+
+    weight_decay_multipliers: WeightDecayMultipliers = field(default_factory=WeightDecayMultipliers)
+    """Per-group weight decay multipliers. Use 0.0 for embeddings, output, norms, biases."""
 
 
 @dataclass
@@ -242,6 +349,23 @@ class Training:
     loaded from this path instead of downloaded.
     """
 
+    pack_samples: bool = False
+    """
+    Whether to use sample packing that preserves sample boundaries.
+    When True, complete samples are packed into sequences without splitting,
+    with padding at the end. Loss is masked on padding tokens.
+    When False (default), samples are concatenated and chunked at fixed intervals,
+    which may split samples across sequence boundaries.
+    Use True for fine-tuning tasks where sample boundaries matter.
+    """
+
+    add_bos_eos: bool = True
+    """
+    Whether to add BOS and EOS tokens when encoding samples.
+    Set to False for pre-formatted data (e.g., Harmony format) that already
+    contains proper start/end tokens. Default True for raw text datasets.
+    """
+
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""
 
@@ -275,8 +399,8 @@ class Training:
     """
     torch dtype to use for parameters when applying mixed precision via fully_shard or torch.autocast.
     This feature takes effect via fully_shard when data_parallel_shard_degree > 1 or
-    context_parallel_degree > 1; it takes effect via torch.autocast when data_replicate_degree >= 1
-    and no other parallelism is enabled, i.e. under DDP or single-device training.
+    context_parallel_degree > 1; it takes effect via torch.autocast for all other cases including
+    TP-only, PP-only, DDP, or single-device training.
     """
 
     mixed_precision_reduce: Literal["float32"] = "float32"
@@ -298,6 +422,16 @@ class Training:
 
     dataloader: DataLoader = field(default_factory=DataLoader)
     """DataLoader configuration"""
+
+    freeze_router_bias: bool = True
+    """
+    Freeze router gate bias during fine-tuning (MoE models only).
+    When fine-tuning with small datasets, freezing router bias preserves
+    the pretrained routing behavior while still allowing router weights
+    and expert parameters to adapt. Load balancing still works via the
+    expert_bias buffer mechanism.
+    Recommended: True for fine-tuning, False for full pretraining.
+    """
 
 
 @dataclass
@@ -786,12 +920,67 @@ class MXGroupedMM:
 
 
 @dataclass
+class NVFP4QATLinear:
+    quantize_weights_only: bool = True
+    """
+    Weight-only quantization (vs weight+activation quantization).
+    Weight-only provides better accuracy with minimal performance impact.
+
+    Example: --quantize.linear.nvfp4_qat.quantize_weights_only=true
+    """
+
+    calibration_steps: int = 100
+    """
+    Number of training steps to collect statistics for quantization scale initialization.
+    After calibration, scales are frozen and normal training continues.
+
+    Example: --quantize.linear.nvfp4_qat.calibration_steps=100
+    """
+
+    filter_fqns: list[str] = field(
+        default_factory=lambda: [
+            "attention", "wq", "wk", "wv", "wo",  # Skip all attention layers
+            "norm",  # Skip all normalization layers
+            "router", "gate",  # Skip router/gate layers
+            "tok_embeddings", "output"  # Skip embeddings and output projection
+        ]
+    )
+    """
+    Comma-separated list of fully qualified names of modules to skip applying NVFP4 QAT to.
+    By default, only quantize MLP/expert weights (w1, w2, w3) and skip everything else
+    (attention, norms, router, embeddings, output) for better accuracy and stability.
+
+    Example: --quantize.linear.nvfp4_qat.filter_fqns="attention,norm,router,output"
+    """
+
+
+@dataclass
+class NVFP4QATGroupedMM:
+    quantize_weights_only: bool = True
+    """
+    Weight-only quantization for MoE expert weights.
+
+    Example: --quantize.grouped_mm.nvfp4_qat.quantize_weights_only=true
+    """
+
+    calibration_steps: int = 100
+    """
+    Number of training steps to collect statistics for MoE quantization scale initialization.
+
+    Example: --quantize.grouped_mm.nvfp4_qat.calibration_steps=100
+    """
+
+
+@dataclass
 class QuantizedLinear:
     float8: Float8Linear = field(default_factory=Float8Linear)
     """FP8 training config for nn.Linear layers"""
 
     mx: MXLinear = field(default_factory=MXLinear)
     """MX training config for nn.Linear layers"""
+
+    nvfp4_qat: NVFP4QATLinear = field(default_factory=NVFP4QATLinear)
+    """NVFP4 QAT training config for nn.Linear layers"""
 
 
 @dataclass
@@ -801,6 +990,9 @@ class QuantizedGroupedMM:
 
     mx: MXGroupedMM = field(default_factory=MXGroupedMM)
     """MX training config for grouped GEMMs"""
+
+    nvfp4_qat: NVFP4QATGroupedMM = field(default_factory=NVFP4QATGroupedMM)
+    """NVFP4 QAT training config for grouped GEMMs"""
 
 
 @dataclass
