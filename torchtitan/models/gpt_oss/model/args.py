@@ -91,6 +91,7 @@ class GptOssModelArgs(BaseModelArgs):
                 "CP support for gpt-oss model is still in progress."
             )
 
+    # pyrefly: ignore [bad-override]
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:

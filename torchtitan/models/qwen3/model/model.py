@@ -283,6 +283,7 @@ class Attention(nn.Module):
                     xv,
                     self.head_dim,
                     attention_masks,
+                    scale=self.scaling,
                 )
             case "sdpa":
                 assert attention_masks is None
