@@ -20,7 +20,7 @@ enable_wandb = false
 [model]
 name = "deepseek_v3"
 flavor = "deepseek_aghilora"
-hf_assets_path = "./assets/hf/DeepSeek-V3.1-Base"
+hf_assets_path = "/root/.cache/team_artifacts/DeepSeek-V3.1-Base"
 # converters = ["float8"]
 
 [optimizer]
@@ -53,11 +53,11 @@ expert_parallel_degree = 1
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
-enable = false
+enable = true
 folder = "checkpoint"
 interval = 250
 last_save_model_only = true
-export_dtype = "float32"
+export_dtype = "float16"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
 
 [activation_checkpoint]

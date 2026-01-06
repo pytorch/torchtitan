@@ -209,6 +209,9 @@ deepseekv3_args = {
         v_head_dim=128,
         attn_type="sdpa",
         attn_mask_type="block_causal",
+        # Fine-tuning LoRA (for parameter-efficient fine-tuning)
+        finetune_lora_rank=16,    # 0 = disabled, >0 = enable LoRA fine-tuning
+        finetune_lora_alpha=32.0,  # LoRA scaling factor
     ),
 }
 
