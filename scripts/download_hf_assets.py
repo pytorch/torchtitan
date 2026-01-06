@@ -30,10 +30,12 @@ def download_hf_assets(
         - tokenizer.json - Modern HuggingFace tokenizers (complete definition)
         - tokenizer_config.json - Tokenizer configuration and metadata
         - tokenizer.model - SentencePiece model files (Llama, T5, etc.)
+        - tiktoken.model - Tiktoken BPE model files (Kimi, etc.)
         - vocab.txt - Plain text vocabulary files
         - vocab.json - JSON vocabulary files
         - merges.txt - BPE merge rules (GPT-2, RoBERTa style)
         - special_tokens_map.json - Special token mappings
+        - added_tokens.json - Additional tokens definition
     - safetensors
         - *.safetensors - Modern Huggingface model weights format for fast loading
         - model.safetensors.index.json - Contains mapping from hf fqn to file name
@@ -71,10 +73,12 @@ def download_hf_assets(
             "tokenizer.json",
             "tokenizer_config.json",
             "tokenizer.model",
+            "tiktoken.model",
             "vocab.txt",
             "vocab.json",
             "merges.txt",
             "special_tokens_map.json",
+            "added_tokens.json",
         ],
         "safetensors": ["*.safetensors", "*model.safetensors.index.json"],
         "index": ["*model.safetensors.index.json"],
