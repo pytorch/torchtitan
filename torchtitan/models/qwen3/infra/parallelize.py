@@ -108,10 +108,9 @@ def parallelize_qwen3(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
-        tp_mesh = parallel_dims.get_mesh("tp")
         apply_moe_ep_tp(
             model,
-            tp_mesh=tp_mesh,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
@@ -119,12 +118,11 @@ def parallelize_qwen3(
         )
 
     if parallel_dims.cp_enabled:
-        use_flex_attn = attn_type == "flex"
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
-            use_flex_attn,
+            attn_type,
         )
 
     if job_config.activation_checkpoint.mode != "none":

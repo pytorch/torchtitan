@@ -25,7 +25,7 @@ from torchtitan.tools.logging import logger
 def apply_cp_to_attention_module(
     attention_modules: Sequence[nn.Module],
     cp_mesh: DeviceMesh,
-    use_flex_attn: bool,
+    attention_type: str,
 ) -> None:
     """
     Apply context parallelism to attention modules.
@@ -37,28 +37,47 @@ def apply_cp_to_attention_module(
     Args:
         attention_modules: Sequence of attention modules to apply CP to
         cp_mesh: Device mesh for context parallel dimension
-        use_flex_attn: Whether to use FlexAttention (True) or SDPA (False)
+        attention_type: Type of attention mechanism. Must be one of:
+            - "sdpa": Scaled Dot Product Attention (enables CP dispatcher)
+            - "flex": FlexAttention
+            - "varlen": Variable-length attention (not yet implemented)
+
+    Raises:
+        NotImplementedError: If attention_type is "varlen"
 
     Note:
-        - For FlexAttention: CP plan uses FLEX attention type
-        - For SDPA: Enables CP dispatcher and uses SDPA attention type
+        - For "flex": CP plan uses FLEX attention type
+        - For "sdpa": Enables CP dispatcher and uses SDPA attention type
+        - For "varlen": Currently not supported
     """
     # Apply context parallelism to every attention module
     # TODO: make seq_dim configurable once the implementation doesn't assume 2
     # internally.
-    if use_flex_attn:
-        cp_plan = _ContextParallel(
-            seq_dim=2, attention_type=_ContextParallel.AttentionType.FLEX
-        )
-    else:
-        # Enable the DTensor dispatcher to route SDPA operations to the Context Parallel
-        # implementation. This is required for CP to work with SDPA (but not FlexAttention).
-        # Note: Use _disable_context_parallel_dispatcher() if you need to turn this off.
-        #       In TorchTitan, we currently don't disable the CP dispatcher.
-        _enable_context_parallel_dispatcher()
-        cp_plan = _ContextParallel(
-            seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
-        )
+    match attention_type:
+        case "flex":
+            cp_plan = _ContextParallel(
+                seq_dim=2, attention_type=_ContextParallel.AttentionType.FLEX
+            )
+        case "sdpa":
+            # Enable the DTensor dispatcher to route SDPA operations to the
+            # Context Parallel implementation. This is required for CP to work
+            # with SDPA (but not FlexAttention).
+            # Note: Use _disable_context_parallel_dispatcher() if you need to
+            # turn this off. In TorchTitan, we currently don't disable the CP
+            # dispatcher.
+            _enable_context_parallel_dispatcher()
+            cp_plan = _ContextParallel(
+                seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
+            )
+        case "varlen":
+            raise NotImplementedError(
+                "Variable-length attention CP is not yet supported"
+            )
+        case _:
+            raise ValueError(
+                f"Invalid attention_type '{attention_type}'. "
+                f"Must be one of: 'sdpa', 'flex', 'varlen'"
+            )
 
     for attention_module in attention_modules:
         parallelize_module(
@@ -120,9 +139,38 @@ def cp_shard(
     inputs: tuple[torch.Tensor, ...],
     attention_masks: AttentionMasksType | None,
     disable_load_balancer: bool = False,
-):
-    INPUT_SEQ_DIM = 1
-    seq_len = inputs[0].size(INPUT_SEQ_DIM)
+    input_seq_dim: int = 1,
+) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
+    """
+    Shard inputs and attention masks across the context parallel mesh.
+
+    This function distributes input tensors across devices in the CP mesh
+    along the sequence dimension. It optionally uses a load balancer to
+    handle uneven computation workload. Currently, HeadTailLoadBalancer is
+    used for SDPA + CP, which is the only supported configuration.
+
+    Args:
+        cp_mesh: Device mesh for context parallel dimension
+        inputs: Tuple of input tensors to be sharded along the sequence
+            dimension
+        attention_masks: Attention masks to be sharded (currently raises
+            error as FlexAttention CP is not yet supported)
+        disable_load_balancer: If True, disables load balancing. If False
+            (default), uses HeadTailLoadBalancer for SDPA to handle uneven
+            computation workload.
+        input_seq_dim: Sequence dimension index for sharding. Defaults to 1,
+            which covers most use cases where tensors have shape
+            [batch_size, seq_len, ...]. Can be changed by passing a
+            different value if your tensors use a different sequence
+            dimension layout.
+
+    Returns:
+        Tuple of (sharded_inputs, attention_masks) where:
+            - sharded_inputs: Tuple of input tensors sharded along the
+              sequence dimension
+            - attention_masks: Attention masks (currently unchanged/None)
+    """
+    seq_len = inputs[0].size(input_seq_dim)
     cp_world_size = cp_mesh.size(0)
     if attention_masks is not None:
         raise ValueError(
@@ -141,7 +189,7 @@ def cp_shard(
         _context_parallel_shard(
             mesh=cp_mesh,
             buffers=inputs,
-            seq_dims=tuple(1 for _ in inputs),
+            seq_dims=tuple(input_seq_dim for _ in inputs),
             load_balancer=load_balancer,
         ),
     )

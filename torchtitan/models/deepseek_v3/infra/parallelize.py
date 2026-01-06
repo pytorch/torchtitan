@@ -134,12 +134,11 @@ def parallelize_deepseekv3(
         )
 
     if parallel_dims.cp_enabled:
-        use_flex_attn = attn_type == "flex"
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
-            use_flex_attn,
+            attn_type,
         )
 
     model_compile_enabled = (
