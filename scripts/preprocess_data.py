@@ -62,7 +62,9 @@ DATASET_INFO = r"""{
 }"""
 
 
-def process_packing_shard(shard, args, tokenizer_pad_id, rank, world_size, epoch=0, rng_state=None):
+def process_packing_shard(
+    shard, args, tokenizer_pad_id, rank, world_size, epoch=0, rng_state=None
+):
     """Pack a shard of the dataset.
 
     Args:
@@ -85,19 +87,19 @@ def process_packing_shard(shard, args, tokenizer_pad_id, rank, world_size, epoch
     # Shuffle packs after packing (within this shard)
     random.shuffle(packer.packs)
 
+    example = (
+        {
+            "inputs": packer.packs[0]["inputs"],
+            "labels": packer.packs[0]["labels"],
+            "position_ids": packer.packs[0]["position_ids"],
+            "sequence_lengths": packer.packs[0]["sequence_lengths"],
+        }
+        if len(packer.packs) > 0
+        else None
+    )
+
     if args.save_to_disk:
         # create a schema that uses int64 for list sizes
-
-        example = (
-            {
-                "inputs": packer.packs[0]["inputs"],
-                "labels": packer.packs[0]["labels"],
-                "position_ids": packer.packs[0]["position_ids"],
-                "sequence_lengths": packer.packs[0]["sequence_lengths"],
-            }
-            if len(packer.packs) > 0
-            else None
-        )
 
         oriented_data = {
             "inputs": [pack["inputs"] for pack in packer.packs],
@@ -231,7 +233,9 @@ class PackedDataset(Dataset):
         elif packing_mode == "random_fit":
             self._pack_random_fit()
         else:
-            raise ValueError(f"Unknown packing_mode: {packing_mode}. Use 'ffd' or 'random_fit'")
+            raise ValueError(
+                f"Unknown packing_mode: {packing_mode}. Use 'ffd' or 'random_fit'"
+            )
 
     def _get_empty_pack(self):
 
@@ -389,7 +393,8 @@ class PackedDataset(Dataset):
             for item in group:
                 # Find all bins that can fit this sample
                 fitting_bins = [
-                    (i, bin) for i, bin in enumerate(bins)
+                    (i, bin)
+                    for i, bin in enumerate(bins)
                     if bin["remaining_space"] >= item["seq_len"]
                 ]
 
@@ -697,6 +702,7 @@ def main(args):
             elif "messages" in x:
                 return len(x["messages"])
             return 0
+
         dataset = dataset.filter(lambda x: _get_conversation_len(x) > 3)
 
     original_column_names = list(dataset.features.keys())
@@ -731,10 +737,13 @@ def main(args):
             epoch_dataset = dataset.shuffle(seed=epoch_shuffle_seed)
 
             shards = [
-                epoch_dataset.shard(num_shards=num_shards, index=i) for i in range(num_shards)
+                epoch_dataset.shard(num_shards=num_shards, index=i)
+                for i in range(num_shards)
             ]
 
-            print(f"Packing epoch {epoch + 1}/{num_epochs} (shuffle_seed={epoch_shuffle_seed})...")
+            print(
+                f"Packing epoch {epoch + 1}/{num_epochs} (shuffle_seed={epoch_shuffle_seed})..."
+            )
 
             # Generate unique random states for each shard from main RNG
             shard_rng_states = [random.getstate() for _ in range(num_shards)]
@@ -744,7 +753,15 @@ def main(args):
 
             with multiprocessing.Pool(processes=num_shards) as pool:
                 process_args = [
-                    (shard, args, tokenizer.pad_token_id, index, num_shards, epoch, shard_rng_states[index])
+                    (
+                        shard,
+                        args,
+                        tokenizer.pad_token_id,
+                        index,
+                        num_shards,
+                        epoch,
+                        shard_rng_states[index],
+                    )
                     for index, shard in enumerate(shards)
                 ]
 
@@ -776,7 +793,9 @@ def main(args):
         # Fix the "of-TOTAL" placeholders in filenames
         if args.save_to_disk:
             for i in range(file_counter):
-                old_path = os.path.join(args.save_to_disk, f"data-{i:05d}-of-TOTAL.arrow")
+                old_path = os.path.join(
+                    args.save_to_disk, f"data-{i:05d}-of-TOTAL.arrow"
+                )
                 new_filename = f"data-{i:05d}-of-{file_counter:05d}.arrow"
                 new_path = os.path.join(args.save_to_disk, new_filename)
                 os.rename(old_path, new_path)
@@ -792,10 +811,14 @@ def main(args):
 
             # verify we can open and do any conversion needed
             final_dataset = load_dataset(args.save_to_disk, num_proc=args.num_proc)
-            print(f"Created {len(final_dataset['train'])} packed samples across {num_epochs} epoch(s)")
+            print(
+                f"Created {len(final_dataset['train'])} packed samples across {num_epochs} epoch(s)"
+            )
             if args.packing_mode == "ffd":
-                print(f"!!! Warning: FFD packing sorts by length, which may introduce bias. "
-                      f"Consider using --packing-mode=random_fit or shuffle before using.")
+                print(
+                    f"!!! Warning: FFD packing sorts by length, which may introduce bias. "
+                    f"Consider using --packing-mode=random_fit or shuffle before using."
+                )
 
     else:
         # No packing - just shuffle and save tokenized samples
@@ -863,7 +886,7 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Number of epochs to pack. Each epoch shuffles and packs independently, "
-             "so the same sample appears in different packs across epochs.",
+        "so the same sample appears in different packs across epochs.",
     )
     parser.add_argument(
         "--packing-mode",
@@ -871,7 +894,7 @@ if __name__ == "__main__":
         default="random_fit",
         choices=["ffd", "random_fit"],
         help="Packing algorithm: 'ffd' (First-Fit Decreasing, sorted by length) or "
-             "'random_fit' (no sorting, random bin selection - default, avoids length bias)",
+        "'random_fit' (no sorting, random bin selection - default, avoids length bias)",
     )
     parser.add_argument("--drop-larger-than", type=int)
     parser.add_argument("--save-to-disk", type=str)
@@ -879,4 +902,3 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     main(args)
-    
