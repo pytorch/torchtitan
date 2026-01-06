@@ -41,7 +41,23 @@ export DEBUG_TIMEOUT=${DEBUG_TIMEOUT:-""}
 
 # NGPU=8 DEBUG=1 DEBUG_WAIT_RANKS="0" CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_v3_16b.toml" ./run_train.sh
 
+# NGPU=8 DEBUG=1 DEBUG_WAIT_RANKS="0" CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_aghi.toml" ./run_train.sh
+
+# NGPU=8 DEBUG=1 DEBUG_WAIT_RANKS="0" CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/deepseek_aghilora.toml" ./run_train.sh
+
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
+
+# python scripts/download_hf_assets.py \
+#     --repo_id deepseek-ai/DeepSeek-V3.1-Base \
+#     --local_dir ./assets/hf \
+#     --assets tokenizer config index
+
+
+# python scripts/download_hf_assets.py \
+#     --repo_id deepseek-ai/DeepSeek-V3.1-Base \
+#     --local_dir /root/.cache/team_artifacts/ \
+#     --all
+
 
 if [ -n "$COMM_MODE" ]; then
     # Communication mode specified: validate configuration or run in debug mode
