@@ -148,6 +148,7 @@ class Validator(BaseValidator):
                 extra_kwargs,
                 self.parallel_dims.get_mesh("cp"),
                 inputs.device,
+                self.job_config.parallelism.context_parallel_load_balancer,
             )
 
         return inputs, labels, extra_inputs, extra_kwargs

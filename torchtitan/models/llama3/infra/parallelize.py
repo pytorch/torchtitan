@@ -94,13 +94,13 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, tp_mesh)
 
-    use_flex_attn = getattr(model.model_args, "attn_type", "sdpa") == "flex"
+    attn_type = getattr(model.model_args, "attn_type", "sdpa")
     if parallel_dims.cp_enabled:
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
-            use_flex_attn,
+            attn_type,
         )
 
     model_compile_enabled = (
@@ -219,6 +219,8 @@ def apply_tp(
             # NOTE: when the fourth argument (positions) is not None, its input layout
             # and desired input layout is still None as we don't convert freqs_cis to
             # a DTensor for llama3.
+            # TODO: https://github.com/pytorch/torchtitan/pull/2149 would fix this
+            # inconsistency.
             "attention": prepare_module_input(
                 input_layouts=(Shard(1), None, None, None),
                 desired_input_layouts=(Replicate(), None, None, None),

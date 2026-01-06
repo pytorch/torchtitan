@@ -27,7 +27,7 @@ from torchtitan.tools.logging import logger
 def apply_cp_to_attention_module(
     attention_modules: Sequence[nn.Module],
     cp_mesh: DeviceMesh,
-    use_flex_attn: bool,
+    attention_type: str,
 ) -> None:
     """
     Apply context parallelism to attention modules.
@@ -39,28 +39,47 @@ def apply_cp_to_attention_module(
     Args:
         attention_modules: Sequence of attention modules to apply CP to
         cp_mesh: Device mesh for context parallel dimension
-        use_flex_attn: Whether to use FlexAttention (True) or SDPA (False)
+        attention_type: Type of attention mechanism. Must be one of:
+            - "sdpa": Scaled Dot Product Attention (enables CP dispatcher)
+            - "flex": FlexAttention
+            - "varlen": Variable-length attention (not yet implemented)
+
+    Raises:
+        NotImplementedError: If attention_type is "varlen"
 
     Note:
-        - For FlexAttention: CP plan uses FLEX attention type
-        - For SDPA: Enables CP dispatcher and uses SDPA attention type
+        - For "flex": CP plan uses FLEX attention type
+        - For "sdpa": Enables CP dispatcher and uses SDPA attention type
+        - For "varlen": Currently not supported
     """
     # Apply context parallelism to every attention module
     # TODO: make seq_dim configurable once the implementation doesn't assume 2
     # internally.
-    if use_flex_attn:
-        cp_plan = _ContextParallel(
-            seq_dim=2, attention_type=_ContextParallel.AttentionType.FLEX
-        )
-    else:
-        # Enable the DTensor dispatcher to route SDPA operations to the Context Parallel
-        # implementation. This is required for CP to work with SDPA (but not FlexAttention).
-        # Note: Use _disable_context_parallel_dispatcher() if you need to turn this off.
-        #       In TorchTitan, we currently don't disable the CP dispatcher.
-        _enable_context_parallel_dispatcher()
-        cp_plan = _ContextParallel(
-            seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
-        )
+    match attention_type:
+        case "flex":
+            cp_plan = _ContextParallel(
+                seq_dim=2, attention_type=_ContextParallel.AttentionType.FLEX
+            )
+        case "sdpa":
+            # Enable the DTensor dispatcher to route SDPA operations to the
+            # Context Parallel implementation. This is required for CP to work
+            # with SDPA (but not FlexAttention).
+            # Note: Use _disable_context_parallel_dispatcher() if you need to
+            # turn this off. In TorchTitan, we currently don't disable the CP
+            # dispatcher.
+            _enable_context_parallel_dispatcher()
+            cp_plan = _ContextParallel(
+                seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
+            )
+        case "varlen":
+            raise NotImplementedError(
+                "Variable-length attention CP is not yet supported"
+            )
+        case _:
+            raise ValueError(
+                f"Invalid attention_type '{attention_type}'. "
+                f"Must be one of: 'sdpa', 'flex', 'varlen'"
+            )
 
     for attention_module in attention_modules:
         parallelize_module(
@@ -78,6 +97,7 @@ def prepare_context_parallel_input(
     extra_kwargs: dict[str, Any],
     cp_mesh: DeviceMesh,
     device: torch.device,
+    load_balancer_type: str | None = "headtail",
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """
     Prepare inputs, labels, and attention masks for Context Parallel forward pass.
@@ -93,6 +113,8 @@ def prepare_context_parallel_input(
         extra_kwargs: Dictionary that may contain 'attention_masks' to be sharded
         cp_mesh: Device mesh for context parallel dimension
         device: Device to create position tensor on
+        load_balancer_type: Type of load balancer to use for sharding.
+            Options: "headtail", "ptrr", None, or "". Defaults to "headtail".
 
     Returns:
         Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
@@ -109,6 +131,7 @@ def prepare_context_parallel_input(
         cp_mesh,
         (inputs, labels, positions),
         attention_masks,
+        load_balancer_type,
     )
     extra_kwargs["positions"] = positions
     if attention_masks is not None:
@@ -121,39 +144,83 @@ def cp_shard(
     cp_mesh: DeviceMesh,
     inputs: tuple[torch.Tensor, ...],
     attention_masks: AttentionMasksType | None,
-    disable_load_balancer: bool = False,
-):
+    load_balancer_type: str | None = "headtail",
+    input_seq_dim: int = 1,
+) -> tuple[tuple[torch.Tensor, ...], AttentionMasksType | None]:
+    """
+    Shard inputs and attention masks across the context parallel mesh.
 
-    INPUT_SEQ_DIM = 1
-    seq_len = inputs[0].size(INPUT_SEQ_DIM)
+    This function distributes input tensors across devices in the CP mesh
+    along the sequence dimension, enabling efficient processing. It optionally
+    uses a load balancer to handle uneven computation workload.
+
+    Args:
+        cp_mesh: Device mesh for context parallel dimension
+        inputs: Tuple of input tensors to be sharded along the sequence
+            dimension
+        attention_masks: Attention masks to be sharded. Supports None,
+            BlockMask, or dict[str, BlockMask]
+        load_balancer_type: Type of load balancer to use. Options:
+            - "headtail": Use HeadTailLoadBalancer (for SDPA)
+            - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
+            - None or "": Disable load balancing
+            Defaults to "headtail".
+        input_seq_dim: Sequence dimension index for sharding. Defaults to 1,
+            which covers most use cases where tensors have shape
+            [batch_size, seq_len]. Can be changed by passing a
+            different value if your tensors use a different sequence
+            dimension layout.
+
+    Returns:
+        Tuple of (sharded_inputs, attention_masks) where:
+            - sharded_inputs: Tuple of input tensors sharded along the
+              sequence dimension
+            - attention_masks: Sharded attention masks (BlockMask or
+              dict[str, BlockMask]) or None
+
+    Raises:
+        ValueError: If load_balancer_type is "ptrr" and attention_masks
+            is None or a dict
+    """
+    seq_len = inputs[0].size(input_seq_dim)
     cp_world_size = cp_mesh.size(0)
 
     load_balancer = None
-    if not disable_load_balancer:
-        if isinstance(attention_masks, BlockMask):
-            load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
-        elif attention_masks is None or isinstance(attention_masks, dict):
-            # For SDPA, we use the _HeadTailLoadBalancer.
-            # TODO: For dict[str, BlockMask], _PTRRLoadBalancer currently doesn't
-            # support the case where there are multiple masks. To address multiple
-            # masks usage, _PTRRLoadBalancer also needs to take into account the
-            # usage frequency of each mask. So we default to _HeadTailLoadBalancer
-            # as we have not implemented this feature.
-            load_balancer = _HeadTailLoadBalancer(
-                seq_len, cp_world_size, cp_mesh.device_type
-            )
-        else:
-            ValueError(
-                "cp_shard only support attention_masks is "
-                "None, BlockMask, dict[str, BlockMask]"
-            )
+    if load_balancer_type and load_balancer_type != "":
+        match load_balancer_type:
+            case "headtail":
+                # For SDPA, we use the _HeadTailLoadBalancer.
+                load_balancer = _HeadTailLoadBalancer(
+                    seq_len, cp_world_size, cp_mesh.device_type
+                )
+            case "ptrr":
+                # For FlexAttention, we use _PTRRLoadBalancer.
+                # _PTRRLoadBalancer requires attention_masks to be a BlockMask.
+                # For dict[str, BlockMask], _PTRRLoadBalancer currently doesn't
+                # support the case where there are multiple masks.
+                if attention_masks is None or isinstance(attention_masks, dict):
+                    raise ValueError(
+                        "PTRRLoadBalancer requires attention_masks to be a "
+                        "BlockMask, but got None or dict[str, BlockMask]"
+                    )
+                if not isinstance(attention_masks, BlockMask):
+                    raise ValueError(
+                        f"PTRRLoadBalancer requires attention_masks to be a "
+                        f"BlockMask, but got {type(attention_masks)}"
+                    )
+                load_balancer = _PTRRLoadBalancer(attention_masks, cp_world_size)
+            case _:
+                raise ValueError(
+                    f"Invalid load_balancer_type '{load_balancer_type}'. "
+                    f"Must be one of: 'headtail', 'ptrr', None, or ''"
+                )
 
     inputs = cast(
         tuple[torch.Tensor, ...],
         _context_parallel_shard(
             mesh=cp_mesh,
             buffers=inputs,
-            seq_dims=tuple(1 for _ in inputs),
+            seq_dims=tuple(input_seq_dim for _ in inputs),
             load_balancer=load_balancer,
         ),
     )
