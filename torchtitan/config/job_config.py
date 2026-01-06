@@ -1118,7 +1118,7 @@ class GRPO:
     Whether to scale by total tokens.
     """
 
-
+@dataclass
 class Debug:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
