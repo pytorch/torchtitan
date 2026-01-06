@@ -43,24 +43,28 @@ class GptossExpertTensorParallel(ExpertTensorParallel):
         mod.register_parameter(
             "mlp1_weight",
             nn.Parameter(
+                # pyrefly: ignore [bad-argument-type]
                 distribute_tensor(mod.mlp1_weight, device_mesh, [Shard(0), Shard(1)])
             ),
         )  # Column-wise sharding
         mod.register_parameter(
             "mlp1_bias",
             nn.Parameter(
+                # pyrefly: ignore [bad-argument-type]
                 distribute_tensor(mod.mlp1_bias, device_mesh, [Shard(0), Shard(1)])
             ),
         )  # Column-wise sharding
         mod.register_parameter(
             "mlp2_weight",
             nn.Parameter(
+                # pyrefly: ignore [bad-argument-type]
                 distribute_tensor(mod.mlp2_weight, device_mesh, [Shard(0), Shard(2)])
             ),
         )  # Row-wise sharding
         mod.register_parameter(
             "mlp2_bias",
             nn.Parameter(
+                # pyrefly: ignore [bad-argument-type]
                 distribute_tensor(mod.mlp2_bias, device_mesh, [Shard(0), Replicate()])
             ),
         )  # Replicate

@@ -52,6 +52,7 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    # pyrefly: ignore [missing-attribute]
     torch._higher_order_ops.inductor_compiled_code,
 }
 
@@ -106,7 +107,7 @@ def parallelize_gptoss(
             model,
             tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
-            ep_etp_mesh=parallel_dims.get_optional_mesh("ep_etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             etp_enabled=parallel_dims.etp_enabled,
             dual_pipe_v=dual_pipe_v,
         )
@@ -116,6 +117,7 @@ def parallelize_gptoss(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
+            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
         )
 
@@ -200,21 +202,28 @@ def apply_non_moe_tp(
     )
 
     # Apply tensor + sequence parallelism to every transformer block
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": PrepareModuleInput(
+                # pyrefly: ignore [bad-argument-type]
                 input_layouts=(Shard(1), Replicate(), None),
+                # pyrefly: ignore [bad-argument-type]
                 desired_input_layouts=(Replicate(), Replicate(), None),
             ),
             "attention.wq": ColwiseParallel(use_local_output=False),
             "attention.wk": ColwiseParallel(use_local_output=False),
             "attention.wv": ColwiseParallel(use_local_output=False),
             "attention.inner_attention": PrepareModuleInputOutput(
+                # pyrefly: ignore [bad-argument-type]
                 input_layouts=(Shard(1), Shard(1), Shard(1)),
+                # pyrefly: ignore [bad-argument-type]
                 desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
                 use_local_input=True,
+                # pyrefly: ignore [bad-argument-type]
                 output_layouts=(Shard(1), Shard(1)),
+                # pyrefly: ignore [bad-argument-type]
                 desired_output_layouts=(Shard(1), Shard(1)),
                 use_local_output=False,
             ),
@@ -223,6 +232,7 @@ def apply_non_moe_tp(
         }
 
         # shard attention.sinks across heads
+        # pyrefly: ignore [missing-attribute]
         attn = transformer_block.attention
         attn.register_parameter(
             "sinks",
@@ -230,14 +240,17 @@ def apply_non_moe_tp(
         )
 
         parallelize_module(
+            # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
     if enable_async_tp:
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
+        # pyrefly: ignore [implicit-import]
         torch._inductor.config._micro_pipeline_tp = True
         enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
@@ -257,7 +270,9 @@ def apply_moe_ep_tp(
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        # pyrefly: ignore [missing-attribute]
         if not transformer_block.moe_enabled:
             continue
 
@@ -279,11 +294,14 @@ def apply_moe_ep_tp(
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
                 # the reorderer, the all-to-all comms, and routed experts computation
                 # are effectively running Sequence Parallel (split along the folded bs*slen dim)
+                # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
 
             parallelize_module(
+                # pyrefly: ignore [bad-argument-type]
                 module=transformer_block,
                 device_mesh=tp_mesh,
+                # pyrefly: ignore [bad-argument-type]
                 parallelize_plan=moe_layer_plan,
             )
 
@@ -304,6 +322,7 @@ def apply_moe_ep_tp(
             experts_plan = DualPipeExpertParallel(experts_plan)
 
         parallelize_module(
+            # pyrefly: ignore [missing-attribute]
             module=transformer_block.moe.experts,
             device_mesh=experts_mesh,
             parallelize_plan=experts_plan,

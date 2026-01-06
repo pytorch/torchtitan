@@ -125,6 +125,22 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "llama4_pp+fsdp+tp+ep+compile",
             ngpu=8,
         ),
+        # Integration Test Cases for gpt-oss
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name gpt_oss",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--parallelism.expert_tensor_parallel_degree 1",
+                    "--compile.enable",
+                ],
+            ],
+            "Gpt-oss FSDP+TP+EP+compile",
+            "gpt_oss_fsdp+tp+ep+compile",
+            ngpu=8,
+        ),
     ]
 
     return model_tests
