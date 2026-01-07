@@ -30,25 +30,20 @@ def apply_cp_to_attention_module(
     """
     Apply context parallelism to attention modules.
 
-    Context Parallelism (CP) splits the sequence dimension across devices to enable
-    training with longer sequences. This function applies CP to the provided attention
+    CP splits the sequence dimension across devices to enable training with
+    longer sequences. This function applies CP to the provided attention
     modules.
 
     Args:
         attention_modules: Sequence of attention modules to apply CP to
         cp_mesh: Device mesh for context parallel dimension
         attention_type: Type of attention mechanism. Must be one of:
-            - "sdpa": Scaled Dot Product Attention (enables CP dispatcher)
-            - "flex": FlexAttention
-            - "varlen": Variable-length attention (not yet implemented)
+            - "sdpa": scaled_dot_product_attention()
+            - "flex": flex_attention()
+            - "varlen": varlen_attn() (not yet implemented)
 
     Raises:
         NotImplementedError: If attention_type is "varlen"
-
-    Note:
-        - For "flex": CP plan uses FLEX attention type
-        - For "sdpa": Enables CP dispatcher and uses SDPA attention type
-        - For "varlen": Currently not supported
     """
     # Apply context parallelism to every attention module
     # TODO: make seq_dim configurable once the implementation doesn't assume 2
@@ -99,7 +94,7 @@ def prepare_context_parallel_input(
     """
     Prepare inputs, labels, and attention masks for Context Parallel forward pass.
 
-    This function prepares tensors for Context Parallel by:
+    This function prepares tensors for context parallel by:
     1. Creating position indices based on input sequence length
     2. Sharding inputs, labels, and positions across the CP mesh
     3. Sharding attention masks if present
