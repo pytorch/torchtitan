@@ -132,6 +132,17 @@ def parallelize_deepseekv3(
     )
 
     if job_config.activation_checkpoint.mode != "none":
+        # Disable dynamo LRU cache to workaround an interaction between SAC, PP, and Flex:
+        #
+        # When forward runs with a second PP microbatch, it triggers recompilation with dynamic
+        # shapes enabled. Now there are two valid compiled graphs. By default, dynamo selects
+        # the latest one (the dynamic shapes version), so the runtime wrapper expects an extra
+        # symint output. When SAC caches the inductor HOP output from the static graph for
+        # batch_idx=0, it would miss that symint and cause an assertion failure. The workaround
+        # here is to disable the LRU cache, and select graphs in insertion order instead.
+        #
+        # Also see: https://github.com/pytorch/pytorch/issues/166926
+        torch._C._dynamo.eval_frame._set_lru_cache(False)
         apply_ac(
             model,
             job_config.activation_checkpoint,
