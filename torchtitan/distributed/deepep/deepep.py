@@ -39,6 +39,16 @@ _handle_cache: dict = {}
 _cache_counter: int = 0
 
 
+def clear_handle_cache():
+    """Clear the handle cache to prevent memory leaks with activation checkpointing.
+
+    Call this at the end of each training step.
+    """
+    global _handle_cache, _cache_counter
+    _handle_cache.clear()
+    _cache_counter = 0  # Reset counter to prevent unbounded growth
+
+
 def _get_next_cache_id() -> torch.Tensor:
     """Generate a unique cache_id tensor on CPU to avoid GPU-CPU sync."""
     global _cache_counter
