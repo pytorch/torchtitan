@@ -3,6 +3,8 @@ name: 8 GPU Integration Test on H100
 on:
   push:
     branches: [ main ]
+    tags:
+      - ciflow/8gpu/*
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
@@ -21,18 +23,33 @@ defaults:
   run:
     shell: bash -l -eo pipefail {0}
 
+permissions:
+      id-token: write
+      contents: read
+
 jobs:
-  build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+  # Step 1: Dynamically compute the matrix based on conditions
+  set-matrix:
+    uses: ./.github/workflows/set-matrix.yaml
     with:
-      runner: linux.aws.h100.8
-      gpu-arch-type: cuda
-      gpu-arch-version: "12.6"
-      # This image is faster to clone than the default, but it lacks CC needed by triton
-      # (1m25s vs 2m37s).
-      docker-image: torchtitan-ubuntu-20.04-clang12
+      runner-rocm: linux.rocm.gpu.gfx942.8
+      runner-cuda: linux.aws.h100.8
+
+  # Step 2: Use the dynamic matrix in the build-test job
+  build-test:
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
+      timeout: 45
       script: |
         set -eux
 
@@ -46,12 +63,13 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+        python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
 
-        USE_CPP=0 python -m pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
+        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
-        mkdir artifacts-to-be-uploaded
+        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
         # Enable CPP stacktraces for debugging symmetric memory initialization errors.
-        TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 artifacts-to-be-uploaded --ngpu 8
-        rm -rf artifacts-to-be-uploaded/*/checkpoint
+        TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

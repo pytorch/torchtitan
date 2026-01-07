@@ -2,6 +2,15 @@ name: Set Matrix
 
 on:
   workflow_call:
+    inputs:
+      runner-rocm:
+        description: 'Override default (linux.rocm.gpu.gfx942.8) ROCm runner label'
+        required: false
+        type: string
+      runner-cuda:
+        description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
+        required: false
+        type: string
     outputs:
       matrix:
         description: dynamically set matrix
@@ -19,28 +28,48 @@ jobs:
       IS_8GPU_TAG:  ${{ startsWith(github.ref, 'refs/tags/ciflow/8gpu/') }}
       TRIGGERED_8GPU_LABEL: ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' }}
 
+      # Default CUDA & ROCm runners
+      DEFAULT_ROCM_RUNNER: linux.rocm.gpu.gfx942.8
+      DEFAULT_CUDA_RUNNER: linux.g5.48xlarge.nvidia.gpu
+
+      # Input CUDA & ROCm runners
+      ROCM_RUNNER_INPUT: ${{ inputs.runner-rocm }}
+      CUDA_RUNNER_INPUT: ${{ inputs.runner-cuda }}
+
     steps:
       - id: set
         run: |
+          set -euo pipefail
+
+          # Select runner if provided, else use default value
+          ROCM_RUNNER="${ROCM_RUNNER_INPUT:-$DEFAULT_ROCM_RUNNER}"
+          CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
+
           # Define ROCm matrix
-          ROCM_MATRIX='{
+          ROCM_MATRIX=$(cat <<EOF
+          {
             "name": "rocm",
-            "runner": "linux.rocm.gpu.gfx942.8",
+            "runner": "${ROCM_RUNNER}",
             "gpu-arch-type": "rocm",
             "gpu-arch-version": "7.1",
             "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
             "index-url": "https://download.pytorch.org/whl/nightly/rocm7.1"
-          }'
+          }
+          EOF
+          )
 
           # Define CUDA matrix
-          CUDA_MATRIX='{
+          CUDA_MATRIX=$(cat <<EOF
+          {
             "name": "cuda",
-            "runner": "linux.g5.48xlarge.nvidia.gpu",
+            "runner": "${CUDA_RUNNER}",
             "gpu-arch-type": "cuda",
             "gpu-arch-version": "12.6",
             "docker-image": "torchtitan-ubuntu-20.04-clang12",
             "index-url": "https://download.pytorch.org/whl/nightly/cu126"
-          }'
+          }
+          EOF
+          )
 
           # Use default value as 'false' for unset environment variables
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
