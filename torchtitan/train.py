@@ -248,10 +248,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # confirm that user will be able to view loss metrics on the console
             ensure_pp_loss_visible(parallel_dims, job_config, color)
         else:
-            # Materialize model from meta device to actual CUDA memory BEFORE parallelization
-            # This is required for torchcomms which needs real tensors for NCCL broadcasts
-            model.to_empty(device=init_device)
+            # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
+
+            model.to_empty(device=init_device)
             with torch.no_grad():
                 model.init_weights(buffer_device=buffer_device)
             model.train()
@@ -371,6 +371,33 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         parallelism_config = job_config.parallelism
+        collective_api = parallelism_config.collective_api
+
+        # Use TorchCommsParallelDims for torchcomms-based collective APIs
+        if collective_api in ("torchcomms", "torchcomms_via_process_group"):
+            # Set TORCHCOMMS_PATCH_FOR_COMPILE BEFORE importing torchcomms
+            # "torchcomms" uses native device mesh (PATCH=1), optimized for compile
+            # "torchcomms_via_process_group" uses process group-based mesh (PATCH=0)
+            if collective_api == "torchcomms":
+                os.environ["TORCHCOMMS_PATCH_FOR_COMPILE"] = "1"
+            else:
+                os.environ["TORCHCOMMS_PATCH_FOR_COMPILE"] = "0"
+
+            from torchtitan.experiments.torchcomms.parallel_dims import (
+                TorchCommsParallelDims,
+            )
+
+            return TorchCommsParallelDims(
+                dp_shard=parallelism_config.data_parallel_shard_degree,
+                dp_replicate=parallelism_config.data_parallel_replicate_degree,
+                cp=parallelism_config.context_parallel_degree,
+                tp=parallelism_config.tensor_parallel_degree,
+                pp=parallelism_config.pipeline_parallel_degree,
+                ep=parallelism_config.expert_parallel_degree,
+                etp=parallelism_config.expert_tensor_parallel_degree,
+                world_size=world_size,
+            )
+
         return ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
@@ -707,6 +734,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.ntokens_seen = state_dict["ntokens_seen"]
 
     def close(self) -> None:
+        if (
+            hasattr(self, "parallel_dims")
+            and hasattr(self.parallel_dims, "comms")
+            and self.parallel_dims.comms
+        ):
+            for comm in self.parallel_dims.comms:
+                comm.finalize()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:

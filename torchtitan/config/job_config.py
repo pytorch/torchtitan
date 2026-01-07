@@ -424,6 +424,23 @@ class Parallelism:
     Note that this is still an experimental feature.
     """
 
+    collective_api: Literal["process_group", "torchcomms_via_process_group", "torchcomms"] = "process_group"
+    """
+    Collective communication API to use for distributed training.
+
+    Options:
+    - "process_group": Use standard PyTorch distributed collectives (NCCL process groups).
+      This is the default.
+    - "torchcomms_via_process_group": Use torchcomms library with process group-based
+      device mesh initialization (TORCHCOMMS_PATCH_FOR_COMPILE=0). This uses torchcomms
+      communicators but creates process groups for the device mesh.
+    - "torchcomms": Use torchcomms library with native device mesh initialization
+      (TORCHCOMMS_PATCH_FOR_COMPILE=1). This uses torchcomms communicators with native
+      mesh support, optimized for torch.compile.
+
+    Note: torchcomms options are still experimental features.
+    """
+
 
 @dataclass
 class Checkpoint:

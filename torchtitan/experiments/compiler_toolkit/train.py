@@ -6,11 +6,10 @@
 
 import gc
 
-from torchtitan.experiments.torchcomms.train import TorchCommsTrainer
-from torchtitan.train import main
+from torchtitan.train import main, Trainer
 
 
-class CompilerToolkitTrainer(TorchCommsTrainer):
+class CompilerToolkitTrainer(Trainer):
     def close(self) -> None:
         super().close()
 
