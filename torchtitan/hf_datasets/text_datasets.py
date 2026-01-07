@@ -216,8 +216,10 @@ class HuggingFacePackedDataset(IterableDataset, Stateful):
                         input_ids = x[:-1]
                         labels = x[1:].clone()
 
-                        if num_padding > 0:
-                            labels[-(num_padding):] = self.IGNORE_INDEX
+                        if num_padding > 1:
+                            # Mask labels where INPUT is padding (num_padding - 1 positions)
+                            # We keep one: predicting first PAD from last real token
+                            labels[-(num_padding - 1):] = self.IGNORE_INDEX
 
                         yield {"input": input_ids}, labels
                     else:
@@ -242,8 +244,9 @@ class HuggingFacePackedDataset(IterableDataset, Stateful):
                     input_ids = x[:-1]
                     labels = x[1:].clone()
 
-                    if num_padding > 0:
-                        labels[-(num_padding):] = self.IGNORE_INDEX
+                    if num_padding > 1:
+                        # Mask labels where INPUT is padding (num_padding - 1 positions)
+                        labels[-(num_padding - 1):] = self.IGNORE_INDEX
 
                     yield {"input": input_ids}, labels
 
