@@ -59,9 +59,9 @@ def merge_finetune_lora_weights(state_dict, model_args):
     Merge LoRA fine-tuning weights into base weights.
     
     LoRA naming convention: finetune_lora_{target}.lora_A, finetune_lora_{target}.lora_B
-    Example keys:
-      - layers.0.attention.finetune_lora_wo.lora_A.weight → merge into layers.0.attention.wo.weight
-      - layers.0.moe.finetune_lora_shared_w2.lora_A.weight → merge into layers.0.moe.shared_experts.w2.weight
+    
+    Example:
+      - finetune_lora_wo → merges into wo
     
     Merge formula: merged = base + lora_B @ lora_A * scale
     where scale = finetune_lora_alpha / finetune_lora_rank
@@ -72,13 +72,6 @@ def merge_finetune_lora_weights(state_dict, model_args):
         return state_dict
     
     scale = model_args.finetune_lora_alpha / model_args.finetune_lora_rank
-    
-    # Mapping from LoRA module name to base layer path
-    # Format: "finetune_lora_{name}" → base layer relative path
-    lora_target_mapping = {
-        "finetune_lora_wo": "wo",
-        "finetune_lora_shared_w2": "shared_experts.w2",
-    }
     
     # Find all LoRA A keys: pattern is "finetune_lora_*.lora_A.weight"
     lora_a_keys = [k for k in state_dict.keys() if ".lora_A.weight" in k]
@@ -97,12 +90,14 @@ def merge_finetune_lora_weights(state_dict, model_args):
         prefix = lora_module_key.rsplit(".", 1)[0]  # "layers.0.attention"
         lora_module_name = lora_module_key.rsplit(".", 1)[1]  # "finetune_lora_wo"
         
-        # Look up the base layer mapping
-        if lora_module_name not in lora_target_mapping:
-            logger.warning(f"Unknown LoRA module '{lora_module_name}' in {lora_a_key}, skipping")
+        # Parse the target from the LoRA module name:
+        # 1. Remove "finetune_lora_" prefix
+        # 2. Replace "__" with "." to get the base layer path
+        if not lora_module_name.startswith("finetune_lora_"):
+            logger.warning(f"LoRA module '{lora_module_name}' doesn't start with 'finetune_lora_', skipping")
             continue
         
-        base_relative = lora_target_mapping[lora_module_name]
+        base_relative = lora_module_name.replace("finetune_lora_", "").replace("__", ".")
         
         # Derive corresponding keys
         lora_b_key = f"{lora_module_key}.lora_B.weight"

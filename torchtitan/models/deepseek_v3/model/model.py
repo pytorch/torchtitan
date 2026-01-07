@@ -323,8 +323,6 @@ class TransformerBlock(nn.Module):
                 model_args.moe_args,
                 dim=model_args.dim,
                 hidden_dim=model_args.moe_inter_dim,
-                finetune_lora_rank=model_args.finetune_lora_rank,
-                finetune_lora_alpha=model_args.finetune_lora_alpha,
             )
         else:
             self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)
