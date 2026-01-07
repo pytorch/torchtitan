@@ -6,6 +6,7 @@
 
 _supported_experiments = frozenset(
     [
+        "gpt_oss_mhc",
         "simple_fsdp.llama3",
         "simple_fsdp.deepseek_v3",
         "vlm",

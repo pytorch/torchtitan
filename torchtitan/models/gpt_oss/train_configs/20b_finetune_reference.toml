@@ -1,0 +1,124 @@
+# =============================================================================
+# GPT-OSS 20B Reference Configuration - Known Good Config
+# =============================================================================
+#
+# This is a reference configuration for fine-tuning the GPT-OSS 20B model.
+# It demonstrates the recommended settings for:
+#   - CPU offload optimizer (for memory efficiency on limited GPU memory)
+#   - Differential learning rates (per parameter group)
+#   - Differential weight decay (standard practice for transformers)
+#   - Long context training (49K sequence length)
+#   - Sample packing for efficiency
+#
+# This config was validated on 2x GPUs with FSDP sharding.
+# Adjust batch sizes and parallelism settings for your hardware.
+# =============================================================================
+
+[job]
+dump_folder = "./outputs/gpt_oss_20b_finetune"
+description = "GPT-OSS 20B fine-tuning reference config"
+print_config = true
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 5
+disable_color_printing = false
+enable_tensorboard = true
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "gpt_oss"
+flavor = "20b"
+hf_assets_path = "/path/to/hf_model"  # Path to HF assets (tokenizer, config)
+
+[optimizer]
+name = "AdamW"
+lr = 1e-5
+eps = 1e-8
+weight_decay = 0.01
+cpu_offload = true  # Offload optimizer states to CPU for memory efficiency
+
+[optimizer.lr_multipliers]
+# Differential learning rates by parameter group
+# Values are multipliers applied to base lr (1e-5)
+embeddings = 0.1    # Lower LR - preserve pretrained representations
+output = 1.0        # Full LR - allow output head to adapt
+attention = 1.0     # Full LR for attention projections
+experts = 1.0       # Full LR for expert MLPs
+routers = 0.1       # Lower LR - protect routing stability
+norms = 0.1         # Lower LR - preserve normalization scales
+mhc = 1.0           # Full LR for mHC (manifold hyper-connections) params
+
+[optimizer.weight_decay_multipliers]
+# Standard practice: disable weight decay on embeddings, norms, and biases
+embeddings = 0.0    # No weight decay on embeddings
+output = 1.0        # Full weight decay on output layer
+attention = 1.0     # Full weight decay on attention projections
+experts = 1.0       # Full weight decay on expert MLPs
+routers = 0.0       # No weight decay - protect routing stability
+norms = 0.0         # No weight decay on layer norms (standard practice)
+mhc = 1.0           # Full weight decay on mHC parameters
+bias = 0.0          # No weight decay on bias parameters (standard practice)
+
+[lr_scheduler]
+warmup_steps = 80
+decay_ratio = 0.7
+decay_type = "cosine"
+min_lr_factor = 0.3  # Floor at 30% of peak LR
+
+[training]
+local_batch_size = 1
+global_batch_size = 6
+seq_len = 49152  # 49K context length
+max_norm = 1.0   # Gradient clipping threshold
+steps = 1000
+dataset = "c4"  # Replace with your dataset (add to text_datasets.py DATASETS dict)
+pack_samples = true   # Pack multiple samples per sequence for efficiency
+add_bos_eos = true    # Add BOS/EOS tokens (required for c4 and most raw text datasets)
+gc_freq = 60
+freeze_router_bias = true
+dtype = "float32"              # Model initialization dtype
+mixed_precision_param = "bfloat16"   # FSDP parameter storage dtype
+mixed_precision_reduce = "float32"   # Gradient reduction precision
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1      # Auto-shard across available GPUs
+fsdp_reshard_after_forward = "default"
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 1
+
+[checkpoint]
+enable = true
+folder = "checkpoint"
+interval = 200
+enable_first_step_checkpoint = false
+last_save_model_only = false
+export_dtype = "float32"
+async_mode = "disabled"
+# Uncomment to load initial weights from HuggingFace checkpoint:
+# initial_load_path = "/path/to/hf_checkpoint"
+# initial_load_in_hf = true
+# initial_load_model_only = true  # Set false to include optimizer state
+
+[activation_checkpoint]
+mode = "selective"
+selective_ac_option = '1'  # Checkpoint every transformer layer
+
+[compile]
+enable = true
+
+[validation]
+enable = false
+dataset = "c4_validation"
+freq = 250
+steps = 50

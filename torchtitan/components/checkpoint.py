@@ -12,6 +12,7 @@ import re
 import shutil
 import threading
 import time
+from collections import Counter
 from concurrent.futures import Future
 from typing import Any
 
@@ -78,7 +79,17 @@ class ModelWrapper(Stateful):
             model_state_dict=state_dict,
             options=StateDictOptions(strict=False),
         )
-        list(map(func, self.model))
+        results = list(map(func, self.model))
+
+        # Log any key mismatches for debugging checkpoint compatibility issues
+        for i, incompatible_keys in enumerate(results):
+            if incompatible_keys.missing_keys:
+                logger.warning(f"Model {i}: Missing {len(incompatible_keys.missing_keys)} keys in checkpoint")
+                logger.warning(f"  First 10: {list(incompatible_keys.missing_keys)[:10]}")
+            if incompatible_keys.unexpected_keys:
+                logger.warning(f"Model {i}: Unexpected {len(incompatible_keys.unexpected_keys)} keys in checkpoint")
+                logger.warning(f"  First 10: {list(incompatible_keys.unexpected_keys)[:10]}")
+
         # `set_model_state_dict()` does change the keys of the input state_dict,
         # we will need to reinitialize the cache_state_dict.
         self.cache_state_dict = self._get_state_dict()
@@ -439,6 +450,138 @@ class CheckpointManager:
 
         return ret
 
+    def _load_hf_safetensors_unquantized(
+        self,
+        checkpoint_path: str,
+        target_dtype: torch.dtype | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Load non-quantized HuggingFace safetensors checkpoint directly.
+
+        This method loads standard (non-MXFP4) HuggingFace checkpoints by reading
+        safetensors files directly, bypassing dcp.load() which has pickle issues
+        with DTensor state dicts during distributed planning.
+
+        Args:
+            checkpoint_path: Path to HuggingFace checkpoint directory
+            target_dtype: Target dtype for floating point tensors. If None, uses
+                self.export_dtype from checkpoint config.
+
+        Returns:
+            State dict with TorchTitan key names
+        """
+        # Use configured export_dtype if not explicitly specified
+        if target_dtype is None:
+            target_dtype = self.export_dtype
+        import json
+        from safetensors import safe_open
+
+        # Only pin memory if we need to broadcast (world_size > 1)
+        # Pinned memory speeds up CPU->GPU transfers but is a limited resource
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+        should_pin = world_size > 1 and torch.cuda.is_available()
+
+        # Load index to find tensor locations
+        index_path = os.path.join(checkpoint_path, "model.safetensors.index.json")
+
+        if os.path.exists(index_path):
+            # Sharded checkpoint with index file
+            with open(index_path) as f:
+                index = json.load(f)
+            weight_map = index.get("weight_map", {})
+
+            # Group tensors by file
+            file_to_tensors: dict[str, list[str]] = {}
+            for tensor_name, file_name in weight_map.items():
+                if file_name not in file_to_tensors:
+                    file_to_tensors[file_name] = []
+                file_to_tensors[file_name].append(tensor_name)
+
+            # Load all tensors
+            hf_state_dict: dict[str, torch.Tensor] = {}
+            for file_name, tensor_names in file_to_tensors.items():
+                file_path = os.path.join(checkpoint_path, file_name)
+                with safe_open(file_path, framework="pt", device="cpu") as f:
+                    for name in tensor_names:
+                        tensor = f.get_tensor(name)
+                        # Explicit dtype cast for consistency
+                        if tensor.dtype != target_dtype and tensor.is_floating_point():
+                            tensor = tensor.to(target_dtype)
+                        # Pin memory for fast broadcast transfers when distributed
+                        if should_pin:
+                            tensor = tensor.pin_memory()
+                        hf_state_dict[name] = tensor
+        else:
+            # Single file checkpoint
+            single_file = os.path.join(checkpoint_path, "model.safetensors")
+            if not os.path.exists(single_file):
+                raise FileNotFoundError(
+                    f"No safetensors files found in {checkpoint_path}. "
+                    "Expected model.safetensors or model.safetensors.index.json"
+                )
+
+            hf_state_dict = {}
+            with safe_open(single_file, framework="pt", device="cpu") as f:
+                for name in f.keys():
+                    tensor = f.get_tensor(name)
+                    # Explicit dtype cast for consistency
+                    if tensor.dtype != target_dtype and tensor.is_floating_point():
+                        tensor = tensor.to(target_dtype)
+                    # Pin memory for fast broadcast transfers when distributed
+                    if should_pin:
+                        tensor = tensor.pin_memory()
+                    hf_state_dict[name] = tensor
+
+        # Log loading info
+        dtypes = Counter(str(t.dtype) for t in hf_state_dict.values())
+        logger.info(
+            f"Loaded {len(hf_state_dict)} tensors from HF checkpoint "
+            f"(pinned={should_pin}, dtypes={dict(dtypes)})"
+        )
+
+        # Convert HF keys to TorchTitan keys
+        return self.sd_adapter.from_hf(hf_state_dict)
+
+    def _load_hf_state_dict_to_model(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        is_distributed: bool,
+    ) -> None:
+        """Load HuggingFace state dict into model with appropriate distributed handling.
+
+        This helper handles the common pattern of loading a state dict into the model,
+        with proper handling for both distributed (broadcast from rank 0) and
+        non-distributed (direct load) cases.
+
+        Args:
+            state_dict: The state dict to load (only needs data on rank 0 if distributed)
+            is_distributed: Whether we're in distributed mode (world_size > 1)
+        """
+        if is_distributed:
+            # Broadcast from rank 0 and convert to DTensors
+            for model in self.states[MODEL].model:
+                set_model_state_dict(
+                    model,
+                    model_state_dict=state_dict,
+                    options=StateDictOptions(
+                        strict=False,
+                        full_state_dict=True,
+                        broadcast_from_rank0=True,
+                    ),
+                )
+            logger.info(f"Loaded {len(state_dict)} tensors via broadcast from rank 0")
+        else:
+            # Single process - load directly without broadcast
+            for model in self.states[MODEL].model:
+                set_model_state_dict(
+                    model,
+                    model_state_dict=state_dict,
+                    options=StateDictOptions(strict=False),
+                )
+            logger.info(f"Loaded {len(state_dict)} tensors directly (non-distributed)")
+
+        # Reinitialize the cached state dict after loading
+        self.states[MODEL].cache_state_dict = self.states[MODEL]._get_state_dict()
+
     def dcp_load(
         self,
         state_dict: dict[str, Any],
@@ -458,18 +601,37 @@ class CheckpointManager:
             assert (
                 self.sd_adapter is not None
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            hf_state_dict = self.sd_adapter.to_hf(state_dict)
-            hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
-                checkpoint_id, from_quantized
+            assert MODEL in self.states, (
+                "Cannot load HF checkpoint: MODEL state not registered. "
+                "Ensure model is added to CheckpointManager states before loading."
             )
 
-            dcp.load(
-                hf_state_dict,
-                storage_reader=hf_storage_reader,
-            )
+            # Check if we're in distributed mode
+            is_distributed = dist.is_initialized() and dist.get_world_size() > 1
 
-            state_dict = self.sd_adapter.from_hf(hf_state_dict)
-            self.states[MODEL].load_state_dict(state_dict)
+            # Determine which loader to use based on checkpoint type
+            if from_quantized and hasattr(self.sd_adapter, "load_hf_safetensors_direct"):
+                # Use direct loading to bypass buggy QuantizedHuggingFaceStorageReader
+                # which has a bug where dcp.load() planner uses wrong lengths for MXFP4 tensors
+                loader_fn = self.sd_adapter.load_hf_safetensors_direct
+            else:
+                # Standard loading path for non-quantized checkpoints
+                # Use broadcast-based loading to avoid pickle issues with DTensors
+                # when using dcp.load() with distributed planning.
+                # DTensors contain internal objects (lambdas) that cannot be pickled,
+                # which causes dist.gather_object() to fail during DCP planning.
+                loader_fn = self._load_hf_safetensors_unquantized
+
+            # Load state dict (only on rank 0 if distributed, to minimize I/O)
+            if is_distributed:
+                rank = dist.get_rank()
+                state_dict = loader_fn(checkpoint_id) if rank == 0 else {}
+            else:
+                state_dict = loader_fn(checkpoint_id)
+
+            # Load into model with appropriate distributed handling
+            self._load_hf_state_dict_to_model(state_dict, is_distributed)
+            return
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
@@ -577,13 +739,17 @@ class CheckpointManager:
         if self.enable_ft_dataloader_checkpoints:
             self._ft_load()
 
+        # Even if checkpoint saving is disabled, we may still want to load initial weights
+        # from HuggingFace format (e.g., for fine-tuning pretrained models)
         if not self.enable:
-            return False
+            if not self.initial_load_in_hf:
+                return False
+            # Continue to load initial HF weights even when saving is disabled
 
         model_only = False
         from_hf = False
         from_quantized = False
-        if not os.path.exists(self.folder):
+        if not os.path.exists(self.folder) or not self.enable:
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized

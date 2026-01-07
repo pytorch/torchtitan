@@ -15,11 +15,18 @@ from torchtitan.tools.logging import logger
 
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
+# Standard PyTorch ignore index for cross-entropy loss (skips padding tokens)
+CROSS_ENTROPY_IGNORE_INDEX = -100
+
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Common cross-entropy loss function for Transformer models training."""
+    """Common cross-entropy loss function for Transformer models training.
+
+    Labels with CROSS_ENTROPY_IGNORE_INDEX (-100) are ignored, which is the
+    standard PyTorch convention for skipping padding tokens in loss computation.
+    """
     return torch.nn.functional.cross_entropy(
-        pred.flatten(0, 1).float(), labels.flatten(0, 1)
+        pred.flatten(0, 1).float(), labels.flatten(0, 1), ignore_index=CROSS_ENTROPY_IGNORE_INDEX
     )
 
 

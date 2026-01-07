@@ -19,22 +19,26 @@ class GptossTensorParallel(TensorParallel):
                 distribute_tensor(module.mlp1_weight, device_mesh, [Shard(1)])
             ),
         )  # Column-wise sharding
-        module.register_parameter(
-            "mlp1_bias",
-            nn.Parameter(distribute_tensor(module.mlp1_bias, device_mesh, [Shard(1)])),
-        )  # Column-wise sharding
+        # Only distribute bias if it exists (use_expert_bias=True)
+        if module.mlp1_bias is not None:
+            module.register_parameter(
+                "mlp1_bias",
+                nn.Parameter(distribute_tensor(module.mlp1_bias, device_mesh, [Shard(1)])),
+            )  # Column-wise sharding
         module.register_parameter(
             "mlp2_weight",
             nn.Parameter(
                 distribute_tensor(module.mlp2_weight, device_mesh, [Shard(2)])
             ),
         )  # Row-wise sharding
-        module.register_parameter(
-            "mlp2_bias",
-            nn.Parameter(
-                distribute_tensor(module.mlp2_bias, device_mesh, [Replicate()])
-            ),
-        )  # Replicate
+        # Only distribute bias if it exists (use_expert_bias=True)
+        if module.mlp2_bias is not None:
+            module.register_parameter(
+                "mlp2_bias",
+                nn.Parameter(
+                    distribute_tensor(module.mlp2_bias, device_mesh, [Replicate()])
+                ),
+            )  # Replicate
 
 
 # This class is for dp2ep with TP (without TP we can just use GptossExpertParallel)
@@ -47,13 +51,15 @@ class GptossExpertTensorParallel(ExpertTensorParallel):
                 distribute_tensor(mod.mlp1_weight, device_mesh, [Shard(0), Shard(1)])
             ),
         )  # Column-wise sharding
-        mod.register_parameter(
-            "mlp1_bias",
-            nn.Parameter(
-                # pyrefly: ignore [bad-argument-type]
-                distribute_tensor(mod.mlp1_bias, device_mesh, [Shard(0), Shard(1)])
-            ),
-        )  # Column-wise sharding
+        # Only distribute bias if it exists (use_expert_bias=True)
+        if mod.mlp1_bias is not None:
+            mod.register_parameter(
+                "mlp1_bias",
+                nn.Parameter(
+                    # pyrefly: ignore [bad-argument-type]
+                    distribute_tensor(mod.mlp1_bias, device_mesh, [Shard(0), Shard(1)])
+                ),
+            )  # Column-wise sharding
         mod.register_parameter(
             "mlp2_weight",
             nn.Parameter(
@@ -61,10 +67,12 @@ class GptossExpertTensorParallel(ExpertTensorParallel):
                 distribute_tensor(mod.mlp2_weight, device_mesh, [Shard(0), Shard(2)])
             ),
         )  # Row-wise sharding
-        mod.register_parameter(
-            "mlp2_bias",
-            nn.Parameter(
-                # pyrefly: ignore [bad-argument-type]
-                distribute_tensor(mod.mlp2_bias, device_mesh, [Shard(0), Replicate()])
-            ),
-        )  # Replicate
+        # Only distribute bias if it exists (use_expert_bias=True)
+        if mod.mlp2_bias is not None:
+            mod.register_parameter(
+                "mlp2_bias",
+                nn.Parameter(
+                    # pyrefly: ignore [bad-argument-type]
+                    distribute_tensor(mod.mlp2_bias, device_mesh, [Shard(0), Replicate()])
+                ),
+            )  # Replicate
