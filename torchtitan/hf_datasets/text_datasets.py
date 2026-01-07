@@ -142,11 +142,12 @@ class HuggingFacePackedDataset(IterableDataset, Stateful):
         # Get pad token - try pad_id, then look up <|endoftext|>, finally fall back to eos_id
         self.pad_id = getattr(tokenizer, "pad_id", None)
         if self.pad_id is None:
-            # Try to get pad token from tokenizer
+            # Try to get pad token from tokenizer's underlying tokenizer
             try:
                 self.pad_id = tokenizer.tokenizer.token_to_id("<|endoftext|>")
-            except Exception:
-                pass
+            except (AttributeError, KeyError):
+                # Tokenizer doesn't support token_to_id or token not in vocab
+                logger.debug("Could not find <|endoftext|> token, will use eos_id fallback")
         if self.pad_id is None:
             self.pad_id = tokenizer.eos_id
             logger.warning(
