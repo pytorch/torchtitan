@@ -226,6 +226,15 @@ class Training:
     steps: int = 10000
     """How many train steps to run"""
 
+    shutdown_signal_file: str | None = None
+    """
+    Path to a file that, when present, will trigger a checkpoint save and graceful shutdown.
+    If set, the training loop will check for this file after each step. If the file exists,
+    training will save a checkpoint and exit. Useful for graceful shutdown in production environments.
+    Example: "/path/to/CHECKPOINT_AND_SHUTDOWN.TXT"
+    If None, this feature is disabled.
+    """
+
     enable_cpu_offload: bool = False
     """
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP

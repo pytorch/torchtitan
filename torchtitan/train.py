@@ -738,6 +738,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         world_mesh=self.parallel_dims.world_mesh,
                     )
 
+                # Check for shutdown signal file
+                if self._check_shutdown_signal():
+                    logger.info(
+                        f"Shutdown signal file detected at step {self.step}. "
+                        "Saving checkpoint and shutting down gracefully..."
+                    )
+                    # Force checkpoint save (even if not on interval)
+                    self.checkpointer.save(self.step, last_step=True)
+                    break
+
         if torch.distributed.get_rank() == 0:
             logger.info("Sleeping 2 seconds for other ranks to complete")
             time.sleep(2)
@@ -746,6 +756,46 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def should_continue_training(self) -> bool:
         return self.step < self.job_config.training.steps
+
+    def _check_shutdown_signal(self) -> bool:
+        """
+        Check for the presence of a shutdown signal file.
+        
+        Returns:
+            bool: True if shutdown signal file exists, False otherwise.
+        """
+        shutdown_file = self.job_config.training.shutdown_signal_file
+        if shutdown_file is None:
+            return False
+        
+        # Only rank 0 checks the file to avoid filesystem contention
+        # Then broadcasts the result to all ranks
+        if torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+            world_size = torch.distributed.get_world_size()
+            
+            # Rank 0 checks the file
+            signal_detected = False
+            if rank == 0:
+                signal_detected = os.path.exists(shutdown_file)
+                if signal_detected:
+                    logger.info(f"Shutdown signal file found: {shutdown_file}")
+            
+            # Broadcast the result to all ranks
+            if world_size > 1:
+                # Use CPU tensor for broadcast to avoid device placement issues
+                signal_tensor = torch.tensor(
+                    [1 if signal_detected else 0], 
+                    dtype=torch.int32, 
+                    device=torch.device("cpu")
+                )
+                torch.distributed.broadcast(signal_tensor, src=0)
+                signal_detected = bool(signal_tensor.item() == 1)
+            
+            return signal_detected
+        else:
+            # Single process case
+            return os.path.exists(shutdown_file)
 
     def state_dict(self) -> dict[str, Any]:
         return {"step": self.step, "ntokens_seen": self.ntokens_seen}
