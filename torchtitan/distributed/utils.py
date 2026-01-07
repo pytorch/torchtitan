@@ -502,7 +502,9 @@ def _clip_grad_norm_with_ep(
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
+        total_norm = (
+            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
+        )
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:

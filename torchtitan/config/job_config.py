@@ -424,7 +424,9 @@ class Parallelism:
     Note that this is still an experimental feature.
     """
 
-    collective_api: Literal["process_group", "torchcomms_via_process_group", "torchcomms"] = "process_group"
+    collective_api: Literal[
+        "process_group", "torchcomms_via_process_group", "torchcomms"
+    ] = "process_group"
     """
     Collective communication API to use for distributed training.
 
