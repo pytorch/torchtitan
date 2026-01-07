@@ -370,7 +370,11 @@ def set_pg_timeouts(timeout, world_mesh):
     torch.distributed.barrier(device_ids=[device_module.current_device()])
     device_module.synchronize()
 
-    groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
+    try:
+        groups = [world_mesh.get_group(mesh_dim) for mesh_dim in range(world_mesh.ndim)]
+    except RuntimeError:
+        # todo: handle this better but we might be using torchcomms
+        return
 
     # None represents the 'default' PG, not part of the mesh
     groups.append(None)
