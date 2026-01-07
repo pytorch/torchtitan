@@ -9,11 +9,18 @@ Compiler passes for the compiler toolkit.
 
 This module provides various compiler passes that can be applied to graph modules
 during compilation. Passes can be selected and configured via job config.
+
+Pass Types:
+- Joint custom passes: Applied to the joint forward-backward graph before partitioning
+- Compiler passes: Applied to the partitioned forward/backward graphs
 """
 
 from typing import Any, Sequence
 
 import torch
+from torch._functorch.aot_autograd import JointWithDescriptors
+from torch._guards import TracingContext
+from torch._inductor.compile_fx import compile_fx_inner
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
@@ -24,6 +31,7 @@ from torchtitan.experiments.compiler_toolkit.cudagraph import (
 from torchtitan.experiments.simple_fsdp.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
+from torchtitan.tools.logging import logger
 
 
 def autobucketing_reordering_pass(
@@ -106,10 +114,166 @@ def fsdp_reshard_after_fwd_pass(
     return gm
 
 
+def inductor_decomposition_pass(
+    gm: torch.fx.GraphModule,
+    model: torch.nn.Module,
+    joint_with_descriptors: JointWithDescriptors,
+    forward_inputs: tuple,
+    tracing_context: TracingContext,
+) -> torch.fx.GraphModule:
+    """
+    Apply Inductor decompositions to the joint graph.
+
+    This pass applies decompositions to the joint forward-backward graph using make_fx.
+    It unwraps tensor subclasses (like DTensor) and retraces the graph with decompositions
+    applied, while preserving metadata required by the partitioner.
+
+    Args:
+        gm: The joint graph module
+        model: The parallelized model
+        joint_with_descriptors: The joint graph with descriptors
+        forward_inputs: Forward input arguments (may be DTensors)
+        tracing_context: The tracing context from original joint graph capture
+
+    Returns:
+        The joint graph with decompositions applied
+    """
+    from torch._functorch._aot_autograd.descriptors import DummyAOTInput
+    from torch._functorch._aot_autograd.subclass_utils import unwrap_tensor_subclasses
+    from torch._inductor.decomposition import select_decomp_table
+    from torch.fx.experimental.proxy_tensor import make_fx
+
+    logger.info("Applying decompositions to joint graph")
+
+    decomp_table = select_decomp_table()
+
+    # Get traced tangents metadata
+    traced_tangents = joint_with_descriptors._aot_state.fw_metadata.traced_tangents
+
+    # Collect all inputs: params, buffers, forward inputs, tangents
+    param_inputs = list(model.parameters())
+    buffer_inputs = list(model.buffers())
+    primals = param_inputs + buffer_inputs + list(forward_inputs)
+    tangents = list(traced_tangents)
+
+    # Create dummy descriptors for unwrapping
+    primals_descs = [DummyAOTInput(i) for i in range(len(primals))]
+    tangents_descs = [DummyAOTInput(i + len(primals)) for i in range(len(tangents))]
+
+    # Unwrap tensor subclasses (DTensor -> _local_tensor)
+    primals_unwrapped, _ = unwrap_tensor_subclasses(
+        primals, primals_descs, append_symints=False
+    )
+    tangents_unwrapped, _ = unwrap_tensor_subclasses(
+        tangents, tangents_descs, append_symints=False
+    )
+
+    # Verify unwrapped tensor shapes match joint graph placeholders
+    all_inputs = primals_unwrapped + tangents_unwrapped
+    placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+
+    if len(all_inputs) != len(placeholders):
+        raise RuntimeError(
+            f"Input count mismatch: {len(all_inputs)} inputs vs {len(placeholders)} placeholders"
+        )
+
+    shape_mismatches = []
+    for i, (inp, ph) in enumerate(zip(all_inputs, placeholders)):
+        if hasattr(inp, "shape") and "val" in ph.meta:
+            expected_shape = ph.meta["val"].shape
+            actual_shape = inp.shape
+            if expected_shape != actual_shape:
+                shape_mismatches.append(
+                    f"  {ph.target}: expected {expected_shape}, got {actual_shape}"
+                )
+
+    if shape_mismatches:
+        logger.error(f"Shape mismatches found ({len(shape_mismatches)}):")
+        for msg in shape_mismatches:
+            logger.error(msg)
+        raise RuntimeError(
+            "Unwrapped tensor shapes don't match joint graph placeholders."
+        )
+
+    # Get the FakeTensorMode from the original joint graph
+    fake_mode = None
+    for node in gm.graph.nodes:
+        if node.op == "placeholder" and "val" in node.meta:
+            val = node.meta["val"]
+            if hasattr(val, "fake_mode"):
+                fake_mode = val.fake_mode
+                break
+
+    if fake_mode is None:
+        from torch._guards import detect_fake_mode
+
+        fake_mode = detect_fake_mode(primals_unwrapped)
+
+    # Use make_fx with the original fake mode to retrace with decompositions
+    with fake_mode:
+        decomposed_gm = make_fx(
+            gm,
+            decomposition_table=decomp_table,
+            _allow_non_fake_inputs=False,
+        )(primals_unwrapped, tangents_unwrapped)
+
+    # Copy metadata from original placeholders to decomposed placeholders
+    orig_placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+    decomp_placeholders = [
+        n for n in decomposed_gm.graph.nodes if n.op == "placeholder"
+    ]
+
+    if len(orig_placeholders) != len(decomp_placeholders):
+        raise RuntimeError(
+            f"Placeholder count mismatch: {len(orig_placeholders)} vs {len(decomp_placeholders)}"
+        )
+
+    for orig, decomp in zip(orig_placeholders, decomp_placeholders):
+        # Copy all metadata from original to decomposed
+        for key, value in orig.meta.items():
+            if key not in decomp.meta:
+                decomp.meta[key] = value
+
+        # Rename decomposed placeholder to match original name
+        decomp.target = orig.target
+        decomp.name = orig.name
+
+    decomposed_gm.recompile()
+    logger.info("Decompositions applied successfully to joint graph")
+
+    return decomposed_gm
+
+
+def full_inductor_compilation_pass(
+    gm: torch.fx.GraphModule, example_inputs
+) -> torch.fx.GraphModule:
+    """
+    Apply full Inductor compilation with code generation.
+
+    This pass uses compile_fx_inner to generate optimized code for the graph.
+
+    Args:
+        gm: The graph module (forward or backward)
+        example_inputs: Example inputs for compilation
+
+    Returns:
+        The compiled graph module
+    """
+    return compile_fx_inner(gm, example_inputs)
+
+
 # Registry mapping pass names to pass functions
 AVAILABLE_COMPILER_PASSES = {
     "autobucketing_reordering": autobucketing_reordering_pass,
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
     "cudagraph": cudagraph_pass,
+    "full_inductor_compilation": full_inductor_compilation_pass,
+}
+
+# Registry for joint custom passes (applied before partitioning)
+AVAILABLE_JOINT_PASSES = {
+    "inductor_decomposition": inductor_decomposition_pass,
+    "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
+    "validate_flex_attn_annotation": validate_flex_attn_annotation_pass,
 }
