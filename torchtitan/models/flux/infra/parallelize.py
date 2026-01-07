@@ -17,6 +17,7 @@ from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecision
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.tools.logging import logger
 
 
@@ -27,6 +28,9 @@ def parallelize_flux(
 ):
     if job_config.activation_checkpoint.mode != "none":
         apply_ac(model, job_config.activation_checkpoint)
+
+    if parallel_dims.cp_enabled:
+        apply_cp(model, parallel_dims.get_mesh("cp"))
 
     if parallel_dims.fsdp_enabled:
         names = (
@@ -46,16 +50,6 @@ def parallelize_flux(
             logger.info("Applied HSDP to the model")
         else:
             logger.info("Applied FSDP to the model")
-
-        if parallel_dims.cp_enabled:
-            # The attention in Flux does not use causal mask.
-            # Currently, load_balance must be disabled in order to support Context Parallelism
-            # in Pytorch's experimental ring attention module
-            # https://github.com/pytorch/pytorch/blob/v2.9.0/torch/distributed/tensor/experimental/_attention.py#L395
-            from torch.distributed.tensor.experimental._attention import _cp_options
-
-            _cp_options.enable_load_balance = False
-            logger.info("Applied Context Parallel to the model")
 
     return model
 
@@ -132,6 +126,42 @@ def apply_ac(model: nn.Module, ac_config):
         model.single_blocks.register_module(layer_id, block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+
+
+def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
+    """
+    Apply context parallelism to the Flux model.
+
+    Args:
+        model: The Flux model with double_blocks and single_blocks containing
+            inner attention modules.
+        cp_mesh: Device mesh for context parallel dimension
+
+    Note:
+        - Uses SDPA attention type
+        - Applies to all inner_attention modules in double_blocks and single_blocks
+    """
+    # Collect all inner_attention modules from the Flux model
+    attention_modules = []
+
+    # pyrefly: ignore [not-iterable]
+    for double_block in model.double_blocks:
+        # pyrefly: ignore [missing-attribute]
+        attention_modules.append(double_block.img_attn.inner_attention)
+        # pyrefly: ignore [missing-attribute]
+        attention_modules.append(double_block.txt_attn.inner_attention)
+        # pyrefly: ignore [missing-attribute]
+        attention_modules.append(double_block.inner_attention)
+
+    # pyrefly: ignore [not-iterable]
+    for single_block in model.single_blocks:
+        # pyrefly: ignore [missing-attribute]
+        attention_modules.append(single_block.inner_attention)
+
+    # Apply CP using the shared implementation (always uses SDPA for Flux)
+    apply_cp_to_attention_module(attention_modules, cp_mesh, "sdpa")
+
+    logger.info("Applied Context Parallel to the Flux model")
 
 
 def parallelize_encoders(
