@@ -58,10 +58,10 @@ def merge_finetune_lora_weights(state_dict, model_args):
     """
     Merge LoRA fine-tuning weights into base weights.
     
-    LoRA naming convention: finetune_lora_A_{target}, finetune_lora_B_{target}
+    LoRA naming convention: finetune_lora_{target}.lora_A, finetune_lora_{target}.lora_B
     Example keys:
-      - layers.0.attention.finetune_lora_A_wo.weight → merge into layers.0.attention.wo.weight
-      - layers.0.attention.finetune_lora_B_wo.weight
+      - layers.0.attention.finetune_lora_wo.lora_A.weight → merge into layers.0.attention.wo.weight
+      - layers.0.moe.finetune_lora_shared_w2.lora_A.weight → merge into layers.0.moe.shared_experts.w2.weight
     
     Merge formula: merged = base + lora_B @ lora_A * scale
     where scale = finetune_lora_alpha / finetune_lora_rank
@@ -73,28 +73,40 @@ def merge_finetune_lora_weights(state_dict, model_args):
     
     scale = model_args.finetune_lora_alpha / model_args.finetune_lora_rank
     
-    # Find all LoRA A keys: pattern is "finetune_lora_A_{target}.weight"
-    lora_a_keys = [k for k in state_dict.keys() if "finetune_lora_A_" in k and k.endswith(".weight")]
+    # Mapping from LoRA module name to base layer path
+    # Format: "finetune_lora_{name}" → base layer relative path
+    lora_target_mapping = {
+        "finetune_lora_wo": "wo",
+        "finetune_lora_shared_w2": "shared_experts.w2",
+    }
+    
+    # Find all LoRA A keys: pattern is "finetune_lora_*.lora_A.weight"
+    lora_a_keys = [k for k in state_dict.keys() if ".lora_A.weight" in k]
     
     if not lora_a_keys:
         raise ValueError(
             f"finetune_lora_rank={model_args.finetune_lora_rank} but no LoRA keys found in checkpoint. "
-            "Expected keys matching pattern 'finetune_lora_A_*.weight'"
+            "Expected keys matching pattern '*.lora_A.weight'"
         )
     
-    merged_count = 0
+    merged_layers = []
     for lora_a_key in lora_a_keys:
-        # Extract target layer name from key
-        # e.g., "layers.0.attention.finetune_lora_A_wo.weight" → target = "wo"
-        # Split: prefix = "layers.0.attention.", target = "wo"
-        parts = lora_a_key.rsplit("finetune_lora_A_", 1)
-        prefix = parts[0]  # "layers.0.attention."
-        target_with_suffix = parts[1]  # "wo.weight"
-        target = target_with_suffix.replace(".weight", "")  # "wo"
+        # Extract LoRA module key
+        # e.g., "layers.0.attention.finetune_lora_wo.lora_A.weight" → "layers.0.attention.finetune_lora_wo"
+        lora_module_key = lora_a_key.replace(".lora_A.weight", "")
+        prefix = lora_module_key.rsplit(".", 1)[0]  # "layers.0.attention"
+        lora_module_name = lora_module_key.rsplit(".", 1)[1]  # "finetune_lora_wo"
+        
+        # Look up the base layer mapping
+        if lora_module_name not in lora_target_mapping:
+            logger.warning(f"Unknown LoRA module '{lora_module_name}' in {lora_a_key}, skipping")
+            continue
+        
+        base_relative = lora_target_mapping[lora_module_name]
         
         # Derive corresponding keys
-        lora_b_key = f"{prefix}finetune_lora_B_{target}.weight"
-        base_key = f"{prefix}{target}.weight"
+        lora_b_key = f"{lora_module_key}.lora_B.weight"
+        base_key = f"{prefix}.{base_relative}.weight"
         
         if lora_b_key not in state_dict:
             raise KeyError(
@@ -112,10 +124,6 @@ def merge_finetune_lora_weights(state_dict, model_args):
         lora_a_weight = state_dict[lora_a_key]
         lora_b_weight = state_dict[lora_b_key]
         
-        logger.info(
-            f"Updating weights of {base_key} from {lora_a_key} and {lora_b_key}"
-        )
-        
         # Merge: merged = base + lora_B @ lora_A * scale
         delta = lora_b_weight @ lora_a_weight * scale
         state_dict[base_key] = base_weight + delta
@@ -123,9 +131,11 @@ def merge_finetune_lora_weights(state_dict, model_args):
         # Remove LoRA keys
         del state_dict[lora_a_key]
         del state_dict[lora_b_key]
-        merged_count += 1
+        merged_layers.append(base_key)
     
-    logger.info(f"[LoRA] Merged {merged_count} LoRA adapter(s) into base weights (scale={scale:.4f})")
+    logger.info(f"[LoRA] Merged {len(merged_layers)} LoRA adapter(s) into base weights (scale={scale:.4f})")
+    for layer in merged_layers:
+        logger.info(f"  - {layer}")
     
     return state_dict
 
@@ -160,8 +170,8 @@ def convert_to_hf(
     )
 
     # If LoRA fine-tuning was used, merge LoRA weights into base weights
-    # state_dict keys like: layers.0.attention.finetune_lora_A_wo.weight, layers.0.attention.finetune_lora_A_wo.weight, 
-    # pattern layers.{}.attention.finetune_lora_{A|B}_{orginal_weight}.weight
+    # state_dict keys like: layers.0.attention.finetune_lora_wo.lora_A.weight
+    # pattern: layers.{}.{module}.finetune_lora_{target}.lora_{A|B}.weight
     state_dict = merge_finetune_lora_weights(state_dict, model_args)
 
     # convert state dict tt->hf

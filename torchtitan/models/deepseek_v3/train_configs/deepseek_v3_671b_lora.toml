@@ -1,7 +1,7 @@
 [job]
-dump_folder = "./outputs"
+dump_folder = "/root/.cache/team_artifacts/hf_checkpoints/dsv3-biglora"
 description = "DeepSeek-V3 671B model training"
-print_config = false
+print_config = true
 
 [profiling]
 enable_profiling = false
@@ -15,7 +15,7 @@ log_freq = 10
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
-enable_wandb = false
+enable_wandb = true
 
 [model]
 name = "deepseek_v3"

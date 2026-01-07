@@ -25,6 +25,7 @@ from torchtitan.protocols.train_spec import ModelProtocol
 from torchtitan.tools.logging import logger
 
 from .args import DeepSeekV3ModelArgs
+from .lora import LoRALinear
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -181,12 +182,15 @@ class Attention(nn.Module):
         self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
 
         # Fine-tuning LoRA on output projection (wo)
-        # Naming: finetune_lora_A_{target}, finetune_lora_B_{target}
-        self.finetune_lora_rank = model_args.finetune_lora_rank
-        if self.finetune_lora_rank > 0:
-            self.finetune_lora_A_wo = nn.Linear(self.n_heads * self.v_head_dim, self.finetune_lora_rank, bias=False)
-            self.finetune_lora_B_wo = nn.Linear(self.finetune_lora_rank, self.dim, bias=False)
-            self.finetune_lora_scale = model_args.finetune_lora_alpha / self.finetune_lora_rank
+        # This is a parallel LoRA where lora_B @ lora_A has the same shape as wo
+        self.finetune_lora_wo: LoRALinear | None = None
+        if model_args.finetune_lora_rank > 0:
+            self.finetune_lora_wo = LoRALinear(
+                in_features=self.n_heads * self.v_head_dim,
+                out_features=self.dim,
+                rank=model_args.finetune_lora_rank,
+                alpha=model_args.finetune_lora_alpha,
+            )
 
         self.softmax_scale = self.qk_head_dim**-0.5
 
@@ -274,8 +278,8 @@ class Attention(nn.Module):
 
         # Apply base projection + finetune LoRA if enabled
         out = self.wo(output)
-        if self.finetune_lora_rank > 0:
-            out = out + self.finetune_lora_B_wo(self.finetune_lora_A_wo(output)) * self.finetune_lora_scale
+        if self.finetune_lora_wo is not None:
+            out = out + self.finetune_lora_wo(output)
         return out  # (bsz, seqlen, dim)
 
     def init_weights(self, init_std: float):
@@ -292,10 +296,9 @@ class Attention(nn.Module):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
-        # Initialize fine-tuning LoRA: A with small random, B with zeros (standard practice)
-        if self.finetune_lora_rank > 0:
-            nn.init.kaiming_uniform_(self.finetune_lora_A_wo.weight, a=math.sqrt(5))
-            nn.init.zeros_(self.finetune_lora_B_wo.weight)
+        # Initialize fine-tuning LoRA adapter
+        if self.finetune_lora_wo is not None:
+            self.finetune_lora_wo.init_weights()
 
         self.kv_norm.reset_parameters()
         if self.q_lora_rank > 0:
@@ -320,6 +323,8 @@ class TransformerBlock(nn.Module):
                 model_args.moe_args,
                 dim=model_args.dim,
                 hidden_dim=model_args.moe_inter_dim,
+                finetune_lora_rank=model_args.finetune_lora_rank,
+                finetune_lora_alpha=model_args.finetune_lora_alpha,
             )
         else:
             self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)
@@ -414,23 +419,23 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
 
     def freeze_for_finetuning(self) -> None:
         """
-        Freeze all parameters except finetune_lora layers.
+        Freeze all parameters except LoRA layers.
         Call this after loading pretrained weights to enable LoRA fine-tuning.
         """
         # First, freeze everything
         for param in self.parameters():
             param.requires_grad = False
 
-        # Then, unfreeze only finetune_lora layers
+        # Then, unfreeze only LoRA layers (matching pattern: finetune_lora_*)
         trainable_count = 0
         total_count = 0
         for name, param in self.named_parameters():
             total_count += param.numel()
-            if "finetune" in name:
+            if "finetune_lora_" in name:
                 param.requires_grad = True
                 trainable_count += param.numel()
 
-        logger.error(f"[LoRA] Trainable params: {trainable_count:,} / {total_count:,} ", f"({100 * trainable_count / total_count:.2f}%)")
+        logger.info(f"[LoRA] Trainable params: {trainable_count:,} / {total_count:,} ({100 * trainable_count / total_count:.2f}%)")
 
     def get_attention_masks(
         self,

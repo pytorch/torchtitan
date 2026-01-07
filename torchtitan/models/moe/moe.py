@@ -354,7 +354,14 @@ class TokenReorderer(nn.Module):
 
 
 class MoE(nn.Module):
-    def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
+    def __init__(
+        self,
+        moe_args: MoEArgs,
+        dim: int,
+        hidden_dim: int,
+        finetune_lora_rank: int = 0,
+        finetune_lora_alpha: float = 1.0,
+    ):
         super().__init__()
 
         num_experts = moe_args.num_experts
@@ -374,12 +381,25 @@ class MoE(nn.Module):
             _debug_force_load_balance=moe_args._debug_force_load_balance,
         )
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
+        shared_hidden_dim = hidden_dim * moe_args.num_shared_experts
         self.shared_experts = (
-            FeedForward(dim=dim, hidden_dim=hidden_dim * moe_args.num_shared_experts)
+            FeedForward(dim=dim, hidden_dim=shared_hidden_dim)
             if moe_args.num_shared_experts > 0
             else None
         )
         self.score_before_experts = moe_args.score_before_experts
+        
+        # Optional LoRA on shared experts w2 (down projection)
+        # Shape: lora_B @ lora_A = (dim, shared_hidden_dim) = same as shared_experts.w2
+        self.finetune_lora_shared_w2: nn.Module | None = None
+        if finetune_lora_rank > 0 and self.shared_experts is not None:
+            from torchtitan.models.deepseek_v3.model.lora import LoRALinear
+            self.finetune_lora_shared_w2 = LoRALinear(
+                in_features=shared_hidden_dim,
+                out_features=dim,
+                rank=finetune_lora_rank,
+                alpha=finetune_lora_alpha,
+            )
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert is accumulated in the model forward pass.
@@ -458,7 +478,17 @@ class MoE(nn.Module):
         # shared expert
         # Note: we execute the shared expert before scoring the output of the routed expert
         # to "implicitly" overlap the shared expert compute with token combine communication
-        out = self.shared_experts(x) if self.shared_experts is not None else None
+        if self.shared_experts is not None:
+            out = self.shared_experts(x)
+            # Apply LoRA on shared experts output (parallel to w2)
+            if self.finetune_lora_shared_w2 is not None:
+                # Get the intermediate activation before w2
+                # shared_experts computes: w2(silu(w1(x)) * w3(x))
+                # We apply LoRA in parallel to w2
+                intermediate = F.silu(self.shared_experts.w1(x)) * self.shared_experts.w3(x)
+                out = out + self.finetune_lora_shared_w2(intermediate)
+        else:
+            out = None
 
         # Unsort routed outputs
         routed_output_unsorted = torch.zeros(
@@ -495,6 +525,8 @@ class MoE(nn.Module):
         self.router.init_weights(init_std)
         if self.shared_experts is not None:
             self.shared_experts.init_weights(init_std)
+        if self.finetune_lora_shared_w2 is not None:
+            self.finetune_lora_shared_w2.init_weights()
 
         with torch.device(buffer_device):
             self.tokens_per_expert = torch.zeros(
