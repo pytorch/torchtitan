@@ -920,67 +920,12 @@ class MXGroupedMM:
 
 
 @dataclass
-class NVFP4QATLinear:
-    quantize_weights_only: bool = True
-    """
-    Weight-only quantization (vs weight+activation quantization).
-    Weight-only provides better accuracy with minimal performance impact.
-
-    Example: --quantize.linear.nvfp4_qat.quantize_weights_only=true
-    """
-
-    calibration_steps: int = 100
-    """
-    Number of training steps to collect statistics for quantization scale initialization.
-    After calibration, scales are frozen and normal training continues.
-
-    Example: --quantize.linear.nvfp4_qat.calibration_steps=100
-    """
-
-    filter_fqns: list[str] = field(
-        default_factory=lambda: [
-            "attention", "wq", "wk", "wv", "wo",  # Skip all attention layers
-            "norm",  # Skip all normalization layers
-            "router", "gate",  # Skip router/gate layers
-            "tok_embeddings", "output"  # Skip embeddings and output projection
-        ]
-    )
-    """
-    Comma-separated list of fully qualified names of modules to skip applying NVFP4 QAT to.
-    By default, only quantize MLP/expert weights (w1, w2, w3) and skip everything else
-    (attention, norms, router, embeddings, output) for better accuracy and stability.
-
-    Example: --quantize.linear.nvfp4_qat.filter_fqns="attention,norm,router,output"
-    """
-
-
-@dataclass
-class NVFP4QATGroupedMM:
-    quantize_weights_only: bool = True
-    """
-    Weight-only quantization for MoE expert weights.
-
-    Example: --quantize.grouped_mm.nvfp4_qat.quantize_weights_only=true
-    """
-
-    calibration_steps: int = 100
-    """
-    Number of training steps to collect statistics for MoE quantization scale initialization.
-
-    Example: --quantize.grouped_mm.nvfp4_qat.calibration_steps=100
-    """
-
-
-@dataclass
 class QuantizedLinear:
     float8: Float8Linear = field(default_factory=Float8Linear)
     """FP8 training config for nn.Linear layers"""
 
     mx: MXLinear = field(default_factory=MXLinear)
     """MX training config for nn.Linear layers"""
-
-    nvfp4_qat: NVFP4QATLinear = field(default_factory=NVFP4QATLinear)
-    """NVFP4 QAT training config for nn.Linear layers"""
 
 
 @dataclass
@@ -990,9 +935,6 @@ class QuantizedGroupedMM:
 
     mx: MXGroupedMM = field(default_factory=MXGroupedMM)
     """MX training config for grouped GEMMs"""
-
-    nvfp4_qat: NVFP4QATGroupedMM = field(default_factory=NVFP4QATGroupedMM)
-    """NVFP4 QAT training config for grouped GEMMs"""
 
 
 @dataclass
