@@ -488,7 +488,7 @@ class CPUOffloadOptimizersContainer(OptimizersContainer):
         self.model_parts = model_parts
         self.optimizers = []
 
-        # Map from GPU param to CPU shadow param
+        # Map between model params (may be DTensor) and CPU shadow params
         self._gpu_to_cpu_param: dict[nn.Parameter, torch.Tensor] = {}
         self._cpu_to_gpu_param: dict[torch.Tensor, nn.Parameter] = {}
 
@@ -505,11 +505,11 @@ class CPUOffloadOptimizersContainer(OptimizersContainer):
         # Create CPU shadow copies of parameters
         # For DTensor (FSDP2), we get the local tensor
         cpu_params = []
-        for gpu_param in all_params:
-            if isinstance(gpu_param, DTensor):
-                local_tensor = gpu_param.to_local()
+        for model_param in all_params:
+            if isinstance(model_param, DTensor):
+                local_tensor = model_param.to_local()
             else:
-                local_tensor = gpu_param.data
+                local_tensor = model_param.data
 
             # Create CPU copy as nn.Parameter (leaf tensor with requires_grad=True)
             # Use pinned memory for faster CPU<->GPU transfers
@@ -519,8 +519,8 @@ class CPUOffloadOptimizersContainer(OptimizersContainer):
             cpu_param = nn.Parameter(cpu_data, requires_grad=True)
             cpu_params.append(cpu_param)
 
-            self._gpu_to_cpu_param[gpu_param] = cpu_param
-            self._cpu_to_gpu_param[cpu_param] = gpu_param
+            self._gpu_to_cpu_param[model_param] = cpu_param
+            self._cpu_to_gpu_param[cpu_param] = model_param
 
         logger.info(f"Created {len(cpu_params)} CPU shadow parameters (fp32 for optimizer precision)")
 
@@ -543,20 +543,20 @@ class CPUOffloadOptimizersContainer(OptimizersContainer):
                 weight_decay_multipliers,
             )
 
-            # Build CPU param_groups from GPU param_groups
+            # Build CPU param_groups from model param_groups
             cpu_param_groups = []
-            for gpu_group in param_groups:
+            for group in param_groups:
                 cpu_group_params = []
-                for gpu_param in gpu_group['params']:
+                for model_param in group['params']:
                     # Find corresponding CPU param
-                    if gpu_param in self._gpu_to_cpu_param:
-                        cpu_group_params.append(self._gpu_to_cpu_param[gpu_param])
+                    if model_param in self._gpu_to_cpu_param:
+                        cpu_group_params.append(self._gpu_to_cpu_param[model_param])
 
                 cpu_param_groups.append({
                     'params': cpu_group_params,
-                    'lr': gpu_group['lr'],
-                    'weight_decay': gpu_group['weight_decay'],
-                    'group_name': gpu_group.get('group_name', 'unknown'),
+                    'lr': group['lr'],
+                    'weight_decay': group['weight_decay'],
+                    'group_name': group.get('group_name', 'unknown'),
                 })
 
             features = []
@@ -616,8 +616,8 @@ class CPUOffloadOptimizersContainer(OptimizersContainer):
         """
         # Copy gradients from GPU to CPU (with dtype conversion bf16→fp32)
         skipped_params = 0
-        for gpu_param, cpu_param in self._gpu_to_cpu_param.items():
-            if gpu_param.grad is None:
+        for model_param, cpu_param in self._gpu_to_cpu_param.items():
+            if model_param.grad is None:
                 # Skip parameters without gradients (e.g., frozen params).
                 # IMPORTANT: This is safe ONLY if the parameter is frozen on ALL ranks.
                 # If grad is None on this rank but exists on other ranks, the
@@ -625,19 +625,19 @@ class CPUOffloadOptimizersContainer(OptimizersContainer):
                 skipped_params += 1
                 continue
 
-            if isinstance(gpu_param.grad, DTensor):
+            if isinstance(model_param.grad, DTensor):
                 # For TP, gradients may have Partial placement (need reduction).
                 # Redistribute to match parameter's placement before getting local tensor.
                 # This handles both FSDP (Shard) and TP (Partial -> Shard) cases.
-                if isinstance(gpu_param, DTensor):
-                    grad_redistributed = gpu_param.grad.redistribute(
-                        gpu_param.device_mesh, gpu_param.placements
+                if isinstance(model_param, DTensor):
+                    grad_redistributed = model_param.grad.redistribute(
+                        model_param.device_mesh, model_param.placements
                     )
                     grad_local = grad_redistributed.to_local()
                 else:
-                    grad_local = gpu_param.grad.to_local()
+                    grad_local = model_param.grad.to_local()
             else:
-                grad_local = gpu_param.grad
+                grad_local = model_param.grad
 
             # Non-blocking copy to overlap with other transfers
             # grad_local is bf16, cpu_param.grad must be fp32 for precision
@@ -657,6 +657,12 @@ class CPUOffloadOptimizersContainer(OptimizersContainer):
             # .copy_() will cast bf16 → fp32 automatically
             cpu_param.grad.copy_(grad_local, non_blocking=True)
 
+        # Log skipped params at debug level (useful for debugging frozen param issues)
+        if skipped_params > 0:
+            logger.debug(
+                f"CPUOffloadOptimizer: Skipped {skipped_params} params without gradients"
+            )
+
         # Sync to ensure all gradient copies are complete before CPU optimizer runs
         # Use CUDA event for fine-grained sync (only waits on our copies, not all CUDA ops)
         if torch.cuda.is_available():
@@ -670,17 +676,17 @@ class CPUOffloadOptimizersContainer(OptimizersContainer):
             optimizer.step(*args, **kwargs)
 
         # Copy updated parameters back to GPU (with dtype conversion fp32→bf16)
-        for cpu_param, gpu_param in self._cpu_to_gpu_param.items():
-            # cpu_param.data is fp32, gpu_param is bf16 → automatic downcast
-            if isinstance(gpu_param, DTensor):
+        for cpu_param, model_param in self._cpu_to_gpu_param.items():
+            # cpu_param.data is fp32, model_param may be bf16 → automatic downcast
+            if isinstance(model_param, DTensor):
                 # NOTE: Using _local_tensor instead of to_local() because:
                 # 1. to_local() may return a view that doesn't propagate in-place updates
                 # 2. We need direct access to the underlying storage for copy_()
                 # 3. _local_tensor is stable in PyTorch's DTensor implementation
-                local_tensor = gpu_param._local_tensor  # noqa: SLF001
+                local_tensor = model_param._local_tensor  # noqa: SLF001
                 local_tensor.copy_(cpu_param.data, non_blocking=True)
             else:
-                gpu_param.data.copy_(cpu_param.data, non_blocking=True)
+                model_param.data.copy_(cpu_param.data, non_blocking=True)
 
         # Sync to ensure parameter updates are visible before next forward pass
         # Use CUDA event for fine-grained sync
@@ -730,13 +736,13 @@ class CPUOffloadOptimizersContainer(OptimizersContainer):
         Converts bf16 GPU params → fp32 CPU params for better optimizer precision.
         """
         with torch.no_grad():
-            for gpu_param, cpu_param in self._gpu_to_cpu_param.items():
-                if isinstance(gpu_param, DTensor):
+            for model_param, cpu_param in self._gpu_to_cpu_param.items():
+                if isinstance(model_param, DTensor):
                     # See NOTE in step() for why we use _local_tensor
-                    local_tensor = gpu_param._local_tensor  # noqa: SLF001
+                    local_tensor = model_param._local_tensor  # noqa: SLF001
                 else:
-                    local_tensor = gpu_param.data
-                # gpu param is bf16, cpu param is fp32 → automatic upcast
+                    local_tensor = model_param.data
+                # model param is bf16, cpu param is fp32 → automatic upcast
                 cpu_param.data.copy_(local_tensor)
         logger.info("Synced GPU parameters to CPU optimizer shadow copies (bf16→fp32)")
 
