@@ -551,9 +551,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
                     input_batch, tokenizer.eos_id
                 )
             case _:
-                raise NotImplementedError(
-                    "Only varlen and flex attn masks are supported"
-                )
+                raise TypeError("Only varlen and flex attn masks are supported")
 
     def forward(
         self,

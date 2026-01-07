@@ -18,6 +18,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
@@ -65,7 +66,11 @@ def parallelize_deepseekv3(
 
     attn_type = getattr(model.model_args, "attn_type", "sdpa")
     if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
-        raise NotImplementedError("CP support is only supported for SDPA.")
+        raise NotImplementedError(
+            f"Context Parallel only supports SDPA attention. "
+            f"Got attn_type='{attn_type}'. "
+            f"FlexAttention and varlen attention are not supported with CP."
+        )
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
@@ -87,6 +92,7 @@ def parallelize_deepseekv3(
             tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
+            cp_enabled=parallel_dims.cp_enabled,
         )
         maybe_enable_async_tp(job_config, tp_mesh)
 
@@ -125,6 +131,14 @@ def parallelize_deepseekv3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
+        )
+
+    if parallel_dims.cp_enabled:
+        apply_cp_to_attention_module(
+            # pyrefly: ignore [missing-attribute, not-callable]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+            attn_type,
         )
 
     model_compile_enabled = (
@@ -178,9 +192,6 @@ def parallelize_deepseekv3(
         else:
             logger.info("Applied FSDP to the model")
 
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
-
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
@@ -201,6 +212,7 @@ def apply_non_moe_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
+    cp_enabled: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -239,15 +251,19 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    positions_sharding = Replicate() if cp_enabled else None
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
-            # NOTE: when the fourth argument (positions) is not None, its input layout
-            # and desired input layout should be Replicate()
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate(), None, None),
-                desired_input_layouts=(Replicate(), Replicate(), None, None),
+                input_layouts=(Shard(1), Replicate(), None, positions_sharding),
+                desired_input_layouts=(
+                    Replicate(),
+                    Replicate(),
+                    None,
+                    positions_sharding,
+                ),
             ),
             # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
             # so that the intermedidate results k is generated as a DTensor and its gradient is
