@@ -72,93 +72,13 @@ DATASETS = {
         loader=partial(_load_c4_dataset, split="validation"),
         sample_processor=_process_c4_text,
     ),
-    "harmony_persona": DatasetConfig(
-        path="/mnt/git/bestofn/experiments/training/harmony_persona_interleaved.jsonl",
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "harmony_persona_short": DatasetConfig(
-        path="/mnt/git/bestofn/experiments/training/harmony_persona_0-2048.jsonl",  # 3,527 examples, properly filtered to ≤2048 tokens
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "harmony_persona_long": DatasetConfig(
-        path="/mnt/git/bestofn/experiments/training/harmony_persona_2049-8192.jsonl",  # 1,131 examples, properly filtered to 2049-8192 tokens
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    # No-developer datasets (omit persona instructions to test if they make prediction too easy)
-    "harmony_persona_no_dev_short": DatasetConfig(
-        path="/mnt/git/bestofn/experiments/training/harmony_persona_no_dev_short.jsonl",  # 3,641 examples, 0-2048 tokens
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "harmony_persona_no_dev_long": DatasetConfig(
-        path="/mnt/git/bestofn/experiments/training/harmony_persona_no_dev_long.jsonl",  # 1,017 examples, 2049-8192 tokens
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "harmony_persona_no_dev_interleaved": DatasetConfig(
-        path="/mnt/git/bestofn/experiments/training/harmony_persona_no_dev_interleaved.jsonl",  # 4,658 examples, 0-8192 tokens
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    # Persona Grid datasets (D&D alignment grid: data, marvin, tars, baymax, j5, k2so, bender, am, glados)
-    "persona_grid_short": DatasetConfig(
-        path="/home/ptrck/git/bestofn/persona_grid_train_short.jsonl",  # 12,972 examples, 0-2048 tokens
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "persona_grid_long": DatasetConfig(
-        path="/home/ptrck/git/bestofn/persona_grid_train_long.jsonl",  # 3,207 examples, 2049-8192 tokens
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "persona_grid_complete": DatasetConfig(
-        path="/home/ptrck/git/bestofn/persona_grid_train_complete.jsonl",  # 16,782 examples, 0-8192 tokens
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "math_quick": DatasetConfig(
-        path="/home/ptrck/git/bestofn/math_quick.jsonl",  # ~4k examples, <2048 tokens, 50/50 persona+math
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "hendrycks_math_complete": DatasetConfig(
-        path="/home/ptrck/git/bestofn/hendrycks_math_harmony_complete.jsonl",  # 12,496 math samples, all difficulties
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "v6_balanced_math_persona": DatasetConfig(
-        path="/home/ptrck/git/bestofn/v6_balanced_math_persona.jsonl",  # 24,992 samples: 12.5k Hendrycks + 12.5k persona (math→tool→code)
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "v7_math_persona_interleaved": DatasetConfig(
-        path="/home/ptrck/git/bestofn/v7_math_persona_interleaved.jsonl",  # 24,992 samples: Perfect 1:1 interleave [M, P, M, P, ...]
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "v7_math_persona_interleaved_long": DatasetConfig(
-        path="/home/ptrck/git/bestofn/v7_math_persona_interleaved_long.jsonl",  # 29,356 samples: ALL data, proportional interleave (~1.35 P per M)
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "persona_epsilon": DatasetConfig(
-        path="/home/ptrck/git/bestofn/persona-epsilon.jsonl",  # 25,866 samples: Epsilon training dataset
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "persona_epsilon_shuffled": DatasetConfig(
-        path="/home/ptrck/git/bestofn/persona-epsilon-shuffled.jsonl",  # 25,866 samples: Shuffled for QAT calibration
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
-    "persona_zeta": DatasetConfig(
-        path="/mnt/models/persona_datasets/persona-zeta.jsonl",  # 40,585 samples: 5-way interleave (epsilon + 9persona + baseline) × (reasoning + tool_calling)
-        loader=_load_harmony_jsonl,
-        sample_processor=_process_harmony_text,
-    ),
+    # JSONL datasets can be added here using _load_harmony_jsonl loader
+    # Example:
+    # "my_dataset": DatasetConfig(
+    #     path="/path/to/dataset.jsonl",
+    #     loader=_load_harmony_jsonl,
+    #     sample_processor=_process_harmony_text,
+    # ),
 }
 
 
