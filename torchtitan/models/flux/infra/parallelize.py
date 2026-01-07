@@ -88,6 +88,10 @@ def apply_fsdp(
     for layer in linear_layers:
         # pyrefly: ignore [no-matching-overload]
         fully_shard(layer, **fsdp_config)
+        # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
+        #       gradient division. We handle gradient scaling in the training
+        #       loop based on global token count.
+        layer.set_gradient_divide_factor(1.0)
 
     # pyrefly: ignore [not-iterable]
     for block in model.double_blocks:
@@ -96,6 +100,10 @@ def apply_fsdp(
             block,
             **fsdp_config,
         )
+        # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
+        #       gradient division. We handle gradient scaling in the training
+        #       loop based on global token count.
+        block.set_gradient_divide_factor(1.0)
 
     # pyrefly: ignore [not-iterable]
     for block in model.single_blocks:
@@ -104,10 +112,18 @@ def apply_fsdp(
             block,
             **fsdp_config,
         )
+        # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
+        #       gradient division. We handle gradient scaling in the training
+        #       loop based on global token count.
+        block.set_gradient_divide_factor(1.0)
 
     # apply FSDP to last layer. Set reshard_after_forward=False for last layer to avoid gather right after reshard
     # pyrefly: ignore [no-matching-overload]
     fully_shard(model.final_layer, **fsdp_config, reshard_after_forward=False)
+    # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
+    #       gradient division. We handle gradient scaling in the training
+    #       loop based on global token count.
+    model.final_layer.set_gradient_divide_factor(1.0)
 
     # Wrap all the rest of model
     fully_shard(model, **fsdp_config)

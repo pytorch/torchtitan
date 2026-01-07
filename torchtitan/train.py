@@ -699,9 +699,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     and self.validator.should_validate(self.step)
                 ):
                     # pyrefly: ignore [missing-attribute]
-                    with self.loss_fn.no_rescale():
-                        # pyrefly: ignore [bad-argument-count]
-                        self.validator.validate(self.model_parts, self.step)
+                    self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:
