@@ -138,7 +138,7 @@ class Validator(BaseValidator):
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
-        except NotImplementedError:
+        except TypeError:
             pass
 
         if self.parallel_dims.cp_enabled:

@@ -163,13 +163,15 @@ class Trainer(ForgeEngine):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
-        attn_type = getattr(self.model_args, "attn_type", "sdpa")
-        if attn_type in ["flex", "varlen"]:
+        try:
+            # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
+        except TypeError:
+            pass
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
