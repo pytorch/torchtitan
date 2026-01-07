@@ -458,7 +458,10 @@ class MoE(nn.Module):
         # shared expert
         # Note: we execute the shared expert before scoring the output of the routed expert
         # to "implicitly" overlap the shared expert compute with token combine communication
-        out = self.shared_experts(x) if self.shared_experts is not None else None
+        if self.shared_experts is not None:
+            out = self.shared_experts(x)
+        else:
+            out = None
 
         # Unsort routed outputs
         routed_output_unsorted = torch.zeros(

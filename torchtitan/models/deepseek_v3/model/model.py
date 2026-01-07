@@ -22,8 +22,10 @@ from torchtitan.models.attention import (
 from torchtitan.models.moe import FeedForward, MoE
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
+from torchtitan.tools.logging import logger
 
 from .args import DeepSeekV3ModelArgs
+from .lora import LoRALinear
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -178,6 +180,18 @@ class Attention(nn.Module):
             bias=False,
         )
         self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
+
+        # Fine-tuning LoRA on output projection (wo)
+        # This is a parallel LoRA where lora_B @ lora_A has the same shape as wo
+        self.finetune_lora_wo: LoRALinear | None = None
+        if model_args.finetune_lora_rank > 0:
+            self.finetune_lora_wo = LoRALinear(
+                in_features=self.n_heads * self.v_head_dim,
+                out_features=self.dim,
+                rank=model_args.finetune_lora_rank,
+                alpha=model_args.finetune_lora_alpha,
+            )
+
         self.softmax_scale = self.qk_head_dim**-0.5
 
         if model_args.max_seq_len > model_args.original_seq_len:
@@ -261,7 +275,12 @@ class Attention(nn.Module):
             1, 2
         ).contiguous()  # (bsz, seqlen, n_heads, v_head_dim)
         output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
-        return self.wo(output)  # (bsz, seqlen, dim)
+
+        # Apply base projection + finetune LoRA if enabled
+        out = self.wo(output)
+        if self.finetune_lora_wo is not None:
+            out = out + self.finetune_lora_wo(output)
+        return out  # (bsz, seqlen, dim)
 
     def init_weights(self, init_std: float):
         linear_list = [
@@ -276,6 +295,10 @@ class Attention(nn.Module):
         for linear in linear_list:
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+
+        # Initialize fine-tuning LoRA adapter
+        if self.finetune_lora_wo is not None:
+            self.finetune_lora_wo.init_weights()
 
         self.kv_norm.reset_parameters()
         if self.q_lora_rank > 0:
@@ -387,6 +410,30 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
                 a=-cutoff_factor * final_out_std,
                 b=cutoff_factor * final_out_std,
             )
+
+        # Automatically freeze for LoRA fine-tuning if enabled
+        if self.model_args.finetune_lora_rank > 0:
+            self.freeze_for_finetuning()
+
+    def freeze_for_finetuning(self) -> None:
+        """
+        Freeze all parameters except LoRA layers.
+        Call this after loading pretrained weights to enable LoRA fine-tuning.
+        """
+        # First, freeze everything
+        for param in self.parameters():
+            param.requires_grad = False
+
+        # Then, unfreeze only LoRA layers (matching pattern: finetune_lora_*)
+        trainable_count = 0
+        total_count = 0
+        for name, param in self.named_parameters():
+            total_count += param.numel()
+            if "finetune_lora_" in name:
+                param.requires_grad = True
+                trainable_count += param.numel()
+
+        logger.info(f"[LoRA] Trainable params: {trainable_count:,} / {total_count:,} ({100 * trainable_count / total_count:.2f}%)")
 
     def get_attention_masks(
         self,

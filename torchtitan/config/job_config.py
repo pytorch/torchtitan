@@ -961,7 +961,7 @@ class JobConfig:
 
     def maybe_log(self) -> None:
         if self.job.print_config:
-            logger.info(f"Running with configs: {self.to_dict()}")
+            logger.info(f"Running with configs:\n{json.dumps(self.to_dict(), indent=2)}")
 
         if self.job.save_config_file is not None:
             config_file = os.path.join(self.job.dump_folder, self.job.save_config_file)

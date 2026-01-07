@@ -87,6 +87,11 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
 
+    # Fine-tuning LoRA (distinct from MLA's latent compression)
+    # Set finetune_lora_rank > 0 to enable LoRA fine-tuning on attention output projection
+    finetune_lora_rank: int = 0
+    finetune_lora_alpha: float = 32.0
+
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:

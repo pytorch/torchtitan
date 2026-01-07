@@ -45,6 +45,18 @@ export DEBUG_TIMEOUT=${DEBUG_TIMEOUT:-""}
 # NGPU=8 DEBUG=1 DEBUG_WAIT_RANKS="0" CONFIG_FILE="./torchtitan/models/qwen3/train_configs/qwen3_0.6b.toml" ./run_train.sh
 TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE:-"http://localhost:29510"}
 
+# python scripts/download_hf_assets.py \
+#     --repo_id deepseek-ai/DeepSeek-V3.1-Base \
+#     --local_dir ./assets/hf \
+#     --assets tokenizer config index
+
+
+# python scripts/download_hf_assets.py \
+#     --repo_id deepseek-ai/DeepSeek-V3.1-Base \
+#     --local_dir /root/.cache/team_artifacts/ \
+#     --all
+
+
 if [ -n "$COMM_MODE" ]; then
     # Communication mode specified: validate configuration or run in debug mode
     echo "Running with comm_mode=${COMM_MODE}"
