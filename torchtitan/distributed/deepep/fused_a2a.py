@@ -184,13 +184,6 @@ class FusedDispatch(torch.autograd.Function):
         # The local DeepEP always returns num_recv_tokens_per_expert_list as a Python list.
         # The forked DeepEP in torchtitan-amd has num_recv_tokens_per_expert_as_cuda parameter
         # which when True, returns a CUDA tensor directly instead of a Python list.
-        #
-        # ORIGINAL CODE (from torchtitan-amd with forked DeepEP):
-        # if not use_cuda_num_token_per_expert:
-        #     tokens_per_expert = torch.tensor(num_recv_tokens_per_expert_list)  # list -> CPU tensor
-        # else:
-        #     tokens_per_expert = num_recv_tokens_per_expert_list  # Already CUDA tensor from DeepEP
-        #
         # MODIFIED CODE (phuc, workaround for local DeepEP):
         # NOTE(phuc): fix device placement issue - both branches now use device=x.device
         # Previously the first branch created CPU tensor which caused:

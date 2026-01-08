@@ -857,16 +857,6 @@ def main(trainer_class: type[Trainer]) -> None:
     config_manager = ConfigManager()
     config = config_manager.parse_args()
 
-    # # Configure DeepEP empty expert padding fix
-    # # The fix is now built into utils.py - just need to set the flag
-    # # Use assume_load_balanced=True for ~6% overhead (vs ~12% without)
-    # # This is safe when debug_moe_force_load_balance is enabled
-    # from torchtitan.distributed.deepep.utils import set_assume_load_balanced
-
-    # assume_balanced = getattr(config.training, "debug_moe_force_load_balance", False)
-    # # set_assume_load_balanced(assume_balanced)
-    # set_assume_load_balanced(False)
-
     trainer: Trainer | None = None
 
     try:
