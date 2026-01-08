@@ -18,6 +18,7 @@ from torch.nn.attention.flex_attention import (
     create_block_mask,
     flex_attention,
 )
+from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 from torch.nn.attention.varlen import varlen_attn
 from torch.types import Number
@@ -174,6 +175,72 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
     ) -> torch.Tensor:
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
             return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
+
+class VLLMCompatibleFlashAttention(torch.nn.Module):
+    """Wrapper around FlashAttention as used by VLLM"""
+    def __init__(self) -> None:
+        super().__init__()
+        self.flash_attn_varlen_func = flash_attn_varlen_func
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+        from vllm.attention.utils.fa_utils import get_flash_attn_version
+        self.vllm_is_batch_invariant = vllm_is_batch_invariant
+        self.fa_version = get_flash_attn_version()
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        scale: float | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, AuxOutput]:
+        # Flash Attention varlen expects: (batch, seqlen, nheads, headdim)
+        # The input from TorchTitan is always (batch, num_heads, seq_len, head_dim)
+        # We need to transpose to (batch, seq_len, num_heads, head_dim)
+
+        # Input is (batch, num_heads, seq_len, head_dim) - need to transpose
+        q = q.transpose(1, 2)  # -> (batch, seq_len, num_heads, head_dim)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # Get dimensions
+        batch_size, seq_len, num_heads, head_dim = q.shape
+
+        # Convert to varlen format: flatten batch and sequence dimensions
+        # (batch, seqlen, nheads, headdim) -> (total_tokens, nheads, headdim)
+        q_varlen = q.reshape(-1, num_heads, head_dim)
+        k_varlen = k.reshape(-1, k.shape[2], head_dim)
+        v_varlen = v.reshape(-1, v.shape[2], head_dim)
+
+        # Create cumulative sequence lengths
+        # cu_seqlens: [0, seq_len, 2*seq_len, ..., batch_size*seq_len]
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * seq_len, seq_len,
+            dtype=torch.int32, device=q.device
+        )
+
+        # Call Flash Attention varlen (works with both standard flash-attn and vLLM's wrapper)
+        output_varlen = self.flash_attn_varlen_func(
+            q_varlen, k_varlen, v_varlen,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=seq_len,
+            max_seqlen_k=seq_len,
+            softmax_scale=scale,
+            causal=True,
+            num_splits=1 if self.vllm_is_batch_invariant() else 0,
+            fa_version=self.fa_version,
+        )
+
+        # Convert back to batch format
+        # (total_tokens, nheads, headdim) -> (batch, seqlen, nheads, headdim)
+        output = output_varlen.reshape(batch_size, seq_len, num_heads, head_dim)
+
+        # Transpose back to (batch, num_heads, seq_len, head_dim) to match input format
+        output = output.transpose(1, 2)
+
+        return output
+
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:
