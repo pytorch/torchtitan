@@ -1,6 +1,5 @@
-# should get: tps: 14,768  tflops: 340.88  on 8 B200s
-# NGPU=8 CONFIG_FILE="./torchtitan/models/qwen3/train_configs/qwen3_10b_a1b_with_deepep.toml" \
-# PYTORCH_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.8" ./run_train.sh
+# Based on config10b0_like_config9bb0_qwen3_30b_a3b_with_deepep_and_with_force_load_balance.toml
+# sync_comm_stream=false, fused_weighted_scatter_add=false, fused_silu_gate_prob=true
 
 [job]
 dump_folder = "./outputs"
@@ -13,7 +12,6 @@ profile_freq = 100
 
 [metrics]
 log_freq = 10
-# log_freq = 1
 enable_tensorboard = false
 save_tb_folder = "tb"
 enable_wandb = true
@@ -22,7 +20,6 @@ enable_wandb = true
 name = "qwen3"
 flavor = "30B-A3B-deepep"
 hf_assets_path = "./assets/hf/Qwen3-32B"
-# converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
@@ -30,27 +27,25 @@ lr = 8e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 600  # lr scheduler warm up, 20% total steps
+warmup_steps = 600
 
 [training]
-local_batch_size = 8 # hit 80% memory in a single node
+local_batch_size = 8
 seq_len = 4096
-max_norm = 1.0  # grad norm clipping
+max_norm = 1.0
 steps = 20
-# dataset = "c4"
 dataset_type = "nanoset"
 dataset_folders = ["/home/shared/datasets/fineweb-edu-v1_4-tokenized-qwen3", "/home/shared/datasets/dclm-baseline-1.0-tokenized-qwen3"]
 dataset_weights = [1, 1]
-debug_moe_force_load_balance=true
+debug_moe_force_load_balance=false
 
 [parallelism]
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
-fsdp_reshard_after_forward = "default" # default / never / always
+fsdp_reshard_after_forward = "default"
 tensor_parallel_degree = 1
 context_parallel_degree = 1
 expert_parallel_degree = 8
-
 
 [checkpoint]
 enable = false
@@ -58,11 +53,11 @@ folder = "checkpoint"
 interval = 500
 last_save_model_only = false
 export_dtype = "float16"
-async_mode = "disabled" # ["disabled", "async", "async_with_pinned_mem"]
+async_mode = "disabled"
 
 [activation_checkpoint]
-mode = "full"  # ["none", "selective", "full"]
-selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
+mode = "full"
+selective_ac_option = "op"
 
 [compile]
 enable=true
@@ -72,3 +67,11 @@ components = ["model", "loss"]
 enable_fsdp_float8_all_gather = false
 precompute_float8_dynamic_scale_for_fsdp = false
 filter_fqns = ["output"]
+
+[deepep]
+sync_comm_stream = false
+fused_weighted_scatter_add = false
+fused_silu_gate_prob = true
+
+[debug]                                                                                     
+moe_force_load_balance = false

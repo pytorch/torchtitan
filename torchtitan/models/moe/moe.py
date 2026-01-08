@@ -365,43 +365,6 @@ class GroupedExperts(nn.Module):
 
         return out
 
-        # ============================================================================
-        # OLD CODE (kept for reference)
-        # ============================================================================
-        # NOTE(phuc): The old implementation multiplied routing probabilities here.
-        # This is now handled by the fused weighted combine kernel in DeepEP.
-        #
-        # OLD forward() signature:
-        #   def forward(self, x, num_tokens_per_expert, routed_prob=None)
-        #
-        # OLD score_before_experts logic:
-        # if (
-        #     self.deepep_dispatcher is not None
-        #     and routed_prob is not None
-        #     and self.score_before_experts
-        # ):
-        #     x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
-        #
-        # OLD fused triton kernel logic:
-        # use_fused_kernel = (
-        #     self.deepep_dispatcher is not None
-        #     and routed_prob is not None
-        #     and not self.score_before_experts
-        # )
-        # if use_fused_kernel:
-        #     out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert, routed_prob)
-        # else:
-        #     out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
-        #
-        # OLD score_after_experts logic:
-        # if (
-        #     self.deepep_dispatcher is not None
-        #     and routed_prob is not None
-        #     and not self.score_before_experts
-        # ):
-        #     out = (out.to(torch.float32) * routed_prob.reshape(-1, 1)).to(out.dtype)
-        # ============================================================================
-
     def init_weights(self, init_std: float, n_layers: int):
         std_in = moe_init_std(self.w1.shape[-1], n_layers)
         std_out = moe_init_std(self.w2.shape[0], n_layers)

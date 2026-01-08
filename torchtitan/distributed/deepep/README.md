@@ -49,12 +49,12 @@ With **256 GPUs** :
 ```bash
 # Single-node training (8 GPUs)
 NGPU=8 \
-CONFIG_FILE="./torchtitan/models/qwen3/train_configs/qwen3_10b_a1b_with_deepep.toml" \
+CONFIG_FILE="./torchtitan/models/qwen3/train_configs/qwen3_30b_a3b_with_deepep.toml" \
 PYTORCH_ALLOC_CONF="expandable_segments:True,max_split_size_mb:128,garbage_collection_threshold:0.8" \
 ./run_train.sh
 ```
 
-**Expected performance**: ~14,768 tok/s/GPU, ~340 TFLOPS on 8× B200s
+**Expected performance**: ~14,760 tok/s/GPU, ~412 TFLOPS on 8× B200s
 
 > **Note**: `PYTORCH_ALLOC_CONF` is required because PyTorch's default cache allocator reserves more memory than needed. This setting uses a smaller buffer.
 
