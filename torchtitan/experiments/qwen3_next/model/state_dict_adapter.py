@@ -130,7 +130,7 @@ class Qwen3NextStateDictAdapter(MoEStateDictAdapter):
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
 
         for key, value in hf_state_dict.items():
-            if "mlp.experts" in key or "mlp.shared_expert" in key:
+            if "mlp.experts." in key or "mlp.shared_expert." in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=2 if "experts" in key else 1)
                 if "experts" in key:
                     layer_num, expert_num = re.findall(r"\d+", key)

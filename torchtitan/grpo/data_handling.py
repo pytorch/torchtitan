@@ -404,12 +404,17 @@ class OnlineDataHandler:
                 #         dynamic_grad_accum_size,
                 #         data_lens,
                 #     ) = self.queue.get()
+                start_data_get_time = time.perf_counter()
                 data = requests.get(f"{self.server_url}/batch").json()
+                data_get_time = time.perf_counter() - start_data_get_time
                 if data["batch"] is not None:
                     logger.debug("Rx'd batch from server...")
                     # Save the batch
+                    start_data_dump_time = time.perf_counter()
                     with open("temp.json", "w") as f:
                         json.dump(data, f)
+                    data_dump_time = time.perf_counter() - start_data_dump_time
+                    start_data_prep_time = time.perf_counter()
                     (
                         batches,
                         max_token_len,
@@ -426,6 +431,8 @@ class OnlineDataHandler:
                         scale_adv_by_len=job_config.grpo.scale_adv_by_len,
                         num_microbatches=job_config.grpo.num_microbatches,
                     )
+                    prep_time = time.perf_counter() - start_data_prep_time
+
                     flag = flag + 1
                     torch.distributed.broadcast(flag, 0)
                     if dp_replicate_rank == 0:
@@ -438,6 +445,13 @@ class OnlineDataHandler:
                     torch.distributed.broadcast_object_list(data_lens, 0)
                     # now broadcast the batch
                     torch.distributed.broadcast_object_list(batches, 0)
+                    # Finally, the timing info
+                    prep_time = torch.tensor(prep_time).to(device)
+                    data_dump_time = torch.tensor(data_dump_time).to(device)
+                    data_get_time = torch.tensor(data_get_time).to(device)
+                    torch.distributed.broadcast(prep_time, 0)
+                    torch.distributed.broadcast(data_dump_time, 0)
+                    torch.distributed.broadcast(data_get_time, 0)
                     break
                 else:
                     logger.debug("No batch yet, retrying...")
@@ -479,6 +493,12 @@ class OnlineDataHandler:
                     )
                     # now get the batch
                     torch.distributed.broadcast_object_list(batches, 0)
+                    prep_time = torch.tensor(0.0).to(device)
+                    data_dump_time = torch.tensor(0.0).to(device)
+                    data_get_time = torch.tensor(0.0).to(device)
+                    torch.distributed.broadcast(prep_time, 0)
+                    torch.distributed.broadcast(data_dump_time, 0)
+                    torch.distributed.broadcast(data_get_time, 0)
                     break
             time.sleep(1)
         # Now to check data...
@@ -519,6 +539,9 @@ class OnlineDataHandler:
             dynamic_batch_size,
             dynamic_grad_accum_size,
             data_lens,
+            prep_time.item(),
+            data_dump_time.item(),
+            data_get_time.item(),
         )
 
 

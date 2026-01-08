@@ -13,5 +13,6 @@ _supported_experiments = frozenset(
         "compiler_toolkit.deepseek_v3",
         "compiler_toolkit.llama3",
         "qwen3_next",
+        "kimi_linear",
     ]
 )

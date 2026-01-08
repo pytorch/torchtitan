@@ -42,7 +42,6 @@ qwen3next_configs = {
         rope_theta=50000,
         moe_enabled=True,
         moe_inter_dim=512,
-        #partial_rotary_factor=1.0,
         moe_args=MoEArgs(
             num_experts=128,
             num_shared_experts=1,
@@ -52,6 +51,28 @@ qwen3next_configs = {
             route_scale=1.0,
             score_before_experts=False,
             shared_gate=True
+        ),
+    ),
+    "20B_A1B": Qwen3NextModelArgs(
+        max_seq_len=8192,
+        head_dim=128,
+        dim=1536,
+        n_layers=20,
+        n_heads=16,
+        n_kv_heads=4,
+        hidden_dim=4096,
+        rope_theta=50000,
+        moe_enabled=True,
+        moe_inter_dim=384,
+        moe_args=MoEArgs(
+            num_experts=512,
+            num_shared_experts=1,
+            top_k=10,
+            score_func="softmax",
+            route_norm=True,
+            route_scale=1.0,
+            score_before_experts=False,
+            shared_gate=True,
         ),
     ),
     "40B_A3B": Qwen3NextModelArgs(
@@ -67,8 +88,8 @@ qwen3next_configs = {
             route_norm=True,
             route_scale=1.0,
             score_before_experts=False,
-            shared_gate=True
-        )
+            shared_gate=True,
+        ),
     ),
     "80B_A3B": Qwen3NextModelArgs(
         moe_enabled=True,
