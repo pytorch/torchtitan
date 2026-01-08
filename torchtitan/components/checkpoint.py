@@ -6,6 +6,7 @@
 
 import enum
 import functools
+import json
 import os
 import queue
 import re
@@ -277,6 +278,7 @@ class CheckpointManager:
         self.initial_load_in_hf_quantized = (
             checkpoint_config.initial_load_in_hf_quantized
         )
+        self.initial_load_multipart = checkpoint_config.initial_load_multipart
         self.last_save_model_only = checkpoint_config.last_save_model_only
         self.last_save_in_hf = checkpoint_config.last_save_in_hf
         self.initial_load_legacy = checkpoint_config.initial_load_legacy
@@ -453,6 +455,7 @@ class CheckpointManager:
         checkpoint_id: str,
         from_hf: bool,
         from_quantized: bool,
+        from_multipart: bool,
     ) -> None:
         """Load the checkpoint with dcp.
         Args:
@@ -485,6 +488,24 @@ class CheckpointManager:
             if self.has_ref_model:
                 ref_state_dict = self.sd_adapter.from_hf(hf_state_dict)
                 self.states[REF_MODEL].load_state_dict(ref_state_dict)
+        elif from_multipart:
+            with open(os.path.join(checkpoint_id, "meta_data.json"), "r") as f:
+                multipart_meta = json.load(f)
+            for dcp_iter, keys_in_file in multipart_meta.items():
+                state_dict_subset = {key: state_dict[key] for key in keys_in_file}
+                dcp.load(
+                    state_dict_subset,
+                    checkpoint_id=os.path.join(checkpoint_id, str(dcp_iter)),
+                )
+                # reassign state_dict_subset to state_dict
+                state_dict.update(state_dict_subset)
+                if MODEL in self.states:
+                    self.states[MODEL].load_state_dict(state_dict_subset)
+                if self.has_ref_model:
+                    dcp.load(ref_state_dict, checkpoint_id=checkpoint_id)
+                    if REF_MODEL in self.states:
+                        self.states[REF_MODEL].load_state_dict(state_dict_subset)
+
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
@@ -601,10 +622,12 @@ class CheckpointManager:
         model_only = False
         from_hf = False
         from_quantized = False
+        from_multipart = False
         if not os.path.exists(self.folder):
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
+            from_multipart = self.initial_load_multipart
             if from_hf:
                 assert (
                     model_only
@@ -614,6 +637,11 @@ class CheckpointManager:
                 assert (
                     from_hf
                 ), "Quantized checkpoint can only be loaded from HuggingFace format."
+
+            if from_multipart:
+                assert (
+                    model_only
+                ), "Multipart checkpoint can only be loaded from model only."
 
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
@@ -668,6 +696,7 @@ class CheckpointManager:
             checkpoint_id=checkpoint_id,
             from_hf=from_hf,
             from_quantized=from_quantized,
+            from_multipart=from_multipart,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -746,6 +775,7 @@ class CheckpointManager:
             # FT checkpoints are always DCP because FT checkpoint currently only save/load dataloader.
             from_hf=False,
             from_quantized=False,
+            from_multipart=False,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
