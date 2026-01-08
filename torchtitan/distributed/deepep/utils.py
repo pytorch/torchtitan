@@ -11,7 +11,31 @@ from deep_ep import Config
 from torchtitan.distributed.deepep.kernels import fused_weighted_scatter_add
 
 from .fused_a2a import fused_combine, fused_dispatch, set_deepep_num_sms
-from .fused_indices_converter import fused_indices_to_multihot
+from .fused_indices_converter import ALIGNMENT_M, fused_indices_to_multihot
+
+
+# =============================================================================
+# EMPTY EXPERT PADDING FIX
+# =============================================================================
+# Fix: torch._grouped_mm backward produces garbage gradients for experts with 0 tokens.
+# Solution: Pad empty experts to 8 tokens (like Standard EP does in kernels.py:181).
+#
+# Strategy:
+# - Uses ORIGINAL kernel (no overhead) + compute tokens_per_expert from routing_map
+# - Fast path (no padding): When all experts have >= 8 tokens, use original logic
+# - Padding path: When some experts have < 8 tokens, do explicit padding
+# - With load balancing enabled, skip the expensive check (assumes all experts >= 8 tokens)
+# =============================================================================
+
+# Global flag to skip padding check when load balancing is enabled
+# Set this to True when using --training.debug_moe_force_load_balance
+_ASSUME_LOAD_BALANCED = False
+
+
+def set_assume_load_balanced(value: bool):
+    """Set whether to assume load balancing is enabled (skip padding check)."""
+    global _ASSUME_LOAD_BALANCED
+    _ASSUME_LOAD_BALANCED = value
 
 
 def permute(
@@ -375,123 +399,284 @@ class PrimusTurboDeepepManager:
     def get_restored_hidden_states_by_experts(
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
-        # Determine if we should use fused weighted scatter
-        use_fused_weighted_scatter_add = (
-            not self.score_before_experts and self.fused_weighted_scatter_add
-        )
+        """Unpermute with padding handling for empty expert fix."""
+        num_tokens, hidden = self.hidden_shape_before_permute
+        device = hidden_states.device
 
-        # Get permuted probs for fused weighted scatter (only if needed)
-        weights = None
-        if (
-            use_fused_weighted_scatter_add
-            and hasattr(self, "permuted_probs_for_combine")
-            and self.permuted_probs_for_combine is not None
-        ):
-            weights = self.permuted_probs_for_combine
+        if getattr(self, "_has_padding", False):
+            # Extra row for padding tokens
+            output = torch.zeros(
+                num_tokens + 1, hidden, dtype=hidden_states.dtype, device=device
+            )
+            output.scatter_add_(
+                0,
+                self.reversed_mapping_for_combine.unsqueeze(1).expand(-1, hidden),
+                hidden_states,
+            )
+            return output[:-1]  # Remove padding row
+        else:
+            output = torch.zeros(
+                num_tokens, hidden, dtype=hidden_states.dtype, device=device
+            )
+            output.scatter_add_(
+                0,
+                self.reversed_mapping_for_combine.unsqueeze(1).expand(-1, hidden),
+                hidden_states,
+            )
+            return output
 
-        # Clear stored probs (no longer needed after unpermute)
-        self.permuted_probs_for_combine = None
-
-        hidden_states = unpermute(
-            hidden_states,
-            self.reversed_mapping_for_combine,
-            restore_shape=self.hidden_shape_before_permute,
-            weights=weights,  # Pass weights only when fused scatter should be used
-        )
-        return hidden_states
+    # =========================================================================
+    # ORIGINAL get_restored_hidden_states_by_experts (commented out for reference)
+    # =========================================================================
+    # def get_restored_hidden_states_by_experts(
+    #     self, hidden_states: torch.Tensor
+    # ) -> torch.Tensor:
+    #     # Determine if we should use fused weighted scatter
+    #     use_fused_weighted_scatter_add = (
+    #         not self.score_before_experts and self.fused_weighted_scatter_add
+    #     )
+    #
+    #     # Get permuted probs for fused weighted scatter (only if needed)
+    #     weights = None
+    #     if (
+    #         use_fused_weighted_scatter_add
+    #         and hasattr(self, "permuted_probs_for_combine")
+    #         and self.permuted_probs_for_combine is not None
+    #     ):
+    #         weights = self.permuted_probs_for_combine
+    #
+    #     # Clear stored probs (no longer needed after unpermute)
+    #     self.permuted_probs_for_combine = None
+    #
+    #     hidden_states = unpermute(
+    #         hidden_states,
+    #         self.reversed_mapping_for_combine,
+    #         restore_shape=self.hidden_shape_before_permute,
+    #         weights=weights,  # Pass weights only when fused scatter should be used
+    #     )
+    #     return hidden_states
+    # =========================================================================
 
     def get_permuted_hidden_states_by_experts(
         self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
-        if True:
-            (
-                self.dispatched_routing_map,
-                self.dispatched_probs,
-            ) = fused_indices_to_multihot(
-                self.dispatched_indices, self.dispatched_probs, self.num_local_experts
-            )
-        else:
-            raise RuntimeError("Please enable permute_fusion")
-            (
-                self.dispatched_routing_map,
-                self.dispatched_probs,
-            ) = self._indices_to_multihot(
-                self.dispatched_indices, self.dispatched_probs
-            )
+        """Permute with padding for empty experts fix.
 
-        # ============================================================================
-        # MEMORY OPTIMIZATION: Release dispatched_indices early
-        # ============================================================================
-        # Context: dispatched_indices has been converted to dispatched_routing_map
-        #          and is no longer needed. Releasing it here saves ~80-100 MB per
-        #          GPU per MoE layer, totaling ~2-3 GB per GPU across 28 layers.
-        #
-        # Safety:
-        #   - dispatched_indices is ONLY used in fused_indices_to_multihot() above
-        #   - After conversion, routing_map contains all necessary information
-        #   - Backward pass doesn't need indices (only uses handle metadata)
-        #   - No other code references dispatched_indices after this point
-        #
-        # Verification: Traced all usage sites in codebase, confirmed single use
-        # Reference: See temp/2025-11-14/complete_memory_overhead_analysis.md
-        #
-        # Original code (kept for reference):
-        # self.dispatched_indices = self.dispatched_indices  # Keep alive
-        # ============================================================================
-        self.dispatched_indices = None  # Free ~80-100 MB per GPU per layer
+        Uses ORIGINAL fused_indices_to_multihot kernel (no overhead) and computes
+        tokens_per_expert from routing_map to check if padding is needed.
+        """
+        # Use ORIGINAL kernel - no overhead
+        routing_map, probs = fused_indices_to_multihot(
+            self.dispatched_indices, self.dispatched_probs, self.num_local_experts
+        )
+
+        num_tokens, hidden = hidden_states.shape
+        num_experts = routing_map.shape[1]
+        device = hidden_states.device
 
         self.hidden_shape_before_permute = hidden_states.shape
-        assert (
-            self.dispatched_probs.dtype == torch.float32
-        ), "DeepEP only supports float32 probs"
 
-        hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
-            hidden_states,
-            self.dispatched_routing_map,
-            probs=self.dispatched_probs,
-        )
-        # ============================================================================
-        # PROBS STORAGE FOR FUSED KERNELS
-        # ============================================================================
-        # permuted_probs_for_combine: Used by LOCAL Triton fused_weighted_scatter_add
-        #   kernel in unpermute(). Fuses multiply + scatter_add for 2-3x speedup.
-        #   Only stored when: score_before_experts=False AND fused_weighted_scatter_add=True
-        # ============================================================================
-        use_fused_weighted_scatter = (
-            not self.score_before_experts and self.fused_weighted_scatter_add
-        )
-        if use_fused_weighted_scatter:
-            self.permuted_probs_for_combine = permuted_probs
+        # Compute tokens_per_expert (needed for grouped_mm later)
+        # Keep as int64 from sum, convert to int32 only if needed for grouped_mm
+        tokens_per_expert = routing_map.sum(dim=0)
+
+        # Check if padding is needed
+        if False:  # _ASSUME_LOAD_BALANCED - disabled, always check for safety
+            # Fast path: assume load balancing ensures all experts have >= 8 tokens
+            # Skip the expensive GPU->CPU sync
+            needs_padding = False
         else:
-            self.permuted_probs_for_combine = None
+            # Full check with GPU->CPU sync (slower but correct for all cases)
+            min_tokens = tokens_per_expert.min().item()
+            needs_padding = min_tokens < ALIGNMENT_M
 
-        # ============================================================================
-        # MEMORY OPTIMIZATION: Release dispatched_routing_map early
-        # ============================================================================
-        # Context: dispatched_routing_map has been used to permute hidden_states
-        #          and generate reversed_mapping_for_combine. It's no longer needed.
-        #
-        # Safety:
-        #   - routing_map is ONLY used in permute() call above
-        #   - After permutation, reversed_mapping contains all info for combine
-        #   - The permutation result is in hidden_states (already materialized)
-        #   - Backward pass doesn't need routing_map (only uses handle + reversed_mapping)
-        #
-        # Memory saved: ~150-200 MB per GPU per layer (bool matrix + metadata)
-        # Total: ~4-6 GB per GPU across 28 layers
-        #
-        # Verification: Traced permute() implementation, confirmed single use
-        # Reference: See temp/2025-11-14/complete_memory_overhead_analysis.md
-        #
-        # Original code (kept for reference):
-        # self.dispatched_routing_map = self.dispatched_routing_map  # Keep alive
-        # ============================================================================
-        self.dispatched_routing_map = None  # Free ~150-200 MB per GPU per layer
+        # Convert to int32 (grouped_mm requirement) - do after check to avoid unnecessary conversion
+        tokens_per_expert = tokens_per_expert.to(torch.int32)
+
+        if not needs_padding:
+            # Fast path - no padding needed (common case with load balancing)
+            routing_map_t = routing_map.bool().T.contiguous()
+            token_indices = (
+                torch.arange(num_tokens, device=device)
+                .unsqueeze(0)
+                .expand(num_experts, -1)
+            )
+            sorted_indices = token_indices.masked_select(routing_map_t)
+            permuted_probs = probs.T.contiguous().masked_select(routing_map_t)
+            permuted_input = hidden_states.index_select(0, sorted_indices)
+
+            self.reversed_mapping_for_combine = sorted_indices
+            self.tokens_per_expert = tokens_per_expert
+            self._has_padding = False
+        else:
+            # Padding path - slower but correct for experts with < 8 tokens
+            # Compute padded sizes: clamp to min 8, round up to multiple of 8
+            tokens_clamped = torch.clamp_min(tokens_per_expert, ALIGNMENT_M)
+            m_sizes = (
+                (tokens_clamped + ALIGNMENT_M - 1) // ALIGNMENT_M * ALIGNMENT_M
+            ).to(torch.int32)
+            m_offsets = torch.cumsum(m_sizes, dim=0).to(torch.int32)
+
+            total_padded = m_offsets[-1].item()
+            write_offsets = m_offsets - m_sizes  # start of each expert segment
+
+            # For real tokens: use routing_map to find which tokens go to which experts
+            routing_map_t = routing_map.bool().T.contiguous()
+            token_indices = (
+                torch.arange(num_tokens, device=device)
+                .unsqueeze(0)
+                .expand(num_experts, -1)
+            )
+
+            # Get the real token indices per expert (flattened)
+            real_sorted_indices = token_indices.masked_select(routing_map_t)
+            real_probs = probs.T.contiguous().masked_select(routing_map_t)
+
+            # Build position within each expert using cumcount
+            expert_ids_for_tokens = torch.repeat_interleave(
+                torch.arange(num_experts, device=device), tokens_per_expert.long()
+            )
+
+            # Vectorized cumcount within each segment:
+            # positions_in_expert[i] = count of same expert_id before position i
+            raw_counts_cumsum = torch.cat(
+                [
+                    torch.zeros(1, dtype=torch.long, device=device),
+                    torch.cumsum(tokens_per_expert.long(), dim=0)[:-1],
+                ]
+            )
+            global_indices = torch.arange(len(expert_ids_for_tokens), device=device)
+            positions_in_expert = (
+                global_indices - raw_counts_cumsum[expert_ids_for_tokens]
+            )
+
+            # Write positions in padded layout
+            write_pos = write_offsets[expert_ids_for_tokens] + positions_in_expert
+
+            # Build padded sorted_indices (padding positions point to num_tokens = zero row)
+            new_sorted_indices = torch.full(
+                (total_padded,), num_tokens, dtype=torch.long, device=device
+            )
+            new_sorted_indices.scatter_(0, write_pos, real_sorted_indices)
+
+            # Build padded probs (padding has 0 prob)
+            new_probs = torch.zeros(total_padded, dtype=probs.dtype, device=device)
+            new_probs.scatter_(0, write_pos, real_probs)
+
+            # Permute with zero row appended for padding
+            hidden_with_zero = torch.cat(
+                [hidden_states, hidden_states.new_zeros(1, hidden)]
+            )
+            permuted_input = hidden_with_zero.index_select(0, new_sorted_indices)
+
+            self.reversed_mapping_for_combine = new_sorted_indices
+            self.tokens_per_expert = m_sizes  # Use padded counts for grouped_mm
+            self._has_padding = True
+            permuted_probs = new_probs
+
+        self.dispatched_indices = None
 
         if self.router_dtype == "fp64":
             permuted_probs = permuted_probs.to(torch.float64)
 
-        return hidden_states, permuted_probs
+        return permuted_input, permuted_probs
+
+    # =========================================================================
+    # ORIGINAL get_permuted_hidden_states_by_experts (commented out for reference)
+    # =========================================================================
+    # def get_permuted_hidden_states_by_experts(
+    #     self, hidden_states: torch.Tensor
+    # ) -> torch.Tensor:
+    #     if True:
+    #         (
+    #             self.dispatched_routing_map,
+    #             self.dispatched_probs,
+    #         ) = fused_indices_to_multihot(
+    #             self.dispatched_indices, self.dispatched_probs, self.num_local_experts
+    #         )
+    #     else:
+    #         raise RuntimeError("Please enable permute_fusion")
+    #         (
+    #             self.dispatched_routing_map,
+    #             self.dispatched_probs,
+    #         ) = self._indices_to_multihot(
+    #             self.dispatched_indices, self.dispatched_probs
+    #         )
+    #
+    #     # ============================================================================
+    #     # MEMORY OPTIMIZATION: Release dispatched_indices early
+    #     # ============================================================================
+    #     # Context: dispatched_indices has been converted to dispatched_routing_map
+    #     #          and is no longer needed. Releasing it here saves ~80-100 MB per
+    #     #          GPU per MoE layer, totaling ~2-3 GB per GPU across 28 layers.
+    #     #
+    #     # Safety:
+    #     #   - dispatched_indices is ONLY used in fused_indices_to_multihot() above
+    #     #   - After conversion, routing_map contains all necessary information
+    #     #   - Backward pass doesn't need indices (only uses handle metadata)
+    #     #   - No other code references dispatched_indices after this point
+    #     #
+    #     # Verification: Traced all usage sites in codebase, confirmed single use
+    #     # Reference: See temp/2025-11-14/complete_memory_overhead_analysis.md
+    #     #
+    #     # Original code (kept for reference):
+    #     # self.dispatched_indices = self.dispatched_indices  # Keep alive
+    #     # ============================================================================
+    #     self.dispatched_indices = None  # Free ~80-100 MB per GPU per layer
+    #
+    #     self.hidden_shape_before_permute = hidden_states.shape
+    #     assert (
+    #         self.dispatched_probs.dtype == torch.float32
+    #     ), "DeepEP only supports float32 probs"
+    #
+    #     hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
+    #         hidden_states,
+    #         self.dispatched_routing_map,
+    #         probs=self.dispatched_probs,
+    #     )
+    #     # ============================================================================
+    #     # PROBS STORAGE FOR FUSED KERNELS
+    #     # ============================================================================
+    #     # permuted_probs_for_combine: Used by LOCAL Triton fused_weighted_scatter_add
+    #     #   kernel in unpermute(). Fuses multiply + scatter_add for 2-3x speedup.
+    #     #   Only stored when: score_before_experts=False AND fused_weighted_scatter_add=True
+    #     # ============================================================================
+    #     use_fused_weighted_scatter = (
+    #         not self.score_before_experts and self.fused_weighted_scatter_add
+    #     )
+    #     if use_fused_weighted_scatter:
+    #         self.permuted_probs_for_combine = permuted_probs
+    #     else:
+    #         self.permuted_probs_for_combine = None
+    #
+    #     # ============================================================================
+    #     # MEMORY OPTIMIZATION: Release dispatched_routing_map early
+    #     # ============================================================================
+    #     # Context: dispatched_routing_map has been used to permute hidden_states
+    #     #          and generate reversed_mapping_for_combine. It's no longer needed.
+    #     #
+    #     # Safety:
+    #     #   - routing_map is ONLY used in permute() call above
+    #     #   - After permutation, reversed_mapping contains all info for combine
+    #     #   - The permutation result is in hidden_states (already materialized)
+    #     #   - Backward pass doesn't need routing_map (only uses handle + reversed_mapping)
+    #     #
+    #     # Memory saved: ~150-200 MB per GPU per layer (bool matrix + metadata)
+    #     # Total: ~4-6 GB per GPU across 28 layers
+    #     #
+    #     # Verification: Traced permute() implementation, confirmed single use
+    #     # Reference: See temp/2025-11-14/complete_memory_overhead_analysis.md
+    #     #
+    #     # Original code (kept for reference):
+    #     # self.dispatched_routing_map = self.dispatched_routing_map  # Keep alive
+    #     # ============================================================================
+    #     self.dispatched_routing_map = None  # Free ~150-200 MB per GPU per layer
+    #
+    #     if self.router_dtype == "fp64":
+    #         permuted_probs = permuted_probs.to(torch.float64)
+    #
+    #     return hidden_states, permuted_probs
+    # =========================================================================
 
 
 class DeepEPTokenDispatcher:

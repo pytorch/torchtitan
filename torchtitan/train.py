@@ -377,7 +377,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"total steps {job_config.training.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
-        
+
         # Calculate global batch size in tokens
         global_batch_size_tokens = global_batch_size * job_config.training.seq_len
         total_tokens_all_dp_ranks = global_batch_size_tokens * dp_degree
@@ -544,7 +544,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     if counts is None:
                         continue
 
-                    checkpoint_impl = getattr(transformer_block, "checkpoint_impl", None)
+                    checkpoint_impl = getattr(
+                        transformer_block, "checkpoint_impl", None
+                    )
 
                     if (
                         CheckpointImpl is not None
@@ -855,16 +857,15 @@ def main(trainer_class: type[Trainer]) -> None:
     config_manager = ConfigManager()
     config = config_manager.parse_args()
 
-    # Apply DeepEP empty expert gradient fix
-    # This patch fixes torch._grouped_mm producing garbage gradients for experts with 0 tokens
-    # Harmless if DeepEP isn't used (the monkey-patched class won't be instantiated)
-    from torchtitan.distributed.deepep.patches import apply_deepep_empty_expert_fix
-
+    # # Configure DeepEP empty expert padding fix
+    # # The fix is now built into utils.py - just need to set the flag
     # # Use assume_load_balanced=True for ~6% overhead (vs ~12% without)
     # # This is safe when debug_moe_force_load_balance is enabled
-    assume_balanced = getattr(config.training, "debug_moe_force_load_balance", False)
-    apply_deepep_empty_expert_fix(assume_load_balanced=assume_balanced)
+    # from torchtitan.distributed.deepep.utils import set_assume_load_balanced
 
+    # assume_balanced = getattr(config.training, "debug_moe_force_load_balance", False)
+    # # set_assume_load_balanced(assume_balanced)
+    # set_assume_load_balanced(False)
 
     trainer: Trainer | None = None
 
