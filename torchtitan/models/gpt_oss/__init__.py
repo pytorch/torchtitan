@@ -55,6 +55,7 @@ gptoss_configs = {
             top_k=4,
             use_grouped_mm=True,
             load_balance_coeff=1e-3,
+            use_expert_bias=True,  # GPT-OSS models have learned expert biases
         ),
     ),
     "120b": GptOssModelArgs(
@@ -69,6 +70,7 @@ gptoss_configs = {
             top_k=4,
             use_grouped_mm=True,
             load_balance_coeff=1e-3,
+            use_expert_bias=True,  # GPT-OSS models have learned expert biases
         ),
     ),
 }
