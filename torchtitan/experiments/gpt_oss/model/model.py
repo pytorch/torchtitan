@@ -76,13 +76,19 @@ def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Te
 
 
 def apply_rotary_emb(
-    xq: torch.Tensor, xk: torch.Tensor, rope_cache: torch.Tensor
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    rope_cache: torch.Tensor,
+    position_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # input tensor x has shape [bsz, seq_len, n_heads, head_dim]
     head_dim = xq.shape[-1]
 
-    # reshape for broadcast
-    rope_cache = reshape_for_broadcast(rope_cache, xq)
+    # reshape for broadcast or gather explicitly provided positions
+    if position_ids is not None:
+        rope_cache = rope_cache[position_ids].unsqueeze(2)
+    else:
+        rope_cache = reshape_for_broadcast(rope_cache, xq)
 
     # [bsz, seq_len, 1, head_dim]
     cos = rope_cache[..., :head_dim].to(dtype=xq.dtype, device=xq.device)
@@ -162,6 +168,7 @@ class Attention(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        position_ids: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
@@ -169,6 +176,8 @@ class Attention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
             rope_cache (torch.Tensor): Precomputed cosine and sine frequencies for rope embedding.
+            attention_masks (AttentionMasksType | None): Optional attention masks.
+            position_ids (torch.Tensor | None): Optional custom position ids for RoPE.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -180,7 +189,7 @@ class Attention(nn.Module):
         k = self.wk(x).view(hidden_shape)
         v = self.wv(x).view(hidden_shape)
 
-        q, k = apply_rotary_emb(q, k, rope_cache)
+        q, k = apply_rotary_emb(q, k, rope_cache, position_ids=position_ids)
 
         # repeat k/v heads if n_kv_heads < n_heads
         keys = repeat_kv(k, self.n_rep)
@@ -222,6 +231,7 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.n_layers = model_args.n_layers
 
         self.moe = GptOssMoE(
             model_args, dim=model_args.dim, hidden_dim=model_args.moe_inter_dim
@@ -236,6 +246,7 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType,
+        position_ids: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Transformer block.
@@ -244,6 +255,7 @@ class TransformerBlock(nn.Module):
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
             rope_cache (torch.Tensor): Precomputed cosine and sine frequencies.
             attention_masks (AttentionMasksType): a dict of BlockMasks.
+            position_ids (torch.Tensor | None): Optional custom position ids.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -255,7 +267,12 @@ class TransformerBlock(nn.Module):
             layer_mask = attention_masks.get("basic_mask", None)
         assert layer_mask is not None
 
-        x = x + self.attention(self.attention_norm(x), rope_cache, layer_mask)
+        x = x + self.attention(
+            self.attention_norm(x),
+            rope_cache,
+            layer_mask,
+            position_ids=position_ids,
+        )
         x = x + self.moe(self.ffn_norm(x))
         return x
 
@@ -263,7 +280,7 @@ class TransformerBlock(nn.Module):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
-        self.moe.init_weights(self.weight_init_std, buffer_device)
+        self.moe.init_weights(self.weight_init_std, buffer_device, self.n_layers)
 
 
 class GptOssModel(nn.Module, ModelProtocol):
@@ -374,6 +391,7 @@ class GptOssModel(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType,
+        position_ids: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Transformer model.
@@ -381,6 +399,7 @@ class GptOssModel(nn.Module, ModelProtocol):
         Args:
             tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
             attention_masks (AttentionMasksType): a dict of BlockMasks.
+            position_ids (torch.Tensor | None): Optional custom RoPE position ids.
 
         Returns:
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
@@ -388,7 +407,12 @@ class GptOssModel(nn.Module, ModelProtocol):
         h = self.tok_embeddings(tokens)
 
         for layer in self.layers.values():
-            h = layer(h, self.rope_cache, attention_masks)
+            h = layer(
+                h,
+                self.rope_cache,
+                attention_masks,
+                position_ids=position_ids,
+            )
         h = self.norm(h)
         output = self.output(h)
         return output

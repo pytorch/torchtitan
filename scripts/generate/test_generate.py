@@ -25,7 +25,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 from torchtitan.components.metrics import build_device_memory_monitor
-from torchtitan.config import ConfigManager, Debug as DebugConfig
+from torchtitan.config import TORCH_DTYPE_MAP, ConfigManager, Debug as DebugConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools import utils
@@ -79,6 +79,7 @@ def test_generate(
     top_k: Optional[int] = None,
     seed: Optional[int] = None,
     deterministic: bool = False,
+    dtype: str = "float32",
 ):
     init_logger()
     color = utils.Color
@@ -107,9 +108,14 @@ def test_generate(
 
     model_args = train_spec.model_args[config.model.flavor]
     model_args.update_from_config(config)
+    if hasattr(model_args, "use_flex_attn"):
+        model_args.use_flex_attn = False
 
     init_device = "meta" if world_size > 1 else device
-    with torch.device(init_device):
+    with (
+        torch.device(init_device),
+        utils.set_default_dtype(TORCH_DTYPE_MAP[dtype]),
+    ):
         logger.info(f"Init model on init_device: {init_device}")
         model = train_spec.model_cls(model_args)
 
@@ -153,6 +159,7 @@ def test_generate(
     begin = time.monotonic()
     logger.info(f"Loading chkpt at: {checkpoint_path}")
     dcp.load(state_dict, checkpoint_id=checkpoint_path)
+    model.load_state_dict(state_dict)
     logger.info(f"Finished loading chkpt in {time.monotonic() - begin:.2f} seconds.")
 
     device_mem_stats = device_memory_monitor.get_peak_stats()
@@ -277,6 +284,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Use deterministic algorithms wherever possible, may be slower",
     )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        choices=["float32", "bfloat16", "float16"],
+        default="float32",
+        help="Load model in this data type",
+    )
 
     parser.add_argument("--prompt", type=str, default="", help="Input prompt")
 
@@ -299,6 +313,7 @@ if __name__ == "__main__":
         top_k=args.top_k,
         seed=args.seed,
         deterministic=args.deterministic,
+        dtype=args.dtype,
     )
 
     if torch.distributed.is_initialized():

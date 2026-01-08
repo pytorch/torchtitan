@@ -57,6 +57,8 @@ def create_parameter_groups(
         expert_optimizer = getattr(dion_config, "expert_optimizer", None)
         routing_optimizer = getattr(dion_config, "routing_optimizer", None)
 
+        is_muon = dion_config.algorithm.lower() == "muon"
+
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
@@ -75,16 +77,6 @@ def create_parameter_groups(
                 elif param.ndim >= 2 and not is_head_param(name, param, model):
                     # Use matrix algorithm for expert matrices
                     # Dion only supports 2D, but Muon supports 3D+ (with flattening)
-                    algorithm_name = dion_config.algorithm.upper()
-
-                    # Check if flatten is enabled (for Muon 3D+ tensor support)
-                    flatten_enabled = getattr(dion_config, "flatten", False)
-
-                    # Handle case-insensitive algorithm matching
-                    is_muon = (
-                        algorithm_name in ["MUON", "muon"]
-                        or dion_config.algorithm.lower() == "muon"
-                    )
 
                     # Simplified condition: Use matrix algorithm for any 2D+ tensors when algorithm is muon
                     if is_muon and param.ndim >= 2:
@@ -114,13 +106,24 @@ def create_parameter_groups(
             elif param.ndim == 1:  # 1D scalar parameters (biases, layer norms)
                 param_stats["scalar"].append((name, param.shape))
                 scalar_params.append(param)
+            elif (
+                param.ndim == 2 and min(param.shape) == 1
+            ):  # Treat degenerate 2D (1 x N / N x 1) as scalar
+                param_stats["scalar"].append((name, param.shape))
+                scalar_params.append(param)
             elif param.ndim == 2:  # 2D matrix parameters
                 param_stats["dion"].append((name, param.shape))
                 dion_params.append(param)
             else:
-                # For higher dimensional parameters, treat as scalar
-                param_stats["scalar"].append((name, param.shape))
-                scalar_params.append(param)
+                # Simplified condition: Use matrix algorithm for any 2D+ tensors when algorithm is muon
+                if is_muon and param.ndim >= 2:
+                    # Use Muon for 2D+ tensors when algorithm is MUON, or always for 2D tensors
+                    param_stats["dion"].append((name, param.shape))
+                    dion_params.append(param)
+                else:
+                    # Dion doesn't support 3D+, fall back to scalar optimizer
+                    param_stats["scalar"].append((name, param.shape))
+                    scalar_params.append(param)
 
         # Create parameter groups for each type
         if dion_params:
@@ -281,9 +284,24 @@ def is_head_param(name: str, param: torch.Tensor, model: nn.Module) -> bool:
         "output_projection",
     ]
 
+    # Patterns that indicate the parameter is NOT a head (e.g., attention output projections)
+    # These should use Muon, not the head optimizer
+    attention_context_patterns = [
+        "attention",
+        "attn",
+        "self_attn",
+    ]
+
     name_lower = name.lower()
+
     for pattern in head_patterns:
         if pattern in name_lower:
+            # Special case: out_proj inside attention layers should NOT be classified as head
+            # These are attention output projections, not model output heads
+            if pattern in ["out_proj", "output_projection"]:
+                for attn_pattern in attention_context_patterns:
+                    if attn_pattern in name_lower:
+                        return False
             return True
 
     return False
