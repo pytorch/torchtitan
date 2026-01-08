@@ -1177,6 +1177,7 @@ class GRPO:
     """
 
 
+@dataclass
 class Debug:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
