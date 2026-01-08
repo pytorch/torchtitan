@@ -37,7 +37,6 @@ steps = 20
 dataset_type = "nanoset"
 dataset_folders = ["/home/shared/datasets/fineweb-edu-v1_4-tokenized-qwen3", "/home/shared/datasets/dclm-baseline-1.0-tokenized-qwen3"]
 dataset_weights = [1, 1]
-debug_moe_force_load_balance=true
 
 [parallelism]
 data_parallel_replicate_degree = 1

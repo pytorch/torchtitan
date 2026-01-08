@@ -75,7 +75,7 @@ class Qwen3NextModelArgs(BaseModelArgs):
         self.max_seq_len = seq_len
 
         self.moe_args._debug_force_load_balance = (
-            job_config.training.debug_moe_force_load_balance
+            job_config.debug.moe_force_load_balance
         )
 
         # Pass DeepEP config to MoE layer and validate
