@@ -78,7 +78,10 @@ def apply_fsdp(
         cpu_offload (bool): Whether to offload model parameters to CPU. Defaults to False.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    fsdp_config: dict[str, Any] = {
+        "mesh": dp_mesh,
+        "mp_policy": mp_policy,
+    }
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -91,6 +94,10 @@ def apply_fsdp(
     for layer in linear_layers:
         # pyrefly: ignore [no-matching-overload]
         fully_shard(layer, **fsdp_config)
+        # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
+        #       gradient division. We handle gradient scaling in the training
+        #       loop based on global token count.
+        layer.set_gradient_divide_factor(1.0)
 
     # pyrefly: ignore [not-iterable]
     for block in model.double_blocks:
@@ -99,6 +106,10 @@ def apply_fsdp(
             block,
             **fsdp_config,
         )
+        # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
+        #       gradient division. We handle gradient scaling in the training
+        #       loop based on global token count.
+        block.set_gradient_divide_factor(1.0)
 
     # pyrefly: ignore [not-iterable]
     for block in model.single_blocks:
@@ -107,13 +118,25 @@ def apply_fsdp(
             block,
             **fsdp_config,
         )
+        # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
+        #       gradient division. We handle gradient scaling in the training
+        #       loop based on global token count.
+        block.set_gradient_divide_factor(1.0)
 
     # apply FSDP to last layer. Set reshard_after_forward=False for last layer to avoid gather right after reshard
     # pyrefly: ignore [no-matching-overload]
     fully_shard(model.final_layer, **fsdp_config, reshard_after_forward=False)
+    # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
+    #       gradient division. We handle gradient scaling in the training
+    #       loop based on global token count.
+    model.final_layer.set_gradient_divide_factor(1.0)
 
     # Wrap all the rest of model
     fully_shard(model, **fsdp_config)
+
+    # Set gradient_divide_factor=1.0 to disable FSDP's automatic gradient division
+    # We handle gradient scaling ourselves in the training loop with global token count
+    model.set_gradient_divide_factor(1.0)
 
 
 def apply_ac(model: nn.Module, ac_config):
@@ -164,6 +187,10 @@ def parallelize_encoders(
             fully_shard(block, **fsdp_config)
         # pyrefly: ignore [no-matching-overload]
         fully_shard(t5_model.hf_module, **fsdp_config)
+
+        # Set gradient_divide_factor=1.0 to disable FSDP's automatic gradient division
+        # We handle gradient scaling ourselves in the training loop with global token count
+        t5_model.hf_module.set_gradient_divide_factor(1.0)
 
         if parallel_dims.dp_replicate_enabled:
             logger.info("Applied HSDP to the T5 encoder model")

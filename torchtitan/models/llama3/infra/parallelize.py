@@ -284,7 +284,10 @@ def apply_fsdp(
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    fsdp_config = {
+        "mesh": dp_mesh,
+        "mp_policy": mp_policy,
+    }
     if cpu_offload:
         # pyrefly: ignore [bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
@@ -310,6 +313,7 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
+        model.tok_embeddings.set_gradient_divide_factor(1.0)
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
         fully_shard(
@@ -317,16 +321,23 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
+        transformer_block.set_gradient_divide_factor(1.0)
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
     if model.norm is not None and model.output is not None:
         # pyrefly: ignore [no-matching-overload]
-        fully_shard(
+        module = fully_shard(
             [model.norm, model.output],
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
+        model.norm.set_gradient_divide_factor(1.0)
+        model.output.set_gradient_divide_factor(1.0)
+
     fully_shard(model, **fsdp_config)
+    # Set gradient_divide_factor=1.0 to disable FSDP's automatic gradient division
+    # We handle gradient scaling ourselves in the training loop with global token count
+    model.set_gradient_divide_factor(1.0)
 
 
 def apply_ddp(
