@@ -114,8 +114,8 @@ Here's the minimal set of changes to enable DeepEP on an existing config:
  name = "qwen3"
 +flavor = "30B-A3B-deepep"
 
- [training]
-+debug_moe_force_load_balance = true  # For sanity testing (see Tips)
+ [debug]
++moe_force_load_balance = true  # For sanity testing (see Tips)
 
  [parallelism]
 -expert_parallel_degree = 1
@@ -129,7 +129,7 @@ Override config values without editing the file:
 ```bash
 NGPU=8 CONFIG_FILE="path/to/config.toml" ./run_train.sh \
   --parallelism.expert_parallel_degree 8 \
-  --training.debug_moe_force_load_balance
+  --debug.moe_force_load_balance
 ```
 
 ---
@@ -190,17 +190,17 @@ python -c "from deep_ep import Buffer, Config; print('DeepEP installed successfu
 
 **Problem**: MoE routers start with unbalanced token distributions, causing low throughput during initial training steps. If you observe low throughput initially, this is expected. Once the router converges to uniform distribution, throughput should approach the target.
 
-**Solution**: Use `debug_moe_force_load_balance` for testing and initial benchmarking:
+**Solution**: Use `moe_force_load_balance` for testing and initial benchmarking:
 
 ```toml
-[training]
-debug_moe_force_load_balance = true  # Forces uniform token distribution across experts
+[debug]
+moe_force_load_balance = true  # Forces uniform token distribution across experts
 ```
 
 Or via command line:
 
 ```bash
-./run_train.sh --training.debug_moe_force_load_balance
+./run_train.sh --debug.moe_force_load_balance
 ```
 
 ### DeepEP Tuning
