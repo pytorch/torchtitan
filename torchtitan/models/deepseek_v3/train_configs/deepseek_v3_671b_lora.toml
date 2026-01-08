@@ -36,9 +36,9 @@ min_lr_factor = 0.1
 
 [training]
 local_batch_size = 4
-seq_len = 4096
+seq_len = 1024
 max_norm = 1.0  # grad norm clipping
-steps = 50
+steps = 20
 dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 
 [parallelism]
@@ -57,9 +57,9 @@ enable = true
 folder = "checkpoint"
 interval = 100
 last_save_model_only = true
-export_dtype = "float16"  # Valid options: "float16", "bfloat16", "float32" (NOT "float8")
+export_dtype = "float16"  # Valid options: "float16", "bfloat16", "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
-last_save_in_hf = true
+last_save_in_hf = false
 
 [activation_checkpoint]
 mode = "none"  # ["none", "selective", "full"]
