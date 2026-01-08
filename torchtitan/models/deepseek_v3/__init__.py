@@ -179,7 +179,7 @@ deepseekv3_args = {
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,
-        attn_type="flex",
+        attn_type="sdpa",  # Changed from "flex" to avoid Triton resource exhaustion on H200
         attn_mask_type="block_causal",
         # Fine-tuning LoRA (for parameter-efficient fine-tuning)
         finetune_lora_rank=16,

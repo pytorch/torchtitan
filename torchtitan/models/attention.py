@@ -7,6 +7,7 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import functools
+import os
 from collections.abc import Callable
 from typing import ClassVar, NamedTuple
 
@@ -94,10 +95,19 @@ class FlexAttentionWrapper(torch.nn.Module):
     Note:
         The forward function must have q, k, v as the first three arguments, and
         block_mask as a keyword argument to be compatible with _ContextParallel.
+        
+    Environment Variable:
+        TORCH_COMPILE_FLEX_ATTN: Set to "0" or "false" to disable torch.compile
+        for FlexAttention. This can help avoid Triton resource exhaustion errors
+        on some hardware configurations.
     """
 
-    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="max-autotune-no-cudagraphs"
+    # Make compilation conditional via environment variable
+    _compile_enabled: ClassVar[bool] = os.environ.get("TORCH_COMPILE_FLEX_ATTN", "1").lower() not in ("0", "false", "no")
+    _compiled_flex_attn: ClassVar[Callable] = (
+        torch.compile(flex_attention, mode="max-autotune-no-cudagraphs")
+        if _compile_enabled
+        else flex_attention
     )
 
     def forward(
