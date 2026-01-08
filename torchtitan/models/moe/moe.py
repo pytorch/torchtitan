@@ -26,6 +26,13 @@ class MoEArgs:
     route_norm: bool = False
     route_scale: float = 1.0
     score_before_experts: bool = True
+    use_router_bias: bool = False  # Set to True for GPT-OSS
+    # TopK-then-Score (True) vs Score-then-TopK (False):
+    #   True: Select top-K by raw logits, then apply score_func (GPT-OSS style)
+    #   False: Apply score_func to all experts, then select top-K (DeepSeek-V3 style)
+    # Default is False to preserve backward compatibility with DeepSeek/Llama4 models
+    topk_before_score: bool = False
+    use_expert_bias: bool = False  # Set to True for GPT-OSS (enables mlp1_bias, mlp2_bias in GptOssGroupedExperts)
 
     # token-choice with optional node limited routing
     top_k: int = 1
@@ -213,16 +220,19 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid"],
         route_norm: bool,
         route_scale: float,
+        use_router_bias: bool = False,
+        topk_before_score: bool = True,
         _debug_force_load_balance: bool = False,
     ):
         super().__init__()
-        self.gate = nn.Linear(dim, num_experts, bias=False)
+        self.gate = nn.Linear(dim, num_experts, bias=use_router_bias)
         self.num_experts = num_experts
         self.num_expert_groups = num_expert_groups
         self.num_limited_groups = num_limited_groups
         self.top_k = top_k
         self.score_func = score_func
         self.route_norm = route_norm
+        self.topk_before_score = topk_before_score
         self.route_scale = route_scale
         self._debug_force_load_balance = _debug_force_load_balance
 
@@ -303,54 +313,85 @@ class TokenChoiceTopKRouter(nn.Module):
                 - num_tokens_per_expert (torch.Tensor):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
-        # scores shape (bs*slen, num_experts)
-        scores = self.gate(x)
+        # Get raw router logits shape (bs*slen, num_experts)
+        router_logits = self.gate(x)
 
-        # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
-        if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
-        elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1)
+        if self.topk_before_score:
+            # TopK-then-Score: Select top-K by raw logits, then apply score_func (GPT-OSS style)
+            # This matches HuggingFace GPT-OSS implementation
+            # Note: Node-limited routing is not supported with TopK-then-Score
+            if self.num_expert_groups is not None:
+                raise ValueError(
+                    "topk_before_score=True does not support node-limited routing. "
+                    "Set num_expert_groups=None or use topk_before_score=False."
+                )
+
+            # Handle debug mode for forced load balancing
+            if self._debug_force_load_balance:
+                if self.score_func == "sigmoid":
+                    all_scores = torch.sigmoid(router_logits.to(torch.float32))
+                else:
+                    all_scores = F.softmax(router_logits.to(torch.float32), dim=1)
+                selected_experts_indices, top_scores = self._debug_force_load_balance_routing(all_scores)
+            else:
+                # Select top-K experts by logits (optionally biased for load balancing)
+                if expert_bias is not None:
+                    _, selected_experts_indices = torch.topk(
+                        router_logits + expert_bias, k=self.top_k, dim=1
+                    )
+                    # Gather UNBIASED logits for score computation (bias only affects routing)
+                    router_top_logits = router_logits.gather(dim=1, index=selected_experts_indices)
+                else:
+                    router_top_logits, selected_experts_indices = torch.topk(
+                        router_logits, k=self.top_k, dim=1
+                    )
+
+                # Apply score function to ONLY the selected top-K expert logits
+                if self.score_func == "sigmoid":
+                    top_scores = torch.sigmoid(router_top_logits.to(torch.float32))
+                elif self.score_func == "softmax":
+                    top_scores = F.softmax(router_top_logits.to(torch.float32), dim=1)
+                else:
+                    raise NotImplementedError(f"Unknown score function {self.score_func}")
         else:
-            raise NotImplementedError(f"Unknown score function {self.score_func}")
+            # Score-then-TopK: Apply score_func to all experts, then select top-K (DeepSeek-V3 style)
+            # This supports node-limited routing
+            if self.score_func == "sigmoid":
+                scores = torch.sigmoid(router_logits.to(torch.float32))
+            elif self.score_func == "softmax":
+                scores = F.softmax(router_logits.to(torch.float32), dim=1)
+            else:
+                raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        scores_for_choice = scores if expert_bias is None else scores + expert_bias
-        # Apply node-limited routing if configured
-        if self.num_expert_groups is not None:
-            scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
-        _, selected_experts_indices = torch.topk(
-            scores_for_choice, k=self.top_k, dim=-1, sorted=False
-        )
+            scores_for_choice = scores if expert_bias is None else scores + expert_bias
 
-        # top scores shape (bs*slen, top_k)
-        # NOTE: The expert_bias is only used for routing. The gating value
-        #       top_scores is still derived from the original scores.
-        top_scores = scores.gather(dim=1, index=selected_experts_indices)
+            # Apply node-limited routing if configured
+            if self.num_expert_groups is not None:
+                scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
 
-        # debug override: balanced round-robin routing
-        if self._debug_force_load_balance:
-            (
-                selected_experts_indices,
-                top_scores,
-            ) = self._debug_force_load_balance_routing(scores)
+            _, selected_experts_indices = torch.topk(
+                scores_for_choice, k=self.top_k, dim=-1, sorted=False
+            )
+            # Gather scores from original (non-biased) distribution
+            top_scores = scores.gather(dim=1, index=selected_experts_indices)
 
         if self.route_norm:
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
             top_scores = top_scores / denominator
         top_scores = top_scores * self.route_scale
 
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
+        # Count tokens per expert using bincount (more reliable than histc for integer indices)
+        num_tokens_per_expert = torch.bincount(
             selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+            minlength=self.num_experts,
         )
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
     def init_weights(self, init_std: float):
         nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+        if self.gate.bias is not None:
+            nn.init.zeros_(self.gate.bias)
 
 
 # NOTE: the reason we make this a stateless module is to support
@@ -390,12 +431,10 @@ class TokenReorderer(nn.Module):
                 - token_indices_experts_sorted: Token indices reordered to match expert ordering
                 - num_tokens_per_expert: Number of tokens assigned to each expert
         """
-        # group tokens together by expert indices from 0 to num_experts and pass that to experts forward
-        num_tokens_per_expert = torch.histc(
+        # Count tokens per expert using bincount (more reliable than histc for integer indices)
+        num_tokens_per_expert = torch.bincount(
             selected_experts_indices.view(-1),
-            bins=self.num_experts,
-            min=0,
-            max=self.num_experts,
+            minlength=self.num_experts,
         )
 
         # Reorder the token indices to match the order of the experts
@@ -433,6 +472,8 @@ class MoE(nn.Module):
             score_func=moe_args.score_func,
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
+            use_router_bias=moe_args.use_router_bias,
+            topk_before_score=moe_args.topk_before_score,
             _debug_force_load_balance=moe_args._debug_force_load_balance,
         )
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
