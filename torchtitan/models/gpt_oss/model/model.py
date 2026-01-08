@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
+
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
@@ -22,10 +24,95 @@ from .args import GptOssModelArgs
 from .moe import GptOssMoE
 
 
+def _find_yarn_correction_dim(
+    num_rotations: float, dim: int, base: float, max_seq_len: int
+) -> float:
+    """YaRN helper: Find correction dimension."""
+    return (
+        dim
+        * math.log(max_seq_len / (num_rotations * 2 * math.pi))
+        / (2 * math.log(base))
+    )
+
+
+def _find_yarn_correction_range(
+    low_rot: float, high_rot: float, dim: int, base: float, max_seq_len: int
+) -> tuple[int, int]:
+    """YaRN helper: Find correction range."""
+    low = math.floor(_find_yarn_correction_dim(low_rot, dim, base, max_seq_len))
+    high = math.ceil(_find_yarn_correction_dim(high_rot, dim, base, max_seq_len))
+    return max(low, 0), min(high, dim - 1)
+
+
+def _linear_ramp_factor(min_val: float, max_val: float, dim: int) -> torch.Tensor:
+    """YaRN helper: Linear ramp for smooth interpolation."""
+    if min_val == max_val:
+        max_val += 0.001
+    linear_func = (torch.arange(dim, dtype=torch.float32) - min_val) / (max_val - min_val)
+    ramp_func = torch.clamp(linear_func, 0, 1)
+    return ramp_func
+
+
+def compute_yarn_mscale(rope_factor: float) -> float:
+    """
+    Compute YaRN mscale (attention scaling factor) for extended context.
+
+    YaRN paper recommends scaling attention by this factor to maintain
+    perplexity at extended context lengths. Without mscale, model quality
+    degrades significantly when extending beyond the original training length.
+
+    Formula: mscale = 0.1 * ln(rope_factor) + 1.0
+
+    Args:
+        rope_factor: YaRN rope scaling factor (e.g., 32 for 32x context extension)
+
+    Returns:
+        Attention scaling multiplier (1.0 when rope_factor <= 1)
+    """
+    if rope_factor <= 1.0:
+        return 1.0
+    return 0.1 * math.log(rope_factor) + 1.0
+
+
 def precompute_rope_cache(
-    dim: int, max_seq_len: int, base: float = 1_000_000.0
+    dim: int,
+    max_seq_len: int,
+    base: float = 1_000_000.0,
+    rope_factor: float = 1.0,
+    beta_fast: int = 32,
+    beta_slow: int = 1,
+    original_seq_len: int = 4096,
 ) -> torch.Tensor:
+    """
+    Precompute RoPE cache with optional YaRN scaling for extended context.
+
+    YaRN (Yet another RoPE extensioN) allows extending context length beyond
+    the original training length by applying frequency scaling corrections.
+
+    Args:
+        dim: Embedding dimension (head_dim)
+        max_seq_len: Maximum sequence length to precompute
+        base: RoPE theta base (default: 1M, GPT-OSS uses 150k)
+        rope_factor: YaRN scaling factor (GPT-OSS uses 32)
+        beta_fast: Fast frequency correction threshold (GPT-OSS uses 32)
+        beta_slow: Slow frequency correction threshold (GPT-OSS uses 1)
+        original_seq_len: Original pretrained context length (GPT-OSS uses 4096)
+
+    Returns:
+        Precomputed RoPE cache: [max_seq_len, dim * 2] (cos and sin concatenated)
+    """
+    # Basic RoPE frequency calculation
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+
+    # YaRN scaling for extended context (applied when seqlen > original_seq_len)
+    if max_seq_len > original_seq_len and rope_factor > 1.0:
+        low, high = _find_yarn_correction_range(
+            beta_fast, beta_slow, dim, base, original_seq_len
+        )
+        smooth = 1 - _linear_ramp_factor(low, high, dim // 2)
+        # Apply YaRN interpolation: blend scaled and unscaled frequencies
+        freqs = freqs / rope_factor * (1 - smooth) + freqs * smooth
+
     # Create position indexes `[0, 1, ..., max_seq_len - 1]`
     t = torch.arange(max_seq_len, dtype=freqs.dtype, device=freqs.device)
 
@@ -109,6 +196,10 @@ class Attention(nn.Module):
 
         self.n_rep = self.n_heads // self.n_kv_heads
 
+        # Compute YaRN mscale for extended context attention scaling
+        mscale = compute_yarn_mscale(model_args.rope_factor)
+        self.softmax_scale = mscale / math.sqrt(self.head_dim)
+
         self.wq = nn.Linear(
             model_args.dim,
             model_args.n_heads * model_args.head_dim,
@@ -181,7 +272,7 @@ class Attention(nn.Module):
             xk,
             xv,
             block_mask=attention_masks,
-            scale=None,
+            scale=self.softmax_scale,
             return_lse=True,
             enable_gqa=self.enable_gqa,
         )
@@ -317,6 +408,10 @@ class GptOssModel(ModelProtocol):
             self.model_args.head_dim,
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
+            self.model_args.rope_factor,
+            self.model_args.beta_fast,
+            self.model_args.beta_slow,
+            self.model_args.original_seq_len,
         )
 
     def get_attention_masks(
