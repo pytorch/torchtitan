@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.tools.logging import logger
 from .utils import indices_padding_wrapper
 
 
@@ -245,7 +246,7 @@ class TokenChoiceTopKRouter(nn.Module):
     def _get_node_limited_routing_scores(
         self,
         scores_for_choice: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """Select num_limited_groups groups based on group scores,
             and set expert scores in non-selected groups as -inf
 
@@ -259,6 +260,7 @@ class TokenChoiceTopKRouter(nn.Module):
             raise ValueError(
                 "num_limited_groups must be set when num_expert_groups is set"
             )
+        assert self.num_expert_groups is not None
         if self.num_experts % self.num_expert_groups != 0:
             raise ValueError(
                 f"num_experts ({self.num_experts}) must be divisible by num_expert_groups ({self.num_expert_groups})"
@@ -564,3 +566,21 @@ class MoE(nn.Module):
                 self.expert_bias = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
                 )
+
+
+def build_moe(
+    args: MoEArgs, dim: int, hidden_dim: int, moe_impl: str = "standard"
+) -> nn.Module:
+    """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP)."""
+    if moe_impl == "deepep":
+        from .moe_deepep import DeepEPMoE
+
+        logger.info(
+            f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
+        )
+        return DeepEPMoE(moe_args=args, dim=dim, hidden_dim=hidden_dim)
+
+    logger.info(
+        f"Standard MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
+    )
+    return MoE(args, dim=dim, hidden_dim=hidden_dim)

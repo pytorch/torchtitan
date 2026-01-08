@@ -24,7 +24,6 @@ dependencies = [
     "fsspec",
     "tyro",
     "tensorboard",
-    "psutil",
     "einops",
     "pillow",
 ]
@@ -68,3 +67,4 @@ testpaths = ["tests"]
 [tool.pyrefly]
 project-excludes = ["torchtitan/experiments", "**/tests/**"]
 ignore-missing-imports = ["torchao.*", "torchft"]  # optional dependencies
+search-path = ["../pytorch"]  # local built pytorch

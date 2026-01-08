@@ -271,8 +271,11 @@ class Attention(nn.Module):
         match self.attn_type:
             case "flex":
                 assert isinstance(attention_masks, BlockMask), attention_masks
-                output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+                output = self.inner_attention(
+                    xq, xk, xv, block_mask=attention_masks, scale=self.scaling
+                )
             case "varlen":
+                # TODO: pass self.scaling into varlen attention
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
                     xq,
@@ -280,10 +283,11 @@ class Attention(nn.Module):
                     xv,
                     self.head_dim,
                     attention_masks,
+                    scale=self.scaling,
                 )
             case "sdpa":
                 assert attention_masks is None
-                output = self.inner_attention(xq, xk, xv)
+                output = self.inner_attention(xq, xk, xv, scale=self.scaling)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
