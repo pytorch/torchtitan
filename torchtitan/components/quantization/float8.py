@@ -146,6 +146,19 @@ class Float8LinearConverter(QuantizationConverter):
         if not self.enabled:
             return
 
+        from torchao.quantization import quantize_
+        from torchao.prototype.deep_gemm_float8_training.linear import (
+            DeepGemmFloat8LinearConfig,
+        )
+
+        quantize_(
+            model, 
+            config=DeepGemmFloat8LinearConfig(), 
+            filter_fn=lambda mod, fqn: isinstance(mod, torch.nn.Linear) and fqn != "output",
+        )
+        logger.info("enabled DeepGemm dense training")
+        return
+
         from torchao.float8 import convert_to_float8_training
 
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
