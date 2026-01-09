@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._functional_collectives import (
     all_to_all_single,
@@ -280,4 +281,56 @@ class ReordererSequenceParallel(ParallelStyle):
             partition_fn=None,
             input_fn=self._prepare_inputput_fn,
             output_fn=self._prepare_output_fn,
+        )
+
+
+class ExpertParallelDeepEP(ParallelStyle):
+    def __init__(self):
+        super().__init__()
+        self.input_splits = None
+        self.output_splits = None
+
+    # performing all-to-all dispatch on the input
+    def _token_dispatch(self, mod, inputs, device_mesh):
+        # annotate module input placements/sharding with input_layouts
+        routed_input, num_tokens_per_expert = inputs
+
+        routed_input, routed_prob = mod.deepep_dispatcher.token_dispatch(
+            routed_input, group=device_mesh.get_group()
+        )
+        (
+            routed_input,
+            num_tokens_per_expert,
+            routed_prob,
+        ) = mod.deepep_dispatcher.dispatch_postprocess(routed_input, None)
+
+        # NOTE: routed_prob is returned and passed to GroupedExperts.forward().
+        # When fused_weighted_scatter_add=True, probs are also stored in dispatcher
+        # for use in unpermute(). When False, GroupedExperts.forward() handles
+        # the multiplication directly.
+        return routed_input, num_tokens_per_expert, routed_prob
+
+    @staticmethod
+    def _partition_fn(name, mod, device_mesh):
+        # shard on the expert dimension
+        for name, param in mod.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            mod.register_parameter(name, dist_param)
+
+    # performing all-to-all combine on the output
+    def _token_combine(self, mod, routed_output, device_mesh):
+        routed_output = mod.deepep_dispatcher.combine_preprocess(routed_output)
+        routed_output = mod.deepep_dispatcher.token_combine(
+            routed_output, group=device_mesh.get_group()
+        )
+        # TODO: combine post process?
+        return routed_output
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=self._partition_fn,
+            input_fn=self._token_dispatch,
+            output_fn=self._token_combine,
         )

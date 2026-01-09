@@ -365,7 +365,8 @@ class TransformerBlock(nn.Module):
         )
 
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x))
+            moe_output = self.moe(self.ffn_norm(x))
+            x = x + moe_output
         else:
             x = x + self.feed_forward(self.ffn_norm(x))
         return x

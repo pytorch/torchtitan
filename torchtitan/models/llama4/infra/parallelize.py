@@ -40,6 +40,7 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
+    ExpertParallelDeepEP,
     ExpertTensorParallel,
     ReordererSequenceParallel,
     TensorParallel,
@@ -456,6 +457,7 @@ def apply_moe_ep_tp(
     ep_mesh: DeviceMesh | None,
     ep_tp_mesh: DeviceMesh | None,
     etp_enabled: bool,
+    use_deepep: bool,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -512,7 +514,13 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or not etp_enabled:
             experts_mesh = ep_mesh
             # input / output sharding on the batch / tokens dim
-            experts_plan = ExpertParallel()
+            experts_plan = (
+                ExpertParallelDeepEP() if use_deepep is True else ExpertParallel()
+            )
+            if use_deepep is True:
+                logger.info(
+                    f"Enabling deep_ep and fused all-to-all communication for expert parallelism"
+                )
         else:
             experts_mesh = ep_tp_mesh
             experts_plan = ExpertTensorParallel()
@@ -533,14 +541,28 @@ def old_apply_compile(model: nn.Module, compile_config: CompileConfig):
     # but it is experimental.
     # torch._dynamo.config.capture_scalar_outputs = True
     for layer_id, transformer_block in model.layers.named_children():
-        # TODO: remove when torch.compile supports fullgraph=True for MoE
-        fullgraph = True
+        # IMPORTANT: MoE layers MUST use fullgraph=False, non-MoE layers SHOULD use fullgraph=True.
+        #
+        # Why MoE needs fullgraph=False:
+        #   DeepEP's PrimusTurboDeepepManager.setup_metadata() mutates instance state
+        #   (self.token_probs, self.token_indices) inside activation checkpointing regions.
+        #   When fullgraph=True, torch.compile wraps these in HigherOrderOperator which
+        #   raises "Mutating a variable not in the current scope (SideEffects)" error.
+        #   fullgraph=False allows graph breaks, permitting these state mutations.
+        #
+        # Why non-MoE layers should use fullgraph=True:
+        #   fullgraph=False on attention/FFN layers causes unnecessary graph breaks,
+        #   which interferes with activation checkpointing and retains more intermediate
+        #   tensors during backward pass, leading to OOM on memory-constrained setups.
+        #
+        # Respect user config for non-MoE layers, but MoE layers MUST use False
+        fullgraph = compile_config.fullgraph
         if transformer_block.moe_enabled:
             fullgraph = False
         transformer_block = torch.compile(
             transformer_block,
             backend=compile_config.backend,
-            fullgraph=compile_config.fullgraph,
+            fullgraph=fullgraph,
         )
         model.layers.register_module(layer_id, transformer_block)
 

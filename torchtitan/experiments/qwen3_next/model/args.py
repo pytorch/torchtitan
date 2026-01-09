@@ -7,17 +7,6 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass, field
-
-from torch import nn
-
-from torchtitan.config import JobConfig
-from torchtitan.models.moe import MoEArgs
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.protocols.train_spec import BaseModelArgs
-
-from torchtitan.tools.logging import logger
-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -84,6 +73,14 @@ class Qwen3NextModelArgs(BaseModelArgs):
                 f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
             )
         self.max_seq_len = seq_len
+
+        self.moe_args._debug_force_load_balance = (
+            job_config.debug.moe_force_load_balance
+        )
+
+        # Pass DeepEP config to MoE layer and validate
+        self.moe_args.deepep_config = job_config.deepep
+        self.moe_args.validate_deepep_config()
 
         if self.layer_types == []:
             self.layer_types = [

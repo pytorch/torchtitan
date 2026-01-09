@@ -44,6 +44,12 @@ class Profiling:
     enable_profiling: bool = False
     """Whether to enable pytorch profile"""
 
+    with_stack: bool = True
+    """Record source information (file and line number) for the ops"""
+
+    with_modules: bool = True
+    """Record module hierarchy (including function names) corresponding to the callstack of the op"""
+
     save_traces_folder: str = "profile_traces"
     """Trace files location"""
 
@@ -517,6 +523,52 @@ class Parallelism:
     - [partial dp -> ep] etp = tp
     - [partial dp + all tp -> ep] etp = 1
     Note that this is still an experimental feature.
+    """
+
+
+@dataclass
+class DeepEP:
+    """Configuration for DeepEP (Deep Expert Parallelism) MoE communication.
+
+    DeepEP provides optimized all-to-all communication for MoE token dispatch/combine.
+    These settings only take effect when model.use_deepep is enabled.
+    """
+
+    sync_comm_stream: bool = False
+    """
+    Whether to synchronize the DeepEP communication stream with the default CUDA stream.
+
+    DeepEP uses a separate communication stream for dispatch/combine operations. Without sync (default): Better performance, but may cause race conditions if the
+    DeepEP version doesn't properly synchronize streams internally.
+
+    With sync enabled: Adds explicit CUDA event-based synchronization between the
+    comm stream and default stream after each dispatch/combine operation.
+    """
+
+    fused_weighted_scatter_add: bool = False
+    """
+    Whether to use fused weighted scatter_add kernel for combining expert outputs.
+
+    When enabled (default) and score_before_experts=False, the routing probability
+    multiplication is fused into the scatter_add operation in unpermute, providing
+    2-3x speedup over separate multiply + scatter_add.
+
+    When disabled, the multiplication happens in GroupedExperts.forward() after
+    expert computation (original behavior).
+    """
+
+    fused_silu_gate_prob: bool = False
+    """
+    Whether to use fused SiLU-Gate-Prob Triton kernel for expert computation.
+
+    When enabled, fuses silu(x@w1) * (x@w3) * prob into a single Triton kernel,
+    providing ~3.5x speedup over separate operations. Requires score_before_experts=False.
+
+    The kernel computes intermediates in float32 for numerical stability,
+    with bfloat16 input/output.
+
+    Note: This may cause ~0.15% gradient difference compared to unfused version
+    due to different operation ordering (prob applied before w2 matmul vs after).
     """
 
 
@@ -1153,6 +1205,7 @@ class JobConfig:
     lr_scheduler: LRScheduler = field(default_factory=LRScheduler)
     training: Training = field(default_factory=Training)
     parallelism: Parallelism = field(default_factory=Parallelism)
+    deepep: DeepEP = field(default_factory=DeepEP)
     checkpoint: Checkpoint = field(default_factory=Checkpoint)
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint

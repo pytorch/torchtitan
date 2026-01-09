@@ -378,6 +378,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
+        # Calculate global batch size in tokens
+        global_batch_size_tokens = global_batch_size * job_config.training.seq_len
+        total_tokens_all_dp_ranks = global_batch_size_tokens * dp_degree
+
+        # TODO(phuc): move to appropriate place
+        def format_tokens(num):
+            """Format token counts in human-readable format (e.g., 220K, 2M)"""
+            if num >= 1_000_000:
+                return f"{num / 1_000_000:.1f}M"
+            elif num >= 1_000:
+                return f"{num / 1_000:.0f}K"
+            else:
+                return str(num)
+
+        logger.info(
+            "[Global training] "
+            f"global batch size {global_batch_size} ({format_tokens(global_batch_size_tokens)} tokens), "
+            f"total tokens across all DP ranks per step {format_tokens(total_tokens_all_dp_ranks)}"
+        )
+
     def init_distributed(self) -> ParallelDims:
         job_config = self.job_config
         dist_utils.init_distributed(
@@ -524,7 +544,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     if counts is None:
                         continue
 
-                    checkpoint_impl = getattr(transformer_block, "checkpoint_impl", None)
+                    checkpoint_impl = getattr(
+                        transformer_block, "checkpoint_impl", None
+                    )
 
                     if (
                         CheckpointImpl is not None
@@ -834,6 +856,7 @@ def main(trainer_class: type[Trainer]) -> None:
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
+
     trainer: Trainer | None = None
 
     try:
