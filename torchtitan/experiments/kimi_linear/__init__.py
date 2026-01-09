@@ -71,13 +71,12 @@ kimi_linear_configs = {
             route_norm=True,
             route_scale=2.446,  # routed_scaling_factor from config
             score_before_experts=False,  # HF applies weights to output, not input
-            #use_grouped_mm=False,  # Debug: use for-loop instead of grouped_mm
         ),
     ),
     # 10B-A1B config (smaller model for testing)
     "10B_A1B": KimiLinearModelArgs(
         dim=1536,
-        n_layers=20,
+        n_layers=32,
         vocab_size=163840,
         hidden_dim=6144,
         n_heads=24,
@@ -88,7 +87,7 @@ kimi_linear_configs = {
         qk_nope_head_dim=96,
         qk_rope_head_dim=48,
         norm_eps=1e-5,
-        rope_theta=10000.0,
+        rope_theta=50000.0,
         max_seq_len=8192,
         # Linear attention config
         linear_attn_num_heads=24,
@@ -109,7 +108,6 @@ kimi_linear_configs = {
             route_norm=True,
             route_scale=2.0,
             score_before_experts=False,  # HF applies weights to output, not input
-            #use_grouped_mm=False,  # Debug: use for-loop instead of grouped_mm
         ),
     ),
     # Dense version without MoE (for testing/debugging)
