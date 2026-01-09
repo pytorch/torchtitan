@@ -47,7 +47,8 @@ def _find_yarn_correction_range(
 def _linear_ramp_factor(min_val: float, max_val: float, dim: int) -> torch.Tensor:
     """YaRN helper: Linear ramp for smooth interpolation."""
     if min_val == max_val:
-        max_val += 0.001
+        # Degenerate range: return zeros (all dimensions use same blend factor)
+        return torch.zeros(dim, dtype=torch.float32)
     linear_func = (torch.arange(dim, dtype=torch.float32) - min_val) / (max_val - min_val)
     ramp_func = torch.clamp(linear_func, 0, 1)
     return ramp_func
@@ -92,7 +93,7 @@ def precompute_rope_cache(
     Args:
         dim: Embedding dimension (head_dim)
         max_seq_len: Maximum sequence length to precompute
-        base: RoPE theta base (default: 1M, GPT-OSS uses 150k)
+        base: RoPE theta base (function default: 1M; GPT-OSS config uses 150k via args.py)
         rope_factor: YaRN scaling factor (GPT-OSS uses 32)
         beta_fast: Fast frequency correction threshold (GPT-OSS uses 32)
         beta_slow: Slow frequency correction threshold (GPT-OSS uses 1)
