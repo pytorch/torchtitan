@@ -218,7 +218,7 @@ The default DeepEP configuration is optimized for **B200 GPUs with EP=8**. If yo
 
 ## ⚡ Kernel Optimizations
 
-DeepEP includes custom Triton kernels that provide significant speedups over PyTorch's default operations. These optimizations are critical for achieving the reported throughput numbers.
+We also include custom Triton kernels that provide significant speedups over PyTorch's default operations. These optimizations are critical for achieving the reported throughput numbers.
 
 > **Recommendation**: Enable `fused_silu_gate_prob = true` in the `[deepep]` config section to achieve the expected throughput.
 
