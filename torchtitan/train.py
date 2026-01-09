@@ -620,8 +620,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 for i, (lr_val, param_group) in enumerate(zip(lr_list, optimizer.param_groups)):
                     group_name = param_group.get('group_name', f'group_{i}')
                     extra_metrics[f"lr/{group_name}"] = lr_val
-            except (AttributeError, IndexError):
-                # Fallback: just use numeric indices
+            except (AttributeError, IndexError) as e:
+                # Fallback: just use numeric indices (optimizer may not have group_name keys)
+                logger.debug(f"Using numeric indices for LR logging (no group_name): {e}")
                 for i, lr_val in enumerate(lr_list):
                     extra_metrics[f"lr/group_{i}"] = lr_val
 
