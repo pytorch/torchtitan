@@ -639,6 +639,11 @@ class Checkpoint:
     From model checkpoint paths converted in our old branch
     """
 
+    initial_load_multipart: bool = False
+    """
+    Enable loading of multipart checkpoints. This option is only used when `initial_load_path` is specified.
+    """
+
     initial_load_in_hf: bool = False
     """
     Enable the use of HuggingFace's safetensors format for checkpointing. The option
