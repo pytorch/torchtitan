@@ -75,6 +75,7 @@ init_batch_invariance()
 ### Quick Start
 
 ```python
+from vllm.attention.backends.registry import AttentionBackendEnum
 import torch
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from torchtitan.experiments.rl.vllm_compat import (
@@ -83,7 +84,12 @@ from torchtitan.experiments.rl.vllm_compat import (
 )
 
 # 1. Enable deterministic mode
-init_batch_invariance()
+try:
+    init_batch_invariance()
+except TypeError:
+    # Fallback to new version requiring positional arg for attention
+    init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
+
 enable_batch_invariant_backward_mode()
 
 # 2. Load model
@@ -95,7 +101,7 @@ model_args = Qwen3ModelArgs(
     n_kv_heads=2,
     vocab_size=151936,
 )
-model = Qwen3VLLMCompatModel(model_args)
+model = Qwen3VLLMCompatModel(model_args).to('cuda').to(torch.bfloat16)
 
 # 3. Forward pass (deterministic)
 input_ids = torch.randint(0, 151936, (2, 128), device='cuda')
@@ -104,6 +110,8 @@ logits = model(input_ids)
 # 4. Backward pass
 loss = logits.sum()
 loss.backward()
+
+print("Done running simple model")
 ```
 
 ### Full RL Training
