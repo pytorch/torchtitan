@@ -602,9 +602,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.lr_schedulers.step()
 
         # Clear DeepEP handle cache to prevent memory leaks with activation checkpointing
-        if parallel_dims.ep_enabled:
-            from torchtitan.distributed.deepep import clear_handle_cache
-            clear_handle_cache()
+        # if parallel_dims.ep_enabled:
+        #     from torchtitan.distributed.deepep import clear_handle_cache
+        #     clear_handle_cache()
 
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))

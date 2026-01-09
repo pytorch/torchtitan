@@ -156,7 +156,8 @@ def _dispatch_backward(
     if grad_recv_x is None:
         return None, None, None, None, None, None, None
 
-    handle = _handle_cache.get(ctx.cache_id_int)
+    # Use handle saved in setup_context instead of from cache
+    handle = ctx.saved_handle
     assert handle is not None, f"Handle not found for cache_id={ctx.cache_id_int}"
 
     previous_event = _create_event_if_async(True)
@@ -171,7 +172,7 @@ def _dispatch_backward(
     )
 
     _sync_stream_if_async(True, after_event)
-    _handle_cache.pop(ctx.cache_id_int, None)
+    # No need to pop from cache - combine_setup_context handles cleanup
 
     grad_x = grad_x.to(ctx.input_dtype)
     grad_topk_weights = (
@@ -186,6 +187,8 @@ def _dispatch_setup_context(ctx, inputs, output):
     recv_x, recv_indices, recv_scores, num_recv, cache_id = output
     ctx.cache_id_int = cache_id.item()
     ctx.input_dtype = x.dtype
+    # Save handle directly so dispatch_backward doesn't need the cache
+    ctx.saved_handle = _handle_cache.get(ctx.cache_id_int)
 
 
 def _combine_backward(ctx, grad_combined):
@@ -217,7 +220,9 @@ def _combine_backward(ctx, grad_combined):
 def _combine_setup_context(ctx, inputs, output):
     x, cache_id = inputs
     ctx.cache_id_int = cache_id.item()
-    ctx.saved_handle = _handle_cache.get(ctx.cache_id_int)
+    # Pop handle from cache: saves it for backward AND removes from cache
+    # This prevents memory leaks with activation checkpointing
+    ctx.saved_handle = _handle_cache.pop(ctx.cache_id_int, None)
 
 
 torch.library.register_autograd(
