@@ -41,6 +41,10 @@ __all__ = [
 # Note: norm.weight is the final RMSNorm before output, grouped with output
 # Patterns handle optional _checkpoint_wrapped_module wrapper from activation checkpointing
 #
+# These patterns are designed for GPT-OSS and Llama-style MoE models.
+# For other architectures (e.g., DeepSeek V3 MLA), extend patterns as needed.
+# Unmatched parameters fall into 'default' group with 1.0x multipliers.
+#
 # Using a list of tuples to make ordering explicit and prevent accidental reordering.
 # DO NOT change the order without understanding the implications.
 _PARAM_GROUP_PATTERNS: list[tuple[str, re.Pattern]] = [
@@ -164,6 +168,12 @@ def classify_parameters_for_groups(
         group for group in param_groups_dict.values()
         if len(group['params']) > 0
     ]
+
+    if not param_groups:
+        raise ValueError(
+            "No trainable parameters found. Check that model parameters have "
+            "requires_grad=True and are not frozen."
+        )
 
     return param_groups
 

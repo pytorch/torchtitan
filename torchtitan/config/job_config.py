@@ -183,7 +183,7 @@ class WeightDecayMultipliers:
     effective weight decay for that parameter group. Use 0.0 to disable
     weight decay for specific groups (recommended for embeddings, norms, biases).
 
-    Example: base weight_decay=0.1, embeddings=0.0 -> embeddings get wd=0
+    Example: base weight_decay=0.1, embeddings=0.0 → embeddings get wd=0
 
     Recommended settings for LLM training:
         embeddings=0.0, output=0.0, norms=0.0, bias=0.0
