@@ -1143,20 +1143,20 @@ class Debug:
 class LMEvalSlurmConfig:
     """SLURM configuration for lm-evaluation-harness jobs."""
 
-    partition: str = "gpu"
+    partition: str = "batch"
     """SLURM partition to submit eval jobs to"""
 
     gpus_per_node: int = 1
     """Number of GPUs per node for evaluation"""
 
-    cpus_per_task: int = 8
+    cpus_per_task: int = 16
     """Number of CPUs per task"""
 
     time: str = "02:00:00"
     """Time limit for eval job"""
 
-    qos: str = "normal"
-    """Quality of service"""
+    qos: str | None = None
+    """Quality of service (optional, uses cluster default if not specified)"""
 
     account: str | None = None
     """SLURM account to charge"""
@@ -1164,14 +1164,17 @@ class LMEvalSlurmConfig:
     reservation: str | None = None
     """SLURM reservation to use"""
 
-    hf_cache: str = "/scratch/huggingface"
+    hf_cache: str = "/home/shared/huggingface-cache"
     """HuggingFace cache directory on compute nodes"""
+
+    venv_path: str | None = None
+    """Path to Python virtual environment (e.g., /path/to/env)"""
 
     conda_env: str | None = None
     """Conda environment to activate (if any)"""
 
     extra_sbatch_args: str = ""
-    """Additional sbatch arguments (e.g., '--constraint=a100')"""
+    """Additional sbatch arguments (e.g., '--exclusive')"""
 
 
 @dataclass

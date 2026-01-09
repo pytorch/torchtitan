@@ -447,6 +447,7 @@ torch.manual_seed(TORCH_SEED)
 
 # Evaluation configuration
 CHECKPOINT_PATH = "{checkpoint_path}"
+TOKENIZER_PATH = "{model_cfg.hf_assets_path}"
 OUTPUT_DIR = "{output_dir}"
 MODEL_NAME = "{model_cfg.name}"
 MODEL_FLAVOR = "{model_cfg.flavor}"
@@ -468,7 +469,7 @@ print("=" * 60)
 
 model_args = (
     f"pretrained={{CHECKPOINT_PATH}},"
-    f"tokenizer_path={{CHECKPOINT_PATH}},"
+    f"tokenizer_path={{TOKENIZER_PATH}},"
     f"model_name={{MODEL_NAME}},"
     f"model_flavor={{MODEL_FLAVOR}},"
     f"dtype=bfloat16,"
@@ -529,25 +530,23 @@ for task_name, task_results in results.get("results", {{}}).items():
             pythonpath_parts.append(self.lm_eval_path)
         pythonpath = ":".join(pythonpath_parts) if pythonpath_parts else ""
 
-        # Build conda activation command
-        conda_cmd = ""
-        if slurm_cfg.conda_env:
-            conda_cmd = f"conda activate {slurm_cfg.conda_env}"
-
         # Build extra sbatch args
         extra_args = slurm_cfg.extra_sbatch_args
 
         script_content = f"""#!/bin/bash
 #SBATCH --job-name={job_name}
-#SBATCH --output={self.slurm_logs_dir}/{job_name}_%j.out
-#SBATCH --error={self.slurm_logs_dir}/{job_name}_%j.err
-#SBATCH --partition={slurm_cfg.partition}
-#SBATCH --gpus-per-node={slurm_cfg.gpus_per_node}
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gpus-per-task={slurm_cfg.gpus_per_node}
 #SBATCH --cpus-per-task={slurm_cfg.cpus_per_task}
 #SBATCH --time={slurm_cfg.time}
-#SBATCH --qos={slurm_cfg.qos}
+#SBATCH --partition={slurm_cfg.partition}
+#SBATCH --output={self.slurm_logs_dir}/{job_name}_%j.out
+#SBATCH --error={self.slurm_logs_dir}/{job_name}_%j.err
 """
 
+        if slurm_cfg.qos:
+            script_content += f"#SBATCH --qos={slurm_cfg.qos}\n"
         if slurm_cfg.account:
             script_content += f"#SBATCH --account={slurm_cfg.account}\n"
         if slurm_cfg.reservation:
@@ -571,6 +570,12 @@ echo "Step: {step}"
 echo "=========================================="
 
 # Environment setup
+export LOGLEVEL=INFO
+export FI_PROVIDER="efa"
+export PYTHONFAULTHANDLER=1
+export LD_LIBRARY_PATH=/opt/amazon/efa/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/lib/:$LD_LIBRARY_PATH
+export CUDA_LAUNCH_BLOCKING=0
 export HF_HOME="{slurm_cfg.hf_cache}"
 export TRANSFORMERS_CACHE="{slurm_cfg.hf_cache}"
 """
@@ -578,21 +583,49 @@ export TRANSFORMERS_CACHE="{slurm_cfg.hf_cache}"
         if pythonpath:
             script_content += f'export PYTHONPATH="{pythonpath}:$PYTHONPATH"\n'
 
-        if conda_cmd:
+        # Activate virtual environment if specified
+        if slurm_cfg.venv_path:
+            script_content += f"""
+# Activate Python virtual environment
+export PATH="{slurm_cfg.venv_path}/bin:$PATH"
+export CONDA_PREFIX="{slurm_cfg.venv_path}"
+echo "Activated venv: {slurm_cfg.venv_path}"
+"""
+        elif slurm_cfg.conda_env:
             script_content += f"""
 # Activate conda environment
-{conda_cmd}
+conda activate {slurm_cfg.conda_env}
 """
 
         script_content += f"""
+# Verify python is available
+which python || echo "ERROR: python not found in PATH"
+
+# Record start time
+START_TIME=$(date +%s)
+
 # Run evaluation
 echo "Starting evaluation..."
 python {eval_script_path}
 
+EXIT_CODE=$?
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+
+# Save status
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "SUCCESS: Evaluation completed (Duration: ${{DURATION}}s)"
+else
+    echo "FAILED: Evaluation failed with exit code $EXIT_CODE"
+fi
+
 echo "=========================================="
 echo "Evaluation complete!"
 echo "Results saved to: {output_dir}"
+echo "Duration: ${{DURATION}} seconds"
 echo "=========================================="
+
+exit $EXIT_CODE
 """
 
         with open(slurm_script_path, "w") as f:
