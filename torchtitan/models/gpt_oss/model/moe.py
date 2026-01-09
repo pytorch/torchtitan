@@ -268,10 +268,13 @@ class GptOssGroupedExperts(nn.Module):
         tp_degree = self._get_tp_degree()
 
         if self.use_grouped_mm:
-            if (
-                not self._is_dtensor
-                or "ep" not in self.mlp1_weight.device_mesh.mesh_dim_names
-            ):
+            # Determine if we need padding wrapper for grouped_mm
+            # EP handles padding internally, so we only need wrapper for non-EP cases
+            needs_padding = not self._is_dtensor
+            if not needs_padding:
+                # Safe to access device_mesh since we know it's a DTensor
+                needs_padding = "ep" not in self.mlp1_weight.device_mesh.mesh_dim_names
+            if needs_padding:
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
             else:
                 run_experts_fn = _run_experts_grouped_mm
