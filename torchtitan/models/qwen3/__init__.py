@@ -268,7 +268,6 @@ qwen3_args = {
             route_scale=1.0,
             score_before_experts=False,
             use_deepep=True,
-            _debug_force_load_balance=True,
         ),
     ),
     "30B-A3B": Qwen3ModelArgs(
