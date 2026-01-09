@@ -38,6 +38,7 @@ from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
 from transformers import AutoConfig, AutoTokenizer
 
 from vllm import LLM, SamplingParams
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
