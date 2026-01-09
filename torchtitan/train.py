@@ -18,6 +18,7 @@ import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
+from torchtitan.components.lm_evaluator import LMEvaluator
 from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.components.metrics import (
     build_metrics_processor,
@@ -54,6 +55,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # non-swappable training components
     checkpointer: CheckpointManager
     ft_manager: FTManager
+    lm_evaluator: LMEvaluator | None
 
     # runtime utilities
     device: torch.device
@@ -328,6 +330,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ft_manager=self.ft_manager,
         )
 
+        # Initialize LM Evaluator for automatic evaluation during training
+        self.lm_evaluator = None
+        if job_config.lm_eval.enable:
+            rank = (
+                torch.distributed.get_rank()
+                if torch.distributed.is_initialized()
+                else 0
+            )
+            self.lm_evaluator = LMEvaluator(job_config, rank=rank)
+
         loss_parallel_enabled = (
             parallel_dims.tp_enabled
             and not job_config.parallelism.disable_loss_parallel
@@ -524,7 +536,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     if counts is None:
                         continue
 
-                    checkpoint_impl = getattr(transformer_block, "checkpoint_impl", None)
+                    checkpoint_impl = getattr(
+                        transformer_block, "checkpoint_impl", None
+                    )
 
                     if (
                         CheckpointImpl is not None
@@ -777,6 +791,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.checkpointer.save(
                     self.step, last_step=(self.step == job_config.training.steps)
                 )
+
+                # Run lm-evaluation-harness if enabled and at eval interval
+                if self.lm_evaluator is not None and self.lm_evaluator.should_evaluate(
+                    self.step
+                ):
+                    # Get checkpoint path for evaluation
+                    checkpoint_folder = job_config.checkpoint.folder
+                    checkpoint_path = os.path.join(
+                        job_config.job.dump_folder,
+                        checkpoint_folder,
+                        f"step-{self.step}",
+                    )
+                    try:
+                        self.lm_evaluator.run_evaluation(self.step, checkpoint_path)
+                    except Exception as e:
+                        logger.warning(f"LM evaluation failed at step {self.step}: {e}")
 
                 # Run validation if validator is available
                 if (
