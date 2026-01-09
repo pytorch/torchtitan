@@ -104,7 +104,7 @@ class TestAttentionSinkLSE:
         values = torch.randn(batch_size, num_heads, seq_len, head_dim)
 
         # Per-head sink weights (typically small negative to positive)
-        sinks = torch.randn(num_heads) * 2  # Range roughly [-4, 4]
+        sinks = torch.randn(num_heads) * 2  # Range roughly [-6, 6]
 
         return scores, values, sinks
 
@@ -131,8 +131,7 @@ class TestAttentionSinkLSE:
         """Verify that renormalization doesn't increase total probability mass."""
         scores, values, sinks = setup_tensors
 
-        # Standard attention
-        probs = torch.softmax(scores, dim=-1)
+        # Compute LSE for renormalization
         lse = torch.logsumexp(scores, dim=-1)
 
         # Compute renorm factor
