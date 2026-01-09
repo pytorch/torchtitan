@@ -34,6 +34,12 @@ class MoEArgs:
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
     load_balance_coeff: float | None = 1e-3
 
+    # Expert biases (gate_up_proj_bias, down_proj_bias in HF format)
+    # Set to True when loading pretrained models that have expert biases
+    # (e.g., GPT-OSS models have learned expert biases)
+    # Set to False for models without expert biases (e.g., Llama MoE)
+    use_expert_bias: bool = False
+
     _debug_force_load_balance: bool = False
     # if True, we force each experts get same amount of token via round-robin
 
