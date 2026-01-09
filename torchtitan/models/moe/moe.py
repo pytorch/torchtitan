@@ -221,7 +221,7 @@ class TokenChoiceTopKRouter(nn.Module):
         route_norm: bool,
         route_scale: float,
         use_router_bias: bool = False,
-        topk_before_score: bool = True,
+        topk_before_score: bool = False,
         _debug_force_load_balance: bool = False,
     ):
         super().__init__()
@@ -330,8 +330,10 @@ class TokenChoiceTopKRouter(nn.Module):
             if self._debug_force_load_balance:
                 if self.score_func == "sigmoid":
                     all_scores = torch.sigmoid(router_logits.to(torch.float32))
-                else:
+                elif self.score_func == "softmax":
                     all_scores = F.softmax(router_logits.to(torch.float32), dim=1)
+                else:
+                    raise NotImplementedError(f"Unknown score function {self.score_func}")
                 selected_experts_indices, top_scores = self._debug_force_load_balance_routing(all_scores)
             else:
                 # Select top-K experts by logits (optionally biased for load balancing)
@@ -363,17 +365,21 @@ class TokenChoiceTopKRouter(nn.Module):
             else:
                 raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-            scores_for_choice = scores if expert_bias is None else scores + expert_bias
+            # Handle debug mode for forced load balancing
+            if self._debug_force_load_balance:
+                selected_experts_indices, top_scores = self._debug_force_load_balance_routing(scores)
+            else:
+                scores_for_choice = scores if expert_bias is None else scores + expert_bias
 
-            # Apply node-limited routing if configured
-            if self.num_expert_groups is not None:
-                scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
+                # Apply node-limited routing if configured
+                if self.num_expert_groups is not None:
+                    scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
 
-            _, selected_experts_indices = torch.topk(
-                scores_for_choice, k=self.top_k, dim=-1, sorted=False
-            )
-            # Gather scores from original (non-biased) distribution
-            top_scores = scores.gather(dim=1, index=selected_experts_indices)
+                _, selected_experts_indices = torch.topk(
+                    scores_for_choice, k=self.top_k, dim=-1, sorted=False
+                )
+                # Gather scores from original (non-biased) distribution
+                top_scores = scores.gather(dim=1, index=selected_experts_indices)
 
         if self.route_norm:
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
