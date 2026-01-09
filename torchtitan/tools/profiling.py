@@ -76,6 +76,8 @@ def maybe_enable_profiling(
             schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
             on_trace_ready=trace_handler,
             record_shapes=True,
+            with_stack=profiling_config.with_stack,
+            with_modules=profiling_config.with_modules,
         ) as torch_profiler:
             torch_profiler.step_num = global_step
             yield torch_profiler

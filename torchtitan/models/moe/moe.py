@@ -5,12 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
+
+from torchtitan.distributed.deepep.fused_activation import fused_silu_gate_prob
+from torchtitan.distributed.deepep.utils import DeepEPTokenDispatcher
+from torchtitan.tools.logging import logger
 
 from .utils import indices_padding_wrapper
 
@@ -42,7 +46,76 @@ class MoEArgs:
     load_balance_coeff: float | None = 1e-3
 
     _debug_force_load_balance: bool = False
-    # if True, we force each experts get same amount of token via round-robin
+
+    # use deepep and fused all-to-all communication
+    use_deepep: bool = False
+
+    # DeepEP configuration (set from job_config.deepep)
+    # Type is Any to avoid import cycle, runtime type is DeepEP | None
+    deepep_config: Any = None
+
+    def validate_deepep_config(self) -> None:
+        """Validate DeepEP configuration consistency.
+
+        Should be called after deepep_config is set in model args' update_from_config.
+        Raises ValueError if configuration is invalid.
+        """
+        if self.deepep_config is None:
+            return
+
+        # Validate fused_silu_gate_prob
+        if self.deepep_config.fused_silu_gate_prob:
+            if not self.use_deepep:
+                raise ValueError(
+                    "fused_silu_gate_prob requires use_deepep=True in the model config."
+                )
+            if self.score_before_experts:
+                raise ValueError(
+                    "fused_silu_gate_prob cannot be enabled when score_before_experts=True. "
+                    "The fused kernel applies routing probabilities inside the activation, "
+                    "which is incompatible with score_before_experts."
+                )
+
+        # Validate fused_weighted_scatter_add
+        if self.deepep_config.fused_weighted_scatter_add:
+            if not self.use_deepep:
+                raise ValueError(
+                    "fused_weighted_scatter_add requires use_deepep=True in the model config."
+                )
+            if self.score_before_experts:
+                raise ValueError(
+                    "fused_weighted_scatter_add cannot be enabled when score_before_experts=True. "
+                    "The fused kernel applies routing probabilities in scatter_add, "
+                    "which is incompatible with score_before_experts."
+                )
+
+        # Mutual exclusion: can't enable both fused kernels
+        if (
+            self.deepep_config.fused_silu_gate_prob
+            and self.deepep_config.fused_weighted_scatter_add
+        ):
+            raise ValueError(
+                "Cannot enable both fused_silu_gate_prob and fused_weighted_scatter_add. "
+                "Choose one: fused_silu_gate_prob applies probs in activation (before w2), "
+                "fused_weighted_scatter_add applies probs in scatter_add (after experts)."
+            )
+
+        # Log enabled DeepEP optimizations
+        if self.use_deepep:
+            enabled_opts = []
+            if self.deepep_config.fused_silu_gate_prob:
+                enabled_opts.append("fused_silu_gate_prob")
+            if self.deepep_config.fused_weighted_scatter_add:
+                enabled_opts.append("fused_weighted_scatter_add")
+            if self.deepep_config.sync_comm_stream:
+                enabled_opts.append("sync_comm_stream")
+
+            if enabled_opts:
+                logger.info(
+                    f"[DeepEP optimizations] enabled: {', '.join(enabled_opts)}"
+                )
+            else:
+                logger.info("[DeepEP optimizations] enabled: none (using defaults)")
 
     # logging
     log_expert_routing: bool = False
@@ -123,16 +196,56 @@ def _run_experts_grouped_mm(
     w3: torch.Tensor,
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
+    routed_prob: torch.Tensor | None = None,
+    use_fused_silu_gate_prob: bool = False,
 ) -> torch.Tensor:
+    """
+    Run grouped matrix multiplication for MoE experts with SwiGLU activation.
+
+    Args:
+        w1: First expert weights [num_experts, hidden_dim, dim]
+        w2: Second expert weights [num_experts, dim, hidden_dim]
+        w3: Gate expert weights [num_experts, hidden_dim, dim]
+        x: Input tensor [total_tokens, dim]
+        num_tokens_per_expert: Number of tokens per expert [num_experts]
+        routed_prob: Routing probabilities [total_tokens] (optional, for fused kernel)
+        use_fused_silu_gate_prob: Whether to use fused Triton kernel
+
+    Returns:
+        Output tensor [total_tokens, dim]
+
+    Note:
+        When use_fused_silu_gate_prob=True, the routing probability is fused into
+        the activation computation: out = silu(x@w1) * (x@w3) * prob @ w2
+        This provides ~3.5x speedup but applies prob BEFORE w2 (vs after in unfused).
+    """
     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
-    h = F.silu(
-        torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
-    )
-    h = h * torch._grouped_mm(
-        x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
-    )
-    out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
+    if use_fused_silu_gate_prob and routed_prob is not None:
+        # Fused path: silu(x@w1) * (x@w3) * prob in one Triton kernel
+        x1 = torch._grouped_mm(
+            x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        x3 = torch._grouped_mm(
+            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        h = fused_silu_gate_prob(x1, x3, routed_prob.reshape(-1, 1))
+        out = torch._grouped_mm(
+            h, w2.bfloat16().transpose(-2, -1), offs=offsets
+        ).type_as(x)
+    else:
+        # Original unfused path (unchanged)
+        h = F.silu(
+            torch._grouped_mm(
+                x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets
+            )
+        )
+        h = h * torch._grouped_mm(
+            x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+        )
+        out = torch._grouped_mm(
+            h, w2.bfloat16().transpose(-2, -1), offs=offsets
+        ).type_as(x)
 
     return out
 
@@ -144,6 +257,10 @@ class GroupedExperts(nn.Module):
         hidden_dim: int,
         num_experts: int,
         use_grouped_mm: bool,
+        deepep_dispatcher: DeepEPTokenDispatcher = None,
+        score_before_experts: bool = False,
+        use_fused_weighted_scatter: bool = True,
+        use_fused_silu_gate_prob: bool = False,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -151,12 +268,32 @@ class GroupedExperts(nn.Module):
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
+        self.deepep_dispatcher = deepep_dispatcher
+        # NOTE(phuc): fix compatibility with ExpertParallelDeepEP
+        # When DeepEP is used, it passes routed_prob to forward() which needs to be multiplied
+        # with the input/output. This flag controls whether to apply the scaling before or after
+        # the expert computation. See torchtitan-amd implementation for reference.
+        self.score_before_experts = score_before_experts
+        # When True and score_before_experts=False, skip multiplication here and do it
+        # in unpermute via fused_weighted_scatter_add kernel (2-3x faster)
+        self.use_fused_weighted_scatter = use_fused_weighted_scatter
+        # When True, use fused Triton kernel for silu(x@w1) * (x@w3) * prob (~3.5x faster)
+        # Only effective when score_before_experts=False and DeepEP is enabled
+        self.use_fused_silu_gate_prob = use_fused_silu_gate_prob
 
     def forward(
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
+        routed_prob: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Forward pass through grouped experts.
+
+        Args:
+            x: Input tensor [num_routed_tokens, hidden]
+            num_tokens_per_expert: Number of tokens per expert [num_experts]
+            routed_prob: Routing probabilities [num_routed_tokens] (optional, for DeepEP)
+        """
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
@@ -167,6 +304,23 @@ class GroupedExperts(nn.Module):
             w1 = self.w1
             w2 = self.w2
             w3 = self.w3
+
+        # Apply routing scores BEFORE expert computation if score_before_experts=True
+        if (
+            self.deepep_dispatcher is not None
+            and routed_prob is not None
+            and self.score_before_experts
+        ):
+            x = (x.to(torch.float32) * routed_prob.reshape(-1, 1)).to(x.dtype)
+
+        # Determine if we should use fused silu-gate-prob kernel
+        # Only when: DeepEP enabled, score_before_experts=False, and config enabled
+        should_use_fused_silu = (
+            self.use_fused_silu_gate_prob
+            and self.deepep_dispatcher is not None
+            and routed_prob is not None
+            and not self.score_before_experts
+        )
 
         if self.use_grouped_mm:
             # NOTE: If EP is not used, we need to pad the indices
@@ -179,9 +333,37 @@ class GroupedExperts(nn.Module):
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
             else:
                 run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+
+            if should_use_fused_silu:
+                # Fused path: prob multiplication happens inside the Triton kernel
+                out = run_experts_fn(
+                    w1,
+                    w2,
+                    w3,
+                    x,
+                    num_tokens_per_expert,
+                    routed_prob=routed_prob,
+                    use_fused_silu_gate_prob=True,
+                )
+            else:
+                # Original unfused path
+                out = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
         else:
-            return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+            out = _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+
+        # Apply routing scores AFTER expert computation if score_before_experts=False
+        # Skip if use_fused_weighted_scatter=True (will be done in unpermute instead)
+        # Skip if use_fused_silu_gate_prob=True (already done in fused kernel)
+        if (
+            self.deepep_dispatcher is not None
+            and routed_prob is not None
+            and not self.score_before_experts
+            and not self.use_fused_weighted_scatter
+            and not should_use_fused_silu
+        ):
+            out = (out.to(torch.float32) * routed_prob.reshape(-1, 1)).to(out.dtype)
+
+        return out
 
     def init_weights(self, init_std: float, n_layers: int):
         std_in = moe_init_std(self.w1.shape[-1], n_layers)
@@ -263,9 +445,9 @@ class TokenChoiceTopKRouter(nn.Module):
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
+            scores = torch.sigmoid(scores.to(torch.float32)).to(x.dtype)
         elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1)
+            scores = F.softmax(scores.to(torch.float32), dim=1).to(x.dtype)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
@@ -301,6 +483,7 @@ class TokenChoiceTopKRouter(nn.Module):
             min=0,
             max=self.num_experts,
         )
+        num_tokens_per_expert = torch.clamp(num_tokens_per_expert, min=8)
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
@@ -308,6 +491,8 @@ class TokenChoiceTopKRouter(nn.Module):
         temp_weight = torch.empty_like(self.gate.weight)
         nn.init.normal_(temp_weight, mean=0.0, std=1.0)
 
+        # TODO(phuc): change to torch.linalg.norm
+        # due to TOR101 Use of deprecated function torch.norm
         row_norms = torch.norm(temp_weight, dim=1, keepdim=True)
         temp_weight = temp_weight / row_norms.clamp(min=1e-6)  # avoid divide by 0
 
@@ -376,16 +561,46 @@ class TokenReorderer(nn.Module):
         )
 
 
+# TODO(phuc): would be more clean if separate MoEWithDeepEP, and MoEDefault classes,
+# because they have different forward logic
 class MoE(nn.Module):
     def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
         super().__init__()
 
         num_experts = moe_args.num_experts
+        self.use_deepep = moe_args.use_deepep
+        if self.use_deepep:
+            self.deepep_dispatcher = DeepEPTokenDispatcher(
+                moe_router_topk=moe_args.top_k,
+                num_moe_experts=num_experts,
+                deepep_config=moe_args.deepep_config,
+                score_before_experts=moe_args.score_before_experts,
+            )
+
+        # Determine use_fused_weighted_scatter from config
+        # Only relevant when DeepEP is enabled and score_before_experts=False
+        use_fused_weighted_scatter = False  # default
+        use_fused_silu_gate_prob = False  # default
+        if self.use_deepep and moe_args.deepep_config is not None:
+            use_fused_weighted_scatter = (
+                moe_args.deepep_config.fused_weighted_scatter_add
+            )
+            use_fused_silu_gate_prob = moe_args.deepep_config.fused_silu_gate_prob
+
         self.experts = GroupedExperts(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             use_grouped_mm=moe_args.use_grouped_mm,
+            deepep_dispatcher=self.deepep_dispatcher
+            if self.use_deepep is True
+            else None,
+            # NOTE(phuc): fix ExpertParallelDeepEP compatibility
+            # This ensures that GroupedExperts knows whether to apply routing scores before or after
+            # expert computation when routed_prob is passed to forward()
+            score_before_experts=moe_args.score_before_experts,
+            use_fused_weighted_scatter=use_fused_weighted_scatter,
+            use_fused_silu_gate_prob=use_fused_silu_gate_prob,
         )
         self.router = TokenChoiceTopKRouter(
             dim=dim,
@@ -421,6 +636,7 @@ class MoE(nn.Module):
             )
         else:
             self.expert_bias = None
+
         # tokens_per_expert will be used to track expert usage and to update the expert bias for load balancing
         self.register_buffer(
             "tokens_per_expert",
@@ -463,62 +679,72 @@ class MoE(nn.Module):
             if self.log_expert_routing:
                 self.expert_routing_counter.add_(num_tokens_per_expert)
 
-        # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
-        # num_tokens_per_expert shape (num_experts,)
-        # NOTE: the reason we need to compute num_tokens_per_expert again is:
-        #       1st computation in router is to update self.tokens_per_expert
-        #       which would be the same across all TP ranks.
-        #       2nd computation in reorderer is for the actual routing and experts computation
-        #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
-        #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
-        (
-            top_scores_experts_sorted,
-            token_indices_experts_sorted,
-            num_tokens_per_expert,
-        ) = self.reorderer(top_scores, selected_experts_indices)
-
-        # shape (bs*slen*top_k, dim)
-        token_indices_experts_sorted = token_indices_experts_sorted.reshape(
-            -1, 1
-        ).expand(-1, dim)
-
-        # shape (bs*slen*top_k, dim)
-        routed_input = torch.gather(x, dim=0, index=token_indices_experts_sorted)
-
-        if self.score_before_experts:
-            routed_input = (
-                routed_input.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
-
-        # shape (bs*slen*top_k, dim)
-        routed_output = self.experts(routed_input, num_tokens_per_expert)
-
-        # shared expert
-        # Note: we execute the shared expert before scoring the output of the routed expert
-        # to "implicitly" overlap the shared expert compute with token combine communication
-        flat_x = x.view(-1, x.shape[-1])
-        if self.shared_experts is not None:
-            shared_out = self.shared_experts(flat_x)
-            if self.shared_gate is not None:
-                shared_gate_val = F.sigmoid(self.shared_gate(flat_x))
-                out = shared_out * shared_gate_val
+        if self.use_deepep:
+            top_scores = top_scores.float()
+            self.experts.deepep_dispatcher.dispatch_preprocess(
+                top_scores, selected_experts_indices
+            )
+            # shape (bs*slen*top_k, dim)
+            routed_output = self.experts(x, num_tokens_per_expert)
+            # shared expert
+            if self.shared_experts is not None:
+                out = self.shared_experts(x)
             else:
-                out = shared_out
+                out = torch.zeros_like(x)
+            out = routed_output + out
+            out = out.reshape(bs, slen, dim)
+            return out
         else:
-            out = torch.zeros_like(flat_x)
+            # top_scores and token_indices_experts_sorted shape (bs*slen*top_k,)
+            # num_tokens_per_expert shape (num_experts,)
+            # NOTE: the reason we need to compute num_tokens_per_expert again is:
+            #       1st computation in router is to update self.tokens_per_expert
+            #       which would be the same across all TP ranks.
+            #       2nd computation in reorderer is for the actual routing and experts computation
+            #       which would be sharded over TP ranks if expert_tensor_parallel_degree==1.
+            #       If tensor_paralllel_degree == expert_tensor_parallel_degree, they agree.
+            (
+                top_scores_experts_sorted,
+                token_indices_experts_sorted,
+                num_tokens_per_expert,
+            ) = self.reorderer(top_scores, selected_experts_indices)
 
-        if not self.score_before_experts:
-            routed_output = (
-                routed_output.to(torch.float32)
-                * top_scores_experts_sorted.reshape(-1, 1)
-            ).to(x.dtype)
+            # shape (bs*slen*top_k, dim)
+            token_indices_experts_sorted = token_indices_experts_sorted.reshape(
+                -1, 1
+            ).expand(-1, dim)
 
-        out = out.scatter_add(
-            dim=0, index=token_indices_experts_sorted, src=routed_output
-        )
-        out = out.reshape(bs, slen, dim)
-        return out
+            # shape (bs*slen*top_k, dim)
+            routed_input = torch.gather(x, dim=0, index=token_indices_experts_sorted)
+
+            if self.score_before_experts:
+                routed_input = (
+                    routed_input.to(torch.float32)
+                    * top_scores_experts_sorted.reshape(-1, 1)
+                ).to(x.dtype)
+
+            # shape (bs*slen*top_k, dim)
+            routed_output = self.experts(routed_input, num_tokens_per_expert)
+
+            # shared expert
+            # Note: we execute the shared expert before scoring the output of the routed expert
+            # to "implicitly" overlap the shared expert compute with token combine communication
+            if self.shared_experts is not None:
+                out = self.shared_experts(x)
+            else:
+                out = torch.zeros_like(x)
+
+            if not self.score_before_experts:
+                routed_output = (
+                    routed_output.to(torch.float32)
+                    * top_scores_experts_sorted.reshape(-1, 1)
+                ).to(x.dtype)
+
+            out = out.scatter_add(
+                dim=0, index=token_indices_experts_sorted, src=routed_output
+            )
+            out = out.reshape(bs, slen, dim)
+            return out
 
     def pop_expert_routing_metrics(self) -> torch.Tensor | None:
         if not self.log_expert_routing:

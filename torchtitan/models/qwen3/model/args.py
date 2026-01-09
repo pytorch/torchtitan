@@ -59,6 +59,10 @@ class Qwen3ModelArgs(BaseModelArgs):
             job_config.debug.moe_force_load_balance
         )
 
+        # Pass DeepEP config to MoE layer and validate
+        self.moe_args.deepep_config = job_config.deepep
+        self.moe_args.validate_deepep_config()
+
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:

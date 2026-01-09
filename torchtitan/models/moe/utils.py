@@ -72,6 +72,10 @@ def indices_padding_wrapper(func: Callable) -> Callable:
     tokens each expert gets is a multiple of TOKEN_GROUP_ALIGN_SIZE_M. The
     generate_permute_indices kernel also helps achieve this via padding,
     without incurring synchronization between device and host.
+
+    NOTE: This wrapper is used for the STANDARD EP path (non-DeepEP).
+    For DeepEP with expert parallelism, _run_experts_grouped_mm is called
+    directly without this wrapper, and the fused kernel is used instead.
     """
 
     def wrapper(
