@@ -66,7 +66,7 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        mkdir artifacts-to-be-uploaded
+        mkdir $RUNNER_TEMP/artifacts-to-be-uploaded
         python -m torchtitan.experiments.simple_fsdp.tests.integration_tests $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
         # Run the numerics unit tests of SimpleFSDP
