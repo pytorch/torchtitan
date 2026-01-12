@@ -24,6 +24,17 @@ def has_cuda_capability(major: int, minor: int) -> bool:
     )
 
 
+def is_rocm() -> bool:
+    return torch.cuda.is_available() and torch.version.hip is not None
+
+
+def has_rocm_capability(major: int, minor: int) -> bool:
+    return is_rocm() and torch.cuda.get_device_capability() >= (
+        major,
+        minor,
+    )
+
+
 def get_device_info() -> tuple[str, torch.device]:
     device_type = _get_available_device_type() or "cuda"
     device_module = _get_device_module(device_type)  # default device_module:torch.cuda
