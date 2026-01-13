@@ -37,26 +37,26 @@ def infer():
     logger.info("Initializing vLLM LLMEngine with TorchTitan model")
     logger.info(f"Model: {job_config.checkpoint.initial_load_path}")
     logger.info(
-        f"Tensor Parallel Size: {job_config.generation.parallelism.tensor_parallel_degree}"
+        f"Tensor Parallel Size: {job_config.inference.parallelism.tensor_parallel_degree}"
     )
 
     # Create EngineArgs from JobConfig
     # Map TorchTitan parallelism to vLLM parallelism
-    generation = job_config.generation
+    inference = job_config.inference
 
     engine_args = EngineArgs(
         # Model configuration
         model=job_config.checkpoint.initial_load_path,
         trust_remote_code=True,
-        dtype=generation.dtype,
+        dtype=inference.dtype,
         # Parallelism configuration
-        tensor_parallel_size=generation.parallelism.tensor_parallel_degree,
-        distributed_executor_backend=generation.distributed_executor_backend,
+        tensor_parallel_size=inference.parallelism.tensor_parallel_degree,
+        distributed_executor_backend=inference.distributed_executor_backend,
         # Memory and performance
-        gpu_memory_utilization=generation.gpu_memory_utilization,
-        enforce_eager=generation.enforce_eager,
+        gpu_memory_utilization=inference.gpu_memory_utilization,
+        enforce_eager=inference.enforce_eager,
         # Seed
-        seed=generation.seed,
+        seed=inference.seed,
         # HuggingFace overrides
         hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
     )
@@ -67,7 +67,7 @@ def infer():
     logger.info("vLLM LLMEngine initialized successfully")
 
     # Create sampling parameters from JobConfig
-    sampling = job_config.generation.sampling
+    sampling = job_config.inference.sampling
     sampling_params = SamplingParams(
         temperature=sampling.temperature,
         top_p=sampling.top_p,

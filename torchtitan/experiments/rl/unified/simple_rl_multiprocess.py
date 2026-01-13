@@ -14,8 +14,7 @@ This demonstrates:
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
 Command to run:
-VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_grpo.py \
-    --job.config_file torchtitan/experiments/rl/unified/run_configs/qwen3_0.6b.toml
+VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
 """
 import asyncio
 import logging
@@ -23,9 +22,13 @@ import logging
 import torch
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
-from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.trainer import Trainer
+from torchtitan.experiments.rl.unified.models.utils import ModelMode
+from torchtitan.experiments.rl.vllm_compat.simple_rl import (
+    download_and_convert_model,
+    load_gsm8k_dataset,
+)
 from vllm.model_executor.layers.batch_invariant import (
     init_batch_invariance,
     vllm_is_batch_invariant,
@@ -36,21 +39,33 @@ logger = logging.getLogger(__name__)
 
 async def main():
     """Run the distributed RL training loop using Monarch."""
+    # Model Config
+    model_name = "Qwen/Qwen3-0.6B"
+    cache_dir = "./models"
+    output_dir = "./converted"
 
-    # Step 1: Load job config using config manager
-    config_manager = ConfigManager()
-    job_config = config_manager.parse_args()
+    # Training config
+    group_size = 8
+    num_steps = 10
+    learning_rate = 1e-5
+    max_new_tokens = 20
 
-    # RL Training config
-    num_steps = job_config.training.steps
+    # GRPO config
+    use_stable_grpo = False
+    grpo_beta = 0.1
+
+    # Dataset config
+    use_real_dataset = False
+    num_dataset_samples = 5
 
     # Parallelism sizes
-    trainer_ddp_size = job_config.parallelism.data_parallel_replicate_degree
-    trainer_tp_size = job_config.parallelism.tensor_parallel_degree
+    trainer_ddp_size = 2
+    trainer_tp_size = 1
+    generator_tp_size = 1
 
-    # TODO: add a flag to enable/disable batch_invariant
     init_batch_invariance()
     batch_invariant = vllm_is_batch_invariant()
+    mode = ModelMode.UNIFIED
 
     # Set up batch invariant
     if batch_invariant:
@@ -63,24 +78,37 @@ async def main():
     else:
         raise RuntimeError("Batch invariance NOT detected - using standard model")
 
-    # Use fake dataset for test. TODO: Implement real RL dataloader.
-    logger.info("Using default prompts")
-    prompts_with_answers = [
-        ("The capital of France is", "paris"),
-        ("What is 7 times 8?", "56"),
-        ("The first president of the United States was", "washington"),
-        ("The chemical symbol for water is", "h2o"),
-        ("The largest planet in our solar system is", "jupiter"),
-    ]
-    prompt_texts = [p[0] for p in prompts_with_answers]
-    expected_answers = [p[1] for p in prompts_with_answers]
+    # Download and convert model
+    titan_checkpoint_path, model_path = download_and_convert_model(
+        model_name, cache_dir, output_dir
+    )
+
+    # Load dataset
+    if use_real_dataset:
+        logger.info(f"Loading GSM8K dataset ({num_dataset_samples} samples)...")
+        # TODO: Refactor into loading torchtitan dataset
+        prompt_texts, expected_answers = load_gsm8k_dataset(
+            split="train", num_samples=num_dataset_samples
+        )
+        if prompt_texts is None or len(prompt_texts) == 0:
+            use_real_dataset = False
+
+    if not use_real_dataset:
+        logger.info("Using default prompts")
+        prompts_with_answers = [
+            ("The capital of France is", "paris"),
+            ("What is 7 times 8?", "56"),
+            ("The first president of the United States was", "washington"),
+            ("The chemical symbol for water is", "h2o"),
+            ("The largest planet in our solar system is", "jupiter"),
+        ]
+        prompt_texts = [p[0] for p in prompts_with_answers]
+        expected_answers = [p[1] for p in prompts_with_answers]
 
     logger.info(f"Loaded {len(prompt_texts)} prompts")
 
     # Create process meshes
-    trainer_mesh = this_host().spawn_procs(
-        per_host={"gpus": trainer_ddp_size * trainer_tp_size}
-    )
+    trainer_mesh = this_host().spawn_procs(per_host={"gpus": 2})
     gen_mesh = this_host().spawn_procs(per_host={"gpus": 1})
 
     # Set up distributed env vars so that actors are connected via c10d
@@ -101,15 +129,27 @@ async def main():
     trainer = trainer_mesh.spawn(
         "trainer",
         Trainer,
-        job_config,  # Pass full job_config
+        titan_checkpoint_path,
+        model_path,
+        learning_rate,
+        mode,
+        trainer_ddp_size,
+        trainer_tp_size,
     )
 
     generator = gen_mesh.spawn(
         "generator",
         Generator,
-        job_config,  # Pass full job_config
+        model_path,
         prompt_texts,
         expected_answers,
+        group_size,
+        max_new_tokens,
+        1.0,  # temperature
+        use_real_dataset,
+        grpo_beta,
+        use_stable_grpo,
+        generator_tp_size,
     )
 
     # Initialize generator with trainer weights

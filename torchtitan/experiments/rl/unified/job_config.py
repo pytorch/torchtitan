@@ -5,9 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Extended JobConfig for RL/Generation workloads.
+Extended JobConfig for RL/Inference workloads.
 
-This module extends TorchTitan's base JobConfig with generation-specific
+This module extends TorchTitan's base JobConfig with inference-specific
 configurations needed for vLLM integration.
 """
 
@@ -43,24 +43,25 @@ class Sampling:
 
 
 @dataclass
-class Generate:
+class Inference:
     """
-    Generation configuration for vLLM engine.
+    Inference configuration for vLLM engine.
 
-    This dataclass contains essential vLLM-specific settings for generation.
+    This dataclass contains essential vLLM-specific settings for inference.
     """
 
     dtype: str = "bfloat16"
     """Data type for model weights (auto, float16, bfloat16, float32)"""
 
     gpu_memory_utilization: float = 0.5
-    """Fraction of GPU memory to use for generation engine (0.0 to 1.0)"""
+    """Fraction of GPU memory to use for Inference engine (0.0 to 1.0)"""
 
     distributed_executor_backend: str = "external_launcher"
     """
     Backend for distributed execution.
     'external_launcher' means vLLM does not spawn processes (use torchrun/external launcher)
     """
+
     seed: int = 42
     """Random seed for sampling"""
 
@@ -68,35 +69,20 @@ class Generate:
     """Whether to enforce eager execution (disable CUDA graphs)"""
 
     parallelism: Parallelism = field(default_factory=Parallelism)
-    """Parallelism configuration for generation"""
+    """Parallelism configuration for inference"""
 
     sampling: Sampling = field(default_factory=Sampling)
-    """Sampling configuration for generation"""
-
-
-@dataclass
-class RL:
-    """Reinforcement Learning configuration for GRPO training."""
-
-    grpo_beta: int = 0.1
-    """Beta parameter for GRPO (Group Relative Policy Optimization) algorithm"""
-
-    use_stable_grpo: bool = False
-    """Whether to use stable version of GRPO algorithm"""
-
-    grpo_group_size: int = 8
-    """Number of samples in each GRPO group for policy optimization"""
+    """Sampling configuration for inference"""
 
 
 @dataclass
 class JobConfig(BaseJobConfig):
     """
-    Extended JobConfig with generation support.
+    Extended JobConfig with inference support.
 
-    This extends TorchTitan's base JobConfig by adding `generation` field
-    for vLLM-specific generation configurations.
+    This extends TorchTitan's base JobConfig by adding `inference` and `sampling` fields
+    for vLLM-specific inference and generation configurations.
     """
 
-    generation: Generate = field(default_factory=Generate)
-    """Generation configuration for vLLM engine"""
-    rl: RL = field(default_factory=RL)
+    inference: Inference = field(default_factory=Inference)
+    """Inference configuration for vLLM engine"""
