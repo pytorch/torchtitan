@@ -2,6 +2,31 @@ name: Set Matrix
 
 on:
   workflow_call:
+    inputs:
+      runner-rocm:
+        description: 'Override default (linux.rocm.gpu.gfx942.8) ROCm runner label'
+        required: false
+        type: string
+      runner-cuda:
+        description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
+        required: false
+        type: string
+      gpu-arch-version-rocm:
+        description: 'Override default (7.1) ROCm GPU architecture version'
+        required: false
+        type: string
+      gpu-arch-version-cuda:
+        description: 'Override default (12.6) CUDA GPU architecture version'
+        required: false
+        type: string
+      index-url-rocm:
+        description: 'Override default (https://download.pytorch.org/whl/nightly/rocm7.1) index URL for ROCm'
+        required: false
+        type: string
+      index-url-cuda:
+        description: 'Override default (https://download.pytorch.org/whl/nightly/cu126) index URL for CUDA'
+        required: false
+        type: string
     outputs:
       matrix:
         description: dynamically set matrix
@@ -19,28 +44,60 @@ jobs:
       IS_8GPU_TAG:  ${{ startsWith(github.ref, 'refs/tags/ciflow/8gpu/') }}
       TRIGGERED_8GPU_LABEL: ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' }}
 
+      # Default CUDA & ROCm matrix values
+      DEFAULT_ROCM_RUNNER: linux.rocm.gpu.gfx942.8
+      DEFAULT_CUDA_RUNNER: linux.g5.48xlarge.nvidia.gpu
+      DEFAULT_ROCM_GPU_ARCH_VERSION: 7.1
+      DEFAULT_CUDA_GPU_ARCH_VERSION: 12.6
+      DEFAULT_ROCM_INDEX_URL: https://download.pytorch.org/whl/nightly/rocm7.1
+      DEFAULT_CUDA_INDEX_URL: https://download.pytorch.org/whl/nightly/cu126
+
+      # Input CUDA & ROCm matrix values
+      ROCM_RUNNER_INPUT: ${{ inputs.runner-rocm }}
+      CUDA_RUNNER_INPUT: ${{ inputs.runner-cuda }}
+      ROCM_GPU_ARCH_VERSION_INPUT: ${{ inputs.gpu-arch-version-rocm }}
+      CUDA_GPU_ARCH_VERSION_INPUT: ${{ inputs.gpu-arch-version-cuda }}
+      ROCM_INDEX_URL_INPUT: ${{ inputs.index-url-rocm }}
+      CUDA_INDEX_URL_INPUT: ${{ inputs.index-url-cuda }}
+
     steps:
       - id: set
         run: |
+          set -euo pipefail
+
+          # Select runner if provided, else use default value
+          ROCM_RUNNER="${ROCM_RUNNER_INPUT:-$DEFAULT_ROCM_RUNNER}"
+          CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
+          ROCM_GPU_ARCH_VERSION="${ROCM_GPU_ARCH_VERSION_INPUT:-$DEFAULT_ROCM_GPU_ARCH_VERSION}"
+          CUDA_GPU_ARCH_VERSION="${CUDA_GPU_ARCH_VERSION_INPUT:-$DEFAULT_CUDA_GPU_ARCH_VERSION}"
+          ROCM_INDEX_URL="${ROCM_INDEX_URL_INPUT:-$DEFAULT_ROCM_INDEX_URL}"
+          CUDA_INDEX_URL="${CUDA_INDEX_URL_INPUT:-$DEFAULT_CUDA_INDEX_URL}"
+
           # Define ROCm matrix
-          ROCM_MATRIX='{
+          ROCM_MATRIX=$(cat <<EOF
+          {
             "name": "rocm",
-            "runner": "linux.rocm.gpu.gfx942.8",
+            "runner": "${ROCM_RUNNER}",
             "gpu-arch-type": "rocm",
-            "gpu-arch-version": "7.1",
+            "gpu-arch-version": "${ROCM_GPU_ARCH_VERSION}",
             "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
-            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.1"
-          }'
+            "index-url": "${ROCM_INDEX_URL}"
+          }
+          EOF
+          )
 
           # Define CUDA matrix
-          CUDA_MATRIX='{
+          CUDA_MATRIX=$(cat <<EOF
+          {
             "name": "cuda",
-            "runner": "linux.g5.48xlarge.nvidia.gpu",
+            "runner": "${CUDA_RUNNER}",
             "gpu-arch-type": "cuda",
-            "gpu-arch-version": "12.6",
+            "gpu-arch-version": "${CUDA_GPU_ARCH_VERSION}",
             "docker-image": "torchtitan-ubuntu-20.04-clang12",
-            "index-url": "https://download.pytorch.org/whl/nightly/cu126"
-          }'
+            "index-url": "${CUDA_INDEX_URL}"
+          }
+          EOF
+          )
 
           # Use default value as 'false' for unset environment variables
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
