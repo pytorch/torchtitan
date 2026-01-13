@@ -57,7 +57,7 @@ class TrajectoryData:
     advantages: torch.Tensor
 
 
-class VLLMRolloutEngine:
+class VLLMGenerator:
     """
     vLLM engine for fast rollouts with weight updates.
 
@@ -355,7 +355,7 @@ class Generator(Actor):
             Comm(),
         )
         # Initialize vLLM engine with job_config
-        self.vllm_engine = VLLMRolloutEngine(job_config, self.model_path)
+        self.vllm_engine = VLLMGenerator(job_config, self.model_path)
 
         # State machine
         self.state = GeneratorState.READY_TO_UPDATE
