@@ -69,7 +69,7 @@ python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_mod
 VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_grpo.py \
     --job.config_file torchtitan/experiments/rl/unified/run_configs/qwen3_0.6b.toml
 ```
-We uses a unified model definition for trainer and generator, which could achieve trainer and generator bitwise identical.
+We use a unified model definition for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 
 ## TODO
 Work on batch invariance:
