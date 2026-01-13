@@ -58,10 +58,18 @@ class GarbageCollection:
             self.collect("Performing periodic GC collection")
 
     @staticmethod
-    def collect(reason: str, generation: int = 1):
+    def collect(reason: str, generation: int = 1, empty_cuda_cache: bool = False):
         begin = time.monotonic()
         gc.collect(generation)
-        logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
+        if empty_cuda_cache and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info(
+                "[GC] %s took %.2f seconds (with CUDA cache cleared)",
+                reason,
+                time.monotonic() - begin,
+            )
+        else:
+            logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H100, H200, B200 GPU and AMD MI250, MI300X, MI325X, MI355X and Intel PVC

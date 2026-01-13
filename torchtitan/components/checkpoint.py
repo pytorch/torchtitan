@@ -296,12 +296,10 @@ class CheckpointManager:
 
         # Async checkpoint related fields.
         async_mode = checkpoint_config.async_mode.lower()
-        if (
-            async_mode == AsyncMode.ASYNC
-            or async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
-            or self.enable_ft_dataloader_checkpoints
-        ):
-            self.pg = dist.new_group(backend="gloo")
+        # Always create a gloo process group for checkpoint operations.
+        # This avoids NCCL GPU memory allocation during gather_object() in DCP,
+        # which can cause OOM when GPU memory is near capacity (e.g., large MoE models).
+        self.pg = dist.new_group(backend="gloo")
 
         self.keep_latest_k = checkpoint_config.keep_latest_k
         if self.keep_latest_k > 0:
@@ -429,10 +427,13 @@ class CheckpointManager:
                 async_stager=self.stager,
             )
         else:
+            # Use gloo process_group to avoid NCCL GPU memory allocation
+            # during gather_object() which can cause OOM on high memory usage models
             ret = dcp.save(
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
+                process_group=self.pg,
             )
 
         if to_hf and self.sd_adapter.fqn_to_index_mapping:
@@ -556,6 +557,12 @@ class CheckpointManager:
                 return
 
             states = self._flattened_model_states_sd()
+            # Clear CUDA cache before checkpoint to free GPU memory for DCP operations
+            # This is critical for high memory usage models (e.g., large MoE) to avoid
+            # OOM during gather_object() in distributed checkpoint coordination
+            GarbageCollection.collect(
+                "Pre-checkpoint GC with CUDA cache clear", empty_cuda_cache=True
+            )
             if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
                 if (DefaultStager is None) or (StagingOptions is None):
                     raise RuntimeError(
@@ -866,6 +873,10 @@ class CheckpointManager:
                 self.last_save_model_only
             ), "Only model can be saved when saving in HF safetensors format."
 
+        # Clear CUDA cache before checkpoint to free GPU memory for DCP operations
+        GarbageCollection.collect(
+            "Pre-checkpoint GC with CUDA cache clear (last step)", empty_cuda_cache=True
+        )
         self.dcp_save(
             states,
             checkpoint_id=self._create_checkpoint_id(curr_step),
