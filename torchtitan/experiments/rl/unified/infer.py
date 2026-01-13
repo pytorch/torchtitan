@@ -25,7 +25,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def infer():
+def generate():
 
     config_manager = ConfigManager()
     job_config = config_manager.parse_args()
@@ -108,4 +108,4 @@ def infer():
 
 
 if __name__ == "__main__":
-    infer()
+    generate()
