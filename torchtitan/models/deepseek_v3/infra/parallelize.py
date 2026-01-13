@@ -91,26 +91,49 @@ def parallelize_deepseekv3(
         maybe_enable_async_tp(job_config, tp_mesh)
 
     # Check if using DeepEP for MoE communication
-    if job_config.parallelism.expert_parallel_comm_backend == "deepep":
+    backend = job_config.parallelism.expert_parallel_comm_backend
+    if backend in ("deepep", "hybridep"):
         if not parallel_dims.ep_enabled:
             raise ValueError(
-                "DeepEP requires expert parallelism (ep_degree > 1). "
-                "The DeepEP MoE model code does not support EP=1. "
-                "Please set expert_parallel_degree > 1 or use standard communication backend."
+                f"{backend.upper()} requires expert parallelism (ep_degree > 1). "
+                f"Please set expert_parallel_degree > 1 or use standard communication backend."
             )
         if parallel_dims.etp_enabled:
             raise NotImplementedError(
-                "DeepEP with Expert Tensor Parallelism (ETP) is not supported yet. "
+                f"{backend.upper()} with Expert Tensor Parallelism (ETP) is not supported yet. "
                 "Please set expert_tensor_parallel_degree=1 or use standard communication backend."
+            )
+
+        ngpus_per_node = torch.cuda.device_count()
+        if backend == "deepep" and ngpus_per_node != 8:
+            logger.warning(
+                "DeepEP is optimized for 8 GPUs per node (found %s); "
+                "proceeding but consider expert_parallel_comm_backend='hybridep' "
+                "for non-8-GPU nodes.",
+                ngpus_per_node,
             )
 
         use_deepep = True
 
         # Import deepep module to register custom ops before accessing them
-        import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
+        import torchtitan.distributed.deepep as deepep_module  # noqa: F401
+        from torchtitan.distributed.deepep import configure_deepep_backend
 
-        _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
-        _op_sac_save_list.add(torch.ops.deepep.combine.default)
+        # Configure backend mode and parameters
+        # Buffer will be initialized lazily on first forward pass
+        configure_deepep_backend(
+            backend=backend,
+            num_sms_dispatch_api=job_config.parallelism.hybridep_num_sms_dispatch_api,
+            num_sms_combine_api=job_config.parallelism.hybridep_num_sms_combine_api,
+        )
+
+        # Register custom ops for SAC based on backend
+        if backend == "hybridep":
+            _op_sac_save_list.add(torch.ops.deepep.hybridep_dispatch.default)
+            _op_sac_save_list.add(torch.ops.deepep.hybridep_combine.default)
+        else:
+            _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+            _op_sac_save_list.add(torch.ops.deepep.combine.default)
     else:
         use_deepep = False
 
@@ -125,6 +148,7 @@ def parallelize_deepseekv3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
+            deepep_backend=backend if use_deepep else None,
         )
 
     model_compile_enabled = (

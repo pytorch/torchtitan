@@ -6,10 +6,16 @@
 
 """DeepEP distributed communication primitives for MoE."""
 
-from .deepep import combine_tokens, dispatch_tokens, DispatchState
+from .deepep import (
+    combine_tokens,
+    configure_deepep_backend,
+    dispatch_tokens,
+    DispatchState,
+)
 
 __all__ = [
     "dispatch_tokens",
     "combine_tokens",
+    "configure_deepep_backend",
     "DispatchState",
 ]

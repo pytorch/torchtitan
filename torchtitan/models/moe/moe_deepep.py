@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""MoE with DeepEP backend for efficient expert-parallel communication."""
+"""MoE with DeepEP/HybridEP backend for efficient expert-parallel communication."""
 
 import torch
 
@@ -13,10 +13,11 @@ from .moe import MoE, MoEArgs
 
 class DeepEPMoE(MoE):
     """
-    Mixture of Experts with DeepEP communication.
+    Mixture of Experts with DeepEP/HybridEP communication.
 
     Inherits from MoE but overrides forward() to pass routing info to experts,
     letting DeepEPExpertParallel hooks handle dispatch/combine.
+    Used by both 'deepep' and 'hybridep' backends.
     """
 
     def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
