@@ -3,6 +3,8 @@ name: TorchComms 8 GPU Integration Tests
 on:
   push:
     branches: [ main ]
+    tags:
+      - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/torchcomms/**'
       - '.github/workflows/integration_test_8gpu_torchcomms.yaml'
@@ -22,18 +24,33 @@ defaults:
   run:
     shell: bash -l -eo pipefail {0}
 
+permissions:
+      id-token: write
+      contents: read
+
 jobs:
-  build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+  # Step 1: Dynamically compute the matrix based on conditions
+  set-matrix:
+    uses: ./.github/workflows/set-matrix.yaml
     with:
-      runner: linux.g5.48xlarge.nvidia.gpu
-      gpu-arch-type: cuda
-      gpu-arch-version: "12.8"
-      # This image is faster to clone than the default, but it lacks CC needed by triton
-      # (1m25s vs 2m37s).
-      docker-image: torchtitan-ubuntu-20.04-clang12
+      gpu-arch-version-cuda: 12.8
+      index-url-cuda: https://download.pytorch.org/whl/nightly/cu128
+
+  # Step 2: Use the dynamic matrix in the build-test job
+  build-test:
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
+      timeout: 45
       script: |
         set -eux
 
@@ -47,8 +64,10 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        python -m pip install --force-reinstall --pre torch torchcomms --index-url https://download.pytorch.org/whl/nightly/cu128
+        python -m pip install --force-reinstall --pre torch torchcomms --index-url ${{ matrix.index-url }}
 
-        mkdir artifacts-to-be-uploaded
-        TEST_BACKEND=ncclx TRAIN_FILE=torchtitan.experiments.torchcomms.train python -m torchtitan.experiments.torchcomms.integration_tests artifacts-to-be-uploaded --ngpu 8
-        rm -rf artifacts-to-be-uploaded/*/checkpoint
+        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        TEST_BACKEND=ncclx TRAIN_FILE=torchtitan.experiments.torchcomms.train python -m torchtitan.experiments.torchcomms.integration_tests $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
