@@ -5,9 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Extended JobConfig for RL/Inference workloads.
+Extended JobConfig for RL/Generation workloads.
 
-This module extends TorchTitan's base JobConfig with inference-specific
+This module extends TorchTitan's base JobConfig with generation-specific
 configurations needed for vLLM integration.
 """
 
@@ -43,18 +43,18 @@ class Sampling:
 
 
 @dataclass
-class Inference:
+class Generate:
     """
-    Inference configuration for vLLM engine.
+    Generation configuration for vLLM engine.
 
-    This dataclass contains essential vLLM-specific settings for inference.
+    This dataclass contains essential vLLM-specific settings for generation.
     """
 
     dtype: str = "bfloat16"
     """Data type for model weights (auto, float16, bfloat16, float32)"""
 
     gpu_memory_utilization: float = 0.5
-    """Fraction of GPU memory to use for Inference engine (0.0 to 1.0)"""
+    """Fraction of GPU memory to use for generation engine (0.0 to 1.0)"""
 
     distributed_executor_backend: str = "external_launcher"
     """
@@ -68,10 +68,10 @@ class Inference:
     """Whether to enforce eager execution (disable CUDA graphs)"""
 
     parallelism: Parallelism = field(default_factory=Parallelism)
-    """Parallelism configuration for inference"""
+    """Parallelism configuration for generation"""
 
     sampling: Sampling = field(default_factory=Sampling)
-    """Sampling configuration for inference"""
+    """Sampling configuration for generation"""
 
 
 @dataclass
@@ -91,12 +91,12 @@ class RL:
 @dataclass
 class JobConfig(BaseJobConfig):
     """
-    Extended JobConfig with inference support.
+    Extended JobConfig with generation support.
 
-    This extends TorchTitan's base JobConfig by adding `inference` and `sampling` fields
-    for vLLM-specific inference and generation configurations.
+    This extends TorchTitan's base JobConfig by adding `generation` field
+    for vLLM-specific generation configurations.
     """
 
-    inference: Inference = field(default_factory=Inference)
-    """Inference configuration for vLLM engine"""
+    generation: Generate = field(default_factory=Generate)
+    """Generation configuration for vLLM engine"""
     rl: RL = field(default_factory=RL)
