@@ -491,9 +491,7 @@ class TokenChoiceTopKRouter(nn.Module):
         temp_weight = torch.empty_like(self.gate.weight)
         nn.init.normal_(temp_weight, mean=0.0, std=1.0)
 
-        # TODO(phuc): change to torch.linalg.norm
-        # due to TOR101 Use of deprecated function torch.norm
-        row_norms = torch.norm(temp_weight, dim=1, keepdim=True)
+        row_norms = torch.linalg.norm(temp_weight, dim=1, keepdim=True)
         temp_weight = temp_weight / row_norms.clamp(min=1e-6)  # avoid divide by 0
 
         std = moe_init_std(self.gate.weight.shape[1], n_layers)

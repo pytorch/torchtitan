@@ -225,14 +225,14 @@ def test_main(
         print("\n" + "=" * 100)
         print("DeepEP Comprehensive Grid Tuner for TorchTitan")
         print("=" * 100)
-        print(f"Model: Qwen3-30B-A3B")
+        print("Model: Qwen3-30B-A3B")
         print(f"  num_tokens = {num_tokens}")
         print(f"  hidden = {hidden}")
         print(f"  num_experts = {num_experts}")
         print(f"  num_topk = {num_topk}")
-        print(f"Setup:")
+        print("Setup:")
         print(f"  num_ranks = {num_ranks}")
-        print(f"  mode = intranode (single-node, NVLink only)")
+        print("  mode = intranode (single-node, NVLink only)")
         print("=" * 100)
 
     # Random data
@@ -283,7 +283,7 @@ def test_main(
     combine_send_bytes = dispatch_recv_bytes
 
     if local_rank == 0:
-        print(f"\nData transfer:")
+        print("\nData transfer:")
         print(f"  Dispatch recv: {dispatch_recv_bytes / 1e6:.2f} MB")
         print(f"  Combine send: {combine_send_bytes / 1e6:.2f} MB")
 
@@ -452,7 +452,7 @@ def test_main(
         print("\n" + "=" * 100)
         print("FINAL RESULTS")
         print("=" * 100)
-        print(f"\nOptimal Dispatch Config:")
+        print("\nOptimal Dispatch Config:")
         print(f"  num_sms = {best_dispatch.num_sms}")
         print(f"  nvl_send_chunk = {best_dispatch.nvl_send}")
         print(f"  nvl_recv_buffer = {best_dispatch.nvl_buffer}")
@@ -466,7 +466,7 @@ def test_main(
             f"  Improvement vs worst: {results['performance']['dispatch']['improvement_vs_worst_pct']:.1f}%"
         )
 
-        print(f"\nOptimal Combine Config:")
+        print("\nOptimal Combine Config:")
         print(f"  num_sms = {best_combine.num_sms}")
         print(f"  nvl_send_chunk = {best_combine.nvl_send}")
         print(f"  nvl_recv_buffer = {best_combine.nvl_buffer}")
@@ -480,7 +480,7 @@ def test_main(
             f"  Improvement vs worst: {results['performance']['combine']['improvement_vs_worst_pct']:.1f}%"
         )
 
-        print(f"\nResults saved to:")
+        print("\nResults saved to:")
         print(f"  Full: {full_results_path}")
         print(f"  Summary: {summary_path}")
         print("=" * 100)

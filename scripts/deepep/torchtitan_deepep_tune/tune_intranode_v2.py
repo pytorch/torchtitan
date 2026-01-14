@@ -385,7 +385,7 @@ def test_main(
         print(f"Optimal dispatch config (2-param intranode): {best_dispatch.config}")
         print(f"Optimal combine config (2-param intranode): {best_combine.config}")
         print()
-        print(f"For utils.py (4-param format):")
+        print("For utils.py (4-param format):")
         print(f"  turbo_deepep_dispatch_tuned_config = {dispatch_config_4param}")
         print(f"  turbo_deepep_combine_tuned_config = {combine_config_4param}")
         print()
@@ -396,7 +396,7 @@ def test_main(
             f"Combine: {best_combine.time_us:.2f} us, {best_combine.bandwidth_gbps:.2f} GB/s"
         )
         print()
-        print(f"Improvement vs worst:")
+        print("Improvement vs worst:")
         print(
             f"  Dispatch: {results['performance']['dispatch']['improvement_vs_worst_pct']:.1f}%"
         )

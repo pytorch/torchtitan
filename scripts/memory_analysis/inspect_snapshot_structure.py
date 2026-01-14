@@ -31,7 +31,7 @@ def inspect_snapshot(path: Path):
                 print(f"\nNumber of frames: {len(frames)}")
                 if frames:
                     print(f"Frame structure: {list(frames[0].keys())}")
-                    print(f"\nFirst 10 frames:")
+                    print("\nFirst 10 frames:")
                     for i, frame in enumerate(frames[:10]):
                         print(
                             f"  {i}: {frame['filename']}:{frame['line']} {frame['name']}"
@@ -42,7 +42,7 @@ def inspect_snapshot(path: Path):
         print(f"\nHas device_traces: {len(snapshot['device_traces'])} entries")
 
     if "device_allocator_info" in snapshot:
-        print(f"Has device_allocator_info")
+        print("Has device_allocator_info")
 
     # Look for categorized data
     for key in snapshot.keys():
