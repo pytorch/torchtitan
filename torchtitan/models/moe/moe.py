@@ -695,6 +695,17 @@ class MoE(nn.Module):
             if self.log_expert_routing:
                 self.expert_routing_counter.add_(num_tokens_per_expert)
 
+        # Compute shared expert output (shared by both DeepEP and non-DeepEP paths)
+        if self.shared_experts is not None:
+            shared_out = self.shared_experts(x)
+            if self.shared_gate is not None:
+                shared_gate_val = F.sigmoid(self.shared_gate(x))
+                shared_expert_out = shared_out * shared_gate_val
+            else:
+                shared_expert_out = shared_out
+        else:
+            shared_expert_out = torch.zeros_like(x)
+
         if self.use_deepep:
             top_scores = top_scores.float()
             self.experts.deepep_dispatcher.dispatch_preprocess(
@@ -702,17 +713,7 @@ class MoE(nn.Module):
             )
             # shape (bs*slen*top_k, dim)
             routed_output = self.experts(x, num_tokens_per_expert)
-            # shared expert
-            if self.shared_experts is not None:
-                shared_out = self.shared_experts(x)
-                if self.shared_gate is not None:
-                    shared_gate_val = F.sigmoid(self.shared_gate(x))
-                    out = shared_out * shared_gate_val
-                else:
-                    out = shared_out
-            else:
-                out = torch.zeros_like(x)
-            out = routed_output + out
+            out = routed_output + shared_expert_out
             out = out.reshape(bs, slen, dim)
             return out
         else:
@@ -747,26 +748,13 @@ class MoE(nn.Module):
             # shape (bs*slen*top_k, dim)
             routed_output = self.experts(routed_input, num_tokens_per_expert)
 
-            # shared expert
-            # Note: we execute the shared expert before scoring the output of the routed expert
-            # to "implicitly" overlap the shared expert compute with token combine communication
-            if self.shared_experts is not None:
-                shared_out = self.shared_experts(x)
-                if self.shared_gate is not None:
-                    shared_gate_val = F.sigmoid(self.shared_gate(x))
-                    out = shared_out * shared_gate_val
-                else:
-                    out = shared_out
-            else:
-                out = torch.zeros_like(x)
-
             if not self.score_before_experts:
                 routed_output = (
                     routed_output.to(torch.float32)
                     * top_scores_experts_sorted.reshape(-1, 1)
                 ).to(x.dtype)
 
-            out = out.scatter_add(
+            out = shared_expert_out.scatter_add(
                 dim=0, index=token_indices_experts_sorted, src=routed_output
             )
             out = out.reshape(bs, slen, dim)
