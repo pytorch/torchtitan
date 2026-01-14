@@ -203,9 +203,8 @@ class MoEStateDictAdapter(StateDictAdapter):
         self.local_experts_indices[titan_abstract_key] = (start_index, end_index)
 
         # Step 3: Identify mesh dimensions that shard on dim-0 (expert dimension)
-        # remove expert dimension
+        # exclude expert dimension
         # and build new sub-mesh/placements for individual expert weights
-        dim0_mesh_names = []
         sub_mesh_names = []
         sub_placements = []
 
@@ -217,7 +216,7 @@ class MoEStateDictAdapter(StateDictAdapter):
                 sub_placements.append(Replicate())
             elif isinstance(placement, (Shard, _StridedShard)) and placement.dim == 0:
                 # Shards on expert dim, exclude from sub-mesh
-                dim0_mesh_names.append(name)
+                pass
             elif isinstance(placement, Shard):
                 # Shards on non-expert dim, keep in sub-mesh
                 sub_mesh_names.append(name)
@@ -268,8 +267,10 @@ class MoEStateDictAdapter(StateDictAdapter):
                 expert_weight_3d = expert_weight.unsqueeze(0)
                 # Create DTensor on sub mesh and remove batch dimension
                 expert_dtensor = DTensor.from_local(
-                    # pyrefly: ignore [unbound-name]
-                    expert_weight_3d, sub_mesh, sub_placements, run_check=False
+                    expert_weight_3d,
+                    sub_mesh,  # pyrefly: ignore [unbound-name]
+                    sub_placements,
+                    run_check=False,
                 ).squeeze(0)
 
                 local_expert_tensors[expert_key] = expert_dtensor
