@@ -73,6 +73,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                         abstract_key
                     ] = value.placements
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
+                    self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
 
                     # Split GroupedExperts weight to local individual expert weights
                     local_expert_fqn = self._get_local_experts_weights(
@@ -156,7 +157,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                         expert_weights_by_layer,
                         titan_abstract_key,
                         layer_num,
-                        value.device_mesh,
                     )
                 else:  # keep this path to be compatible with offline conversion
                     stacked_value = self._concatenate_expert_weights(

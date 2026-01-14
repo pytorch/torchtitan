@@ -37,6 +37,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         # Store metadata for GroupedExperts <-> individual experts conversion
         self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}
         self.grouped_expert_weight_shape = {}  # {titan_abstract_key: shape}
+        self.grouped_expert_weight_mesh = {}  # {titan_abstract_key: device_mesh}
         self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
 
     def _calculate_strided_shard_shard_indices(
@@ -149,8 +150,8 @@ class MoEStateDictAdapter(StateDictAdapter):
             end_index = start_index + block_size
 
         elif len(dim_i_placements) == 0:
-            # No need to split on this dimension
-            return start_index, end_index
+            # No sharding on this dimension means all elements are local
+            return 0, dim_size
 
         else:
             raise NotImplementedError(
@@ -195,9 +196,6 @@ class MoEStateDictAdapter(StateDictAdapter):
             dtensor_placements=dtensor_placements,
             device_mesh=device_mesh,
         )
-        assert (
-            start_index is not None and end_index is not None
-        ), "Start index and end index can not be None on dim-0!"
 
         # Step 2: Store indices for potential future use in from_hf()
         self.local_experts_indices[titan_abstract_key] = (start_index, end_index)
@@ -282,7 +280,6 @@ class MoEStateDictAdapter(StateDictAdapter):
         expert_weights_by_layer: dict[str, dict[str, dict[int, torch.Tensor]]],
         abstract_key: str,
         layer_num: str,
-        device_mesh: DeviceMesh,
     ) -> torch.Tensor | None:
         """
         Args:
@@ -297,7 +294,6 @@ class MoEStateDictAdapter(StateDictAdapter):
                 Used to collect individual expert weights before concatenating them into GroupedExperts.
             abstract_key: TorchTitan templage key with {} placeholders for layer and expert IDs
             layer_num: Layer identifier
-            device_mesh: DeviceMesh for the target GroupedExperts weight DTensor
 
         Returns:
             Concatenated GroupedExperts weight DTensor if all experts are available, otherwise None
@@ -319,11 +315,12 @@ class MoEStateDictAdapter(StateDictAdapter):
         assert (
             abstract_key in self.grouped_expert_weight_placements
             and abstract_key in self.grouped_expert_weight_shape
-        ), "GroupedExperts weight metadata (placements, shape) can not be None!"
+            and abstract_key in self.grouped_expert_weight_mesh
+        ), "GroupedExperts weight metadata (placements, shape, mesh) can not be None!"
 
         stacked_dtensor = DTensor.from_local(
             local_tensor,
-            device_mesh,
+            self.grouped_expert_weight_mesh[abstract_key],
             self.grouped_expert_weight_placements[abstract_key],
             run_check=False,
         )
