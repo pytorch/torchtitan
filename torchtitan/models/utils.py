@@ -180,7 +180,7 @@ class MoEStateDictAdapter(StateDictAdapter):
             grouped_expert_weight: DTensor containing all experts' weights
 
         Returns:
-            Dictionary mapping individual expert keys to their DTensor weights
+            Dictionary mapping individual expert keys to their DTensor or plain tensor weights
         """
         # pyrefly: ignore [missing-attribute]
         device_mesh = grouped_expert_weight.device_mesh
@@ -202,26 +202,44 @@ class MoEStateDictAdapter(StateDictAdapter):
         # Step 2: Store indices for potential future use in from_hf()
         self.local_experts_indices[titan_abstract_key] = (start_index, end_index)
 
-        # Step 3: Create new placements for individual expert weights
-        new_placements = []
+        # Step 3: Identify mesh dimensions that shard on dim-0 (expert dimension)
+        # remove expert dimension
+        # and build new sub-mesh/placements for individual expert weights
+        dim0_mesh_names = []
+        sub_mesh_names = []
+        sub_placements = []
+
         for i, name in enumerate(device_mesh.mesh_dim_names):
             placement = dtensor_placements[i]
-            if placement.dim == 0:
-                # Convert dim-0 sharding to replication for individual experts
-                new_placements.append(Replicate())
+            if isinstance(placement, Replicate):
+                # Replicate (hybrid) doesn't shard any dim, keep in sub-mesh
+                sub_mesh_names.append(name)
+                sub_placements.append(Replicate())
+            elif isinstance(placement, (Shard, _StridedShard)) and placement.dim == 0:
+                # Shards on expert dim, exclude from sub-mesh
+                dim0_mesh_names.append(name)
             elif isinstance(placement, Shard):
-                # Keep other shard dimensions (individual expert weight has 2D)
-                new_placements.append(Shard(placement.dim))
+                # Shards on non-expert dim, keep in sub-mesh
+                sub_mesh_names.append(name)
+                sub_placements.append(Shard(placement.dim))
             elif isinstance(placement, _StridedShard):
-                # Keep strided shard with same parameters
-                new_placements.append(
+                # Strided shard on non-expert dim, keep in sub-mesh
+                sub_mesh_names.append(name)
+                sub_placements.append(
                     # pyrefly: ignore [unexpected-positional-argument]
                     _StridedShard(placement.dim, placement.split_factor)
                 )
             else:
                 raise ValueError(f"Unsupported placement type: {type(placement)}")
 
-        # Step 4: Create individual expert DTensors
+        # Step 4: Create sub-mesh excluding dim-0 sharding dimensions
+        # If all mesh dimensions were sharding on dim-0, use plain tensors
+        use_plain_tensor = len(sub_mesh_names) == 0
+
+        if not use_plain_tensor:
+            sub_mesh = device_mesh[tuple(sub_mesh_names)]
+
+        # Step 5: Create individual expert tensors
         assert isinstance(
             grouped_expert_weight, DTensor
         ), "Expected DTensor for grouped expert weight"
@@ -240,15 +258,21 @@ class MoEStateDictAdapter(StateDictAdapter):
             expert_key = abstract_key.format(layer_id, expert_id)
             local_expert_index = expert_id - start_index
 
-            # Extract individual expert weight and add batch dimension temporarily
-            expert_weight = local_grouped_weights[local_expert_index, :, :].unsqueeze(0)
+            # Extract individual expert weight (2D)
+            expert_weight = local_grouped_weights[local_expert_index, :, :]
 
-            # Create DTensor and remove batch dimension (experts dimension is removed)
-            expert_dtensor = DTensor.from_local(
-                expert_weight, device_mesh, new_placements, run_check=False
-            ).squeeze(0)
+            if use_plain_tensor:
+                local_expert_tensors[expert_key] = expert_weight
+            else:
+                # Add batch dimension temporarily for DTensor creation
+                expert_weight_3d = expert_weight.unsqueeze(0)
+                # Create DTensor on sub mesh and remove batch dimension
+                expert_dtensor = DTensor.from_local(
+                    # pyrefly: ignore [unbound-name]
+                    expert_weight_3d, sub_mesh, sub_placements, run_check=False
+                ).squeeze(0)
 
-            local_expert_tensors[expert_key] = expert_dtensor
+                local_expert_tensors[expert_key] = expert_dtensor
 
         return local_expert_tensors
 
