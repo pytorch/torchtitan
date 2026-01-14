@@ -12,11 +12,20 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.deepep.fused_activation import fused_silu_gate_prob
-from torchtitan.distributed.deepep.utils import DeepEPTokenDispatcher
 from torchtitan.tools.logging import logger
 
 from .utils import indices_padding_wrapper
+
+# Lazy import DeepEP - only required when use_deepep=True in config
+try:
+    from torchtitan.distributed.deepep.fused_activation import fused_silu_gate_prob
+    from torchtitan.distributed.deepep.utils import DeepEPTokenDispatcher
+
+    DEEPEP_AVAILABLE = True
+except ImportError:
+    DEEPEP_AVAILABLE = False
+    fused_silu_gate_prob = None
+    DeepEPTokenDispatcher = None
 
 
 @dataclass
@@ -567,6 +576,15 @@ class MoE(nn.Module):
 
         num_experts = moe_args.num_experts
         self.use_deepep = moe_args.use_deepep
+
+        # Validate DeepEP availability when use_deepep=True
+        if self.use_deepep and not DEEPEP_AVAILABLE:
+            raise ImportError(
+                "use_deepep=True requires deep_ep to be installed, but it is not available. "
+                "Please install deep_ep or set use_deepep=False in your model config. "
+                "See torchtitan/distributed/deepep/README.md for installation instructions."
+            )
+
         if self.use_deepep:
             self.deepep_dispatcher = DeepEPTokenDispatcher(
                 moe_router_topk=moe_args.top_k,
