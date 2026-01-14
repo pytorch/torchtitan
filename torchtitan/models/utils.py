@@ -230,11 +230,8 @@ class MoEStateDictAdapter(StateDictAdapter):
                 raise ValueError(f"Unsupported placement type: {type(placement)}")
 
         # Step 4: Create sub-mesh excluding dim-0 sharding dimensions
-        # If all mesh dimensions were sharding on dim-0, use plain tensors
-        use_plain_tensor = len(sub_mesh_names) == 0
-
-        if not use_plain_tensor:
-            sub_mesh = device_mesh[tuple(sub_mesh_names)]
+        # If all mesh dimensions were sharding on dim-0, sub_mesh will be None (use plain tensors)
+        sub_mesh = device_mesh[tuple(sub_mesh_names)] if sub_mesh_names else None
 
         # Step 5: Create individual expert tensors
         assert isinstance(
@@ -255,23 +252,23 @@ class MoEStateDictAdapter(StateDictAdapter):
             expert_key = abstract_key.format(layer_id, expert_id)
             local_expert_index = expert_id - start_index
 
-            # Extract individual expert weight (2D)
-            expert_weight = local_grouped_weights[local_expert_index, :, :]
-
-            if use_plain_tensor:
-                local_expert_tensors[expert_key] = expert_weight
+            if sub_mesh is None:
+                # Extract individual expert weight (2D) as plain tensor
+                expert_weight = local_grouped_weights[local_expert_index, :, :]
             else:
-                # Add batch dimension temporarily for DTensor creation
-                expert_weight_3d = expert_weight.unsqueeze(0)
-                # Create DTensor on sub mesh and remove batch dimension
-                expert_dtensor = DTensor.from_local(
+                # Use index_select to get 3D tensor directly, then create DTensor and squeeze
+                expert_weight_3d = torch.index_select(
+                    local_grouped_weights,
+                    0,
+                    torch.tensor([local_expert_index], device=local_grouped_weights.device),
+                )
+                expert_weight = DTensor.from_local(
                     expert_weight_3d,
-                    sub_mesh,  # pyrefly: ignore [unbound-name]
+                    sub_mesh,
                     sub_placements,
                     run_check=False,
                 ).squeeze(0)
-
-                local_expert_tensors[expert_key] = expert_dtensor
+            local_expert_tensors[expert_key] = expert_weight
 
         return local_expert_tensors
 
