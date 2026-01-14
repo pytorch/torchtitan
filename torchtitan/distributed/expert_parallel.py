@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._functional_collectives import (
     all_to_all_single,

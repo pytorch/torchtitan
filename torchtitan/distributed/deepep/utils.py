@@ -512,6 +512,12 @@ class PrimusTurboDeepepManager:
 class DeepEPTokenDispatcher:
     """
     PrimusTurbo token dispatcher using DeepEP or MORI.
+
+    Args:
+        moe_router_topk: Number of experts each token routes to
+        num_moe_experts: Total number of experts
+        deepep_config: DeepEP configuration from job_config.deepep (optional)
+        score_before_experts: Whether routing scores are applied before expert computation
     """
 
     turbo_deepep_backend: str = "deepep"
@@ -548,15 +554,6 @@ class DeepEPTokenDispatcher:
         deepep_config=None,
         score_before_experts: bool = True,
     ):
-        """
-        Initialize the token dispatcher.
-
-        Args:
-            moe_router_topk: Number of experts each token routes to
-            num_moe_experts: Total number of experts
-            deepep_config: DeepEP configuration from job_config.deepep (optional)
-            score_before_experts: Whether routing scores are applied before expert computation
-        """
         self.shared_experts = None
         self.deepep_config = deepep_config
         self.score_before_experts = score_before_experts

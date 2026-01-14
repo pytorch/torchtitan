@@ -30,7 +30,7 @@ except ImportError:
     sys.exit(1)
 
 sys.path.insert(0, "/home/phuc/workspace/moe/DeepEP/tests")
-from utils import bench_kineto, init_dist, inplace_unique
+from utils import bench_kineto, init_dist
 
 
 @dataclass
@@ -99,11 +99,11 @@ class DeepEPTuner:
 
         if self.local_rank == 0:
             print(f"\n{'='*80}")
-            print(f"DeepEP Tuner (Internode Format)")
+            print("DeepEP Tuner (Internode Format)")
             print(f"{'='*80}")
-            print(f"Hardware: B200 GPUs")
+            print("Hardware: B200 GPUs")
             print(f"Ranks: {self.num_ranks} (nodes: {self.num_nodes})")
-            print(f"Model: Qwen3-30B-A3B")
+            print("Model: Qwen3-30B-A3B")
             print(f"  Tokens: {num_tokens}, Hidden: {hidden}")
             print(
                 f"  Experts: {num_experts}, TopK: {num_topk}, TopK Groups: {num_topk_groups}"
@@ -194,7 +194,7 @@ class DeepEPTuner:
         """Tune dispatch phase"""
         if self.is_rank0():
             print(f"\n{'='*80}")
-            print(f"PHASE 1: Tuning Dispatch")
+            print("PHASE 1: Tuning Dispatch")
             print(
                 f"Testing {len(nvl_range)} x {len(rdma_range)} = {len(nvl_range)*len(rdma_range)} configs"
             )
@@ -270,7 +270,7 @@ class DeepEPTuner:
         """Tune combine phase"""
         if self.is_rank0():
             print(f"\n{'='*80}")
-            print(f"PHASE 2: Tuning Combine")
+            print("PHASE 2: Tuning Combine")
             print(
                 f"Testing {len(nvl_range)} x {len(rdma_range)} = {len(nvl_range)*len(rdma_range)} configs"
             )
@@ -484,31 +484,39 @@ def main():
 
         # Print summary
         print(f"\n{'='*80}")
-        print(f"TUNING COMPLETE")
+        print("TUNING COMPLETE")
         print(f"{'='*80}")
-        print(f"Hardware: B200")
+        print("Hardware: B200")
         print(f"Model: Qwen3-30B-A3B (dim={tuner.hidden}, {tuner.num_experts} experts)")
-        print(f"\nOptimal Configuration:")
+        print("\nOptimal Configuration:")
         print(f"  Dispatch: {best_dispatch.as_tuple()}")
         print(f"  Combine:  {best_combine.as_tuple()}")
-        print(f"\nPerformance Improvement (worst → best):")
+        print("\nPerformance Improvement (worst → best):")
+        dispatch_worst_us = worst_dispatch["time_us"]
+        dispatch_best_us = best_dispatch_result["time_us"]
         print(
-            f"  Dispatch: {dispatch_improvement:.1f}% faster ({worst_dispatch['time_us']:.0f}µs → {best_dispatch_result['time_us']:.0f}µs)"
+            f"  Dispatch: {dispatch_improvement:.1f}% faster "
+            f"({dispatch_worst_us:.0f}µs → {dispatch_best_us:.0f}µs)"
+        )
+        combine_worst_us = worst_combine["time_us"]
+        combine_best_us = best_combine_result["time_us"]
+        print(
+            f"  Combine:  {combine_improvement:.1f}% faster "
+            f"({combine_worst_us:.0f}µs → {combine_best_us:.0f}µs)"
+        )
+        print("\nBest Bandwidth:")
+        print(
+            f"  Dispatch: RDMA={best_dispatch_result['rdma_gbps']:.1f} GB/s, "
+            f"NVL={best_dispatch_result['nvl_gbps']:.1f} GB/s"
         )
         print(
-            f"  Combine:  {combine_improvement:.1f}% faster ({worst_combine['time_us']:.0f}µs → {best_combine_result['time_us']:.0f}µs)"
+            f"  Combine:  RDMA={best_combine_result['rdma_gbps']:.1f} GB/s, "
+            f"NVL={best_combine_result['nvl_gbps']:.1f} GB/s"
         )
-        print(f"\nBest Bandwidth:")
-        print(
-            f"  Dispatch: RDMA={best_dispatch_result['rdma_gbps']:.1f} GB/s, NVL={best_dispatch_result['nvl_gbps']:.1f} GB/s"
-        )
-        print(
-            f"  Combine:  RDMA={best_combine_result['rdma_gbps']:.1f} GB/s, NVL={best_combine_result['nvl_gbps']:.1f} GB/s"
-        )
-        print(f"\nResults saved:")
+        print("\nResults saved:")
         print(f"  Full:    {result_file}")
         print(f"  Summary: {summary_file}")
-        print(f"\nTo use in torchtitan/distributed/deepep/utils.py:")
+        print("\nTo use in torchtitan/distributed/deepep/utils.py:")
         print(f"  turbo_deepep_dispatch_tuned_config = {best_dispatch.as_tuple()}")
         print(f"  turbo_deepep_combine_tuned_config = {best_combine.as_tuple()}")
         print(f"{'='*80}\n")

@@ -35,8 +35,6 @@ Usage:
     #   out = fused_silu_gate_prob(x @ w1, x @ w3, prob)
 """
 
-from typing import Optional
-
 import torch
 import triton
 import triton.language as tl
@@ -387,7 +385,7 @@ def silu_gate_prob_reference(
 def is_triton_available() -> bool:
     """Check if Triton is available for kernel execution."""
     try:
-        import triton
+        import triton  # noqa: F401
 
         return True
     except ImportError:

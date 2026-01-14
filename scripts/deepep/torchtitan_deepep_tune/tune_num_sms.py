@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Tuple
 
 import deep_ep
 
@@ -250,14 +250,14 @@ def main():
         print("\n" + "=" * 100)
         print("DeepEP Comprehensive num_sms Tuner")
         print("=" * 100)
-        print(f"Model: Qwen3-30B-A3B")
+        print("Model: Qwen3-30B-A3B")
         print(f"  num_tokens = {args.num_tokens}")
         print(f"  hidden = {args.hidden}")
         print(f"  num_experts = {args.num_experts}")
         print(f"  num_topk = {args.num_topk}")
-        print(f"Setup:")
+        print("Setup:")
         print(f"  num_ranks = {num_ranks}")
-        print(f"  Hardware: B200 (~600 SMs per GPU)")
+        print("  Hardware: B200 (~600 SMs per GPU)")
         print("=" * 100)
 
     # Test different num_sms values
@@ -301,30 +301,36 @@ def main():
         print("FINAL RESULTS")
         print("=" * 100)
 
-        print(f"\nOptimal Dispatch:")
+        print("\nOptimal Dispatch:")
         print(f"  num_sms = {best_dispatch.num_sms}")
         print(f"  nvl_send_chunk = {best_dispatch.best_dispatch_config[0]}")
         print(f"  nvl_recv_buffer = {best_dispatch.best_dispatch_config[1]}")
-        print(
-            f"  Performance: {best_dispatch.best_dispatch_time_us:.2f} us, {best_dispatch.best_dispatch_bandwidth_gbps:.2f} GB/s"
-        )
+        disp_time = best_dispatch.best_dispatch_time_us
+        disp_bw = best_dispatch.best_dispatch_bandwidth_gbps
+        print(f"  Performance: {disp_time:.2f} us, {disp_bw:.2f} GB/s")
         print(f"  For utils.py: turbo_deepep_num_cus = {best_dispatch.num_sms}")
+        disp_cfg_0 = best_dispatch.best_dispatch_config[0]
+        disp_cfg_1 = best_dispatch.best_dispatch_config[1]
         print(
-            f"               turbo_deepep_dispatch_tuned_config = ({best_dispatch.best_dispatch_config[0]}, {best_dispatch.best_dispatch_config[1]}, 8, 128)"
+            f"               turbo_deepep_dispatch_tuned_config = "
+            f"({disp_cfg_0}, {disp_cfg_1}, 8, 128)"
         )
 
-        print(f"\nOptimal Combine:")
+        print("\nOptimal Combine:")
         print(f"  num_sms = {best_combine.num_sms}")
         print(f"  nvl_send_chunk = {best_combine.best_combine_config[0]}")
         print(f"  nvl_recv_buffer = {best_combine.best_combine_config[1]}")
+        comb_time = best_combine.best_combine_time_us
+        comb_bw = best_combine.best_combine_bandwidth_gbps
+        print(f"  Performance: {comb_time:.2f} us, {comb_bw:.2f} GB/s")
+        comb_cfg_0 = best_combine.best_combine_config[0]
+        comb_cfg_1 = best_combine.best_combine_config[1]
         print(
-            f"  Performance: {best_combine.best_combine_time_us:.2f} us, {best_combine.best_combine_bandwidth_gbps:.2f} GB/s"
-        )
-        print(
-            f"  For utils.py: turbo_deepep_combine_tuned_config = ({best_combine.best_combine_config[0]}, {best_combine.best_combine_config[1]}, 8, 128)"
+            f"  For utils.py: turbo_deepep_combine_tuned_config = "
+            f"({comb_cfg_0}, {comb_cfg_1}, 8, 128)"
         )
 
-        print(f"\nComparison vs Worst:")
+        print("\nComparison vs Worst:")
         dispatch_improvement = (
             (worst_dispatch.best_dispatch_time_us - best_dispatch.best_dispatch_time_us)
             / worst_dispatch.best_dispatch_time_us
@@ -335,15 +341,21 @@ def main():
             / worst_combine.best_combine_time_us
             * 100
         )
+        worst_disp_time = worst_dispatch.best_dispatch_time_us
+        best_disp_time = best_dispatch.best_dispatch_time_us
         print(
-            f"  Dispatch: {dispatch_improvement:.1f}% faster ({worst_dispatch.best_dispatch_time_us:.2f} us -> {best_dispatch.best_dispatch_time_us:.2f} us)"
+            f"  Dispatch: {dispatch_improvement:.1f}% faster "
+            f"({worst_disp_time:.2f} us -> {best_disp_time:.2f} us)"
         )
+        worst_comb_time = worst_combine.best_combine_time_us
+        best_comb_time = best_combine.best_combine_time_us
         print(
-            f"  Combine: {combine_improvement:.1f}% faster ({worst_combine.best_combine_time_us:.2f} us -> {best_combine.best_combine_time_us:.2f} us)"
+            f"  Combine: {combine_improvement:.1f}% faster "
+            f"({worst_comb_time:.2f} us -> {best_comb_time:.2f} us)"
         )
 
         if baseline:
-            print(f"\nComparison vs Baseline (num_sms=24):")
+            print("\nComparison vs Baseline (num_sms=24):")
             dispatch_vs_baseline = (
                 (baseline.best_dispatch_time_us - best_dispatch.best_dispatch_time_us)
                 / baseline.best_dispatch_time_us
@@ -457,7 +469,7 @@ def main():
         with open(summary_path, "w") as f:
             json.dump(summary, f, indent=2)
 
-        print(f"\nResults saved to:")
+        print("\nResults saved to:")
         print(f"  Full: {results_path}")
         print(f"  Summary: {summary_path}")
         print("=" * 100)
