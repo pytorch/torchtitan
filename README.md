@@ -119,6 +119,10 @@ conda install conda-forge::torchtitan
 ```
 Note that each stable release pins the nightly versions of `torch` and `torchao`. Please see [release.md](docs/release.md) for more details.
 
+### Optional: DeepEP for MoE training
+
+For training Mixture-of-Experts (MoE) models with optimized expert parallelism, you can optionally install DeepEP. See [torchtitan/distributed/deepep/README.md](torchtitan/distributed/deepep/README.md) for installation instructions.
+
 ### Downloading a tokenizer
 
 `torchtitan` currently supports training Llama 3.1 (8B, 70B, 405B) out of the box. To get started training these models, we need to download the tokenizer. Follow the instructions on the official [meta-llama](https://huggingface.co/meta-llama/Llama-3.1-8B) repository to ensure you have access to the Llama model weights.
