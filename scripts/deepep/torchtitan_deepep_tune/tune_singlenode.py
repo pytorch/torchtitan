@@ -96,7 +96,7 @@ class SingleNodeTuner:
 
         if self.is_rank0():
             print(f"\n{'='*80}")
-            print(f"Single-Node DeepEP Tuner")
+            print("Single-Node DeepEP Tuner")
             print(f"{'='*80}")
             print(f"Ranks: {self.num_ranks}")
             print(f"Tokens: {num_tokens}, Hidden: {hidden}")
@@ -169,7 +169,7 @@ class SingleNodeTuner:
         """Tune dispatch phase"""
         if self.is_rank0():
             print(f"\n{'='*80}")
-            print(f"PHASE 1: Tuning Dispatch")
+            print("PHASE 1: Tuning Dispatch")
             print(f"Testing {len(nvl_chunk_range)} configurations...")
             print(f"{'='*80}\n")
 
@@ -206,20 +206,24 @@ class SingleNodeTuner:
                     marker = " "
 
                 if self.is_rank0():
+                    idx = i + 1
+                    total = len(nvl_chunk_range)
                     print(
-                        f"[{i+1:2d}/{len(nvl_chunk_range)}] {marker} nvl_chunk={nvl_chunk:2d} | {time_us:6.0f}µs | {bw_gbps:6.1f} GB/s"
+                        f"[{idx:2d}/{total}] {marker} nvl_chunk={nvl_chunk:2d} | "
+                        f"{time_us:6.0f}µs | {bw_gbps:6.1f} GB/s"
                     )
 
             except Exception as e:
                 if self.is_rank0():
-                    print(
-                        f"[{i+1:2d}/{len(nvl_chunk_range)}]   nvl_chunk={nvl_chunk:2d} | ERROR: {e}"
-                    )
+                    idx = i + 1
+                    total = len(nvl_chunk_range)
+                    print(f"[{idx:2d}/{total}]   nvl_chunk={nvl_chunk:2d} | ERROR: {e}")
 
         if self.is_rank0():
-            print(
-                f"\n[BEST DISPATCH] {best_config.as_tuple()} | {best_time*1e6:.0f}µs | {(self.data_bytes/1e9)/best_time:.1f} GB/s\n"
-            )
+            cfg = best_config.as_tuple()
+            time_us = best_time * 1e6
+            bw = (self.data_bytes / 1e9) / best_time
+            print(f"\n[BEST DISPATCH] {cfg} | {time_us:.0f}µs | {bw:.1f} GB/s\n")
 
         return best_config, results
 
@@ -229,7 +233,7 @@ class SingleNodeTuner:
         """Tune combine phase"""
         if self.is_rank0():
             print(f"\n{'='*80}")
-            print(f"PHASE 2: Tuning Combine")
+            print("PHASE 2: Tuning Combine")
             print(f"Testing {len(nvl_chunk_range)} configurations...")
             print(f"{'='*80}\n")
 
@@ -264,20 +268,24 @@ class SingleNodeTuner:
                     marker = " "
 
                 if self.is_rank0():
+                    idx = i + 1
+                    total = len(nvl_chunk_range)
                     print(
-                        f"[{i+1:2d}/{len(nvl_chunk_range)}] {marker} nvl_chunk={nvl_chunk:2d} | {time_us:6.0f}µs | {bw_gbps:6.1f} GB/s"
+                        f"[{idx:2d}/{total}] {marker} nvl_chunk={nvl_chunk:2d} | "
+                        f"{time_us:6.0f}µs | {bw_gbps:6.1f} GB/s"
                     )
 
             except Exception as e:
                 if self.is_rank0():
-                    print(
-                        f"[{i+1:2d}/{len(nvl_chunk_range)}]   nvl_chunk={nvl_chunk:2d} | ERROR: {e}"
-                    )
+                    idx = i + 1
+                    total = len(nvl_chunk_range)
+                    print(f"[{idx:2d}/{total}]   nvl_chunk={nvl_chunk:2d} | ERROR: {e}")
 
         if self.is_rank0():
-            print(
-                f"\n[BEST COMBINE] {best_config.as_tuple()} | {best_time*1e6:.0f}µs | {(self.data_bytes/1e9)/best_time:.1f} GB/s\n"
-            )
+            cfg = best_config.as_tuple()
+            time_us = best_time * 1e6
+            bw = (self.data_bytes / 1e9) / best_time
+            print(f"\n[BEST COMBINE] {cfg} | {time_us:.0f}µs | {bw:.1f} GB/s\n")
 
         return best_config, results
 
@@ -401,26 +409,28 @@ def main():
 
         # Print summary
         print(f"\n{'='*80}")
-        print(f"TUNING COMPLETE")
+        print("TUNING COMPLETE")
         print(f"{'='*80}")
-        print(f"Optimal Configuration:")
+        print("Optimal Configuration:")
         print(f"  Dispatch: {best_dispatch.as_tuple()}")
         print(f"  Combine:  {best_combine.as_tuple()}")
-        print(f"\nPerformance Improvement:")
+        print("\nPerformance Improvement:")
         print(f"  Dispatch: {dispatch_improvement:.1f}% faster (worst→optimal)")
         print(f"  Combine:  {combine_improvement:.1f}% faster (worst→optimal)")
-        print(f"\nBest Bandwidth:")
+        print("\nBest Bandwidth:")
         print(f"  Dispatch: {best_d_result.bandwidth_gbps:.1f} GB/s")
         print(f"  Combine:  {best_c_result.bandwidth_gbps:.1f} GB/s")
-        print(f"\nResults saved:")
+        print("\nResults saved:")
         print(f"  {output_path}")
         print(f"  {log_path}")
-        print(f"\nTo use in torchtitan:")
+        print("\nTo use in torchtitan:")
+        disp_tuple = best_dispatch.as_tuple()
+        comb_tuple = best_combine.as_tuple()
         print(
-            f"  DeepEPTokenDispatcher.turbo_deepep_dispatch_tuned_config = {best_dispatch.as_tuple()}"
+            f"  DeepEPTokenDispatcher.turbo_deepep_dispatch_tuned_config = {disp_tuple}"
         )
         print(
-            f"  DeepEPTokenDispatcher.turbo_deepep_combine_tuned_config = {best_combine.as_tuple()}"
+            f"  DeepEPTokenDispatcher.turbo_deepep_combine_tuned_config = {comb_tuple}"
         )
         print(f"{'='*80}\n")
 

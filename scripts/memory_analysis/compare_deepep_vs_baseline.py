@@ -7,7 +7,6 @@ Creates detailed visualizations and analysis reports.
 from datetime import datetime
 from pathlib import Path
 
-import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -65,9 +64,10 @@ def plot_memory_comparison(output_dir):
 
     # DeepEP breakdown
     deepep_values = [DEEPEP_DATA["total_allocated"], DEEPEP_DATA["cache_wasted"]]
+    cache_pct = DEEPEP_DATA["cache_wasted"] / DEEPEP_DATA["total_reserved"] * 100
     deepep_labels = [
         f'Allocated\n{DEEPEP_DATA["total_allocated"]:.2f} GB\n({DEEPEP_DATA["efficiency"]:.1f}%)',
-        f'Cache/Wasted\n{DEEPEP_DATA["cache_wasted"]:.2f} GB\n({DEEPEP_DATA["cache_wasted"]/DEEPEP_DATA["total_reserved"]*100:.1f}%)',
+        f'Cache/Wasted\n{DEEPEP_DATA["cache_wasted"]:.2f} GB\n({cache_pct:.1f}%)',
     ]
     colors_deepep = ["#2ecc71", "#e74c3c"]
     ax1.pie(
@@ -425,6 +425,38 @@ def plot_scaling_projection(output_dir):
 
 def generate_text_report(output_dir):
     """Generate detailed text report with findings."""
+    # Pre-calculate values to shorten f-string lines
+    d_res = DEEPEP_DATA["total_reserved"]
+    b_res = BASELINE_DATA["total_reserved"]
+    res_oh = OVERHEAD["reserved"]
+    res_oh_pct = res_oh / b_res * 100
+
+    d_alloc = DEEPEP_DATA["total_allocated"]
+    b_active = BASELINE_DATA["max_active"]
+    active_oh = OVERHEAD["active"]
+    active_oh_pct = active_oh / b_active * 100
+
+    d_cache = DEEPEP_DATA["cache_wasted"]
+    b_cache = BASELINE_DATA["cache"]
+    cache_diff = b_cache - d_cache
+
+    d_eff = DEEPEP_DATA["efficiency"]
+    b_eff = BASELINE_DATA["efficiency"]
+    eff_diff = d_eff - b_eff
+
+    expert_moe = DEEPEP_DATA["categories"]["Expert/MoE"]
+    expert_moe_pct = expert_moe / d_alloc * 100
+    unknown = DEEPEP_DATA["categories"]["Unknown"]
+    unknown_pct = unknown / d_alloc * 100
+    other = DEEPEP_DATA["categories"]["Other"]
+    other_pct = other / d_alloc * 100
+
+    deepep_lbs8 = d_alloc * (8 / 6)
+    baseline_lbs8 = b_active * (8 / 6)
+    expert_moe_oh = expert_moe - (b_active * 0.75)
+    unknown_oh_pct = unknown / active_oh * 100
+    overhead_pct = active_oh / b_active * 100
+
     report = f"""
 {'='*80}
 DEEPEP VS BASELINE MEMORY COMPARISON REPORT
@@ -441,29 +473,29 @@ GPU: NVIDIA B200 (178.36 GB)
 SUMMARY STATISTICS
 {'-'*80}
                         DeepEP          Baseline        Difference
-Total Reserved:         {DEEPEP_DATA['total_reserved']:>6.2f} GB      {BASELINE_DATA['total_reserved']:>6.2f} GB      +{OVERHEAD['reserved']:>5.2f} GB (+{OVERHEAD['reserved']/BASELINE_DATA['total_reserved']*100:.1f}%)
-Active/Allocated:       {DEEPEP_DATA['total_allocated']:>6.2f} GB      {BASELINE_DATA['max_active']:>6.2f} GB      +{OVERHEAD['active']:>5.2f} GB (+{OVERHEAD['active']/BASELINE_DATA['max_active']*100:.1f}%)
-Cache/Wasted:           {DEEPEP_DATA['cache_wasted']:>6.2f} GB      {BASELINE_DATA['cache']:>6.2f} GB      -{BASELINE_DATA['cache']-DEEPEP_DATA['cache_wasted']:>5.2f} GB
-Memory Efficiency:      {DEEPEP_DATA['efficiency']:>5.1f}%         {BASELINE_DATA['efficiency']:>5.1f}%         +{DEEPEP_DATA['efficiency']-BASELINE_DATA['efficiency']:>4.1f}pp
+Total Reserved:         {d_res:>6.2f} GB      {b_res:>6.2f} GB      +{res_oh:>5.2f} GB (+{res_oh_pct:.1f}%)
+Active/Allocated:       {d_alloc:>6.2f} GB      {b_active:>6.2f} GB      +{active_oh:>5.2f} GB (+{active_oh_pct:.1f}%)
+Cache/Wasted:           {d_cache:>6.2f} GB      {b_cache:>6.2f} GB      -{cache_diff:>5.2f} GB
+Memory Efficiency:      {d_eff:>5.1f}%         {b_eff:>5.1f}%         +{eff_diff:>4.1f}pp
 
 CATEGORY BREAKDOWN (DeepEP)
 {'-'*80}
-Expert/MoE:             {DEEPEP_DATA['categories']['Expert/MoE']:>6.2f} GB  ({DEEPEP_DATA['categories']['Expert/MoE']/DEEPEP_DATA['total_allocated']*100:>5.1f}%)
-Unknown (DeepEP):       {DEEPEP_DATA['categories']['Unknown']:>6.2f} GB  ({DEEPEP_DATA['categories']['Unknown']/DEEPEP_DATA['total_allocated']*100:>5.1f}%) ⚠️
-Other:                  {DEEPEP_DATA['categories']['Other']:>6.2f} GB  ({DEEPEP_DATA['categories']['Other']/DEEPEP_DATA['total_allocated']*100:>5.1f}%)
+Expert/MoE:             {expert_moe:>6.2f} GB  ({expert_moe_pct:>5.1f}%)
+Unknown (DeepEP):       {unknown:>6.2f} GB  ({unknown_pct:>5.1f}%) ⚠️
+Other:                  {other:>6.2f} GB  ({other_pct:>5.1f}%)
 
 KEY FINDINGS
 {'-'*80}
-1. MEMORY OVERHEAD: DeepEP adds {OVERHEAD['active']:.2f} GB (+{OVERHEAD['active']/BASELINE_DATA['max_active']*100:.1f}%) active memory overhead
-   - This overhead prevents LBS=8 from fitting (would need ~{DEEPEP_DATA['total_allocated']*(8/6):.1f} GB > 178 GB)
-   - Baseline can run LBS=8 successfully (needs ~{BASELINE_DATA['max_active']*(8/6):.1f} GB < 178 GB)
+1. MEMORY OVERHEAD: DeepEP adds {active_oh:.2f} GB (+{active_oh_pct:.1f}%) active memory overhead
+   - This overhead prevents LBS=8 from fitting (would need ~{deepep_lbs8:.1f} GB > 178 GB)
+   - Baseline can run LBS=8 successfully (needs ~{baseline_lbs8:.1f} GB < 178 GB)
 
 2. OVERHEAD BREAKDOWN:
-   a) Expert/MoE Category: +{DEEPEP_DATA['categories']['Expert/MoE']-(BASELINE_DATA['max_active']*0.75):.2f} GB
+   a) Expert/MoE Category: +{expert_moe_oh:.2f} GB
       - DeepEP pre-allocates large buffers for fused all-to-all communication
       - Keeps expert activation tensors resident longer
 
-   b) Unknown Category: {DEEPEP_DATA['categories']['Unknown']:.2f} GB (CRITICAL ⚠️)
+   b) Unknown Category: {unknown:.2f} GB (CRITICAL ⚠️)
       - These are DeepEP-specific allocations with unclear stack traces
       - Likely sources:
         * Fused all-to-all communication buffers
@@ -472,20 +504,20 @@ KEY FINDINGS
       - This is the "smoking gun" of deepep overhead
 
 3. MEMORY EFFICIENCY IMPROVEMENT:
-   - DeepEP has {DEEPEP_DATA['efficiency']:.1f}% efficiency vs {BASELINE_DATA['efficiency']:.1f}% baseline
-   - Saves {BASELINE_DATA['cache']-DEEPEP_DATA['cache_wasted']:.2f} GB in cache/fragmentation
-   - However, this is offset by the {OVERHEAD['active']:.2f} GB pre-allocated overhead
+   - DeepEP has {d_eff:.1f}% efficiency vs {b_eff:.1f}% baseline
+   - Saves {cache_diff:.2f} GB in cache/fragmentation
+   - However, this is offset by the {active_oh:.2f} GB pre-allocated overhead
 
 4. SCALING IMPLICATIONS:
    - DeepEP cannot scale beyond LBS=6 on B200 (178 GB)
    - Baseline can run LBS=8 and possibly LBS=10
-   - The {OVERHEAD['active']:.2f} GB overhead is the critical bottleneck
+   - The {active_oh:.2f} GB overhead is the critical bottleneck
 
 ROOT CAUSE ANALYSIS
 {'-'*80}
-The {DEEPEP_DATA['categories']['Unknown']:.2f} GB "Unknown" category is the primary culprit:
+The {unknown:.2f} GB "Unknown" category is the primary culprit:
 - Not present in baseline (0 GB)
-- Represents ~{DEEPEP_DATA['categories']['Unknown']/OVERHEAD['active']*100:.0f}% of total overhead
+- Represents ~{unknown_oh_pct:.0f}% of total overhead
 - Cannot be easily identified in memory profiler traces
 - Suggests deep integration in DeepEP's communication layer
 
@@ -505,13 +537,13 @@ RECOMMENDATIONS
 3. FILES TO INVESTIGATE:
    - torchtitan/nn/modules/moe.py (PrimusTurboFlexTokenDispatcher)
    - /home/phuc/workspace/moe/DeepEP (fused all-to-all kernel)
-   - Look for allocations of {DEEPEP_DATA['categories']['Unknown']:.2f} GB or multiples of 288 MB
+   - Look for allocations of {unknown:.2f} GB or multiples of 288 MB
 
 CONCLUSION
 {'-'*80}
 DeepEP's fused all-to-all optimization trades memory for compute efficiency:
-- Memory overhead: +{OVERHEAD['active']:.2f} GB ({OVERHEAD['active']/BASELINE_DATA['max_active']*100:.0f}% increase)
-- Primary source: {DEEPEP_DATA['categories']['Unknown']:.2f} GB in untraced allocations
+- Memory overhead: +{active_oh:.2f} GB ({overhead_pct:.0f}% increase)
+- Primary source: {unknown:.2f} GB in untraced allocations
 - Impact: Reduces maximum batch size from 8+ to 6
 - Action needed: Optimize buffer allocation in DeepEP implementation
 

@@ -519,7 +519,7 @@ def apply_moe_ep_tp(
             )
             if use_deepep is True:
                 logger.info(
-                    f"Enabling deep_ep and fused all-to-all communication for expert parallelism"
+                    "Enabling deep_ep and fused all-to-all communication for expert parallelism"
                 )
         else:
             experts_mesh = ep_tp_mesh
