@@ -16,7 +16,7 @@ Requires installing [git@github.com:meta-pytorch/autoparallel.git](https://githu
 
 **DeepSeekv3**
 
-`CONFIG_FILE=./torchtitan/models/deepseek_v3/train_configs/debug_model.toml ./run_train.sh --model.name autoparallel.deepseek_v3 --job.custom_config_module=torchtitan.experiments.autoparallel.job_config`
+`NGPU=2 CONFIG_FILE=./torchtitan/models/deepseek_v3/train_configs/debug_model.toml ./run_train.sh --model.name autoparallel.deepseek_v3 --job.custom_config_module=torchtitan.experiments.autoparallel.job_config`
 
 **DeepSeekv3 local_map**
 
