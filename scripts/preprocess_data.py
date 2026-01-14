@@ -656,23 +656,29 @@ def main(args):
                 else:
                     raise RuntimeError(f"Unknown chat format, keys are {keys}")
 
-            tokens = tokenizer.apply_chat_template(conversation, tokenize=True)
+            tokens = tokenizer.apply_chat_template(
+                conversation, tokenize=True, add_generation_prompt=False
+            )
             label = []
 
             current_len = 0
             for i in range(len(conversation)):
                 if i + 1 == len(conversation):
-                    next_tokens = tokenizer.apply_chat_template(conversation)[
-                        current_len:
-                    ]
+                    next_tokens = tokenizer.apply_chat_template(
+                        conversation, tokenize=True, add_generation_prompt=False
+                    )[current_len:]
                 else:
                     if "assistant" == conversation[i + 1]["role"]:
                         next_tokens = tokenizer.apply_chat_template(
-                            conversation[: i + 1], add_generation_prompt=True
+                            conversation[: i + 1],
+                            add_generation_prompt=True,
+                            tokenize=True,
                         )[current_len:]
                     else:
                         next_tokens = tokenizer.apply_chat_template(
-                            conversation[: i + 1]
+                            conversation[: i + 1],
+                            tokenize=True,
+                            add_generation_prompt=False,
                         )[current_len:]
 
                 if conversation[i]["role"] == "assistant":
@@ -822,15 +828,84 @@ def main(args):
 
     else:
         # No packing - just shuffle and save tokenized samples
-        # (epochs don't apply here since there's no packing randomness)
-        dataset = dataset.shuffle(seed=args.seed)
+        # Support multiple epochs: each epoch gets a different shuffle, then concatenated
+        num_epochs = args.epochs
 
-        if args.drop_larger_than:
+        # Seed random ONCE at the beginning - all randomness flows from here
+        random.seed(args.seed)
+        print(f"Initialized random seed: {args.seed}")
+
+        if num_epochs == 1:
+            dataset = dataset.shuffle(seed=args.seed)
+        else:
+            from datasets import concatenate_datasets
+
+            epoch_datasets = []
+            for epoch in range(num_epochs):
+                # Generate a unique shuffle seed for this epoch from the main RNG
+                epoch_shuffle_seed = random.randint(0, 2**31 - 1)
+                print(f"Shuffling epoch {epoch + 1}/{num_epochs} (shuffle_seed={epoch_shuffle_seed})...")
+                epoch_dataset = dataset.shuffle(seed=epoch_shuffle_seed)
+                epoch_datasets.append(epoch_dataset)
+
+            dataset = concatenate_datasets(epoch_datasets)
+            print(f"Concatenated {num_epochs} epochs: {len(dataset)} total samples")
+
+        if args.pad_to_and_drop_larger_than:
+            max_seq_len = args.pad_to_and_drop_larger_than
             len_before = len(dataset)
             dataset = dataset.filter(
-                lambda x: len(x["inputs"]) <= args.drop_larger_than
+                lambda x: len(x["inputs"]) <= max_seq_len
             )
             dropped = len_before - len(dataset)
+
+            # Pad samples and add position_ids/sequence_lengths
+            def _pad_and_add_metadata(sample):
+                seq_len = len(sample["inputs"])
+                num_padding = max_seq_len - seq_len
+
+                # Pad inputs with pad token
+                padded_inputs = sample["inputs"] + [tokenizer.pad_token_id] * num_padding
+
+                # Pad labels with -100 (ignore index)
+                if "labels" in sample:
+                    padded_labels = sample["labels"] + [-100] * num_padding
+                else:
+                    # If no labels, create them from inputs and pad
+                    padded_labels = sample["inputs"] + [-100] * num_padding
+
+                # Position IDs: continue incrementing for padding
+                position_ids = list(range(max_seq_len))
+
+                # Sequence lengths: actual sequence + padding length
+                sequence_lengths = [seq_len]
+                if num_padding > 0:
+                    sequence_lengths.append(num_padding)
+
+                return {
+                    "inputs": padded_inputs,
+                    "labels": padded_labels,
+                    "position_ids": position_ids,
+                    "sequence_lengths": sequence_lengths,
+                }
+
+            dataset = dataset.map(
+                _pad_and_add_metadata,
+                num_proc=args.num_proc,
+            )
+        else:
+            # Add position_ids and sequence_lengths for consistency with packed format
+            def _add_position_ids_and_seq_lengths(sample):
+                seq_len = len(sample["inputs"])
+                return {
+                    "position_ids": list(range(seq_len)),
+                    "sequence_lengths": [seq_len],
+                }
+
+            dataset = dataset.map(
+                _add_position_ids_and_seq_lengths,
+                num_proc=args.num_proc,
+            )
 
         if args.save_to_disk:
             print(f"Saving to {args.save_to_disk}")
@@ -896,7 +971,7 @@ if __name__ == "__main__":
         help="Packing algorithm: 'ffd' (First-Fit Decreasing, sorted by length) or "
         "'random_fit' (no sorting, random bin selection - default, avoids length bias)",
     )
-    parser.add_argument("--drop-larger-than", type=int)
+    parser.add_argument("--pad-to-and-drop-larger-than", type=int)
     parser.add_argument("--save-to-disk", type=str)
     parser.add_argument("--show-example", action="store_true")
     args = parser.parse_args()
