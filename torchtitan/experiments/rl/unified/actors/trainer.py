@@ -19,7 +19,6 @@ from torchtitan.experiments.rl.unified.models.utils import load_trainer_model
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_policy_gradient_loss_vllm,
 )
-from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_to_vllm
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,6 @@ class Trainer(Actor):
 
         # load trainer model and patch to vllm.Attention()
         self.model = load_trainer_model(model_path)
-
         self.parallel_dims = create_trainer_parallel_dims(self.ddp_size, self.tp_size)
 
         # apply PT-D Parallelism
@@ -77,14 +75,13 @@ class Trainer(Actor):
 
     @endpoint
     async def get_weights(self) -> dict:
-        """Get vLLM weights for generator.
+        """Get model weights for generator.
 
         Returns:
-            vLLM state dict
+            model state dict
         """
         titan_state = self.model.state_dict()
-        vllm_state = torchtitan_to_vllm(titan_state)
-        return vllm_state
+        return titan_state
 
     @endpoint
     async def step(self, trajectory: TrajectoryData) -> dict:
@@ -113,8 +110,6 @@ class Trainer(Actor):
         self.optimizer.step()
 
         self.policy_version += 1
-
-        # TODO: save dcp checkpoint to file here instead of sending weight dicts
 
         # Return metrics
         metrics = {
