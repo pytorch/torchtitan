@@ -12,6 +12,7 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple
+import tqdm
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -105,7 +106,7 @@ def check_if_all_keys_are_present(state_dict, safetensor_mapping):
 
 
 @torch.inference_mode()
-def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_path):
+def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_path, debug):
     if model_name == "flux":
         import torchtitan.experiments.flux  # noqa: F401
     # load model and model args so that we can get the state dict adapter...
@@ -125,6 +126,14 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_pat
     keys_to_save = get_metadata(input_dir)
     with open(os.path.join(hf_assets_path, "model.safetensors.index.json"), "r") as f:
         index_json = json.load(f)
+        fixed_weight_map = {}
+        for key, val in index_json["weight_map"].items():
+            if "rotary_emb.inv_freq" in key:
+                continue
+            if "weight_scale_inv" in key:
+                continue
+            fixed_weight_map[key] = val
+        index_json["weight_map"] = fixed_weight_map
         with open(os.path.join(output_dir, "model.safetensors.index.json"), "w") as f:
             json.dump(index_json, f, indent=2)
         safetensor_mapping = defaultdict(list)
@@ -134,7 +143,11 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_pat
     # Copy config files and clean up
     copy_hf_configs(hf_assets_path, output_dir)
     cleanup_sharded_dir(output_dir)
-    for key, tensor_metadata in keys_to_save:
+    keys_to_save = sorted(keys_to_save, key=lambda x: x[0])
+    if debug:
+        print(f"Keys...")
+        print([x[0] for x in keys_to_save])
+    for key, tensor_metadata in tqdm.tqdm(keys_to_save, desc="Loading state dict"):
         state_dict_to_grab = {
             key: torch.empty(
                 tensor_metadata.size, dtype=tensor_metadata.properties.dtype
@@ -156,6 +169,13 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_pat
                 save_file(
                     state_dict_to_save, os.path.join(output_dir, safe_tensor_file)
                 )
+                del state_dict_to_save
+        else:
+            if debug:
+                print("No safe tensors to save, current state dict:")
+                print(list(loaded_state_dict.keys()))
+            else:
+                print("No safe tensors to save")
 
 
 def convert_all_checkpoints(
@@ -219,6 +239,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Convert all step-* checkpoints in input_dir to {parent}/hf_checkpoints/{step}/",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print debug information",
+    )
     args = parser.parse_args()
 
     if args.all:
@@ -237,4 +262,5 @@ if __name__ == "__main__":
             args.model_name,
             args.model_flavor,
             args.hf_assets_path,
+            args.debug,
         )
