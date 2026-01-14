@@ -14,6 +14,7 @@ TorchTitan models for vLLM.
 from functools import partial
 
 import torch
+import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 from torch.distributed._tensor import DTensor, Replicate
 from torch.distributed.checkpoint.state_dict import (
@@ -114,6 +115,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             job_config=self.parallel_config,
         )
 
+        # Initial load model weights from HuggingFace checkpoint path
+        self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
+
     def _extend_rope_cache_if_needed(
         self, rope_cache: torch.Tensor, max_position: int
     ) -> torch.Tensor:
@@ -177,11 +181,13 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         return rope_cache
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Convert input token IDs to embeddings."""
+        """vLLM required API.
+        Convert input token IDs to embeddings."""
         return self.model.tok_embeddings(input_ids)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Convert input token IDs to embeddings (deprecated vLLM interface)."""
+        """vLLM required API.
+        Convert input token IDs to embeddings (deprecated vLLM interface)."""
         return self.embed_input_ids(input_ids)
 
     def forward(
@@ -192,6 +198,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         """
+        vLLM required API.
         Forward pass with vLLM interface.
 
         Args:
@@ -256,7 +263,8 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         hidden_states: torch.Tensor,
         sampling_metadata=None,
     ) -> torch.Tensor | None:
-        """Compute logits from hidden states."""
+        """vLLM required API.
+        Compute logits from hidden states."""
 
         # When TP is applied, we return the full tensor (plain tensor) to vLLM engine
         # at the end of TorchTitanVLLMModelWrapper.forward().
@@ -277,12 +285,12 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
     def load_weights_from_state_dict(self, titan_state_dict):
         """
-        Load model weights directly from
+        Load model weights directly from torchtitan state dict.
         """
 
         model_state_dict = {k: v for k, v in self.model.state_dict().items()}
 
-        # Convert to DTensor if target is DTensor
+        # Convert to DTensor if target is DTensor (when the target model is sharded)
         for name, tensor in titan_state_dict.items():
             if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
                 target_dtensor = model_state_dict[name]
@@ -304,8 +312,34 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         return loaded_params
 
+    def _initial_load_weights(self, checkpoint_path):
+        """
+        Helper function to load torchtitan model weights from HF checkpoint when initialize this model.
+
+        Args:
+            checkpoint_path: Path to the HuggingFace checkpoint directory
+        """
+        # Create adapter instance
+        adapter = self.state_dict_adapter(
+            model_args=self.config,
+            hf_assets_path=None,
+        )
+
+        # Get HF storage reader from adapter
+        storage_reader = adapter.get_hf_storage_reader(checkpoint_path)
+
+        # Load HF state dict using DCP
+        hf_state_dict = adapter.to_hf(self.model.state_dict())
+        dcp.load(hf_state_dict, storage_reader=storage_reader)
+
+        # Convert HF state dict to TorchTitan format
+        torchtitan_state_dict = adapter.from_hf(hf_state_dict)
+
+        return self.load_weights_from_state_dict(torchtitan_state_dict)
+
     def load_weights(self, weights_iter):
         """
+        vLLM required API.
         Load weights from HF checkpoint using the provided state dict adapter.
         vLLM engine would call this function to load model weights.
 
@@ -321,7 +355,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # so vLLM's safety check passes.
         loaded_param_names = set()
         for name, _ in self.model.named_parameters():
-            loaded_param_names.add(name)
+            loaded_param_names.add("model." + name)
 
         logger.info(
             f"Weights already loaded during model initialization. \
