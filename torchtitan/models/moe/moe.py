@@ -704,7 +704,12 @@ class MoE(nn.Module):
             routed_output = self.experts(x, num_tokens_per_expert)
             # shared expert
             if self.shared_experts is not None:
-                out = self.shared_experts(x)
+                shared_out = self.shared_experts(x)
+                if self.shared_gate is not None:
+                    shared_gate_val = F.sigmoid(self.shared_gate(x))
+                    out = shared_out * shared_gate_val
+                else:
+                    out = shared_out
             else:
                 out = torch.zeros_like(x)
             out = routed_output + out
@@ -746,7 +751,12 @@ class MoE(nn.Module):
             # Note: we execute the shared expert before scoring the output of the routed expert
             # to "implicitly" overlap the shared expert compute with token combine communication
             if self.shared_experts is not None:
-                out = self.shared_experts(x)
+                shared_out = self.shared_experts(x)
+                if self.shared_gate is not None:
+                    shared_gate_val = F.sigmoid(self.shared_gate(x))
+                    out = shared_out * shared_gate_val
+                else:
+                    out = shared_out
             else:
                 out = torch.zeros_like(x)
 
