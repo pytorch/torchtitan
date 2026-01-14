@@ -51,8 +51,12 @@ Note: Currently supports single-device training only.
 ### Prerequisites
 
 ```bash
-# Install vLLM with deterministic support
-pip install vllm
+# Install vLLM with deterministic support (from source)
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+python use_existing_torch.py
+uv pip install -r requirements/build.txt
+uv pip install --no-build-isolation -e .
 
 # Install TorchTitan (from the repository root)
 pip install -e .
@@ -75,21 +79,17 @@ init_batch_invariance()
 ### Quick Start
 
 ```python
-from vllm.attention.backends.registry import AttentionBackendEnum
-import torch
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+import torch
 from torchtitan.experiments.rl.vllm_compat import (
     enable_batch_invariant_backward_mode,
     Qwen3VLLMCompatModel,
 )
 
 # 1. Enable deterministic mode
-try:
-    init_batch_invariance()
-except TypeError:
-    # Fallback to new version requiring positional arg for attention
-    init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
-
+init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 enable_batch_invariant_backward_mode()
 
 # 2. Load model
@@ -112,6 +112,7 @@ loss = logits.sum()
 loss.backward()
 
 print("Done running simple model")
+
 ```
 
 ### Full RL Training
