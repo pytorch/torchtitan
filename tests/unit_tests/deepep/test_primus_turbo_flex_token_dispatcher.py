@@ -30,10 +30,10 @@ import torch.distributed as dist
 # Mock deep_ep module if not available
 DEEP_EP_AVAILABLE = False
 try:
-    import deep_ep
+    import deep_ep  # noqa: F401
 
     DEEP_EP_AVAILABLE = True
-except (ImportError, ModuleNotFoundError):
+except ImportError:
     pass
 
 if not DEEP_EP_AVAILABLE:
@@ -824,7 +824,7 @@ class TestDistributed(unittest.TestCase):
         self.assertAlmostEqual(test_tensor[0].item(), expected_sum, places=5)
         dist.barrier()
         if self.rank == 0:
-            print(f"✓ Cross-rank communication verified")
+            print("✓ Cross-rank communication verified")
 
     def test_expert_distribution(self):
         """Test experts correctly distributed across ranks."""
@@ -946,7 +946,7 @@ class TestDistributed(unittest.TestCase):
 
         dist.barrier()
         if self.rank == 0:
-            print(f"✓ Token dispatch distributed communication")
+            print("✓ Token dispatch distributed communication")
 
     @unittest.skipIf(not DEEP_EP_AVAILABLE, "Requires real deep_ep library")
     def test_dispatch_postprocess_distributed(self):
@@ -997,7 +997,7 @@ class TestDistributed(unittest.TestCase):
 
         dist.barrier()
         if self.rank == 0:
-            print(f"✓ Dispatch postprocess distributed")
+            print("✓ Dispatch postprocess distributed")
 
     @unittest.skipIf(not DEEP_EP_AVAILABLE, "Requires real deep_ep library")
     def test_dispatch_expert_assignment_distributed(self):
@@ -1109,7 +1109,7 @@ class TestDistributed(unittest.TestCase):
 
         dist.barrier()
         if self.rank == 0:
-            print(f"✓ Combine preprocess distributed")
+            print("✓ Combine preprocess distributed")
 
     @unittest.skipIf(not DEEP_EP_AVAILABLE, "Requires real deep_ep library")
     def test_token_combine_distributed(self):
@@ -1165,7 +1165,7 @@ class TestDistributed(unittest.TestCase):
 
         dist.barrier()
         if self.rank == 0:
-            print(f"✓ Token combine distributed communication")
+            print("✓ Token combine distributed communication")
 
     @unittest.skipIf(not DEEP_EP_AVAILABLE, "Requires real deep_ep library")
     def test_combine_handle_cleanup_distributed(self):
@@ -1221,7 +1221,7 @@ class TestDistributed(unittest.TestCase):
 
         dist.barrier()
         if self.rank == 0:
-            print(f"✓ Combine handle cleanup distributed")
+            print("✓ Combine handle cleanup distributed")
 
     # ============================================================================
     # End-to-End Distributed Tests
@@ -1296,7 +1296,7 @@ class TestDistributed(unittest.TestCase):
 
         dist.barrier()
         if self.rank == 0:
-            print(f"✓ End-to-end dispatch-combine distributed")
+            print("✓ End-to-end dispatch-combine distributed")
 
     @unittest.skipIf(not DEEP_EP_AVAILABLE, "Requires real deep_ep library")
     def test_end_to_end_preserves_dtype_distributed(self):
@@ -1358,7 +1358,7 @@ class TestDistributed(unittest.TestCase):
             dist.barrier()
 
         if self.rank == 0:
-            print(f"✓ Dtype preservation distributed (float32, float16)")
+            print("✓ Dtype preservation distributed (float32, float16)")
 
     @unittest.skipIf(not DEEP_EP_AVAILABLE, "Requires real deep_ep library")
     def test_end_to_end_multiple_iterations_distributed(self):
@@ -1413,7 +1413,7 @@ class TestDistributed(unittest.TestCase):
 
         dist.barrier()
         if self.rank == 0:
-            print(f"✓ Multiple iterations distributed (3 iterations)")
+            print("✓ Multiple iterations distributed (3 iterations)")
 
     def test_data_consistency_across_ranks(self):
         """Test that same input produces consistent routing across ranks."""
@@ -1452,7 +1452,7 @@ class TestDistributed(unittest.TestCase):
 
         dist.barrier()
         if self.rank == 0:
-            print(f"✓ Data consistency across ranks")
+            print("✓ Data consistency across ranks")
 
 
 # ============================================================================

@@ -6,7 +6,6 @@ Analyzes PyTorch memory snapshots and generates visualizations + detailed report
 Auto-generates timestamped output directories for each run.
 """
 
-import os
 import pickle
 import sys
 from collections import defaultdict
@@ -318,11 +317,11 @@ def generate_visualizations(analysis, output_dir):
     plt.close()
 
     print(f"\n✅ Generated 5 visualization files in: {output_dir}/")
-    print(f"   1. memory_overview.png       - Overall memory usage breakdown")
-    print(f"   2. top_consumers.png         - Top 30 memory allocations")
-    print(f"   3. category_breakdown.png    - Memory by category")
-    print(f"   4. size_distribution.png     - Allocation size histograms")
-    print(f"   5. memory_efficiency.png     - Efficiency metrics")
+    print("   1. memory_overview.png       - Overall memory usage breakdown")
+    print("   2. top_consumers.png         - Top 30 memory allocations")
+    print("   3. category_breakdown.png    - Memory by category")
+    print("   4. size_distribution.png     - Allocation size histograms")
+    print("   5. memory_efficiency.png     - Efficiency metrics")
 
 
 def generate_text_report(analysis, output_file):
@@ -340,8 +339,8 @@ def generate_text_report(analysis, output_file):
         cache = reserved - allocated
         efficiency = (allocated / reserved) * 100
 
-        f.write(f"SUMMARY\n")
-        f.write(f"-" * 80 + "\n")
+        f.write("SUMMARY\n")
+        f.write("-" * 80 + "\n")
         f.write(f"Total Reserved:      {format_size(reserved):>15s}  (100.0%)\n")
         f.write(
             f"Total Allocated:     {format_size(allocated):>15s}  ({efficiency:.1f}%)\n"
@@ -350,34 +349,34 @@ def generate_text_report(analysis, output_file):
             f"Cache/Wasted:        {format_size(cache):>15s}  ({cache/reserved*100:.1f}%)\n"
         )
         f.write(f"Memory Efficiency:   {efficiency:.1f}%\n")
-        f.write(f"\n")
+        f.write("\n")
 
         # Category breakdown
-        f.write(f"MEMORY BY CATEGORY\n")
-        f.write(f"-" * 80 + "\n")
+        f.write("MEMORY BY CATEGORY\n")
+        f.write("-" * 80 + "\n")
         for cat, size in sorted(
             analysis["category_totals"].items(), key=lambda x: x[1], reverse=True
         ):
             pct = size / allocated * 100
             f.write(f"  {cat:30s}: {format_size(size):>15s}  ({pct:.1f}%)\n")
-        f.write(f"\n")
+        f.write("\n")
 
         # Top allocations
-        f.write(f"TOP 50 ALLOCATIONS\n")
-        f.write(f"-" * 80 + "\n")
+        f.write("TOP 50 ALLOCATIONS\n")
+        f.write("-" * 80 + "\n")
         f.write(f"{'Rank':<6} {'Size':<15} {'Category':<25}\n")
-        f.write(f"-" * 80 + "\n")
+        f.write("-" * 80 + "\n")
 
         for i, block in enumerate(analysis["active_blocks"][:50], 1):
             size = block["size"]
             category = get_tensor_category(block.get("frames", []))
             f.write(f"{i:<6} {format_size(size):<15} {category:<25}\n")
 
-        f.write(f"\n")
+        f.write("\n")
 
         # Fragmentation analysis
-        f.write(f"FRAGMENTATION ANALYSIS\n")
-        f.write(f"-" * 80 + "\n")
+        f.write("FRAGMENTATION ANALYSIS\n")
+        f.write("-" * 80 + "\n")
 
         num_active = len(analysis["active_blocks"])
         num_inactive = len(analysis["inactive_blocks"])
@@ -396,28 +395,28 @@ def generate_text_report(analysis, output_file):
                 f"  Total wasted: {format_size(sum(b['size'] for b in large_inactive))}\n"
             )
 
-        f.write(f"\n")
+        f.write("\n")
 
         # Recommendations
-        f.write(f"OPTIMIZATION RECOMMENDATIONS\n")
-        f.write(f"-" * 80 + "\n")
+        f.write("OPTIMIZATION RECOMMENDATIONS\n")
+        f.write("-" * 80 + "\n")
 
         if efficiency >= 98:
             f.write(f"✅ Excellent memory efficiency ({efficiency:.1f}%)\n")
-            f.write(f"   No significant optimizations needed.\n")
+            f.write("   No significant optimizations needed.\n")
         elif efficiency >= 95:
             f.write(f"✓ Good memory efficiency ({efficiency:.1f}%)\n")
-            f.write(f"   Minor optimizations possible.\n")
+            f.write("   Minor optimizations possible.\n")
         else:
             f.write(f"⚠️  Memory efficiency could be improved ({efficiency:.1f}%)\n")
             f.write(f"   - Cache overhead: {format_size(cache)}\n")
-            f.write(f"   - Consider more aggressive allocator settings\n")
+            f.write("   - Consider more aggressive allocator settings\n")
 
         if cache / reserved > 0.1:
-            f.write(f"\n⚠️  High cache overhead (>10%)\n")
-            f.write(f"   - Try: PYTORCH_ALLOC_CONF with lower max_split_size_mb\n")
+            f.write("\n⚠️  High cache overhead (>10%)\n")
+            f.write("   - Try: PYTORCH_ALLOC_CONF with lower max_split_size_mb\n")
 
-        f.write(f"\n" + "=" * 80 + "\n")
+        f.write("\n" + "=" * 80 + "\n")
 
     print(f"✅ Generated detailed report: {output_file}")
 
@@ -527,7 +526,7 @@ def main():
     print(f"Loading snapshot: {snapshot_path}")
     analysis = load_and_analyze_snapshot(snapshot_path)
 
-    print(f"\nAnalysis complete!")
+    print("\nAnalysis complete!")
     print(f"  Total Reserved:  {format_size(analysis['total_reserved'])}")
     print(f"  Total Allocated: {format_size(analysis['total_allocated'])}")
     print(
@@ -538,10 +537,10 @@ def main():
     )
 
     # Generate outputs
-    print(f"\nGenerating visualizations...")
+    print("\nGenerating visualizations...")
     generate_visualizations(analysis, output_dir)
 
-    print(f"\nGenerating text report...")
+    print("\nGenerating text report...")
     generate_text_report(analysis, output_dir / "analysis_report.txt")
 
     print(f"\n{'='*80}")

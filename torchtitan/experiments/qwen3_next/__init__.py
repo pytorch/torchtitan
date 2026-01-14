@@ -50,7 +50,7 @@ qwen3next_configs = {
             route_norm=True,
             route_scale=1.0,
             score_before_experts=False,
-            shared_gate=True
+            shared_gate=True,
         ),
     ),
     "20B_A1B": Qwen3NextModelArgs(

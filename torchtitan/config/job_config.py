@@ -538,8 +538,9 @@ class DeepEP:
     """
     Whether to synchronize the DeepEP communication stream with the default CUDA stream.
 
-    DeepEP uses a separate communication stream for dispatch/combine operations. Without sync (default): Better performance, but may cause race conditions if the
-    DeepEP version doesn't properly synchronize streams internally.
+    DeepEP uses a separate communication stream for dispatch/combine operations.
+    Without sync (default): Better performance, but may cause race conditions if
+    the DeepEP version doesn't properly synchronize streams internally.
 
     With sync enabled: Adds explicit CUDA event-based synchronization between the
     comm stream and default stream after each dispatch/combine operation.

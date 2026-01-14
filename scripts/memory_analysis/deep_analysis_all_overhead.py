@@ -10,8 +10,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import torch
-
 
 def format_bytes(bytes_val):
     """Format bytes to human readable."""
@@ -196,7 +194,7 @@ def print_top_allocations(stats: Dict, title: str, top_n: int = 50):
 def compare_snapshots(deepep_stats: Dict, baseline_stats: Dict):
     """Compare DeepEP vs Baseline and show differences."""
     print(f"\n{'='*80}")
-    print(f"MEMORY OVERHEAD COMPARISON: DeepEP vs Baseline")
+    print("MEMORY OVERHEAD COMPARISON: DeepEP vs Baseline")
     print(f"{'='*80}")
 
     # Get all categories
@@ -206,7 +204,7 @@ def compare_snapshots(deepep_stats: Dict, baseline_stats: Dict):
     baseline_total = sum(cat["total_bytes"] for cat in baseline_stats.values())
     total_overhead = deepep_total - baseline_total
 
-    print(f"\nTotal Active Memory:")
+    print("\nTotal Active Memory:")
     print(f"  DeepEP:    {format_bytes(deepep_total)}")
     print(f"  Baseline:  {format_bytes(baseline_total)}")
     print(
@@ -241,7 +239,7 @@ def compare_snapshots(deepep_stats: Dict, baseline_stats: Dict):
 def analyze_deepep_specific_allocations(deepep_stats: Dict):
     """Analyze DeepEP-specific memory allocations in detail."""
     print(f"\n{'='*80}")
-    print(f"DEEPEP-SPECIFIC ALLOCATIONS (Detailed)")
+    print("DEEPEP-SPECIFIC ALLOCATIONS (Detailed)")
     print(f"{'='*80}")
 
     deepep_cat = deepep_stats.get("DeepEP Overhead", {})
@@ -256,7 +254,7 @@ def analyze_deepep_specific_allocations(deepep_stats: Dict):
     print(f"\nTotal DeepEP Overhead: {format_bytes(total)}")
     print(f"Number of allocations: {len(allocs)}")
 
-    print(f"\nTop 20 DeepEP Allocations:")
+    print("\nTop 20 DeepEP Allocations:")
     print(f"{'Rank':<6} {'Size':<15} {'Location':<70}")
     print("-" * 100)
 
@@ -267,7 +265,7 @@ def analyze_deepep_specific_allocations(deepep_stats: Dict):
 
         # Print stack trace for top 5
         if i <= 5:
-            print(f"       Stack trace:")
+            print("       Stack trace:")
             for frame in alloc["frames"][:5]:
                 print(f"         {frame['filename']}:{frame['line']} {frame['name']}")
             print()
