@@ -10,7 +10,7 @@ import json
 import os
 import time
 from datetime import timedelta
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import torch
 import torch.distributed.checkpoint.stateful
@@ -34,6 +34,72 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
+
+
+class PrefetchedDataloader:
+    """Prefetches batches using a separate CUDA stream to overlap with compute."""
+
+    def __init__(
+        self,
+        data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]],
+        device_type: str,
+        post_dataloading_process_fn: Callable[
+            [dict[str, torch.Tensor], torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]],
+        ],
+    ):
+        self.data_iterator = iter(data_iterable)
+        self.device_type = device_type
+        self.post_dataloading_process_fn = post_dataloading_process_fn
+        # pyrefly: ignore [missing-attribute]
+        self.stream = utils.device_module.Stream()
+        self.next_batch: (
+            tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]
+            | None
+        ) = None
+
+    def preload(self) -> None:
+        """Prefetch next batch under self.stream."""
+        try:
+            batch = next(self.data_iterator)
+        except StopIteration:
+            self.next_batch = None
+            return
+
+        input_dict, labels = batch
+
+        # pyrefly: ignore [missing-attribute]
+        with utils.device_module.stream(self.stream):
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(self.device_type, non_blocking=True)
+            labels = labels.to(self.device_type, non_blocking=True)
+
+            (
+                inputs,
+                labels,
+                extra_inputs,
+                extra_kwargs,
+            ) = self.post_dataloading_process_fn(input_dict, labels)
+
+        self.next_batch = (inputs, labels, extra_inputs, extra_kwargs)
+
+    def __iter__(self):
+        self.preload()
+        return self
+
+    def __next__(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+        # pyrefly: ignore [missing-attribute]
+        utils.device_module.current_stream().wait_stream(self.stream)
+
+        if self.next_batch is None:
+            raise StopIteration
+
+        current_batch = self.next_batch
+        self.preload()
+        return current_batch
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
@@ -389,34 +455,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
-        """Returns an iterator that processes batches from the data iterator."""
+    ) -> Iterable[
+        tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]
+    ]:
+        """Returns an iterator that prefetches and processes batches with stream overlap."""
         device_type = utils.device_type
-        data_iterator = iter(data_iterable)
 
-        while True:
-            data_load_start = time.perf_counter()
-            try:
-                batch = next(data_iterator)
-            except StopIteration as ex:
-                # If data runs out during gradient accumulation, that
-                # entire step will not be executed.
-                raise DataloaderExhaustedError() from ex
-            input_dict, labels = batch
-            ntokens_batch = labels.numel()
-            self.ntokens_seen += ntokens_batch
-            self.metrics_processor.ntokens_since_last_log += ntokens_batch
-            self.metrics_processor.data_loading_times.append(
-                time.perf_counter() - data_load_start
-            )
+        prefetched_dataloader = PrefetchedDataloader(
+            data_iterable,
+            device_type,
+            self.post_dataloading_process,
+        )
 
-            # Move tensors to the appropriate device
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(device_type)
-            labels = labels.to(device_type)
+        try:
+            for inputs, labels, extra_inputs, extra_kwargs in prefetched_dataloader:
+                ntokens_batch = labels.numel()
+                self.ntokens_seen += ntokens_batch
+                self.metrics_processor.ntokens_since_last_log += ntokens_batch
 
-            yield input_dict, labels
+                yield inputs, labels, extra_inputs, extra_kwargs
+        except StopIteration as ex:
+            raise DataloaderExhaustedError() from ex
 
     def post_dataloading_process(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
@@ -473,14 +532,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         return inputs, labels, extra_inputs, extra_kwargs
 
     def forward_backward_step(
-        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+        self,
+        inputs: torch.Tensor,
+        labels: torch.Tensor,
+        extra_inputs: dict[str, torch.Tensor],
+        extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-            input_dict, labels
-        )
         # apply context parallelism if cp is enabled
         # ensure CP handles the separate freqs_cis buffer for each pp stage
         cp_buffers: list[torch.Tensor] = [inputs, labels]
@@ -549,7 +609,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         return loss
 
     def train_step(
-        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+        self,
+        data_iterator: Iterable[
+            tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]
+        ],
     ):
         self.optimizers.zero_grad()
         # Save the current step learning rate for logging
@@ -564,8 +627,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # entire step will not be executed.
         for _microbatch in range(self.gradient_accumulation_steps):
             # pyrefly: ignore [no-matching-overload]
-            input_dict, labels = next(data_iterator)
-            loss = self.forward_backward_step(input_dict, labels)
+            inputs, labels, extra_inputs, extra_kwargs = next(data_iterator)
+            loss = self.forward_backward_step(
+                inputs, labels, extra_inputs, extra_kwargs
+            )
             accumulated_losses.append(loss.detach())
 
         grad_norm = dist_utils.clip_grad_norm_(
