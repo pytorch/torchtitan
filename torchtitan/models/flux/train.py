@@ -4,8 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Iterable
+
 import torch
 
+from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 
@@ -17,6 +20,7 @@ from torchtitan.models.flux.utils import (
     pack_latents,
     preprocess_data,
 )
+from torchtitan.tools import utils
 from torchtitan.train import main, Trainer
 
 
@@ -90,6 +94,95 @@ class FluxTrainer(Trainer):
                 clip_encoder=self.clip_encoder,
             )
 
+    # pyrefly: ignore [bad-override]
+    def batch_generator(
+        self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        """FluxTrainer uses a simple batch generator without prefetching."""
+        device_type = utils.device_type
+        data_iterator = iter(data_iterable)
+
+        while True:
+            try:
+                batch = next(data_iterator)
+            except StopIteration as ex:
+                raise DataloaderExhaustedError() from ex
+            input_dict, labels = batch
+            ntokens_batch = labels.numel()
+            self.ntokens_seen += ntokens_batch
+            self.metrics_processor.ntokens_since_last_log += ntokens_batch
+
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(device_type)
+            labels = labels.to(device_type)
+
+            yield input_dict, labels
+
+    # pyrefly: ignore [bad-override]
+    def train_step(
+        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ):
+        self.optimizers.zero_grad()
+        lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+
+        parallel_dims = self.parallel_dims
+
+        accumulated_losses = []
+        for _microbatch in range(self.gradient_accumulation_steps):
+            # pyrefly: ignore [no-matching-overload]
+            input_dict, labels = next(data_iterator)
+            loss = self.forward_backward_step(input_dict, labels)
+            accumulated_losses.append(loss.detach())
+
+        grad_norm = dist_utils.clip_grad_norm_(
+            [p for m in self.model_parts for p in m.parameters()],
+            self.job_config.training.max_norm,
+            foreach=True,
+            pp_mesh=parallel_dims.get_optional_mesh("pp"),
+            ep_enabled=parallel_dims.ep_enabled,
+        )
+        self.checkpointer.maybe_wait_for_staging()
+        self.optimizers.step()
+        self.lr_schedulers.step()
+
+        loss = torch.sum(torch.stack(accumulated_losses))
+
+        if not self.metrics_processor.should_log(self.step):
+            return
+
+        if parallel_dims.dp_cp_enabled:
+            loss = loss.detach()
+            ft_pg = self.ft_manager.loss_sync_pg
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
+            global_avg_loss, global_max_loss, global_ntokens_seen = (
+                dist_utils.dist_mean(loss, loss_mesh, ft_pg),
+                dist_utils.dist_max(loss, loss_mesh, ft_pg),
+                dist_utils.dist_sum(
+                    torch.tensor(
+                        self.ntokens_seen, dtype=torch.int64, device=self.device
+                    ),
+                    loss_mesh,
+                    ft_pg,
+                ),
+            )
+        else:
+            global_avg_loss = global_max_loss = loss.detach().item()
+            global_ntokens_seen = self.ntokens_seen
+
+        extra_metrics = {
+            "n_tokens_seen": global_ntokens_seen,
+            "lr": lr,
+        }
+        self.metrics_processor.log(
+            self.step,
+            global_avg_loss,
+            global_max_loss,
+            grad_norm.item(),
+            extra_metrics=extra_metrics,
+        )
+
+    # pyrefly: ignore [bad-param-name-override]
     def forward_backward_step(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> torch.Tensor:

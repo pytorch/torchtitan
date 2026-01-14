@@ -423,8 +423,14 @@ class MetricsProcessor:
         tflops = self.num_flops_per_token * tps / 1e12
 
         time_end_to_end = time_delta / self.job_config.metrics.log_freq
-        time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
-        time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
+        if self.data_loading_times:
+            time_data_loading = sum(self.data_loading_times) / len(
+                self.data_loading_times
+            )
+            time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
+        else:
+            time_data_loading = 0.0
+            time_data_loading_pct = 0.0
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
 
