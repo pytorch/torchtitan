@@ -260,14 +260,13 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
     )
     # PP computation ========================================================
     _hook_coordinator.enable_coordination(num_layers=min_num_layers)
-    main_stream = torch.accelerator.current_stream(device_module)
+    main_stream = torch.accelerator.current_stream(device_type)
 
     # Shared container for exception from backward thread
     def run_backward():
         # pyrefly: ignore [missing-attribute]
         schedule._assert_unsharded(backward_stage)
         # Set the backward thread to use the same stream as forward
-        # pyrefly: ignore [missing-attribute]
         device_module.set_stream(main_stream)
         with record_function(
             f"backward_stage_{backward_stage_index}_mb_{backward_mb_index}"
