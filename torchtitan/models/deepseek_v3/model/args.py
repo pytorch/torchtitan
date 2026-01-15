@@ -86,6 +86,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.0
+    mscale_all_dim: float = 1.0  # When mscale == mscale_all_dim, effective mscale is 1.0
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
