@@ -492,20 +492,48 @@ class CheckpointManager:
         elif from_multipart:
             with open(os.path.join(checkpoint_id, "meta_data.json"), "r") as f:
                 multipart_meta = json.load(f)
-            for dcp_iter, keys_in_file in multipart_meta.items():
+            num_parts = len(multipart_meta)
+
+            # DCP uses collectives, so we must load sequentially across ranks.
+            # But we can overlap load_state_dict with the next dcp.load using a background thread.
+            load_state_dict_queue = queue.Queue(maxsize=2)
+            load_error = None
+
+            def load_state_dict_worker():
+                nonlocal load_error
+                try:
+                    while True:
+                        item = load_state_dict_queue.get()
+                        if item is None:  # Sentinel to stop
+                            break
+                        subset, idx = item
+                        logger.info(f"Applying shard {idx}/{num_parts} to model ({len(subset)} tensors)")
+                        state_dict.update(subset)
+                        if MODEL in self.states:
+                            self.states[MODEL].load_state_dict(subset)
+                        if self.has_ref_model and REF_MODEL in self.states:
+                            self.states[REF_MODEL].load_state_dict(subset)
+                except Exception as e:
+                    load_error = e
+
+            worker = threading.Thread(target=load_state_dict_worker, daemon=True)
+            worker.start()
+
+            for index, (dcp_iter, keys_in_file) in enumerate(multipart_meta.items()):
                 state_dict_subset = {key: state_dict[key] for key in keys_in_file}
+                logger.info(f"Loading {len(keys_in_file)} tensors from multipart checkpoint shard {index+1}/{num_parts}")
                 dcp.load(
                     state_dict_subset,
                     checkpoint_id=os.path.join(checkpoint_id, str(dcp_iter)),
                 )
-                # reassign state_dict_subset to state_dict
-                state_dict.update(state_dict_subset)
-                if MODEL in self.states:
-                    self.states[MODEL].load_state_dict(state_dict_subset)
-                if self.has_ref_model:
-                    dcp.load(ref_state_dict, checkpoint_id=checkpoint_id)
-                    if REF_MODEL in self.states:
-                        self.states[REF_MODEL].load_state_dict(state_dict_subset)
+                # Queue for background load_state_dict (blocks if previous one still processing)
+                load_state_dict_queue.put((state_dict_subset, index + 1))
+
+            # Signal worker to stop and wait for it
+            load_state_dict_queue.put(None)
+            worker.join()
+            if load_error is not None:
+                raise load_error
 
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
