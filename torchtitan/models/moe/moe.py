@@ -690,9 +690,9 @@ class TokenChoiceTopKRouter(nn.Module):
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32)).to(x.dtype)
+            scores = torch.sigmoid(scores.to(torch.float32))
         elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1).to(x.dtype)
+            scores = F.softmax(scores.to(torch.float32), dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
@@ -736,7 +736,7 @@ class TokenChoiceTopKRouter(nn.Module):
         temp_weight = torch.empty_like(self.gate.weight)
         nn.init.normal_(temp_weight, mean=0.0, std=1.0)
 
-        row_norms = torch.linalg.norm(temp_weight, dim=1, keepdim=True)
+        row_norms = torch.norm(temp_weight, dim=1, keepdim=True)  # noqa: TOR101
         temp_weight = temp_weight / row_norms.clamp(min=1e-6)  # avoid divide by 0
 
         std = moe_init_std(self.gate.weight.shape[1], n_layers)
