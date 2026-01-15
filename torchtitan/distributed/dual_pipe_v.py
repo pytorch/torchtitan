@@ -125,7 +125,7 @@ class HookCoordinator:
 
             # Reset barrier
             self._execution_barrier = threading.Barrier(2)
-            self._num_layers = num_layers
+            self._num_layers = num_layers  # pyrefly: ignore[bad-assignment]
 
     def disable_coordination(self):
         self._coordination_enabled = False
@@ -301,10 +301,12 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
         output = forward_stage.forward_one_chunk(
             # pyrefly: ignore [bad-argument-type]
             forward_mb_index,
-            # pyrefly: ignore [bad-index, unsupported-operation]
-            arg_mbs[forward_mb_index],
-            # pyrefly: ignore [bad-index, unsupported-operation]
-            kwarg_mbs[forward_mb_index],
+            arg_mbs[
+                forward_mb_index
+            ],  # pyrefly: ignore[index-error, unsupported-operation]
+            kwarg_mbs[
+                forward_mb_index
+            ],  # pyrefly: ignore[index-error, unsupported-operation]
         )
         schedule._maybe_compute_loss(
             forward_stage, output, ctx.target_mbs, forward_mb_index

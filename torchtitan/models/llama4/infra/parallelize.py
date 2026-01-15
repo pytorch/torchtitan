@@ -597,6 +597,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
     torch._C._dynamo.eval_frame._set_lru_cache(False)
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
+        # pyrefly: ignore[missing-attribute]
         if transformer_block.moe_enabled:
             # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
             # So we must weave compile wrappers around those FSDP hooks to
