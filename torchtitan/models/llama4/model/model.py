@@ -11,7 +11,9 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks
 
+from torchtitan.components.peft.lora import lora_or_linear, per_layer_config
 from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.config.job_config import PEFT
 from torchtitan.models.attention import (
     create_attention_mask,
     FlexAttentionWrapper,
@@ -159,6 +161,7 @@ class Attention(nn.Module):
 
     Args:
         model_args (TransformerModelArgs): Model configuration arguments.
+        peft_config (PEFT): PEFT configuration.
 
     Attributes:
         n_kv_heads (int): Number of key and value heads.
@@ -175,6 +178,7 @@ class Attention(nn.Module):
     def __init__(
         self,
         model_args: TransformerModelArgs,
+        peft_config: PEFT,
         use_rope: bool = True,
         fixed_block_size: int | None = None,
     ):
@@ -188,13 +192,29 @@ class Attention(nn.Module):
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
 
-        self.wq = nn.Linear(
-            model_args.dim, model_args.n_heads * self.head_dim, bias=False
+        self.wq = lora_or_linear(
+            model_args.dim,
+            model_args.n_heads * self.head_dim,
+            bias=False,
+            peft_config=peft_config,
         )
-        self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(
-            model_args.n_heads * self.head_dim, model_args.dim, bias=False
+        self.wk = lora_or_linear(
+            model_args.dim,
+            self.n_kv_heads * self.head_dim,
+            bias=False,
+            peft_config=peft_config,
+        )
+        self.wv = lora_or_linear(
+            model_args.dim,
+            self.n_kv_heads * self.head_dim,
+            bias=False,
+            peft_config=peft_config,
+        )
+        self.wo = lora_or_linear(
+            model_args.n_heads * self.head_dim,
+            model_args.dim,
+            bias=False,
+            peft_config=peft_config,
         )
 
         # We could not get use_rope and fixed_block_size from model_args as these two
@@ -276,6 +296,7 @@ class FeedForward(nn.Module):
         hidden_dim (int): Hidden dimension of the feedforward layer.
         multiple_of (int): Value to ensure hidden dimension is a multiple of this value.
         ffn_dim_multiplier (float | None): Custom multiplier for hidden dimension. Defaults to None.
+        peft_config (PEFT): PEFT configuration.
 
     Attributes:
         w1 (Linear): Linear transformation for the first layer.
@@ -290,6 +311,7 @@ class FeedForward(nn.Module):
         hidden_dim: int,
         multiple_of: int,
         ffn_dim_multiplier: float | None,
+        peft_config: PEFT | None = None,
     ):
         super().__init__()
         hidden_dim = int(2 * hidden_dim / 3)
@@ -298,9 +320,9 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w1 = lora_or_linear(dim, hidden_dim, bias=False, peft_config=peft_config)
+        self.w2 = lora_or_linear(hidden_dim, dim, bias=False, peft_config=peft_config)
+        self.w3 = lora_or_linear(dim, hidden_dim, bias=False, peft_config=peft_config)
 
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
@@ -318,6 +340,7 @@ class TransformerBlock(nn.Module):
     Args:
         layer_id (int): Identifier for the layer.
         model_args (TransformerModelArgs): Model configuration arguments.
+        peft_config (PEFT): PEFT configuration.
 
     Attributes:
         n_heads (int): Number of attention heads.
@@ -335,10 +358,12 @@ class TransformerBlock(nn.Module):
         self,
         layer_id: int,
         model_args: TransformerModelArgs,
+        peft_config: PEFT,
     ):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
+        self.n_layers = model_args.n_layers
 
         attn_use_rope = True
         fixed_attn_block_size = None
@@ -349,7 +374,9 @@ class TransformerBlock(nn.Module):
                 attn_use_rope = False
             else:
                 fixed_attn_block_size = model_args.fixed_attn_block_size
-        self.attention = Attention(model_args, attn_use_rope, fixed_attn_block_size)
+        self.attention = Attention(
+            model_args, peft_config, attn_use_rope, fixed_attn_block_size
+        )
 
         # use MoE layer for every interleave_moe_layer_step FFN layers
         moe_args = model_args.moe_args
@@ -370,17 +397,24 @@ class TransformerBlock(nn.Module):
                 hidden_dim = int(hidden_dim / hidden_dim_denom)
             hidden_dim += -hidden_dim % model_args.multiple_of
 
-            self.moe = MoE(moe_args, dim=dim, hidden_dim=hidden_dim)
+            self.moe = MoE(
+                moe_args, dim=dim, hidden_dim=hidden_dim, peft_config=peft_config
+            )
         else:
             self.feed_forward = FeedForward(
                 dim=model_args.dim,
                 hidden_dim=4 * model_args.dim,
                 multiple_of=model_args.multiple_of,
                 ffn_dim_multiplier=model_args.ffn_dim_multiplier,
+                peft_config=peft_config,
             )
 
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+
+        if peft_config.enable_peft and not peft_config.lora_train_norm:
+            self.attention_norm.weight.requires_grad = False
+            self.ffn_norm.weight.requires_grad = False
 
         if model_args.depth_init:
             self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -416,7 +450,7 @@ class TransformerBlock(nn.Module):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            self.moe.init_weights(self.weight_init_std, buffer_device)
+            self.moe.init_weights(self.weight_init_std, buffer_device, self.n_layers)
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 
@@ -427,6 +461,7 @@ class Transformer(nn.Module, ModelProtocol):
 
     Args:
         model_args (TransformerModelArgs): Model configuration arguments.
+        peft_config (PEFT): PEFT configuration.
 
     Attributes:
         model_args (TransformerModelArgs): Model configuration arguments.
@@ -440,7 +475,7 @@ class Transformer(nn.Module, ModelProtocol):
 
     """
 
-    def __init__(self, model_args: TransformerModelArgs):
+    def __init__(self, model_args: TransformerModelArgs, peft_config: PEFT):
         super().__init__()
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
@@ -454,9 +489,27 @@ class Transformer(nn.Module, ModelProtocol):
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
+            peft_config_layer = per_layer_config(peft_config, layer_id)
+            self.layers[str(layer_id)] = TransformerBlock(
+                layer_id, model_args, peft_config_layer
+            )
+            if (
+                peft_config.enable_peft
+                and (peft_config.layers_to_train is not None)
+                and (layer_id not in peft_config.layers_to_train)
+            ):
+                # We have layers that are not in the layers_to_train list, so we need to freeze them.
+                for param in self.layers[str(layer_id)].parameters():
+                    param.requires_grad = False
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+        if peft_config.enable_peft:
+            if not peft_config.train_embeddings:
+                self.tok_embeddings.weight.requires_grad = False
+            if not peft_config.train_output_layer:
+                self.output.weight.requires_grad = False
+                if not peft_config.lora_train_norm:
+                    self.norm.weight.requires_grad = False
 
     def init_weights(
         self,

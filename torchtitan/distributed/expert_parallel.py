@@ -54,6 +54,44 @@ class TensorParallel(ParallelStyle):
             "w3",
             nn.Parameter(distribute_tensor(module.w3, device_mesh, [Shard(1)])),
         )  # Column-wise sharding
+        # check for lora parameters
+        if hasattr(module, "w1_lora_a"):
+            module.register_parameter(
+                "w1_lora_a",
+                nn.Parameter(
+                    distribute_tensor(module.w1_lora_a, device_mesh, [Replicate()])
+                ),
+            )
+            module.register_parameter(
+                "w1_lora_b",
+                nn.Parameter(
+                    distribute_tensor(module.w1_lora_b, device_mesh, [Shard(1)])
+                ),
+            )
+            module.register_parameter(
+                "w2_lora_a",
+                nn.Parameter(
+                    distribute_tensor(module.w2_lora_a, device_mesh, [Shard(2)])
+                ),
+            )
+            module.register_parameter(
+                "w2_lora_b",
+                nn.Parameter(
+                    distribute_tensor(module.w2_lora_b, device_mesh, [Replicate()])
+                ),
+            )
+            module.register_parameter(
+                "w3_lora_a",
+                nn.Parameter(
+                    distribute_tensor(module.w3_lora_a, device_mesh, [Replicate()])
+                ),
+            )
+            module.register_parameter(
+                "w3_lora_b",
+                nn.Parameter(
+                    distribute_tensor(module.w3_lora_b, device_mesh, [Shard(1)])
+                ),
+            )
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(

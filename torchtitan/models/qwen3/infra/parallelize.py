@@ -13,13 +13,11 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
-    RowwiseParallel,
     SequenceParallel,
 )
-
+from torchtitan.components.peft.lora import LoraColwiseParallel, LoraRowwiseParallel
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -196,12 +194,12 @@ def apply_non_moe_tp(
         model,
         tp_mesh,
         {
-            "tok_embeddings": RowwiseParallel(
+            "tok_embeddings": LoraRowwiseParallel(
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
             ),
             "norm": SequenceParallel(),
-            "output": ColwiseParallel(
+            "output": LoraColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
@@ -226,8 +224,8 @@ def apply_non_moe_tp(
         )
     else:
         rowwise_parallel, colwise_parallel, prepare_module_input = (
-            RowwiseParallel,
-            ColwiseParallel,
+            LoraRowwiseParallel,
+            LoraColwiseParallel,
             PrepareModuleInput,
         )
 

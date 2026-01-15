@@ -40,6 +40,36 @@ class Job:
 
 
 @dataclass
+class PEFT:
+    enable_peft: bool = False
+    """Whether to enable PEFT"""
+
+    use_lora: bool = False
+    """Whether to use PEFT with LoRA"""
+
+    layers_to_train: List[int] | None = None
+    """List of layers to train for PEFT"""
+
+    lora_rank: int = 8
+    """Rank of the low-rank approximation for PEFT"""
+
+    lora_alpha: float = 1.0
+    """Alpha parameter for the PEFT"""
+
+    lora_dropout: float = 0.0
+    """Dropout probability for the PEFT"""
+
+    lora_train_norm: bool = False
+    """Whether to train the normalization layers while using LoRA"""
+
+    train_embeddings: bool = False
+    """Whether to train the embeddings for PEFT"""
+
+    train_output_layer: bool = False
+    """Whether to train the output layer for PEFT"""
+
+
+@dataclass
 class Profiling:
     enable_profiling: bool = False
     """Whether to enable pytorch profile"""
@@ -1220,6 +1250,7 @@ class JobConfig:
     validation: Validation = field(default_factory=Validation)
     grpo: GRPO = field(default_factory=GRPO)
     debug: Debug = field(default_factory=Debug)
+    peft: PEFT = field(default_factory=PEFT)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
