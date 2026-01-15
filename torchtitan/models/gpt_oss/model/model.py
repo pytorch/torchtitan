@@ -19,13 +19,80 @@ from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
 from .args import GptOssModelArgs
-from .moe import GptOssMoE
+from .moe import GptOssDeepEPMoE, GptOssMoE
+
+
+import math
+
+
+def _find_yarn_correction_dim(
+    num_rotations: float, dim: int, base: float, max_seq_len: int
+) -> float:
+    """YaRN helper: Find correction dimension."""
+    return (
+        dim
+        * math.log(max_seq_len / (num_rotations * 2 * math.pi))
+        / (2 * math.log(base))
+    )
+
+
+def _find_yarn_correction_range(
+    low_rot: float, high_rot: float, dim: int, base: float, max_seq_len: int
+) -> tuple[int, int]:
+    """YaRN helper: Find correction range."""
+    low = math.floor(_find_yarn_correction_dim(low_rot, dim, base, max_seq_len))
+    high = math.ceil(_find_yarn_correction_dim(high_rot, dim, base, max_seq_len))
+    return max(low, 0), min(high, dim - 1)
+
+
+def _linear_ramp_factor(min_val: float, max_val: float, dim: int) -> torch.Tensor:
+    """YaRN helper: Linear ramp for smooth interpolation."""
+    if min_val == max_val:
+        max_val += 0.001
+    linear_func = (torch.arange(dim, dtype=torch.float32) - min_val) / (max_val - min_val)
+    ramp_func = torch.clamp(linear_func, 0, 1)
+    return ramp_func
 
 
 def precompute_rope_cache(
-    dim: int, max_seq_len: int, base: float = 1_000_000.0
+    dim: int,
+    max_seq_len: int,
+    base: float = 1_000_000.0,
+    rope_factor: float = 1.0,
+    beta_fast: int = 32,
+    beta_slow: int = 1,
+    original_seq_len: int = 4096,
 ) -> torch.Tensor:
+    """
+    Precompute RoPE cache with optional YaRN scaling for extended context.
+
+    YaRN (Yet another RoPE extensioN) allows extending context length beyond
+    the original training length by applying frequency scaling corrections.
+
+    Args:
+        dim: Embedding dimension (head_dim)
+        max_seq_len: Maximum sequence length to precompute
+        base: RoPE theta base (default: 1M, GPT-OSS uses 150k)
+        rope_factor: YaRN scaling factor (GPT-OSS uses 32)
+        beta_fast: Fast frequency correction threshold (GPT-OSS uses 32)
+        beta_slow: Slow frequency correction threshold (GPT-OSS uses 1)
+        original_seq_len: Original pretrained context length (GPT-OSS uses 4096)
+
+    Returns:
+        Precomputed RoPE cache: [max_seq_len, dim * 2] (cos and sin concatenated)
+    """
+    # Basic RoPE frequency calculation
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+
+    # YaRN scaling for extended context (applied when seqlen > original_seq_len)
+    if max_seq_len > original_seq_len and rope_factor > 1.0:
+        low, high = _find_yarn_correction_range(
+            beta_fast, beta_slow, dim, base, original_seq_len
+        )
+        smooth = 1 - _linear_ramp_factor(low, high, dim // 2)
+        # Apply YaRN interpolation: blend scaled and unscaled frequencies
+        freqs = freqs / rope_factor * (1 - smooth) + freqs * smooth
+
     # Create position indexes `[0, 1, ..., max_seq_len - 1]`
     t = torch.arange(max_seq_len, dtype=freqs.dtype, device=freqs.device)
 
@@ -195,10 +262,40 @@ class Attention(nn.Module):
             xq, xk, xv, block_mask=attention_masks, scale=None, return_lse=True
         )
 
-        # Apply attention sink rescaling: rescale by σ(lse - w[h])
-        # This is mathematically equivalent to concatenating learnable sink weights
-        sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
-        output = output * sink_scale.to(output.dtype)
+        # Apply attention sinks using LSE renormalization
+        # This is mathematically equivalent to HuggingFace's implementation which:
+        # 1. Concatenates sink logits to attention logits
+        # 2. Applies softmax over K+1 positions (including sink)
+        # 3. Drops the sink position after softmax
+        #
+        # The sink "absorbs" probability mass, effectively down-weighting attention.
+        # Using LSE: log(sum(exp(scores)) + exp(sink)) = logsumexp([lse, sink])
+        # Renorm factor: exp(old_lse - new_lse) redistributes probability correctly.
+        #
+        # Reference: HuggingFace transformers/integrations/flex_attention.py lines 309-322
+        batch_size, num_heads, seq_len_q, head_dim = output.shape
+
+        # Expand dimensions for broadcasting
+        lse_expanded = lse.unsqueeze(-1)  # [B, H, Q, 1]
+        sinks_expanded = self.sinks.view(1, -1, 1, 1).expand(
+            batch_size, num_heads, seq_len_q, 1
+        )
+
+        # Compute combined LSE that includes the sink
+        combined_lse = torch.logsumexp(
+            torch.cat([lse_expanded, sinks_expanded], dim=-1), dim=-1, keepdim=True
+        )
+
+        # Renormalization factor: exp(old_lse - new_lse)
+        # Clamp for numerical stability: when lse and sink have very different magnitudes,
+        # the difference can be extreme. Clamping to [-20, 0] ensures:
+        # - exp(-20) ≈ 2e-9 (effectively zero, sink absorbed almost all attention)
+        # - exp(0) = 1 (no change, sink has no effect)
+        # The upper bound is 0 because combined_lse >= lse_expanded by definition of logsumexp.
+        renorm_factor = torch.exp(
+            torch.clamp(lse_expanded - combined_lse, min=-20.0, max=0.0)
+        )
+        output = output * renorm_factor.to(output.dtype)
 
         output = output.transpose(1, 2).contiguous()  # (B, H, T, D) -> (B, T, H, D)
 
@@ -223,9 +320,15 @@ class TransformerBlock(nn.Module):
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
-        self.moe = GptOssMoE(
-            model_args, dim=model_args.dim, hidden_dim=model_args.moe_inter_dim
-        )
+        # Use DeepEP MoE variant when configured
+        if model_args.moe_impl == "deepep":
+            self.moe = GptOssDeepEPMoE(
+                model_args, dim=model_args.dim, hidden_dim=model_args.moe_inter_dim
+            )
+        else:
+            self.moe = GptOssMoE(
+                model_args, dim=model_args.dim, hidden_dim=model_args.moe_inter_dim
+            )
         self.moe_enabled = True  # for composability with load balancing
 
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -326,6 +429,10 @@ class GptOssModel(nn.Module, ModelProtocol):
             self.model_args.head_dim,
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
+            self.model_args.rope_factor,
+            self.model_args.beta_fast,
+            self.model_args.beta_slow,
+            self.model_args.original_seq_len,
         )
 
     def get_attention_masks(

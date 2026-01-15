@@ -118,6 +118,7 @@ deepseekv3_args = {
             route_norm=False,
             route_scale=16.0,
             score_before_experts=False,
+            topk_before_score=False,  # DeepSeek-V3 uses Score-then-TopK with node-limited routing
         ),
         q_lora_rank=1536,
         kv_lora_rank=512,
@@ -145,6 +146,7 @@ deepseekv3_args = {
             route_norm=True,
             route_scale=2.5,
             score_before_experts=False,
+            topk_before_score=False,  # DeepSeek-V3 uses Score-then-TopK with node-limited routing
         ),
         q_lora_rank=1536,
         kv_lora_rank=512,

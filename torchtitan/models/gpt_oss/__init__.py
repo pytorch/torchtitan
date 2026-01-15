@@ -22,6 +22,7 @@ __all__ = [
     "parallelize_gptoss",
     "GptOssModelArgs",
     "GptOssModel",
+    "GptOssStateDictAdapter",
     "gptoss_configs",
 ]
 
@@ -54,8 +55,11 @@ gptoss_configs = {
             score_before_experts=False,
             top_k=4,
             use_grouped_mm=True,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,  # Disabled for fine-tuning - not part of official GPT-OSS model
+            use_expert_bias=True,  # GPT-OSS models have learned expert biases (gate_up_proj_bias, down_proj_bias)
+            use_router_bias=True,  # GPT-OSS models have learned router bias
         ),
+        attn_mask_type="causal",  # Preserve sample boundaries using EOS token
     ),
     "120b": GptOssModelArgs(
         n_layers=36,
@@ -66,10 +70,13 @@ gptoss_configs = {
             route_norm=False,
             route_scale=1.0,
             score_before_experts=False,
-            top_k=4,
+            top_k=8,  # 120B uses top-8 routing (vs top-4 for 20B)
             use_grouped_mm=True,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,  # Disabled for fine-tuning - not part of official GPT-OSS model
+            use_expert_bias=True,  # GPT-OSS models have learned expert biases (gate_up_proj_bias, down_proj_bias)
+            use_router_bias=True,  # GPT-OSS models have learned router bias
         ),
+        attn_mask_type="causal",  # Preserve sample boundaries using EOS token
     ),
 }
 
