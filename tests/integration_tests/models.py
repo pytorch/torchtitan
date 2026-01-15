@@ -79,6 +79,23 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "deepseek_v3_pp+fsdp+tp+ep+etp",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name deepseek_v3",
+                    "--model.flavor debugmodel_flex_attn",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--activation_checkpoint.mode 'selective'",
+                    "--activation_checkpoint.selective_ac_option 'op'",
+                ],
+            ],
+            "DeepSeek V3 Flex+PP+FSDP+EP+SACOP",
+            "deepseek_v3_flex+pp+fsdp+ep+sacop",
+            ngpu=8,
+        ),
         # Integration Test Cases for Qwen3 dense and MoE model
         OverrideDefinitions(
             [
