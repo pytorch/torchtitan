@@ -108,8 +108,8 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     # Basic RoPE frequency calculation
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
 
-    # YaRN scaling for extended context. YaRN is used to extend the context length after pre-training.
-    if seqlen > args.original_seq_len:
+    # YaRN scaling for extended context
+    if factor != 1.0:
         low, high = find_correction_range(
             beta_fast, beta_slow, dim, base, args.original_seq_len
         )
@@ -186,9 +186,17 @@ class Attention(nn.Module):
         self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
         self.softmax_scale = self.qk_head_dim**-0.5
 
-        if model_args.max_seq_len > model_args.original_seq_len:
-            mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
-            self.softmax_scale = self.softmax_scale * mscale * mscale
+        # Apply mscale for YaRN using the ratio formula from HuggingFace:
+        # effective_mscale = yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim)
+        # When mscale == mscale_all_dim (e.g., both 1.0 for Kimi K2), they cancel out → effective_mscale = 1.0
+        if model_args.rope_factor != 1.0:
+            def yarn_get_mscale(scale: float, mscale: float) -> float:
+                return 0.1 * mscale * math.log(scale) + 1.0
+
+            mscale_numerator = yarn_get_mscale(model_args.rope_factor, model_args.mscale)
+            mscale_denominator = yarn_get_mscale(model_args.rope_factor, model_args.mscale_all_dim)
+            effective_mscale = mscale_numerator / mscale_denominator
+            self.softmax_scale = self.softmax_scale * effective_mscale * effective_mscale
 
         self.use_flex_attn = model_args.use_flex_attn
         if self.use_flex_attn:
@@ -244,6 +252,7 @@ class Attention(nn.Module):
         )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
         kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        # TODO: self.n_heads is global count; with TP this should this be k_nope.size(2) for local heads?
         k = torch.cat(
             [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
         )  # (bsz, seqlen, n_heads, qk_head_dim)
