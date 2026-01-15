@@ -380,7 +380,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Calculate global batch size in tokens
         global_batch_size_tokens = global_batch_size * job_config.training.seq_len
-        total_tokens_all_dp_ranks = global_batch_size_tokens * dp_degree
 
         # TODO(phuc): move to appropriate place
         def format_tokens(num):
@@ -395,7 +394,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         logger.info(
             "[Global training] "
             f"global batch size {global_batch_size} ({format_tokens(global_batch_size_tokens)} tokens), "
-            f"total tokens across all DP ranks per step {format_tokens(total_tokens_all_dp_ranks)}"
         )
 
     def init_distributed(self) -> ParallelDims:
