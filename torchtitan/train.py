@@ -666,23 +666,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context(optional_context_parallel_ctx):
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    #print(f"[DEBUG forward_backward] Starting forward pass...", flush=True)
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                    #print(f"[DEBUG forward_backward] Forward pass done, computing loss...", flush=True)
                     loss = self.loss_fn(pred, labels)
-                    #print(f"[DEBUG forward_backward] Loss computed: {loss.item()}", flush=True)
                 # need to free pred before bwd to avoid peaking memory
                 del pred
-                #print(f"[DEBUG forward_backward] Starting backward pass...", flush=True)
                 loss.backward()
-                #print(f"[DEBUG forward_backward] Backward pass done", flush=True)
 
         return loss
 
     def train_step(
         self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
-        #print(f"[DEBUG train_step] Starting train_step, step={self.step}", flush=True)
         self.optimizers.zero_grad()
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
@@ -695,15 +689,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # If data runs out during gradient accumulation, that
         # entire step will not be executed.
         for _microbatch in range(self.gradient_accumulation_steps):
-            #print(f"[DEBUG train_step] Getting data for microbatch {_microbatch}...", flush=True)
             input_dict, labels = next(data_iterator)
-            #print(f"[DEBUG train_step] Running forward_backward_step...", flush=True)
             loss = self.forward_backward_step(input_dict, labels)
-            #print(f"[DEBUG train_step] forward_backward_step returned", flush=True)
             accumulated_losses.append(loss.detach())
-            #print(f"[DEBUG train_step] loss appended to accumulated_losses", flush=True)
 
-        #print(f"[DEBUG train_step] Clipping grad norm...", flush=True)
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
@@ -713,11 +702,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ),
             ep_enabled=parallel_dims.ep_enabled,
         )
-        #print(f"[DEBUG train_step] Grad norm clipped: {grad_norm}", flush=True)
         self.checkpointer.maybe_wait_for_staging()
-        #print(f"[DEBUG train_step] Running optimizer.step()...", flush=True)
         self.optimizers.step()
-        #print(f"[DEBUG train_step] Optimizer step done", flush=True)
         self.lr_schedulers.step()
 
         # Reduce the data collected over gradient accumulation steps.
