@@ -99,3 +99,52 @@ def indices_padding_wrapper(func: Callable) -> Callable:
         return out
 
     return wrapper
+
+
+def indices_padding_wrapper_lora(func: Callable) -> Callable:
+    """
+    In order to use torch._grouped_mm, we need to make sure the number of
+    tokens each expert gets is a multiple of TOKEN_GROUP_ALIGN_SIZE_M. The
+    generate_permute_indices kernel also helps achieve this via padding,
+    without incurring synchronization between device and host.
+    """
+
+    def wrapper(
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        w3: torch.Tensor,
+        w1_lora_a: torch.Tensor,
+        w1_lora_b: torch.Tensor,
+        w2_lora_a: torch.Tensor,
+        w2_lora_b: torch.Tensor,
+        w3_lora_a: torch.Tensor,
+        w3_lora_b: torch.Tensor,
+        x: torch.Tensor,
+        num_tokens_per_expert: torch.Tensor,
+    ) -> torch.Tensor:
+        num_local_experts = w1.shape[0]
+        ep_degree = num_tokens_per_expert.shape[0] // num_local_experts
+
+        input_shape, x, permuted_indices, num_tokens_per_expert = _permute(
+            x, num_tokens_per_expert, ep_degree, num_local_experts
+        )
+
+        out = func(
+            w1,
+            w2,
+            w3,
+            w1_lora_a,
+            w1_lora_b,
+            w2_lora_a,
+            w2_lora_b,
+            w3_lora_a,
+            w3_lora_b,
+            x,
+            num_tokens_per_expert,
+        )
+
+        out = _unpermute(out, input_shape, permuted_indices)
+
+        return out
+
+    return wrapper
