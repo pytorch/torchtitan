@@ -138,27 +138,54 @@ class MuonOptimizersContainer(OptimizersContainer):
     ) -> Optional[Union[DeviceMesh, ProcessGroup]]:
         """Setup device mesh based on parallel dimensions.
 
-        For Muon, we use the dp_shard mesh for distributed communication.
+        For Muon, we need to return a 1D mesh that spans all data-parallel ranks.
+        With FSDP+EP, the mesh might have dimension names like:
+        - dp_shard, dp_shard_cp (standard FSDP)
+        - dp_shard_mod_ep, dp_shard_in_ep (FSDP with Expert Parallelism)
+        - dp_replicate (HSDP replication dimension)
+
+        Since Muon's distributed_mesh is only used for batching (determining world_size),
+        and each DTensor already has its own mesh for actual communication, we just need
+        to find ANY data-parallel mesh to get the correct world_size for batching.
         """
         distributed_mesh = None
 
         # Get the world mesh from parallel_dims
         world_mesh = parallel_dims.world_mesh
+        mesh_dim_names = world_mesh.mesh_dim_names
 
-        # For Muon, we primarily use the dp_shard mesh for distributed operations
+        # Try to find a suitable 1D submesh for data parallelism
+        # Priority: dp_shard_cp > dp_shard > dp_shard_mod_ep > dp_shard_in_ep > dp_replicate > dp
+
+        # First, try standard FSDP mesh names
         if parallel_dims.dp_shard_enabled:
-            # Extract the dp_shard submesh
-            if "dp_shard" in world_mesh.mesh_dim_names:
-                distributed_mesh = world_mesh["dp_shard"]
-            elif "dp_shard_cp" in world_mesh.mesh_dim_names:
-                # If context parallel is enabled, use dp_shard_cp mesh
+            if "dp_shard_cp" in mesh_dim_names:
                 distributed_mesh = world_mesh["dp_shard_cp"]
-        elif parallel_dims.dp_replicate_enabled:
-            # If no dp_shard but dp_replicate is enabled, use that
-            if "dp_replicate" in world_mesh.mesh_dim_names:
+            elif "dp_shard" in mesh_dim_names:
+                distributed_mesh = world_mesh["dp_shard"]
+        # If not found, try EP-specific mesh names (FSDP + Expert Parallelism)
+        # These have names like dp_shard_mod_ep (sharding modulo EP) and dp_shard_in_ep (within EP)
+        if distributed_mesh is None:
+            for dim_name in mesh_dim_names:
+                if "dp_shard" in dim_name:
+                    distributed_mesh = world_mesh[dim_name]
+                    break
+
+        # Fall back to dp_replicate or dp
+        if distributed_mesh is None and parallel_dims.dp_replicate_enabled:
+            if "dp_replicate" in mesh_dim_names:
                 distributed_mesh = world_mesh["dp_replicate"]
-            elif "dp" in world_mesh.mesh_dim_names:
+            elif "dp" in mesh_dim_names:
                 distributed_mesh = world_mesh["dp"]
+
+        # Last resort: if we still don't have a mesh but have dp_shard enabled,
+        # flatten the entire world mesh to get all DP ranks
+        if distributed_mesh is None and parallel_dims.dp_shard_enabled:
+            # For multi-dimensional meshes like [dp_shard_mod_ep, dp_shard_in_ep],
+            # we can flatten to get all ranks. But DeviceMesh doesn't support direct flattening,
+            # so we just use the first dimension as a fallback.
+            if len(mesh_dim_names) > 0:
+                distributed_mesh = world_mesh[mesh_dim_names[0]]
 
         return distributed_mesh
 
