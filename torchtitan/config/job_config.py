@@ -291,6 +291,55 @@ class LRScheduler:
 
 
 @dataclass
+class DataStage:
+    """Configuration for a single training data stage.
+
+    Each stage can override data-related settings from the Training config.
+    Fields set to None or empty will inherit from the base Training config.
+
+    Example TOML:
+        [[training.data_stages]]
+        name = "general"
+        start_step = 0
+        end_step = 100000
+        dataset_weights = [0.7, 0.2, 0.1]
+    """
+
+    name: str = "stage_0"
+    """Name of the stage for logging and identification"""
+
+    start_step: int = 0
+    """Step at which this stage starts (inclusive)"""
+
+    end_step: int | None = None
+    """Step at which this stage ends (exclusive). None means until training end or next stage"""
+
+    # Data config fields - mirror Training config, None means inherit
+    dataset: str | None = None
+    """Dataset to use. None = inherit from training config"""
+
+    dataset_path: str | None = None
+    """Path to the dataset. None = inherit from training config"""
+
+    dataset_type: Literal[
+        "huggingface", "nanoset", "preprocessed", "packed_memmap"
+    ] | None = None
+    """Type of dataset. None = inherit from training config"""
+
+    dataset_folders: list[str] = field(default_factory=list)
+    """List of folders for Nanoset. Empty = inherit from training config"""
+
+    dataset_weights: list[float] | None = None
+    """Weights for blending datasets. None = inherit from training config"""
+
+    dataset_random_seed: int | None = None
+    """Random seed for this stage. None = inherit from training config"""
+
+    seq_len: int | None = None
+    """Sequence length for this stage. None = inherit from training config"""
+
+
+@dataclass
 class Training:
     dataset: str = "c4_test"
     """Dataset to use"""
@@ -370,6 +419,28 @@ class Training:
     detect if there is a reference cycle that includes a CUDA Tensor.
     Note that you may want to lower the training steps to avoid generating too
     many temporary files.
+    """
+
+    data_stages: list[DataStage] = field(default_factory=list)
+    """
+    List of data stages for multi-stage training. Each stage can override
+    dataset configs (dataset, weights, seq_len, etc.) for a range of training steps.
+    If empty, single-stage training is used with the base Training config.
+
+    Stages are defined by start_step and end_step. The stage active at any step
+    is determined by which stage's range contains that step.
+
+    Example TOML:
+        [[training.data_stages]]
+        name = "general"
+        start_step = 0
+        end_step = 100000
+        dataset_weights = [0.7, 0.2, 0.1]
+
+        [[training.data_stages]]
+        name = "reasoning"
+        start_step = 100000
+        dataset_weights = [0.3, 0.35, 0.35]
     """
 
 
