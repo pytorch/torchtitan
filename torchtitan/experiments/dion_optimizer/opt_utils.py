@@ -65,13 +65,21 @@ def create_param_batches(
 ) -> Generator[List[Tensor], None, None]:
     """
     Batch parameters into groups of size `batch_size`.
-    Tensors in each batch will have identical shape, sharding, and dtype.
+    Tensors in each batch will have identical shape, sharding, dtype, AND device mesh.
     """
-    # Group parameters by shape, sharding, and dtype
+    # Group parameters by shape, sharding, dtype, AND mesh structure
+    # Different meshes (e.g., dp_shard_cp vs dp_shard_mod_ep) must be in different batches
     groups = defaultdict(list)
     for p in params:
-        sharding = p.placements if isinstance(p, DTensor) else None
-        groups[(p.shape, sharding, p.dtype)].append(p)
+        if isinstance(p, DTensor):
+            sharding = p.placements
+            # Include mesh dim names and sizes in the key to distinguish different mesh structures
+            mesh = p.device_mesh
+            mesh_key = (mesh.mesh_dim_names, tuple(mesh.size(i) for i in range(mesh.ndim)))
+        else:
+            sharding = None
+            mesh_key = None
+        groups[(p.shape, sharding, p.dtype, mesh_key)].append(p)
 
     # Create batches from grouped parameters
     for group in groups.values():

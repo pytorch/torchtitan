@@ -4,7 +4,7 @@
 import math
 
 from itertools import chain
-from typing import Callable, Generator, List, Optional, Tuple, Union
+from typing import Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -117,7 +117,13 @@ class Muon(Optimizer):
         else:
             raise TypeError(
                 f"Invalid distributed_mesh type: {type(distributed_mesh)}. Expected DeviceMesh or ProcessGroup."
+
             )
+
+        # Cache for process groups by world_size to ensure consistency across all ranks
+        # When different DTensors have different meshes but same world_size, we use the
+        # FIRST process group we encounter to avoid NCCL communicator mismatches
+        self._pg_cache: Dict[int, ProcessGroup] = {}
         self._distributed_mesh = distributed_mesh
 
         # Newton-Schulz configuration
@@ -178,15 +184,43 @@ class Muon(Optimizer):
             else:
                 raise ValueError(f"Unknown algorithm: {algo}")
 
-        # Summary logging is handled in parameter classification
-
         # Create async tasks for each algorithm
-        muon_tasks = self._create_muon_tasks(muon_groups)
-        lion_tasks = self._create_lion_tasks(lion_groups)
-        adamw_tasks = self._create_adamw_tasks(adamw_groups)
+        # IMPORTANT: Process tasks grouped by process group to avoid deadlocks
+        # with FSDP+EP where different params use different process groups
+        muon_task_lists = self._create_muon_tasks_by_process_group(muon_groups)
+        lion_tasks = list(self._create_lion_tasks(lion_groups))
+        adamw_tasks = list(self._create_adamw_tasks(adamw_groups))
 
-        all_tasks = chain(muon_tasks, lion_tasks, adamw_tasks)
-        runtime = AsyncRuntime(all_tasks, max_concurrent_tasks=3)
+        # Run muon tasks grouped by process group to ensure all ranks in a
+        # process group execute the same collectives at the same time.
+        #
+        # With FSDP+EP, different params use different process groups:
+        # - Expert params use dp_mod_ep process group (local, no collectives)
+        # - Non-expert params use dp_shard_cp process group (all_to_all)
+        #
+    
+        pg_ids = list(muon_task_lists.keys())
+        for pg_id in pg_ids:
+            generators = muon_task_lists[pg_id]
+
+            # Barrier BEFORE each group that uses collectives (not "local")
+            # This ensures all ranks are synchronized before anyone starts this group
+            if pg_id != "local":
+                world_pg = dist.group.WORLD
+                dist.barrier(group=world_pg)
+
+            # Run generators sequentially
+            for gen in generators:
+                yield_count = 0
+                for _ in gen:
+                    yield_count += 1
+
+        # Final barrier after all muon tasks to ensure all ranks are done
+        dist.barrier(group=dist.group.WORLD)
+
+        # Run lion and adamw tasks (no collectives needed)
+        other_tasks = chain(lion_tasks, adamw_tasks)
+        runtime = AsyncRuntime(other_tasks, max_concurrent_tasks=3)
         runtime.run()
 
         return loss
@@ -223,14 +257,90 @@ class Muon(Optimizer):
                 state["variance"] = torch.zeros_like(param)
         return state
 
-    def _create_muon_tasks(
+    def _get_process_group_id(
+        self, process_group: Optional[ProcessGroup], is_local: bool
+    ) -> str:
+        """
+        Get a unique identifier for a process group.
+
+        This is used to group tasks that use the same process group together,
+        ensuring all ranks in that group execute the same collectives at the same time.
+
+        Args:
+            process_group: The process group (or None for single GPU)
+            is_local: If True, this is a local-only operation with no collectives
+
+        Returns:
+            A string identifier that is consistent across all ranks in the same group
+        """
+        if is_local:
+            # Local operations don't need synchronization, use a special ID
+            return "local"
+
+        if process_group is None:
+            # Single GPU case
+            return "single_gpu"
+
+        # Use the process group's name or create an ID from its properties
+        # The key insight: ranks in the same PG will have the same world_size
+        # but different ranks. We use world_size to identify the PG type.
+        pg_world_size = dist.get_world_size(process_group)
+        # Also include a hash of the group to distinguish groups with same size
+        # but different membership (e.g., multiple dp_mod_ep groups)
+        try:
+            pg_name = process_group.group_name if hasattr(process_group, 'group_name') else ""
+        except Exception:
+            pg_name = ""
+
+        return f"pg_ws{pg_world_size}_{pg_name}"
+
+    def _create_muon_tasks_by_process_group(
         self,
         param_groups: List[dict],
         algo_name: str = "muon",
-    ) -> Generator["AsyncTask", None, None]:
+    ) -> Dict[str, List[Generator]]:
+        """
+        Create Muon task generators grouped by process group to avoid deadlocks.
+
+        With FSDP+EP, different parameters may use different process groups:
+        - Expert params use dp_mod_ep process group
+        - Non-expert params use dp_shard_cp process group
+
+        To avoid deadlocks, we must ensure all ranks in a process group
+        execute the same collectives at the same time. This method groups
+        task generators by their process group so they can be executed together.
+
+        IMPORTANT: We return generators, NOT AsyncTasks! AsyncTask.__init__ calls
+        run() immediately, which starts executing the task before we're ready.
+        We defer AsyncTask creation until execution time to ensure all ranks are
+        synchronized when they start each collective operation.
+
+        Returns:
+            Dict mapping process group identifier to list of task generators
+        """
+        from collections import defaultdict
+
+        # Group task GENERATORS by their process group (not AsyncTasks!)
+        # This is critical: AsyncTask.__init__ runs the generator immediately,
+        # which would start all-to-all before all ranks are ready.
+        generators_by_pg: Dict[str, List[Generator]] = defaultdict(list)
+
+        for generator, pg_id in self._create_muon_generators_with_pg_id(param_groups, algo_name):
+            generators_by_pg[pg_id].append(generator)
+
+        # Sort by pg_id to ensure consistent ordering across all ranks
+        return dict(sorted(generators_by_pg.items()))
+
+    def _create_muon_generators_with_pg_id(
+        self,
+        param_groups: List[dict],
+        algo_name: str = "muon",
+    ) -> Generator[Tuple[Generator, str], None, None]:
         """
         Helper function to create batches of Muon matrices and generate
-        AsyncTask objects so we can process multiple batches concurrently.
+        (generator, process_group_id) tuples for grouping by process group.
+
+        IMPORTANT: Yields generators, NOT AsyncTasks, to defer execution.
         """
         for group in param_groups:
             assert group["algorithm"] == algo_name
@@ -252,6 +362,7 @@ class Muon(Optimizer):
             adjust_lr = group["adjust_lr"]
 
             # Create batches of parameters of size self._world_size
+            batch_idx = 0
             for params in create_param_batches(
                 group_params, batch_size=self._world_size
             ):
@@ -259,59 +370,139 @@ class Muon(Optimizer):
                 states = [self._get_or_initialize_state(p, algo_name) for p in params]
                 momentums = [s["momentum"] for s in states]
 
-                # Get sharding dimension
                 sharded_mesh_dim = None
                 sharded_tensor_dim = None
-                if isinstance(params[0], DTensor):
-                    if not isinstance(self._distributed_mesh, DeviceMesh):
-                        raise RuntimeError(
-                            "Must create optimizer with DeviceMesh if using DTensor parameters."
-                        )
+                batch_process_group = self._process_group
+                batch_world_size = self._world_size
+                batch_device_rank = self._device_rank
+                is_batch_dim_sharded = False  # True for EP-style sharding on batch dimension
 
+                if isinstance(params[0], DTensor):
+                    param_mesh = params[0].device_mesh
+                    param_ndim = params[0].ndim
                     # Find the sharded placement and get its mesh and tensor dimensions
                     # Skip any Shard() placements on size-1 mesh dimension = Replicate()
                     shard_placements = [
                         (i, p)
                         for i, p in enumerate(params[0].placements)
-                        if p.is_shard() and params[0].device_mesh.size(i) > 1
+                        if p.is_shard() and param_mesh.size(i) > 1
                     ]
-                    if len(shard_placements) == 1:
-                        sharded_mesh_dim = shard_placements[0][0]
-                        sharded_tensor_dim = shard_placements[0][1].dim
-                    elif len(shard_placements) > 1:
-                        raise NotImplementedError(
-                            "Muon does not support parameters with multiple sharded dimensions."
-                        )
 
-                    # Check that the sharded mesh dimension matches optimizer's device mesh
-                    if (
-                        sharded_mesh_dim is not None
-                        and params[0].device_mesh.get_group(sharded_mesh_dim)
-                        != self._process_group
-                    ):
-                        raise RuntimeError(
-                            f"Got DTensor sharded over mesh dimension {sharded_mesh_dim} different from the optimizer's device mesh"
-                        )
+                    # Separate batch dimension sharding from matrix dimension sharding
+                    # For 3D+ tensors, dims 0..ndim-3 are batch dims, ndim-2..ndim-1 are matrix dims
+                    # For 2D tensors, both dims are matrix dims
+                    batch_dim_shards = []  # e.g., EP expert dimension
+                    matrix_dim_shards = []  # e.g., FSDP or TP on matrix dims
+                    for mesh_dim, placement in shard_placements:
+                        tensor_dim = placement.dim
+                        if param_ndim >= 3 and tensor_dim < param_ndim - 2:
+                            batch_dim_shards.append((mesh_dim, placement))
+                        else:
+                            matrix_dim_shards.append((mesh_dim, placement))
 
-                yield AsyncTask(
-                    muon_update_batch_async(
-                        X=pad_batch(params, self._world_size),
-                        G=pad_batch(gradients, self._world_size),
-                        M=pad_batch(momentums, self._world_size),
-                        lr=lr,
-                        momentum=mu,
-                        weight_decay=weight_decay,
-                        epsilon=epsilon,
-                        nesterov=nesterov,
-                        flatten=flatten,
-                        adjust_lr=adjust_lr,
-                        device_rank=self._device_rank,
-                        world_size=self._world_size,
-                        shard_dim=sharded_tensor_dim,
-                        process_group=self._process_group,
-                        newton_schulz_func=self._newton_schulz_func,
+                    # Handle batch dimension sharding (EP style)
+                    if batch_dim_shards and not matrix_dim_shards:
+                        # Only batch dimension sharding - process locally, no communication
+                        is_batch_dim_sharded = True
+                        #print(f"[Muon DEBUG]   -> batch_dim_sharded path (no communication)", flush=True)
+                    elif matrix_dim_shards:
+                        # Has matrix dimension sharding - needs all-to-all communication
+                        if len(matrix_dim_shards) > 1:
+                            raise NotImplementedError(
+                                "Muon does not support parameters with multiple matrix-dimension shards."
+                            )
+                        sharded_mesh_dim = matrix_dim_shards[0][0]
+                        sharded_tensor_dim = matrix_dim_shards[0][1].dim
+
+                        raw_process_group = param_mesh.get_group(sharded_mesh_dim)
+                        batch_world_size = dist.get_world_size(raw_process_group)
+                        batch_process_group = raw_process_group
+
+                        batch_device_rank = dist.get_rank(batch_process_group)
+
+                        # Check for uneven sharding - if the tensor size isn't divisible by world_size,
+                        # we can't use collective communication (all_gather requires equal-sized chunks)
+                        global_size_on_shard_dim = params[0].size(sharded_tensor_dim)
+                        if global_size_on_shard_dim % batch_world_size != 0:
+                            # Treat as batch_dim_sharded - process locally without collectives
+                            is_batch_dim_sharded = True
+                            sharded_mesh_dim = None
+                            sharded_tensor_dim = None
+                            # Reset process group to default (won't be used for collectives)
+                            batch_process_group = self._process_group
+                            batch_world_size = self._world_size
+                            batch_device_rank = self._device_rank
+
+                # Create process group identifier for grouping tasks
+                # Tasks with the same pg_id must be executed together to avoid deadlocks
+                pg_id = self._get_process_group_id(batch_process_group, is_batch_dim_sharded)
+
+                if is_batch_dim_sharded:
+                    yield (
+                        muon_update_batch_dim_sharded_async(
+                            X=to_local(params),
+                            G=to_local(gradients),
+                            M=to_local(momentums),
+                            lr=lr,
+                            momentum=mu,
+                            weight_decay=weight_decay,
+                            epsilon=epsilon,
+                            nesterov=nesterov,
+                            flatten=flatten,
+                            adjust_lr=adjust_lr,
+                            newton_schulz_func=self._newton_schulz_func,
+                        ),
+                        pg_id,
                     )
-                )
+                elif batch_world_size != self._world_size:
+                    for i in range(0, len(params), batch_world_size):
+                        sub_params = params[i : i + batch_world_size]
+                        sub_gradients = gradients[i : i + batch_world_size]
+                        sub_momentums = momentums[i : i + batch_world_size]
+
+                        yield (
+                            muon_update_batch_async(
+                                X=pad_batch(sub_params, batch_world_size),
+                                G=pad_batch(sub_gradients, batch_world_size),
+                                M=pad_batch(sub_momentums, batch_world_size),
+                                lr=lr,
+                                momentum=mu,
+                                weight_decay=weight_decay,
+                                epsilon=epsilon,
+                                nesterov=nesterov,
+                                flatten=flatten,
+                                adjust_lr=adjust_lr,
+                                device_rank=batch_device_rank,
+                                world_size=batch_world_size,
+                                shard_dim=sharded_tensor_dim,
+                                process_group=batch_process_group,
+                                newton_schulz_func=self._newton_schulz_func,
+                            ),
+                            pg_id,
+                        )
+                else:
+                    # Standard case: matrix dimension sharding with matching world size, or non-sharded
+                    yield (
+                        muon_update_batch_async(
+                            X=pad_batch(params, batch_world_size),
+                            G=pad_batch(gradients, batch_world_size),
+                            M=pad_batch(momentums, batch_world_size),
+                            lr=lr,
+                            momentum=mu,
+                            weight_decay=weight_decay,
+                            epsilon=epsilon,
+                            nesterov=nesterov,
+                            flatten=flatten,
+                            adjust_lr=adjust_lr,
+                            device_rank=batch_device_rank,
+                            world_size=batch_world_size,
+                            shard_dim=sharded_tensor_dim,
+                            process_group=batch_process_group,
+                            newton_schulz_func=self._newton_schulz_func,
+                        ),
+                        pg_id,
+                    )
+                batch_idx += 1
 
     def _create_lion_tasks(
         self,
@@ -394,6 +585,73 @@ class Muon(Optimizer):
             )
 
 
+def muon_update_batch_dim_sharded_async(
+    X: List[Tensor],  # Model weights (modified in place) - local tensors
+    G: List[Tensor],  # Gradient - local tensors
+    M: List[Tensor],  # Momentum buffer (modified in place) - local tensors
+    lr: Tensor,  # Learning rate (scalar tensor)
+    momentum: Tensor,  # Momentum factor (scalar tensor)
+    weight_decay: Tensor,  # Weight decay (scalar tensor)
+    epsilon: Tensor,  # Epsilon (scalar tensor)
+    nesterov: bool,  # Whether to use Nesterov momentum
+    flatten: bool,  # Whether to flatten 3D+ tensors to 2D
+    adjust_lr: Optional[str],  # How to adjust learning rate
+    newton_schulz_func: Optional[Callable] = None,
+) -> Generator[None, None, None]:
+    """
+    Muon update for batch-dimension sharded tensors (e.g., EP expert weights).
+
+    When tensors are sharded on a batch dimension (like the expert dimension in MoE),
+    each GPU owns different data (different experts) rather than shards of the same data.
+    In this case:
+    - Newton-Schulz orthogonalization treats the batch dimension independently
+    - Each GPU processes ALL its local params without any communication
+    - This is mathematically equivalent to orthogonalizing each expert's weights independently
+
+    This function processes all params locally without all-to-all or all-gather.
+    """
+    U = muon_update_pre_orthogonalize(
+        G=G,
+        M=M,
+        momentum=momentum,
+        nesterov=nesterov,
+    )
+
+    # Orthogonalize each tensor locally
+    # Newton-Schulz treats dim 0 as batch, processing each slice independently
+    U = [
+        muon_update_newton_schulz(
+            u,
+            newton_schulz_func=newton_schulz_func,
+            flatten=flatten,
+            epsilon=epsilon,
+        )
+        for u in U
+    ]
+
+    # Compute scaled learning rate
+    # Use the first tensor's shape (they should all be the same shape within a batch)
+    if adjust_lr is None:
+        adjusted_lr = lr
+    elif adjust_lr == "spectral_norm":
+        adjusted_lr = adjust_lr_spectral_norm(lr, X[0].shape)
+    elif adjust_lr == "rms_norm":
+        adjusted_lr = adjust_lr_rms_norm(lr, X[0].shape)
+    else:
+        raise ValueError(f"Unknown adjust_lr value: {adjust_lr}")
+
+    # Update model parameters with orthogonalized output
+    muon_update_post_orthogonalize(
+        X=X,
+        U=U,
+        base_lr=lr,
+        adjusted_lr=adjusted_lr,
+        weight_decay=weight_decay,
+    )
+
+    yield  # Single yield to make this a generator
+
+
 def muon_update_batch_async(
     X: List[Tensor],  # Model weights (modified in place)
     G: List[Tensor],  # Gradient
@@ -421,8 +679,6 @@ def muon_update_batch_async(
     assert len(X) == len(M)
     assert len(X) == world_size
 
-    # Expert parameter tracking (logging removed for cleaner output)
-
     # Update momentum and compute the inputs for orthogonalization
     U = muon_update_pre_orthogonalize(
         G=to_local(G),
@@ -440,19 +696,41 @@ def muon_update_batch_async(
         ), "process_group must be provided for sharded DTensors"
         assert isinstance(X[0], DTensor), "X should contain DTensors"
         assert not isinstance(U[0], DTensor), "U should contain local shards"
+
+        # Debug: print full tensor info before the divisibility check
+        x0 = X[0]
+        x0_mesh = x0.device_mesh
+        x0_mesh_sizes = {name: x0_mesh.size(i) for i, name in enumerate(x0_mesh.mesh_dim_names)}
+
         assert (
             X[0].size(shard_dim) % world_size == 0
-        ), f"Shard dimension {shard_dim} size {X[0].size(shard_dim)} is not divisible by world size {world_size}."
+        ), f"Shard dimension {shard_dim} size {X[0].size(shard_dim)} is not divisible by world size {world_size}. " \
+           f"Tensor info: global_shape={tuple(X[0].shape)}, local_shape={X[0].to_local().shape}, " \
+           f"mesh={X[0].device_mesh.mesh_dim_names}, mesh_sizes={x0_mesh_sizes}, placements={X[0].placements}"
 
         # Allocate buffers to receive shards of one whole matrix from other devices
         single_matrix_shards = [torch.empty_like(u) for u in U]
 
         # Redistribute the shards to form one unique full tensor on each device
-        work = dist.all_to_all(
-            single_matrix_shards, U, group=process_group, async_op=True
-        )
+        # Sync CUDA before collective to ensure all prior GPU ops are complete
+        # This can prevent NCCL hangs due to async GPU operations
+        torch.cuda.synchronize()
+
+        # N sequential all_gathers - only keep result for our assigned param
+        single_matrix_shards = None
+        for param_idx in range(world_size):
+            # Allocate output buffer for this all_gather
+            gathered = [torch.empty_like(U[param_idx]) for _ in range(world_size)]
+
+            # All ranks send their shard of param_idx
+            dist.all_gather(gathered, U[param_idx].contiguous(), group=process_group)
+
+            # Only keep if this is our assigned parameter
+            if param_idx == device_rank:
+                single_matrix_shards = gathered
+            # Otherwise 'gathered' goes out of scope and memory can be freed
+
         yield
-        work.wait()
 
         # Concatentate shards to form a whole matrix to orthogonalize
         single_matrix = torch.cat(single_matrix_shards, dim=shard_dim)
@@ -464,18 +742,28 @@ def muon_update_batch_async(
         )
 
         # Split result back into shards
-        # Contiguous is needed for all-to-all to work correctly
-        single_matrix_shards = [
+        # Contiguous is needed for communication to work correctly
+        orth_shards = [
             x.contiguous()
             for x in torch.tensor_split(single_matrix, world_size, dim=shard_dim)
         ]
 
-        # Redistribute the orthogonalized tensor back to original layout
-        work = dist.all_to_all(
-            U, single_matrix_shards, group=process_group, async_op=True
-        )
+        # N sequential all_gathers - collect results as we go
+        for shard_idx in range(world_size):
+            # Allocate output buffer for this all_gather
+            gathered = [torch.empty_like(orth_shards[shard_idx]) for _ in range(world_size)]
+
+            # All ranks send their shard at index shard_idx
+            dist.all_gather(gathered, orth_shards[shard_idx].contiguous(), group=process_group)
+
+            # gathered[r] = rank r's orth_shards[shard_idx] = O^r_{shard_idx}
+            # We need U[r] = O^r_{device_rank}
+            # So when shard_idx == device_rank: U[r] = gathered[r] for all r
+            if shard_idx == device_rank:
+                for r in range(world_size):
+                    U[r].copy_(gathered[r])
+
         yield
-        work.wait()
 
     else:
         # Matrices are not sharded, so we can directly orthogonalize
