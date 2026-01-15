@@ -97,7 +97,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         dim_size: int,
         dtensor_placements: tuple,
         device_mesh: DeviceMesh,
-    ) -> tuple[int | None, int | None]:
+    ) -> tuple[int, int]:
 
         mesh_names = []
         dim_i_placements = []
@@ -111,7 +111,7 @@ class MoEStateDictAdapter(StateDictAdapter):
                 dim_i_placements.append(placement)
 
         # Calculate local expert indices based on sharding strategy
-        start_index, end_index = None, None
+        start_index, end_index = 0, dim_size
         if len(dim_i_placements) == 2:
             # Handle StridedShard(i) + Shard(i) case
             assert isinstance(
@@ -151,7 +151,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         elif len(dim_i_placements) == 0:
             # No sharding on this dimension means all elements are local
-            return 0, dim_size
+            pass
 
         else:
             raise NotImplementedError(
@@ -260,7 +260,9 @@ class MoEStateDictAdapter(StateDictAdapter):
                 expert_weight_3d = torch.index_select(
                     local_grouped_weights,
                     0,
-                    torch.tensor([local_expert_index], device=local_grouped_weights.device),
+                    torch.tensor(
+                        [local_expert_index], device=local_grouped_weights.device
+                    ),
                 )
                 expert_weight = DTensor.from_local(
                     expert_weight_3d,
