@@ -11,6 +11,8 @@
 from typing import List
 
 import torch
+
+# pyrefly: ignore[import-error]
 from transformers import CLIPTokenizer, T5Tokenizer
 
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer

@@ -146,7 +146,7 @@ class FluxValidator(Validator):
                     job_config=self.job_config,
                     # pyrefly: ignore [bad-argument-type]
                     model=model,
-                    prompt=p,
+                    prompt=p,  # pyrefly: ignore[bad-argument-type]
                     autoencoder=self.autoencoder,
                     t5_tokenizer=self.t5_tokenizer,
                     clip_tokenizer=self.clip_tokenizer,
@@ -163,7 +163,7 @@ class FluxValidator(Validator):
                     ),
                     x=image,
                     add_sampling_metadata=True,
-                    prompt=p,
+                    prompt=p,  # pyrefly: ignore[bad-argument-type]
                 )
                 save_img_count -= 1
 
