@@ -302,7 +302,6 @@ class Attention(nn.Module):
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
-
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
 
