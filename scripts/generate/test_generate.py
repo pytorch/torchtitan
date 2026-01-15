@@ -98,7 +98,6 @@ def test_generate(
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"{device_type}:{local_rank}")
-    # pyrefly: ignore [missing-attribute]
     device_module.set_device(device)
     device_memory_monitor = build_device_memory_monitor()
 

@@ -382,9 +382,7 @@ def set_pg_timeouts(
     # otherwise, some ranks may issue collectives with the new/shorter timeout and
     # those may time out, before other ranks have finished with initialization done
     # under the old/slow timeout.
-    # pyrefly: ignore [missing-attribute]
     torch.distributed.barrier(device_ids=[device_module.current_device()])
-    # pyrefly: ignore [missing-attribute]
     device_module.synchronize()
 
     # None represents the 'default' PG, not part of the mesh
