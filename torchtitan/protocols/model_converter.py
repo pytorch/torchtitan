@@ -62,7 +62,9 @@ class ModelConvertersContainer(ModelConverter):
             _registry_model_converter_cls[name] for name in job_config.model.converters
         ]
         self.converters = [
-            mh_cls(job_config, parallel_dims) for mh_cls in converter_classes
+            # pyrefly: ignore[bad-instantiation]
+            mh_cls(job_config, parallel_dims)
+            for mh_cls in converter_classes
         ]
         self.print_after_conversion = job_config.model.print_after_conversion
 
