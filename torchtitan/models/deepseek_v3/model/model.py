@@ -345,7 +345,6 @@ class TransformerBlock(nn.Module):
     """
 
     def __init__(self, layer_id: int, model_args: DeepSeekV3ModelArgs):
-
         super().__init__()
         self.attention = Attention(model_args)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
