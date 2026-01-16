@@ -248,10 +248,12 @@ def apply_non_moe_tp(
         )
 
     if enable_async_tp:
+        # pyrefly: ignore [deprecated]
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
         # pyrefly: ignore [implicit-import]
         torch._inductor.config._micro_pipeline_tp = True
+        # pyrefly: ignore [deprecated]
         enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
     logger.info(
