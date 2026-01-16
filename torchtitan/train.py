@@ -387,8 +387,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
-        """Returns an iterator that processes batches from the data iterator."""
-        device_type = utils.device_type
+        """Returns an iterator that processes batches from the data iterator.
+
+        Note: Tensors are yielded on CPU. The caller is responsible for moving
+        them to GPU when needed. This allows for more efficient memory usage
+        when doing gradient accumulation.
+        """
         data_iterator = iter(data_iterable)
 
         while True:
@@ -407,12 +411,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 time.perf_counter() - data_load_start
             )
 
-            # Move tensors to the appropriate device
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(device_type)
-            labels = labels.to(device_type)
-
+            # Tensors stay on CPU; moved to GPU per-microbatch during training
             yield input_dict, labels
 
     def post_dataloading_process(
@@ -555,9 +554,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
 
-        # Collect all microbatches first to count total valid tokens
+        # Collect all microbatches on CPU and count total valid tokens
         microbatches = []
-        local_valid_tokens = torch.tensor(0, dtype=torch.int64, device=self.device)
+        local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _microbatch in range(self.gradient_accumulation_steps):
             # pyrefly: ignore [no-matching-overload]
             input_dict, labels = next(data_iterator)
@@ -565,6 +564,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             microbatches.append((input_dict, labels))
 
         # All-reduce to get global token count across DP ranks
+        # Move to GPU for distributed communication
+        local_valid_tokens = local_valid_tokens.to(self.device)
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.parallel_dims.get_mesh("batch")
             ft_pg = self.ft_manager.loss_sync_pg
@@ -574,9 +575,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             global_valid_tokens = local_valid_tokens.float()
 
-        # Now run gradient accumulation with the shared global_valid_tokens
+        # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
         for input_dict, labels in microbatches:
+            # Move tensors to GPU
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(self.device)
+            labels = labels.to(self.device)
+
             loss = self.forward_backward_step(input_dict, labels, global_valid_tokens)
             accumulated_losses.append(loss.detach())
 
