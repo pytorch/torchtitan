@@ -99,21 +99,17 @@ def estimate_memory(job_config: JobConfig):
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
-        # pyrefly: ignore [bad-argument-type]
         model_converters.convert(model)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
         train_spec.parallelize_fn(model, parallel_dims, job_config)
 
-        # pyrefly: ignore [missing-attribute]
         model.to_empty(device="cuda")
         if not active_fake_mode():
             model.init_weights()
-        # pyrefly: ignore [missing-attribute]
         model.train()
 
         # build optimizer after applying parallelisms to the model
-        # pyrefly: ignore [bad-argument-type]
         optimizers = build_optimizers([model], job_config.optimizer, parallel_dims)
         lr_schedulers = build_lr_schedulers(
             # pyrefly: ignore [bad-argument-type]
@@ -125,7 +121,6 @@ def estimate_memory(job_config: JobConfig):
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
         # where it issues a single all-reduce for all parameters at once for better performance
         optimizers.register_step_post_hook(
-            # pyrefly: ignore [bad-argument-type]
             lambda *args, **kwargs: model_converters.post_optimizer_hook(model)
         )
 
@@ -150,7 +145,6 @@ def estimate_memory(job_config: JobConfig):
                 device="cuda",
             ),
         )
-        # pyrefly: ignore [bad-argument-type]
         fsdp_memtracker = FSDPMemTracker(mod=model, optm=optimizers.optimizers[0])
         fsdp_memtracker.track_inputs(batch)
 
@@ -160,7 +154,6 @@ def estimate_memory(job_config: JobConfig):
                 input_ids, labels = batch
                 # train step
                 with train_context():
-                    # pyrefly: ignore [not-callable]
                     pred = model(input_ids)
                     loss = loss_fn(pred, labels)
                     del pred
@@ -168,7 +161,6 @@ def estimate_memory(job_config: JobConfig):
 
                 # clip gradients
                 torch.nn.utils.clip_grad_norm_(
-                    # pyrefly: ignore [missing-attribute]
                     model.parameters(),
                     job_config.training.max_norm,
                     foreach=True,
