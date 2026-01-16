@@ -85,7 +85,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         # Device has to be set before creating TorchFT manager.
-        # pyrefly: ignore [missing-attribute]
         device_module.set_device(self.device)
 
         # init distributed and build meshes
@@ -144,6 +143,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
         ):
+            # pyrefly: ignore[bad-instantiation]
             model = self.train_spec.model_cls(model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty
@@ -307,6 +307,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
+                # pyrefly: ignore[bad-instantiation]
                 self.train_spec.state_dict_adapter(
                     model_args, job_config.model.hf_assets_path
                 )

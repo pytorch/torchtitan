@@ -252,9 +252,9 @@ class Attention(nn.Module):
 
         # Adding the q_norm and k_norm here
         # Last layer of adding q-k norm
-        if self.q_norm:
+        if self.q_norm:  # pyrefly: ignore[invalid-argument]
             xq = self.q_norm(xq)
-        if self.k_norm:
+        if self.k_norm:  # pyrefly: ignore[invalid-argument]
             xk = self.k_norm(xk)
 
         # Apply rotary embedding
@@ -577,14 +577,14 @@ class Qwen3Model(nn.Module, ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.rope_cache, attention_masks, positions)
 
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         h = self.norm(h) if self.norm else h
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         output = self.output(h) if self.output else h
         return output
