@@ -728,8 +728,10 @@ class TokenChoiceTopKRouter(nn.Module):
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
     def init_weights(self, init_std: float, n_layers: int):
-        # NOTE: Use in-place operations for compatibility with FSDP/DTensor.
-        # Direct .data assignment doesn't work with FSDP-wrapped parameters.
+        # NOTE: Must use in-place operations here. When FSDP wraps parameters as
+        # DTensor, direct .data assignment (e.g., self.gate.weight.data = x) is
+        # silently ignored, leaving weights uninitialized. This causes NaN loss
+        # when CPU offload is enabled with 3+ GPUs.
         nn.init.normal_(self.gate.weight, mean=0.0, std=1.0)
 
         # Normalize rows in-place
