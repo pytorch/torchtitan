@@ -81,6 +81,7 @@ class TensorParallel(ParallelStyle):
             module,
             device_mesh,
             self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
             self._prepare_input_fn,
         )
 
@@ -154,9 +155,9 @@ class ExpertParallel(BaseExpertParallel):
         # of GroupedExperts, as it does not need padding.
 
         (
-            self.input_shape,
+            self.input_shape,  # pyrefly: ignore[bad-assignment]
             routed_input,
-            self.permuted_indices,
+            self.permuted_indices,  # pyrefly: ignore[bad-assignment]
             num_tokens_per_expert_group,
         ) = _permute(
             routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
@@ -184,7 +185,9 @@ class ExpertParallel(BaseExpertParallel):
             module,
             device_mesh,
             partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
             output_fn=self._token_combine,
         )
 
@@ -197,8 +200,14 @@ class ExpertTensorParallel(ExpertParallel):
         # NOTE: Currently in MoE TP, experts multiplication runs in plain Tensors.
         #       The grad_placements on inputs is set to Partial so that necessary
         #       reductions are performed during backward.
+
+        # NOTE: The mesh used here should be dense_mesh["tp"] as routed_input is
+        #       technically wrapped with the dense_mesh["tp"] but this complicates
+        #       the interface of ExpertTensorParallel and it doesn't matter as etp
+        #       is almost always the same as tp or is 1. To avoid the complexity,
+        #       we use the etp mesh here.
         routed_input = DTensor.from_local(
-            routed_input, device_mesh["tp"], (Replicate(),)
+            routed_input, device_mesh["etp"], (Replicate(),)
         ).to_local(grad_placements=(Partial(),))
 
         inputs = (routed_input, num_tokens_per_expert)
@@ -210,18 +219,21 @@ class ExpertTensorParallel(ExpertParallel):
         # w1 shape = (experts, out_dim, in_dim)
         mod.register_parameter(
             "w1",
+            # pyrefly: ignore [bad-argument-type]
             nn.Parameter(distribute_tensor(mod.w1, device_mesh, [Shard(0), Shard(1)])),
         )  # Column-wise sharding
 
         # w2 shape = (experts, in_dim, out_dim)
         mod.register_parameter(
             "w2",
+            # pyrefly: ignore [bad-argument-type]
             nn.Parameter(distribute_tensor(mod.w2, device_mesh, [Shard(0), Shard(2)])),
         )  # Row-wise sharding
 
         # w3 shape = (experts, out_dim, in_dim)
         mod.register_parameter(
             "w3",
+            # pyrefly: ignore [bad-argument-type]
             nn.Parameter(distribute_tensor(mod.w3, device_mesh, [Shard(0), Shard(1)])),
         )  # Column-wise sharding
 
@@ -234,7 +246,9 @@ class ExpertTensorParallel(ExpertParallel):
             module,
             device_mesh,
             partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
             output_fn=self._token_combine,
         )
 
@@ -296,6 +310,76 @@ class ReordererSequenceParallel(ParallelStyle):
             module,
             device_mesh,
             partition_fn=None,
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._prepare_inputput_fn,
+            # pyrefly: ignore [bad-argument-type]
             output_fn=self._prepare_output_fn,
+        )
+
+
+class DeepEPExpertParallel(BaseExpertParallel):
+    """Expert Parallel using DeepEP for efficient token dispatch/combine.
+
+    Expects inputs as:
+        (hidden_states, num_tokens_per_expert, selected_experts_indices, top_scores, num_experts)
+
+    Args:
+        score_before_experts: If True, apply routing scores before expert computation.
+    """
+
+    def __init__(self, score_before_experts: bool = True):
+        super().__init__()
+        self._state = None  # State preserved between dispatch and combine
+        self.score_before_experts = score_before_experts
+
+    def _token_dispatch(self, mod, inputs, device_mesh):
+        """Dispatch tokens via DeepEP."""
+        from torchtitan.distributed.deepep import dispatch_tokens
+
+        hidden_states, _, selected_experts_indices, top_scores, num_experts = inputs
+        if isinstance(mod.w1, DTensor):
+            num_local_experts = mod.w1.to_local().shape[0]
+        else:
+            num_local_experts = mod.w1.shape[0]
+        ep_group = device_mesh.get_group()
+
+        # pyrefly: ignore[bad-assignment]
+        hidden_states, tokens_per_expert, self._state = dispatch_tokens(
+            hidden_states,
+            selected_experts_indices,
+            top_scores,
+            num_local_experts,
+            num_experts,
+            ep_group,
+            score_before_experts=self.score_before_experts,
+        )
+
+        return hidden_states, tokens_per_expert
+
+    @staticmethod
+    def _partition_fn(name, mod, device_mesh):
+        """Shard expert weights on expert dimension."""
+        for param_name, param in mod.named_parameters(recurse=False):
+            mod.register_parameter(
+                param_name,
+                nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)])),
+            )
+
+    def _token_combine(self, mod, routed_output, device_mesh):
+        """Combine tokens via DeepEP."""
+        from torchtitan.distributed.deepep import combine_tokens
+
+        # pyrefly: ignore [bad-argument-type]
+        routed_output = combine_tokens(routed_output, self._state)
+        self._state = None
+        return routed_output
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        """Apply DeepEP parallelization."""
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=DeepEPExpertParallel._partition_fn,
+            input_fn=self._token_dispatch,  # pyrefly: ignore [bad-argument-type]
+            output_fn=self._token_combine,  # pyrefly: ignore [bad-argument-type]
         )

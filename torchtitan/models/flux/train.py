@@ -28,10 +28,10 @@ class FluxTrainer(Trainer):
         # (mainly for debugging, expect perf loss).
         # For Flux model, we need distinct seed across FSDP ranks to ensure we randomly dropout prompts info in dataloader
         dist_utils.set_determinism(
-            self.parallel_dims.world_mesh,
+            self.parallel_dims,
             self.device,
             job_config.debug,
-            distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
+            distinct_seed_mesh_dims=["fsdp", "dp_replicate"],
         )
 
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
@@ -48,23 +48,31 @@ class FluxTrainer(Trainer):
         model_args = self.train_spec.model_args[job_config.model.flavor]
 
         self.autoencoder = load_ae(
+            # pyrefly: ignore [missing-attribute]
             job_config.encoder.autoencoder_path,
+            # pyrefly: ignore [missing-attribute]
             model_args.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
+            # pyrefly: ignore [missing-attribute]
             random_init=job_config.training.test_mode,
         )
 
         self.clip_encoder = FluxEmbedder(
+            # pyrefly: ignore [missing-attribute]
             version=job_config.encoder.clip_encoder,
+            # pyrefly: ignore [missing-attribute]
             random_init=job_config.training.test_mode,
         ).to(device=self.device, dtype=self._dtype)
         self.t5_encoder = FluxEmbedder(
+            # pyrefly: ignore [missing-attribute]
             version=job_config.encoder.t5_encoder,
+            # pyrefly: ignore [missing-attribute]
             random_init=job_config.training.test_mode,
         ).to(device=self.device, dtype=self._dtype)
 
         # Apply FSDP to the T5 model / CLIP model
+        # pyrefly: ignore [bad-assignment]
         self.t5_encoder, self.clip_encoder = parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
@@ -73,6 +81,7 @@ class FluxTrainer(Trainer):
         )
 
         if job_config.validation.enable:
+            # pyrefly: ignore [missing-attribute]
             self.validator.flux_init(
                 device=self.device,
                 _dtype=self._dtype,
@@ -127,9 +136,11 @@ class FluxTrainer(Trainer):
             latents = pack_latents(latents)
             target = pack_latents(noise - labels)
 
-        optional_context_parallel_ctx = (
-            dist_utils.create_context_parallel_ctx(
-                cp_mesh=self.parallel_dims.world_mesh["cp"],
+        optional_context_parallel_ctx = None
+        if self.parallel_dims.cp_enabled:
+            cp_mesh = self.parallel_dims.get_mesh("cp")
+            optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
+                cp_mesh=cp_mesh,
                 cp_buffers=[
                     latents,
                     latent_pos_enc,
@@ -147,9 +158,6 @@ class FluxTrainer(Trainer):
                 },
                 cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
             )
-            if self.parallel_dims.cp_enabled
-            else None
-        )
         with self.train_context(optional_context_parallel_ctx):
             with self.maybe_enable_amp:
                 latent_noise_pred = model(
@@ -164,6 +172,7 @@ class FluxTrainer(Trainer):
                 loss = self.loss_fn(latent_noise_pred, target)
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
+            # pyrefly: ignore[delete-error]
             del (latent_noise_pred, noise, target)
             loss.backward()
 

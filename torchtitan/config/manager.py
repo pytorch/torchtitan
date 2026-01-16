@@ -16,6 +16,7 @@ import tyro
 try:
     import tomllib
 except ModuleNotFoundError:
+    # pyrefly: ignore[import-error]
     import tomli as tomllib
 
 from torchtitan.tools.logging import logger
@@ -178,7 +179,7 @@ class ConfigManager:
                     result[f.name] = self._dict_to_dataclass(f.type, value)
                 else:
                     result[f.name] = value
-        return cls(**result)
+        return cls(**result)  # pyrefly: ignore[not-callable, bad-instantiation]
 
     def _validate_config(self) -> None:
         if self.config.experimental.custom_args_module:
@@ -253,7 +254,10 @@ if __name__ == "__main__":
     #
     # -----------------------------------------------------------------------------
 
+    # pyrefly: ignore [missing-import]
     from rich import print as rprint
+
+    # pyrefly: ignore [missing-import]
     from rich.pretty import Pretty
 
     config_manager = ConfigManager()

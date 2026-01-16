@@ -42,7 +42,7 @@ class QuantizationConverter(ModelConverter):
         # quantization converter format:
         # `quantize.[linear | grouped_mm].[float8 | mx]`
         quantization_type = lambda converter: converter.split(".")[-1]
-        existing_quantization_converter = None
+        existing_quantization_converter: str | None = None
         for converter in job_config.model.converters:
             if "quantize" in converter:
                 if existing_quantization_converter is None:
