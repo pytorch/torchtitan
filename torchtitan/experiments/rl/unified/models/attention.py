@@ -75,7 +75,8 @@ class VLLMAttention(torch.nn.Module):
             output: [batch, num_heads, seq_len, head_dim]
         """
         # Input is (batch, num_heads, seq_len, head_dim)
-        # TODO: may be good to use einops in future
+        # TODO: may be good to use einops in future as we can explicitly reshape
+        # with dimension names - see https://github.com/arogozhnikov/einops
         batch_size, num_heads, seq_len, head_dim = q.shape
         _, num_kv_heads, _, _ = k.shape
 
@@ -85,6 +86,7 @@ class VLLMAttention(torch.nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
+        # TODO: reimplement as a 4d tensor once vLLM fix has landed
         # Then flatten batch and seq_len: (batch * seq_len, num_heads, head_dim)
         q = q.reshape(batch_size * seq_len, num_heads, head_dim)
         k = k.reshape(batch_size * seq_len, num_kv_heads, head_dim)
