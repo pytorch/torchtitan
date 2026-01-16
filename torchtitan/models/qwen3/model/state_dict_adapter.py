@@ -152,7 +152,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     int(expert_num)
                 ] = value
 
-                if isinstance(value, DTensor):
+                # Use stored metadata to decide path (online vs offline)
+                # Online mode: local_experts_indices was populated during to_hf()
+                if titan_abstract_key in self.local_experts_indices:
                     stacked_value = self._concatenate_expert_weights_dtensor(
                         expert_weights_by_layer,
                         titan_abstract_key,

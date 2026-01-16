@@ -308,8 +308,11 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         sorted_expert_ids = sorted(experts.keys())
         sorted_experts = [experts[i] for i in sorted_expert_ids]
-        # pyrefly: ignore [missing-attribute]
-        local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor
+
+        # Stack experts - result may be DTensor or plain tensor depending on sub_mesh
+        local_tensor = torch.stack(sorted_experts, dim=0)
+        if isinstance(local_tensor, DTensor):
+            local_tensor = local_tensor._local_tensor
 
         assert (
             abstract_key in self.grouped_expert_weight_placements
