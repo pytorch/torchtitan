@@ -160,6 +160,9 @@ class Attention(nn.Module):
 
     """
 
+    q_norm: nn.RMSNorm | None
+    k_norm: nn.RMSNorm | None
+
     def __init__(self, model_args: Qwen3ModelArgs):
         super().__init__()
         self.n_heads = model_args.n_heads
@@ -199,8 +202,10 @@ class Attention(nn.Module):
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
             case "varlen":
+                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = VarlenAttentionWrapper()
             case "sdpa":
+                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
@@ -247,9 +252,9 @@ class Attention(nn.Module):
 
         # Adding the q_norm and k_norm here
         # Last layer of adding q-k norm
-        if self.q_norm:
+        if self.q_norm:  # pyrefly: ignore[invalid-argument]
             xq = self.q_norm(xq)
-        if self.k_norm:
+        if self.k_norm:  # pyrefly: ignore[invalid-argument]
             xk = self.k_norm(xk)
 
         # Apply rotary embedding
@@ -266,8 +271,11 @@ class Attention(nn.Module):
         match self.attn_type:
             case "flex":
                 assert isinstance(attention_masks, BlockMask), attention_masks
-                output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+                output = self.inner_attention(
+                    xq, xk, xv, block_mask=attention_masks, scale=self.scaling
+                )
             case "varlen":
+                # TODO: pass self.scaling into varlen attention
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
                     xq,
@@ -275,10 +283,11 @@ class Attention(nn.Module):
                     xv,
                     self.head_dim,
                     attention_masks,
+                    scale=self.scaling,
                 )
             case "sdpa":
                 assert attention_masks is None
-                output = self.inner_attention(xq, xk, xv)
+                output = self.inner_attention(xq, xk, xv, scale=self.scaling)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
@@ -476,6 +485,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
+                # pyrefly: ignore [not-callable]
                 layer.init_weights(buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
@@ -567,11 +577,14 @@ class Qwen3Model(nn.Module, ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
+        # pyrefly: ignore[not-callable, invalid-argument]
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.rope_cache, attention_masks, positions)
 
+        # pyrefly: ignore[not-callable, invalid-argument]
         h = self.norm(h) if self.norm else h
+        # pyrefly: ignore[not-callable, invalid-argument]
         output = self.output(h) if self.output else h
         return output

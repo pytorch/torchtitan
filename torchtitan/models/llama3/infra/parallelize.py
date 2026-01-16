@@ -61,7 +61,6 @@ def parallelize_llama(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
@@ -84,13 +83,14 @@ def parallelize_llama(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_tp(
             model,
-            world_mesh["tp"],
+            tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
         )
-        maybe_enable_async_tp(job_config, world_mesh["tp"])
+        maybe_enable_async_tp(job_config, tp_mesh)
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -101,6 +101,7 @@ def parallelize_llama(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
+            # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
@@ -110,15 +111,14 @@ def parallelize_llama(
         apply_compile(model, job_config.compile)
 
     if parallel_dims.fsdp_enabled:
-        # apply FSDP or HSDP, potentially with Context Parallel
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
-
+        # dp_mesh is the mesh for FSDP/HSDP
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
+        dp_mesh = parallel_dims.get_mesh(names)
         apply_fsdp(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
@@ -137,11 +137,12 @@ def parallelize_llama(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        if world_mesh.ndim > 1:
+        dp_replicate_mesh = parallel_dims.get_mesh("dp_replicate")
+        if parallel_dims.world_size != dp_replicate_mesh.size():
             raise RuntimeError("DDP has not supported > 1D parallelism")
         apply_ddp(
             model,
-            world_mesh,
+            dp_replicate_mesh,
             enable_compile=model_compile_enabled,
         )
 
@@ -202,6 +203,7 @@ def apply_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
@@ -226,8 +228,10 @@ def apply_tp(
         }
 
         parallelize_module(
+            # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
@@ -242,10 +246,12 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = torch.compile(
             transformer_block, backend=compile_config.backend, fullgraph=True
         )
+        # pyrefly: ignore [missing-attribute]
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
@@ -280,6 +286,7 @@ def apply_fsdp(
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
+        # pyrefly: ignore[unsupported-operation]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
     match reshard_after_forward_policy:
@@ -297,12 +304,15 @@ def apply_fsdp(
             )
 
     if model.tok_embeddings is not None:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             model.tok_embeddings,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
+    # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
+        # pyrefly: ignore[no-matching-overload]
         fully_shard(
             transformer_block,
             **fsdp_config,
@@ -311,11 +321,13 @@ def apply_fsdp(
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
     if model.norm is not None and model.output is not None:
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             [model.norm, model.output],
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
+    # pyrefly: ignore[no-matching-overload]
     fully_shard(model, **fsdp_config)
 
 
@@ -327,6 +339,7 @@ def apply_ddp(
     if enable_compile:
         torch._dynamo.config.optimize_ddp = "ddp_optimizer"
 
+    # pyrefly: ignore [invalid-param-spec]
     replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
 
     logger.info("Applied DDP to the model")

@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Generator
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+from typing import TypeAlias
 
 import torch
 import torch.nn as nn
@@ -18,6 +20,11 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
+
+ValidationContext: TypeAlias = Callable[
+    [AbstractContextManager[None] | None],
+    AbstractContextManager[None],
+]
 
 
 class BaseValidator:
@@ -52,8 +59,8 @@ class Validator(BaseValidator):
         tokenizer: BaseTokenizer,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
-        validation_context: Generator[None, None, None],
-        maybe_enable_amp: Generator[None, None, None],
+        validation_context: ValidationContext,
+        maybe_enable_amp: AbstractContextManager[None],
         metrics_processor: MetricsProcessor,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
@@ -83,6 +90,7 @@ class Validator(BaseValidator):
             )
 
     @torch.no_grad()
+    # pyrefly: ignore [bad-override]
     def validate(
         self,
         model_parts: list[nn.Module],
@@ -98,6 +106,7 @@ class Validator(BaseValidator):
         device_type = utils.device_type
         num_steps = 0
 
+        # pyrefly: ignore [not-iterable]
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
@@ -111,17 +120,16 @@ class Validator(BaseValidator):
             inputs = input_dict["input"]
             labels = labels.to(device_type)
 
-            optional_context_parallel_ctx = (
-                dist_utils.create_context_parallel_ctx(
-                    cp_mesh=parallel_dims.world_mesh["cp"],
+            optional_context_parallel_ctx = None
+            if parallel_dims.cp_enabled:
+                cp_mesh = parallel_dims.get_mesh("cp")
+                optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
+                    cp_mesh=cp_mesh,
                     cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                     cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                     cp_no_restore_buffers={inputs, labels},
                     cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
                 )
-                if parallel_dims.cp_enabled
-                else None
-            )
 
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
@@ -167,7 +175,7 @@ class Validator(BaseValidator):
         loss /= num_steps
         if parallel_dims.dp_cp_enabled:
             global_avg_loss = dist_utils.dist_mean(
-                loss, parallel_dims.world_mesh["dp_cp"]
+                loss, parallel_dims.get_optional_mesh("loss")
             )
         else:
             global_avg_loss = loss.item()
@@ -186,8 +194,8 @@ def build_validator(
     tokenizer: BaseTokenizer,
     parallel_dims: ParallelDims,
     loss_fn: LossFunction,
-    validation_context: Generator[None, None, None],
-    maybe_enable_amp: Generator[None, None, None],
+    validation_context: ValidationContext,
+    maybe_enable_amp: AbstractContextManager[None],
     metrics_processor: MetricsProcessor | None = None,
     pp_schedule: _PipelineSchedule | None = None,
     pp_has_first_stage: bool | None = None,
@@ -203,6 +211,7 @@ def build_validator(
         loss_fn=loss_fn,
         validation_context=validation_context,
         maybe_enable_amp=maybe_enable_amp,
+        # pyrefly: ignore [bad-argument-type]
         metrics_processor=metrics_processor,
         pp_schedule=pp_schedule,
         pp_has_first_stage=pp_has_first_stage,

@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
-
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
@@ -199,6 +198,40 @@ class LRScheduler:
 
 
 @dataclass
+class DataLoader:
+    """
+    Configuration for PyTorch DataLoader settings.
+
+    These settings are passed directly to StatefulDataLoader.
+
+    Note:
+        persistent_workers and prefetch_factor are only valid if num_workers > 0.
+
+    Example (TOML config file):
+        [training.dataloader]
+        num_workers = 4
+        pin_memory = true
+        persistent_workers = true
+        prefetch_factor = 2
+    """
+
+    num_workers: int = 0
+    """Number of worker processes for data loading."""
+
+    persistent_workers: bool = False
+    """Keep workers alive between epochs. Only valid when num_workers > 0."""
+
+    pin_memory: bool = False
+    """Copy tensors to CUDA pinned memory before returning them."""
+
+    prefetch_factor: int | None = None
+    """
+    Number of batches loaded in advance by each worker. Only valid when num_workers > 0.
+    Default is 2 when num_workers > 0, otherwise None.
+    """
+
+
+@dataclass
 class Training:
     dataset: str = "c4_test"
     """Dataset to use"""
@@ -262,6 +295,9 @@ class Training:
     Note that you may want to lower the training steps to avoid generating too
     many temporary files.
     """
+
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
 
 
 @dataclass
@@ -396,19 +432,7 @@ class Parallelism:
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
 
-    Currently, it is supported with the following constraints:
-
-    - when etp = tp:
-
-      - cp <= ep <= dp_shard * cp
-      - ep % cp == 0
-      - dp_shard * cp % ep == 0
-
-    - when etp = 1:
-
-      - cp * tp <= ep <= dp_shard * cp * tp
-      - ep % (cp * tp) == 0
-      - dp_shard * cp * tp % ep == 0
+    Currently, etp is either 1 or is the same as tp.
 
     Note that this is still an experimental feature. Some constraints will be
     relaxed soon when we have more flexible DeviceMesh support.
@@ -422,6 +446,17 @@ class Parallelism:
     - [partial dp -> ep] etp = tp
     - [partial dp + all tp -> ep] etp = 1
     Note that this is still an experimental feature.
+    """
+
+    expert_parallel_comm_backend: Literal["standard", "deepep"] = "standard"
+    """
+    Expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
+
+    - "standard": Uses PyTorch all-to-all collectives (default)
+    - "deepep": Uses DeepEP custom kernels for more efficient communication
+
+    DeepEP requires installation:
+    https://github.com/deepseek-ai/DeepEP.
     """
 
 
@@ -913,6 +948,9 @@ class Validation:
     Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset
     WARNING: When setting to -1 there could be hangs due to mismatch among ranks
     """
+
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
 
     def __post_init__(self):
         assert (

@@ -20,6 +20,7 @@ from torch.nn.attention.flex_attention import (
 )
 
 from torch.nn.attention.varlen import varlen_attn
+from torch.types import Number
 
 
 __all__ = [
@@ -43,8 +44,8 @@ class VarlenMetadata(NamedTuple):
 
     cu_seq_q: torch.Tensor
     cu_seq_k: torch.Tensor
-    max_q: int
-    max_k: int
+    max_q: Number
+    max_k: Number
 
 
 class VarlenAttentionWrapper(torch.nn.Module):
@@ -59,6 +60,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
         xv: torch.Tensor,
         head_dim: torch.Tensor,
         attention_masks: VarlenMetadata,
+        scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
@@ -66,8 +68,11 @@ class VarlenAttentionWrapper(torch.nn.Module):
         max_k = attention_masks.max_k
 
         n_local_heads = xq.shape[1]
+        # pyrefly: ignore [no-matching-overload]
         xq_packed = xq.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        # pyrefly: ignore [no-matching-overload]
         xk_packed = xk.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        # pyrefly: ignore [no-matching-overload]
         xv_packed = xv.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
 
         return VarlenAttentionWrapper._compiled_varlen_attn(
@@ -79,6 +84,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
             max_q,
             max_k,
             is_causal=True,
+            scale=scale,
         )
 
 
@@ -146,7 +152,7 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
     """
 
     # TODO: remove sdpa_backends after PyTorch 2.9 is released.
-    sdpa_backends: ClassVar[list[SDPBackend]] = []
+    sdpa_backends: list[SDPBackend] = []
 
     def __init__(self) -> None:
         super().__init__()

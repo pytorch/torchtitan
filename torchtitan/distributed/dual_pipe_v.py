@@ -91,7 +91,9 @@ class DualPipeExpertParallel(BaseExpertParallel):
             module,
             device_mesh,
             partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
             output_fn=self._token_combine,
         )
 
@@ -123,7 +125,7 @@ class HookCoordinator:
 
             # Reset barrier
             self._execution_barrier = threading.Barrier(2)
-            self._num_layers = num_layers
+            self._num_layers = num_layers  # pyrefly: ignore[bad-assignment]
 
     def disable_coordination(self):
         self._coordination_enabled = False
@@ -145,6 +147,7 @@ _hook_coordinator = HookCoordinator()
 
 class SyncHook(torch.autograd.Function):
     @staticmethod
+    # pyrefly: ignore [bad-override]
     def forward(ctx, x, hook_name=""):
         ctx.hook_name = hook_name
         # handle edge case for transformer level boundary
@@ -158,6 +161,7 @@ class SyncHook(torch.autograd.Function):
         return x
 
     @staticmethod
+    # pyrefly: ignore [bad-override]
     def backward(ctx, grad_output):
         hook_name = ctx.hook_name
 
@@ -256,10 +260,11 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
     )
     # PP computation ========================================================
     _hook_coordinator.enable_coordination(num_layers=min_num_layers)
-    main_stream = torch.accelerator.current_stream(device_module)
+    main_stream = torch.accelerator.current_stream(device_type)
 
     # Shared container for exception from backward thread
     def run_backward():
+        # pyrefly: ignore [missing-attribute]
         schedule._assert_unsharded(backward_stage)
         # Set the backward thread to use the same stream as forward
         device_module.set_stream(main_stream)
@@ -267,12 +272,15 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
             f"backward_stage_{backward_stage_index}_mb_{backward_mb_index}"
         ):
             loss = schedule._maybe_get_loss(backward_stage, backward_mb_index)
+            # pyrefly: ignore [missing-attribute]
             schedule.backward_counter[backward_stage_index] += 1
             last_backward = (
+                # pyrefly: ignore [missing-attribute]
                 schedule.backward_counter[backward_stage_index]
                 == schedule._n_microbatches
             )
             backward_stage.backward_one_chunk(
+                # pyrefly: ignore [bad-argument-type]
                 backward_mb_index,
                 loss=loss,
                 full_backward=True,
@@ -282,22 +290,31 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
             if backward_is_prev_stage_on_this_rank:
                 stage_index_to_stage[backward_stage_index - 1].set_local_bwd_input(
                     backward_stage.get_local_bwd_output(backward_mb_index),
+                    # pyrefly: ignore [bad-argument-type]
                     backward_mb_index,
                 )
 
     def run_forward():
+        # pyrefly: ignore [missing-attribute]
         schedule._assert_unsharded(forward_stage)
         output = forward_stage.forward_one_chunk(
+            # pyrefly: ignore [bad-argument-type]
             forward_mb_index,
-            arg_mbs[forward_mb_index],
-            kwarg_mbs[forward_mb_index],
+            arg_mbs[
+                forward_mb_index
+            ],  # pyrefly: ignore[index-error, unsupported-operation]
+            kwarg_mbs[
+                forward_mb_index
+            ],  # pyrefly: ignore[index-error, unsupported-operation]
         )
         schedule._maybe_compute_loss(
             forward_stage, output, ctx.target_mbs, forward_mb_index
         )
         if forward_is_next_stage_on_this_rank:
             stage_index_to_stage[forward_stage_index + 1].set_local_fwd_input(
-                output, forward_mb_index
+                output,
+                # pyrefly: ignore [bad-argument-type]
+                forward_mb_index,
             )
 
     # Run forward and backward in parallel

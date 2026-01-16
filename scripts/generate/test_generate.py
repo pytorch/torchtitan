@@ -36,6 +36,7 @@ from torchtitan.tools.utils import device_module, device_type
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
+# pyrefly: ignore[import-error]
 from generate._generation import generate
 
 
@@ -49,6 +50,7 @@ def apply_tp_minus_sp(model: nn.Module, tp_mesh: DeviceMesh):
         },
     )
 
+    # pyrefly: ignore [missing-attribute]
     for _, transformer_block in model.layers.items():
         layer_plan = {
             "attention.wq": ColwiseParallel(),
@@ -63,6 +65,7 @@ def apply_tp_minus_sp(model: nn.Module, tp_mesh: DeviceMesh):
         parallelize_module(
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
@@ -103,6 +106,7 @@ def test_generate(
     logger.info(f"World Size: {world_size}, Local Rank: {local_rank} on {device}")
 
     # Tokenizer setup
+    # pyrefly: ignore [not-callable]
     tokenizer = train_spec.build_tokenizer_fn(config)
 
     model_args = train_spec.model_args[config.model.flavor]
@@ -111,9 +115,10 @@ def test_generate(
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
         logger.info(f"Init model on init_device: {init_device}")
+        # pyrefly: ignore[bad-instantiation]
         model = train_spec.model_cls(model_args)
 
-    world_mesh = None
+    parallel_dims = None
     # Init distributed env
     if world_size > 1:
         dist_utils.init_distributed(config.comm)
@@ -127,26 +132,40 @@ def test_generate(
             etp=1,
             world_size=world_size,
         )
-        world_mesh = parallel_dims.world_mesh
 
         # apply_tp (with Sequence Parallel) on unevenly sharded
         # sequences would require https://github.com/pytorch/torchtitan/pull/686
-        apply_tp_minus_sp(model, parallel_dims.world_mesh["tp"])
+        # pyrefly: ignore [bad-argument-type]
+        apply_tp_minus_sp(model, parallel_dims.get_mesh("tp"))
+    else:
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            etp=1,
+            world_size=1,
+        )
 
     debug_config = DebugConfig(seed=seed, deterministic=deterministic)
     dist_utils.set_determinism(
-        world_mesh=world_mesh,
+        parallel_dims=parallel_dims,
         device=device,
         debug_config=debug_config,
         distinct_seed_mesh_dims=["pp"],
     )
 
     # materalize model
+    # pyrefly: ignore [missing-attribute]
     model.to_empty(device=device_type)
     with torch.no_grad():
         model.init_weights()
+    # pyrefly: ignore [missing-attribute]
     model.eval()
 
+    # pyrefly: ignore [missing-attribute]
     state_dict = model.state_dict()
 
     # Checkpoint Loading
@@ -215,7 +234,7 @@ def test_generate(
                 "input_text": input_text,
                 "output_text": output_text,
             }
-            output_data["responses"].append(_data)
+            output_data["responses"].append(_data)  # pyrefly: ignore[missing-attribute]
 
             logger.info(f"{r}\n{input_text}{b}{output_text}\n{color.reset}")
 

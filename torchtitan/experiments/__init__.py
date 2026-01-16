@@ -6,7 +6,6 @@
 
 _supported_experiments = frozenset(
     [
-        "gpt_oss",
         "simple_fsdp.llama3",
         "simple_fsdp.deepseek_v3",
         "vlm",
@@ -15,5 +14,6 @@ _supported_experiments = frozenset(
         "transformers_modeling_backend",
         "autoparallel.llama3",
         "autoparallel.deepseek_v3",
+        "autoparallel.local_map_deepseek_v3",
     ]
 )

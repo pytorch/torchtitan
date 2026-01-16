@@ -9,6 +9,7 @@ import gc
 import subprocess
 import time
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Generator, Optional
 
 import torch
@@ -24,7 +25,7 @@ def has_cuda_capability(major: int, minor: int) -> bool:
     )
 
 
-def get_device_info() -> tuple[str, torch.device]:
+def get_device_info() -> tuple[str, ModuleType]:
     device_type = _get_available_device_type() or "cuda"
     device_module = _get_device_module(device_type)  # default device_module:torch.cuda
     return device_type, device_module
@@ -65,7 +66,7 @@ class GarbageCollection:
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H100, H200, B200 GPU and AMD MI250, MI300X, MI325X, MI355X and Intel PVC
-def get_peak_flops(device_name: str) -> int:
+def get_peak_flops(device_name: str) -> float:
     try:
         # Run the lspci command and capture the output
         result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
