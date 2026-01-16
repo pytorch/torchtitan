@@ -8,7 +8,7 @@
 import math
 
 import torch
-from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
 
 class VLLMCompatibleFlashAttention(torch.nn.Module):
@@ -17,8 +17,8 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.flash_attn_varlen_func = flash_attn_varlen_func
-        from vllm.attention.utils.fa_utils import get_flash_attn_version
         from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+        from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
         self.vllm_is_batch_invariant = vllm_is_batch_invariant
         self.fa_version = get_flash_attn_version()
