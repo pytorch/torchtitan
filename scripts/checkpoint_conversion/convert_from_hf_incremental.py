@@ -16,6 +16,7 @@ import torchtitan.protocols.train_spec as train_spec_module
 import tqdm
 from safetensors import safe_open
 from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.config.job_config import PEFT
 
 
 def load_incremental_hf(path) -> Dict[str, torch.Tensor]:
@@ -107,7 +108,10 @@ def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
     print(f"Number of experts: {num_experts}")
 
     with torch.device("cpu"):
-        model = train_spec.model_cls(model_args)
+        try:
+            model = train_spec.model_cls(model_args, PEFT())
+        except TypeError:
+            model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
     sd_adapter = train_spec.state_dict_adapter(model_args, None)

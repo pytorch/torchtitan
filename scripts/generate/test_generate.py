@@ -25,7 +25,8 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 from torchtitan.components.metrics import build_device_memory_monitor
-from torchtitan.config import TORCH_DTYPE_MAP, ConfigManager, Debug as DebugConfig
+from torchtitan.config import ConfigManager, Debug as DebugConfig, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import PEFT
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools import utils
@@ -117,7 +118,10 @@ def test_generate(
         utils.set_default_dtype(TORCH_DTYPE_MAP[dtype]),
     ):
         logger.info(f"Init model on init_device: {init_device}")
-        model = train_spec.model_cls(model_args)
+        try:
+            model = train_spec.model_cls(model_args, PEFT())
+        except TypeError:
+            model = train_spec.model_cls(model_args)
 
     world_mesh = None
     # Init distributed env

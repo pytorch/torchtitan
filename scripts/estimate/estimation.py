@@ -18,6 +18,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.config import ConfigManager, JobConfig
+from torchtitan.config.job_config import PEFT
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.protocols.train_spec import get_train_spec
@@ -94,7 +95,10 @@ def estimate_memory(job_config: JobConfig):
             f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = train_spec.model_cls(model_args)
+            try:
+                model = train_spec.model_cls(model_args, PEFT())
+            except TypeError:
+                model = train_spec.model_cls(model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)

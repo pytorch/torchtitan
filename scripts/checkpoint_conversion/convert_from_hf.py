@@ -12,6 +12,7 @@ import torch.distributed.checkpoint as dcp
 import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.config.job_config import PEFT
 
 
 @torch.inference_mode()
@@ -23,7 +24,10 @@ def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
     model_args = train_spec.model_args[model_flavor]
 
     with torch.device("cpu"):
-        model = train_spec.model_cls(model_args)
+        try:
+            model = train_spec.model_cls(model_args, PEFT())
+        except TypeError:
+            model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
     sd_adapter = train_spec.state_dict_adapter(model_args, None)
