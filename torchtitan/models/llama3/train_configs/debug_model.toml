@@ -24,10 +24,6 @@ flavor = "debugmodel"
 hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
-[debug]
-deterministic = true
-seed = 0
-
 [optimizer]
 name = "AdamW"
 lr = 8e-4

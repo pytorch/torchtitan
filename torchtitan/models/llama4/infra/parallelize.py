@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any
-
 import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -39,7 +37,10 @@ from torchtitan.distributed.expert_parallel import (
     TensorParallel,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.llama3.infra.parallelize import (
+    apply_ddp,
+    disable_fsdp_gradient_division,
+)
 from torchtitan.models.moe import moe as moe_module
 from torchtitan.tools.logging import logger
 
@@ -341,10 +342,7 @@ def apply_fsdp(
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config: dict[str, Any] = {
-        "mesh": dp_mesh,
-        "mp_policy": mp_policy,
-    }
+    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -369,10 +367,6 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
-        # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
-        #       gradient division. We handle gradient scaling in the training
-        #       loop based on global token count.
-        model.tok_embeddings.set_gradient_divide_factor(1.0)
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
@@ -405,20 +399,11 @@ def apply_fsdp(
                 shard_placement_fn=_experts_shard_placement_fn,
             )
 
-            # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
-            #       gradient division. We handle gradient scaling in the training
-            #       loop based on global token count.
-            transformer_block.moe.experts.set_gradient_divide_factor(1.0)
-
         fully_shard(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
-        # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
-        #       gradient division. We handle gradient scaling in the training
-        #       loop based on global token count.
-        transformer_block.set_gradient_divide_factor(1.0)
 
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass
@@ -429,17 +414,11 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
-        # NOTE: Set gradient_divide_factor to 1.0 to disable FSDP's automatic
-        #       gradient division. We handle gradient scaling in the training
-        #       loop based on global token count.
-        model.norm.set_gradient_divide_factor(1.0)
-        model.output.set_gradient_divide_factor(1.0)
 
     fully_shard(model, **fsdp_config)
 
-    # Set gradient_divide_factor=1.0 to disable FSDP's automatic gradient division
-    # We handle gradient scaling ourselves in the training loop with global token count
-    model.set_gradient_divide_factor(1.0)
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
     # in EP could interfere with implicit prefetching in FSDP
