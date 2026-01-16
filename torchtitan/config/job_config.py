@@ -448,15 +448,30 @@ class Parallelism:
     Note that this is still an experimental feature.
     """
 
-    expert_parallel_comm_backend: Literal["standard", "deepep"] = "standard"
+    expert_parallel_comm_backend: Literal["standard", "deepep", "hybridep"] = "standard"
     """
     Expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
 
     - "standard": Uses PyTorch all-to-all collectives (default)
-    - "deepep": Uses DeepEP custom kernels for more efficient communication
+    - "deepep": Uses DeepEP custom kernels for more efficient communication (optimized for H100 NVLink Switch)
+    - "hybridep": Uses HybridEP custom kernels (optimized for GB200 NVLink)
 
-    DeepEP requires installation:
-    https://github.com/deepseek-ai/DeepEP.
+    DeepEP/HybridEP requires installation:
+    https://github.com/deepseek-ai/DeepEP. (Checkout to hybrid_ep branch if using HybridEP)
+    """
+
+    hybridep_num_sms_dispatch_api: int = 16
+    """
+    Number of SMs used by the HybridEP dispatch API.
+    Only used when expert_parallel_comm_backend is "hybridep".
+    This is configured by models behind the scene and not exposed to users.
+    """
+
+    hybridep_num_sms_combine_api: int = 16
+    """
+    Number of SMs used by the HybridEP combine API.
+    Only used when expert_parallel_comm_backend is "hybridep".
+    This is configured by models behind the scene and not exposed to users.
     """
 
 
