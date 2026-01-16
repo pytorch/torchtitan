@@ -14,25 +14,18 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.components.peft.lora import lora_or_linear
 from torchtitan.config.job_config import PEFT
-from torchtitan.distributed.deepep.fused_activation import fused_silu_gate_prob
 from torchtitan.tools.logging import logger
 from .utils import indices_padding_wrapper, indices_padding_wrapper_lora
 
 # Lazy import DeepEP - only required when use_deepep=True in config
 try:
+    from torchtitan.distributed.deepep.fused_activation import fused_silu_gate_prob
     from torchtitan.distributed.deepep.utils import DeepEPTokenDispatcher
-except ImportError:
-    DeepEPTokenDispatcher = None
-    logger.warning(
-        "DeepEP is not installed, using default token dispatcher. "
-        "Please install DeepEP to use DeepEP token dispatcher."
-    )
-
     DEEPEP_AVAILABLE = True
 except ImportError:
     DEEPEP_AVAILABLE = False
+    fused_silu_gate_prob = None
     DeepEPTokenDispatcher = None
-
 
 @dataclass
 class ExpertRoutingHistogram:
