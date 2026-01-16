@@ -334,7 +334,7 @@ class LoraRowwiseParallel(RowwiseParallel):
         )
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        if isinstance(module, Lora):
+        if isinstance(module, nn.Linear):
             partition_fn = self._partition_linear_fn
             # rowwise linear runtime sharding requires input tensor shard on last dim
             self.desired_input_layouts: tuple[Placement, ...] = (Shard(-1),)
