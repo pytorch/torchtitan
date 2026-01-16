@@ -223,7 +223,7 @@ class GptOssGroupedExperts(nn.Module):
         tp_degree = 1
         if isinstance(self.mlp1_weight, DTensor):
             mesh_dim_names = self.mlp1_weight.device_mesh.mesh_dim_names
-            # pyrefly: ignore[unsupported-operation]
+            # pyrefly: ignore[not-iterable]
             if "tp" in mesh_dim_names:
                 # pyrefly: ignore [missing-attribute]
                 tp_dim_idx = mesh_dim_names.index("tp")
@@ -232,7 +232,7 @@ class GptOssGroupedExperts(nn.Module):
         if self.use_grouped_mm:
             if (
                 not isinstance(self.mlp1_weight, DTensor)
-                # pyrefly: ignore[unsupported-operation]
+                # pyrefly: ignore[not-iterable]
                 or "ep" not in self.mlp1_weight.device_mesh.mesh_dim_names
             ):
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
