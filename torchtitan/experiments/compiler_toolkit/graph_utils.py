@@ -17,6 +17,7 @@ from torch._functorch.aot_autograd import (
     JointWithDescriptors,
 )
 from torch._guards import tracing, TracingContext
+from torch._inductor.output_code import RegionalOutputCode
 from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
@@ -302,6 +303,10 @@ def compiler(
         )
         logger.info(f"Applying pass: {pass_name}")
         gm = pass_fn(gm, example_inputs)
+        # regional_inductor might output a RegionalOutputCode object
+        # so we need to get the inner gm back
+        if isinstance(gm, RegionalOutputCode):
+            gm = gm._graph_module
 
     # Only try to print/dump if gm is still a GraphModule
     # (compile_fx_inner returns a CompiledFxGraph which doesn't have print_readable)
