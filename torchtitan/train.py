@@ -209,9 +209,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config.training.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
-        # NOTE: We no longer wrap loss_fn with rescale_accumulated_loss
-        # because weighted_cross_entropy_loss handles the scaling correctly
-        # by dividing by the global token count across all ranks and grad accum steps
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -483,7 +480,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         return inputs, labels, extra_inputs, extra_kwargs
 
     def forward_backward_step(
-        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
@@ -520,9 +520,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             loss = (
                 # Rescale PP loss to be "local loss sum / global valid tokens)
                 # because each microbathes could have different number of valid tokens
-                (torch.sum(torch.stack(losses)) / self.global_valid_tokens).to(
-                    self.device
-                )
+                (torch.sum(torch.stack(losses)) / global_valid_tokens).to(self.device)
                 if self.pp_has_last_stage
                 else torch.tensor([-1.0], device=self.device)
             )
@@ -537,13 +535,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
                     # Scale the loss by the inverse of the total weight denominator before backward
                     # This ensures gradients are properly normalized across all microbatches
-                    loss = loss_sum / self.global_valid_tokens
+                    loss = loss_sum / global_valid_tokens
 
                 # need to free pred before bwd to avoid peaking memory
                 del pred
                 loss.backward()
 
-        # The returned loss here is local_sum_loss / global_valid_tokens
+        # The returned loss here is local SUM loss / global_valid_tokens
         return loss
 
     def train_step(
@@ -568,18 +566,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # All-reduce to get global token count across DP ranks
         if parallel_dims.dp_enabled:
-            dp_mesh = parallel_dims.get_optional_mesh("batch")
+            batch_mesh = parallel_dims.parallel_dims.get_mesh("batch")
             ft_pg = self.ft_manager.loss_sync_pg
-            self.global_valid_tokens = dist_utils.dist_sum(
-                local_valid_tokens, dp_mesh, ft_pg
+            global_valid_tokens = dist_utils.dist_sum(
+                local_valid_tokens, batch_mesh, ft_pg
             )
         else:
-            self.global_valid_tokens = local_valid_tokens.float()
+            global_valid_tokens = local_valid_tokens.float()
 
         # Now run gradient accumulation with the shared global_valid_tokens
         accumulated_losses = []
         for input_dict, labels in microbatches:
-            loss = self.forward_backward_step(input_dict, labels)
+            loss = self.forward_backward_step(input_dict, labels, global_valid_tokens)
             accumulated_losses.append(loss.detach())
 
         grad_norm = dist_utils.clip_grad_norm_(
