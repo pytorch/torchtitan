@@ -8,7 +8,6 @@ import asyncio
 import logging
 import os
 
-from dataclasses import dataclass
 from typing import List
 
 import torch
@@ -19,41 +18,13 @@ from torchtitan.distributed import utils as dist_utils
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
 
+from torchtitan.experiments.rl.unified.actors.scorer import TrajectoryData
 from torchtitan.experiments.rl.unified.job_config import JobConfig
 
-from torchtitan.experiments.rl.vllm_compat.simple_rl import (
-    compute_grpo_advantages,
-    compute_grpo_advantages_stable,
-    trivial_reward_function,
-)
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class TrajectoryData:
-    """
-    Data from one generation batch.
-
-    Attributes:
-        policy_version: Version of policy that produced this batch
-        completions: List of completion strings
-        vllm_token_ids: List of token ID lists for each completion
-        vllm_token_log_probs: List of per-token log prob lists
-        prompt_token_ids: List of prompt token ID lists
-        rewards: Computed rewards for each completion
-        advantages: Computed advantages for each completion
-    """
-
-    policy_version: int
-    completions: List[str]
-    vllm_token_ids: List[List[int]]
-    vllm_token_log_probs: List[List[float]]
-    prompt_token_ids: List[List[int]]
-    rewards: torch.Tensor
-    advantages: torch.Tensor
 
 
 class VLLMGenerator:
@@ -258,7 +229,7 @@ class Generator(Actor):
 
     Maintains a vLLM engine that is synchronized with the Trainer
     via weight sync. Generates completions for given prompts and
-    computes rewards/advantages.
+    returns unscored trajectory data for the Scorer to process.
 
     Args:
         job_config: JobConfig dataclass containing all configuration
@@ -284,8 +255,6 @@ class Generator(Actor):
         self.max_new_tokens = job_config.generation.sampling.max_tokens
         self.temperature = job_config.generation.sampling.temperature
         self.group_size = job_config.rl.grpo_group_size
-        self.grpo_beta = job_config.rl.grpo_beta
-        self.use_stable_grpo = job_config.rl.use_stable_grpo
 
         # Initialize distributed environment for SPMD generator
         world_size = dist_utils.init_distributed(
@@ -299,14 +268,15 @@ class Generator(Actor):
         self.cond = asyncio.Condition()
         self.policy_version = 0
 
-        # Reward function. TODO: Use a real reward function
-        self.reward_fn = trivial_reward_function
-
         logger.info("Generator initialized with vLLM engine")
 
     @endpoint
-    async def generate(self) -> None:
-        """Generate trajectories and compute rewards/advantages."""
+    async def generate(self) -> TrajectoryData:
+        """Generate trajectories without computing rewards/advantages.
+
+        Returns:
+            TrajectoryData for the Scorer to process (rewards=None)
+        """
         logger.info(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
         )
@@ -330,43 +300,17 @@ class Generator(Actor):
                 n_samples_per_prompt=self.group_size,
             )
 
-            # Compute rewards
-            logger.info(
-                f"Computing rewards: {len(completions)} completions, "
-                f"{len(self.expected_answers)} expected answers, "
-                f"group_size={self.group_size}"
-            )
-            rewards = self.reward_fn(
-                completions, self.expected_answers, self.group_size
-            )
+            logger.info(f"Generated {len(completions)} completions for scoring")
 
-            # Normalize rewards
-            reward_mean = rewards.mean()
-            reward_std = rewards.std()
-            if reward_std > 1e-8:
-                rewards_normalized = (rewards - reward_mean) / reward_std
-            else:
-                rewards_normalized = rewards - reward_mean
-
-            # Compute advantages using GRPO
-            if self.use_stable_grpo:
-                advantages = compute_grpo_advantages_stable(
-                    rewards_normalized, self.group_size
-                )
-            else:
-                advantages = compute_grpo_advantages(
-                    rewards_normalized, self.group_size, beta=self.grpo_beta
-                )
-
-            # Create trajectory data
+            # Create trajectory data (rewards initialized to zeros, filled by Scorer)
             trajectory = TrajectoryData(
                 policy_version=self.policy_version,
                 completions=completions,
                 vllm_token_ids=vllm_token_ids,
                 vllm_token_log_probs=vllm_token_log_probs,
                 prompt_token_ids=prompt_token_ids,
-                rewards=rewards,
-                advantages=advantages,
+                expected_answers=self.expected_answers,
+                rewards=torch.zeros(len(completions)),
             )
 
             # Signal ready for update
