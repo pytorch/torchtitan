@@ -567,7 +567,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Move to GPU for distributed communication
         local_valid_tokens = local_valid_tokens.to(self.device)
         if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.parallel_dims.get_mesh("batch")
+            batch_mesh = parallel_dims.get_mesh("batch")
             ft_pg = self.ft_manager.loss_sync_pg
             global_valid_tokens = dist_utils.dist_sum(
                 local_valid_tokens, batch_mesh, ft_pg
