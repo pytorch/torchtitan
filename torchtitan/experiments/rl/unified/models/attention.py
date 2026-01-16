@@ -78,9 +78,10 @@ class VLLMAttention(torch.nn.Module):
         batch_size, num_heads, seq_len, head_dim = q.shape
 
         # Transpose to (batch, seq_len, num_heads, head_dim) for vLLM
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        # vLLM attention expects bfloat16 /  inputs
+        q = q.transpose(1, 2).to(dtype=torch.bfloat16)
+        k = k.transpose(1, 2).to(dtype=torch.bfloat16)
+        v = v.transpose(1, 2).to(dtype=torch.bfloat16)
 
         output_varlen = self.vllm_attn(q, k, v)
 
