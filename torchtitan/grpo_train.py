@@ -212,9 +212,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"Building {self.job_config.model.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = self.train_spec.model_cls(model_args)
+            try:
+                model = self.train_spec.model_cls(model_args, job_config.peft)
+            except TypeError:
+                model = self.train_spec.model_cls(model_args)
             if self.use_ref_model:
-                ref_model = self.train_spec.model_cls(model_args)
+                try:
+                    ref_model = self.train_spec.model_cls(model_args, job_config.peft)
+                except TypeError:
+                    ref_model = self.train_spec.model_cls(model_args)
             else:
                 ref_model = None
 

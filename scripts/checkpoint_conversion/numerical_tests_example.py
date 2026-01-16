@@ -12,6 +12,7 @@ import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import ConfigManager
+from torchtitan.config.job_config import PEFT
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools.logging import logger
 from transformers import AutoModelForCausalLM
@@ -71,7 +72,10 @@ def forward_tt(config_path, checkpoint_path, test_set):
     model_args = train_spec.model_args[config.model.flavor]
     model_args.update_from_config(config)
 
-    model = train_spec.model_cls(model_args)
+    try:
+        model = train_spec.model_cls(model_args, PEFT())
+    except TypeError:
+        model = train_spec.model_cls(model_args)
 
     # materalize model
     device = torch.device(device_type)

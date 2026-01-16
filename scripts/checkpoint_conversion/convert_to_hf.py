@@ -13,6 +13,7 @@ import torch.distributed.checkpoint as dcp
 import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.config.job_config import PEFT
 
 # Config files to copy from source HF model
 HF_CONFIG_FILES = [
@@ -60,7 +61,10 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_pat
     model_args = train_spec.model_args[model_flavor]
 
     with torch.device("cpu"):
-        model = train_spec.model_cls(model_args)
+        try:
+            model = train_spec.model_cls(model_args, PEFT())
+        except TypeError:
+            model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
     sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
@@ -133,11 +137,16 @@ def convert_all_checkpoints(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert DCP weights to HF format.")
     parser.add_argument(
-        "input_dir", type=Path, help="Input directory with DCP weights (or checkpoint/ dir with --all)."
+        "input_dir",
+        type=Path,
+        help="Input directory with DCP weights (or checkpoint/ dir with --all).",
     )
     parser.add_argument(
-        "output_dir", type=Path, nargs="?", default=None,
-        help="Output directory for HF checkpoint. Not needed with --all."
+        "output_dir",
+        type=Path,
+        nargs="?",
+        default=None,
+        help="Output directory for HF checkpoint. Not needed with --all.",
     )
     parser.add_argument(
         "--hf_assets_path",
@@ -148,8 +157,9 @@ if __name__ == "__main__":
     parser.add_argument("--model_name", type=str, nargs="?", default="llama3")
     parser.add_argument("--model_flavor", type=str, nargs="?", default="8B")
     parser.add_argument(
-        "--all", action="store_true",
-        help="Convert all step-* checkpoints in input_dir to {parent}/hf_checkpoints/{step}/"
+        "--all",
+        action="store_true",
+        help="Convert all step-* checkpoints in input_dir to {parent}/hf_checkpoints/{step}/",
     )
     args = parser.parse_args()
 

@@ -12,14 +12,15 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple
-import tqdm
 
 import torch
 import torch.distributed.checkpoint as dcp
 import torchtitan.protocols.train_spec as train_spec_module
+import tqdm
 from safetensors.torch import save_file
 from torch.distributed.checkpoint.metadata import Metadata, TensorStorageMetadata
 from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.config.job_config import PEFT
 
 # Config files to copy from source HF model
 HF_CONFIG_FILES = [
@@ -106,7 +107,9 @@ def check_if_all_keys_are_present(state_dict, safetensor_mapping):
 
 
 @torch.inference_mode()
-def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_path, debug):
+def convert_to_hf(
+    input_dir, output_dir, model_name, model_flavor, hf_assets_path, debug
+):
     if model_name == "flux":
         import torchtitan.experiments.flux  # noqa: F401
     # load model and model args so that we can get the state dict adapter...
@@ -116,7 +119,10 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_pat
     os.makedirs(output_dir, exist_ok=True)
 
     with torch.device("cpu"):
-        model = train_spec.model_cls(model_args)
+        try:
+            model = train_spec.model_cls(model_args, PEFT())
+        except TypeError:
+            model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
     sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
@@ -145,7 +151,7 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_pat
     cleanup_sharded_dir(output_dir)
     keys_to_save = sorted(keys_to_save, key=lambda x: x[0])
     if debug:
-        print(f"Keys...")
+        print("Keys...")
         print([x[0] for x in keys_to_save])
     for key, tensor_metadata in tqdm.tqdm(keys_to_save, desc="Loading state dict"):
         state_dict_to_grab = {
