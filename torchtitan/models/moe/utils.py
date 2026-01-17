@@ -7,7 +7,8 @@
 from typing import Callable, Literal
 
 import torch
-
+from torch.distributed.tensor import DeviceMesh
+from torch.distributed._functional_collectives import all_to_all_single
 from torchtitan.tools.utils import _round_up
 
 from .kernels import generate_permute_indices
@@ -95,3 +96,48 @@ def indices_padding_wrapper(func: Callable) -> Callable:
         return out
 
     return wrapper
+
+def get_a2a_splits(
+    num_tokens_per_expert: torch.Tensor,
+    device_mesh: DeviceMesh,
+    ep_degree: int,
+) -> tuple[list[int], list[int]]:
+    """
+    Get the input and output splits for all-to-all comms in expert parallelism.
+
+    Note: this incurs a device-to-host synchronization.
+
+    Args:
+        num_tokens_per_expert: Tensor of shape (num_experts,)
+        device_mesh: Device mesh for expert parallelism
+        ep_degree: Expert parallelism degree
+    Returns:
+        input_splits: list of shape (ep_degree,)
+        output_splits: list of shape (ep_degree,)
+        num_tokens_per_expert_group: Tensor of shape (num_experts,)
+    """
+
+    with torch.no_grad():
+        num_tokens_per_expert_group = all_to_all_single(
+            num_tokens_per_expert,
+            None,
+            None,
+            group=device_mesh.get_group(),
+        )
+        # Need to wait explicitly because it is used by a triton kernel later
+        # which doesn't realize that AsyncCollectiveTensor needs unwrapping
+        num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
+            num_tokens_per_expert_group
+        )
+        input_splits = (
+            num_tokens_per_expert.view(ep_degree, -1)
+            .sum(dim=1)
+            .to(torch.device("cpu"), non_blocking=True)
+        )
+        # NOTE: this would incur a device-to-host sync
+        output_splits = (
+            num_tokens_per_expert_group.view(ep_degree, -1)
+            .sum(dim=1)
+            .to(torch.device("cpu"), non_blocking=False)
+        )
+    return input_splits.tolist(), output_splits.tolist(), num_tokens_per_expert_group

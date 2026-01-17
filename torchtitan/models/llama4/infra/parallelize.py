@@ -131,8 +131,16 @@ def parallelize_llama(
     else:
         use_deepep = False
 
-    use_mxfp8_ep = job_config.parallelism.expert_parallel_a2a_precision == "mxfp8"
-
+    use_mxfp8_a2a_fwd = job_config.parallelism.expert_parallel_a2a_dispatch_fwd_precision == "mxfp8"
+    use_mxfp8_a2a_bwd = job_config.parallelism.expert_parallel_a2a_dispatch_bwd_precision == "mxfp8"
+    if use_mxfp8_a2a_fwd or use_mxfp8_a2a_bwd:
+        assert not use_deepep, (
+            "MXFP8 all-to-all is not compatible with DeepEP. Please choose either DeepEP or MXFP8 all-to-all, but not both."
+        )
+        assert "quantize.grouped_mm.mx" in job_config.model.converters, (
+            "MXFP8 all-to-all requires MXFP8 grouped GEMM converter. Please add 'quantize.grouped_mm.mx' to model.converters in job config."
+        )
+    torch.distributed.breakpoint()
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
@@ -144,7 +152,8 @@ def parallelize_llama(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
-            mxfp8_ep=use_mxfp8_ep,
+            use_mxfp8_a2a_fwd=use_mxfp8_a2a_fwd,
+            use_mxfp8_a2a_bwd=use_mxfp8_a2a_bwd,
         )
 
     model_compile_enabled = (
@@ -503,7 +512,8 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     dual_pipe_v: bool = False,
     use_deepep: bool = False,
-    mxfp8_ep: bool = False,
+    use_mxfp8_a2a_fwd: bool = False,
+    use_mxfp8_a2a_bwd: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -573,13 +583,15 @@ def apply_moe_ep_tp(
                 logger.info("Applying DeepEP to MoE layer")
             else:
                 # input / output sharding on the batch / tokens dim
-                if mxfp8_ep:
+                if use_mxfp8_a2a_fwd or use_mxfp8_a2a_bwd:
                     logger.info("Applying MXFP8 Expert Parallelism to MoE layer")
+                    experts_plan = MXFP8ExpertParallel(
+                        use_mxfp8_a2a_fwd=use_mxfp8_a2a_fwd,
+                        use_mxfp8_a2a_bwd=use_mxfp8_a2a_bwd,
+                    )
                 else:
-                    logger.info("Applying default Expert Parallelism to MoE layer")
-                experts_plan = (
-                    ExpertParallel() if not mxfp8_ep else MXFP8ExpertParallel()
-                )
+                    logger.info("Applying Expert Parallelism to MoE layer")
+                    experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()

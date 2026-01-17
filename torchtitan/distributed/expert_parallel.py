@@ -24,7 +24,7 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from torchtitan.models.moe.utils import _permute, _unpermute
+from torchtitan.models.moe.utils import _permute, _unpermute, get_a2a_splits
 
 
 class BaseExpertParallel(ParallelStyle, ABC):
@@ -107,32 +107,11 @@ class ExpertParallel(BaseExpertParallel):
         ep_degree = device_mesh.shape[0]
         num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
 
-        # generate the input splits and output splits for all-to-all
-        with torch.no_grad():
-            num_tokens_per_expert_group = all_to_all_single(
-                num_tokens_per_expert,
-                None,
-                None,
-                group=device_mesh.get_group(),
-            )
-            # Need to wait explicitly because it is used by a triton kernel later
-            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
-            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
-                num_tokens_per_expert_group
-            )
-            input_splits = (
-                num_tokens_per_expert.view(ep_degree, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
-            )
-            # NOTE: this would incur a device-to-host sync
-            output_splits = (
-                num_tokens_per_expert_group.view(ep_degree, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=False)
-            )
-            self.input_splits = input_splits.tolist()
-            self.output_splits = output_splits.tolist()
+        # first all-to-all to calculate output splits from input splits.
+        # note: this will incur a d2h sync
+        self.input_splits, self.output_splits, num_tokens_per_expert_group = get_a2a_splits(
+            num_tokens_per_expert, device_mesh, ep_degree
+        )
 
         # perform all-to-all
         routed_input = all_to_all_single_autograd(
@@ -192,25 +171,26 @@ class ExpertParallel(BaseExpertParallel):
         )
 
 
-class MXFP8ExpertParallel(BaseExpertParallel):
-    def __init__(self):
+class MXFP8ExpertParallel(ExpertParallel):
+    def __init__(self, use_mxfp8_a2a_fwd: bool = False, use_mxfp8_a2a_bwd: bool = False):
         super().__init__()
         self.input_splits = None
         self.output_splits = None
         self.input_shape = None
         self.permuted_indices = None
+        self.use_mxfp8_a2a_fwd = use_mxfp8_a2a_fwd
+        self.use_mxfp8_a2a_bwd = use_mxfp8_a2a_bwd
         try:
             from torchao.prototype.moe_training.ep import (
-                a2a_combine as mxfp8_a2a_combine,
-                a2a_dispatch as mxpf8_a2a_dispatch,
-                permute as mxfp8_permute,
-                unpermute as mxf8_unpermute,
+                a2a_combine_hp_fwd_mxfp8_bwd,
+                a2a_dispatch_mxfp8_fwd_hp_bwd,
+                permute_mxfp8_fwd_hp_bwd,
+                unpermute_hp_fwd_mxfp8_bwd,
             )
-
-            self.mxfp8_a2a_dispatch = mxpf8_a2a_dispatch
-            self.mxfp8_permute = mxfp8_permute
-            self.mxfp8_unpermute = mxf8_unpermute
-            self.mxfp8_a2a_combine = mxfp8_a2a_combine
+            self.a2a_dispatch_mxfp8_fwd_hp_bwd = a2a_dispatch_mxfp8_fwd_hp_bwd
+            self.permute_mxfp8_fwd_hp_bwd = permute_mxfp8_fwd_hp_bwd
+            self.unpermute_hp_fwd_mxfp8_bwd = unpermute_hp_fwd_mxfp8_bwd
+            self.a2a_combine_hp_fwd_mxfp8_bwd = a2a_combine_hp_fwd_mxfp8_bwd
         except ImportError as e:
             raise ImportError(
                 "MXFP8 expert parallel ops are not available."
@@ -218,10 +198,6 @@ class MXFP8ExpertParallel(BaseExpertParallel):
                 "https://github.com/pytorch/ao/tree/main?tab=readme-ov-file#-installation."
             ) from e
 
-    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
-        for param_name, param in mod.named_parameters(recurse=False):
-            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
-            mod.register_parameter(param_name, dist_param)
 
     def _token_dispatch(
         self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
@@ -231,39 +207,19 @@ class MXFP8ExpertParallel(BaseExpertParallel):
         ep_degree = device_mesh.shape[0]
         num_local_experts = num_tokens_per_expert.shape[0] // ep_degree
 
-        # generate the input splits and output splits for all-to-all
-        with torch.no_grad():
-            num_tokens_per_expert_group = all_to_all_single(
-                num_tokens_per_expert,
-                None,
-                None,
-                group=device_mesh.get_group(),
-            )
-            # Need to wait explicitly because it is used by a triton kernel later
-            # which doesn't realize that AsyncCollectiveTensor needs unwrapping
-            num_tokens_per_expert_group = torch.ops._c10d_functional.wait_tensor(
-                num_tokens_per_expert_group
-            )
-            input_splits = (
-                num_tokens_per_expert.view(ep_degree, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=True)
-            )
-            # NOTE: this would incur a device-to-host sync
-            output_splits = (
-                num_tokens_per_expert_group.view(ep_degree, -1)
-                .sum(dim=1)
-                .to(torch.device("cpu"), non_blocking=False)
-            )
-            self.input_splits = input_splits.tolist()
-            self.output_splits = output_splits.tolist()
+        # first all-to-all to calculate output splits from input splits.
+        # note: this will incur a d2h sync
+        self.input_splits, self.output_splits, num_tokens_per_expert_group = get_a2a_splits(
+            num_tokens_per_expert, device_mesh, ep_degree
+        )
 
         # perform all-to-all
-        routed_input = self.mxfp8_a2a_dispatch(
+        # TODO: set use_mxfp8=self.use_mxfp8_a2a_fwd when the option is available in torchao
+        routed_input = self.a2a_dispatch_mxfp8_fwd_hp_bwd(
             routed_input,
-            self.output_splits,
-            self.input_splits,
-            device_mesh.get_group(),
+            output_splits=self.output_splits,
+            input_splits=self.input_splits,
+            group_name=device_mesh.get_group().group_name,
         )
 
         # NOTE: After this all-to-all, the routed input is put on proper EP rank.
@@ -277,13 +233,15 @@ class MXFP8ExpertParallel(BaseExpertParallel):
         # is a multiple of TOKEN_GROUP_ALIGN_SIZE_M.
         # Note that this will create side effects when wrapping the for-loop implementation
         # of GroupedExperts, as it does not need padding.
+
+        # TODO: set use_mxfp8=self.use_mxfp8_a2a_fwd when the option is available in torchao
         (
             self.input_shape,
             routed_input,
             self.permuted_indices,
             num_tokens_per_expert_group,
             _,
-        ) = self.mxfp8_permute(
+        ) = self.permute_mxfp8_fwd_hp_bwd(
             routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
         )
 
@@ -292,16 +250,17 @@ class MXFP8ExpertParallel(BaseExpertParallel):
     def _token_combine(
         self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
     ) -> Tensor:
-        routed_output = self.mxfp8_unpermute(
+        # TODO: set use_mxfp8=self.use_mxfp8_a2a_bwd when the option is available in torchao
+        routed_output = self.unpermute_hp_fwd_mxfp8_bwd(
             routed_output, self.permuted_indices, self.input_shape
         )
 
-        routed_output = self.mxfp8_a2a_combine(
+        # TODO: set use_mxfp8=self.use_mxfp8_a2a_bwd when the option is available in torchao
+        routed_output = self.a2a_combine_hp_fwd_mxfp8_bwd(
             routed_output,
-            self.input_splits,
-            self.output_splits,
-            device_mesh.get_group(),
-            mxfp8_bwd=False,  # temp workaround since torch.compile requires tensor metadata in bwd to match fwd
+            output_splits=self.input_splits, # swap input/output splits to reverse all-to-all dispatch
+            input_splits=self.output_splits,
+            group_name=device_mesh.get_group().group_name,
         )
         return routed_output
 
@@ -507,3 +466,5 @@ class DeepEPExpertParallel(BaseExpertParallel):
             input_fn=self._token_dispatch,  # pyrefly: ignore [bad-argument-type]
             output_fn=self._token_combine,  # pyrefly: ignore [bad-argument-type]
         )
+
+

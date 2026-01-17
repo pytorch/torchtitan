@@ -459,10 +459,10 @@ class Parallelism:
     https://github.com/deepseek-ai/DeepEP.
     """
 
-    expert_parallel_a2a_precision: Literal["standard", "mxfp8"] = "standard"
+    expert_parallel_a2a_dispatch_fwd_precision: Literal["default", "mxfp8"] = "default"
     """
     Expert-parallel all-to-all communication precision. No effect for non-MoE models or when ep = 1.
-    - "standard": Uses standard floating point precision for all-to-all communication (default)
+    - "default": Uses standard floating point precision for all-to-all communication (default)
     - "mxfp8": Requires model converter "quantize.grouped_mm.mx". When enabled, instead of doing MXFP8
                quantization right before the MXFP8 grouped GEMMs for the routed experts, we do the quantization
                earlier, before the preceding all-to-all dispatch, and stay in MXFP8 through the token shuffle.
@@ -470,15 +470,43 @@ class Parallelism:
                pass, we quantize before the all-to-all combine, stay in MXFP8 through token unpermutation, and then
                do the MXFP8 grouped GEMM. The diagram below visualzes this:
 
-        Forward (left to right):
-         mxpf8 a2a dispatch -> mxfp8 permute -> mxfp8 grouped mm -> bf16 unpermute -> bf16 a2a combine
+               Forward flow:
+                1. a2a dispatch forward: high-precision input, MXFP8 output
+                2. permute forward: MXFP8 input, MXFP8 output
+                3. MXFP8 grouped GEMM: MXFP8 input, high-precision output
+                4. unpermute forward: high-precision input and output
+                5. a2a combine forward: high-precision input and output
 
-        Backward (right to left):
-         bf16 a2a dispatch bwd <- bf16 permute bwd <- mxfp8 grouped mm bwd <- mxfp8 unpermute bwd <- mxfp8 a2a combine bwd
+               Limitations: 
+                - Not compatible with DeepEP
 
-    MXFP8 requires installation of torchao nightly build for CUDA 12.8+:
-    https://github.com/pytorch/ao.
+               MXFP8 requires installation of torchao nightly build for CUDA 12.8+: https://github.com/pytorch/ao
     """
+
+    expert_parallel_a2a_combine_bwd_precision: Literal["default", "mxfp8"] = "default"
+    """
+    Expert-parallel all-to-all communication precision. No effect for non-MoE models or when ep = 1.
+    - "default": Uses standard floating point precision for all-to-all communication (default)
+    - "mxfp8": Requires model converter "quantize.grouped_mm.mx". When enabled, instead of doing MXFP8
+               quantization right before the MXFP8 grouped GEMMs for the routed experts, we do the quantization
+               earlier, before the preceding all-to-all dispatch, and stay in MXFP8 through the token shuffle.
+               This speeds up the all-to-all by sending fewer bytes over the network. Similarly, in the backward
+               pass, we quantize before the all-to-all combine, stay in MXFP8 through token unpermutation, and then
+               do the MXFP8 grouped GEMM. The diagram below visualzes this:
+
+               Backward flow:
+                1. a2a combine backward: high-precision input, MXFP8 output
+                2. unpermute backward: MXFP8 input, MXFP8 output
+                3. MXFP8 grouped GEMM: MXFP8 input, high-precision output
+                4. permute backward: high-precision input and output
+                5. a2a dispatch backward: high-precision input and output
+
+               Limitations: 
+                - Not compatible with DeepEP
+
+               MXFP8 requires installation of torchao nightly build for CUDA 12.8+: https://github.com/pytorch/ao
+    """
+
 
 
 @dataclass
