@@ -626,7 +626,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                             moe,
                             attr_name,
                             torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
+                                submod, backend=compile_config.backend, fullgraph=True, mode="light",
                             ),
                         )
                 else:
@@ -634,7 +634,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                         block,
                         attr_name,
                         torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=True
+                            submod, backend=compile_config.backend, fullgraph=True, mode="light",
                         ),
                     )
 
@@ -645,6 +645,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                 transformer_block,
                 backend=compile_config.backend,
                 fullgraph=True,
+                mode="light",
             )
 
         # pyrefly: ignore [missing-attribute]

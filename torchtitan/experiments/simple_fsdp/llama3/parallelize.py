@@ -176,6 +176,7 @@ def parallelize_llama(
             model,
             backend=backend,
             fullgraph=True,
+            mode="light",
         )
 
     return model
