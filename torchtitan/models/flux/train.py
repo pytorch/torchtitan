@@ -91,7 +91,10 @@ class FluxTrainer(Trainer):
             )
 
     def forward_backward_step(
-        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+        self,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         # generate t5 and clip embeddings
         input_dict["image"] = labels
@@ -169,7 +172,8 @@ class FluxTrainer(Trainer):
                     timesteps=timesteps,
                 )
 
-                loss = self.loss_fn(latent_noise_pred, target)
+                # Scale loss as we used SUM reduction for mse loss function
+                loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
             # pyrefly: ignore[delete-error]

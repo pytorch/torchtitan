@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any
-
 import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -39,7 +37,10 @@ from torchtitan.distributed.expert_parallel import (
     TensorParallel,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.llama3.infra.parallelize import (
+    apply_ddp,
+    disable_fsdp_gradient_division,
+)
 from torchtitan.models.moe import moe as moe_module
 from torchtitan.tools.logging import logger
 
@@ -341,7 +342,7 @@ def apply_fsdp(
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
@@ -398,13 +399,6 @@ def apply_fsdp(
                 shard_placement_fn=_experts_shard_placement_fn,
             )
 
-            # NOTE: # Although the FSDP sharding of experts is done on a mesh of
-            #       a different size than other parameters, the gradient division
-            #       factor should be consistent with data.
-            transformer_block.moe.experts.set_gradient_divide_factor(
-                gradient_divide_factor,
-            )
-
         fully_shard(
             transformer_block,
             **fsdp_config,
@@ -422,6 +416,9 @@ def apply_fsdp(
         )
 
     fully_shard(model, **fsdp_config)
+
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
     # in EP could interfere with implicit prefetching in FSDP

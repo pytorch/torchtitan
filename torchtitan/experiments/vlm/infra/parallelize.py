@@ -21,6 +21,7 @@ from torchtitan.models.llama3.infra.parallelize import (
     _op_sac_save_list,
     apply_compile,
     apply_ddp,
+    disable_fsdp_gradient_division,
 )
 from torchtitan.tools.logging import logger
 
@@ -181,4 +182,8 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
+
     fully_shard(model, **fsdp_config)
+
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)

@@ -17,6 +17,7 @@ from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecision
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.llama3.infra.parallelize import disable_fsdp_gradient_division
 from torchtitan.tools.logging import logger
 
 
@@ -115,6 +116,9 @@ def apply_fsdp(
     # Wrap all the rest of model
     fully_shard(model, **fsdp_config)
 
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)
+
 
 def apply_ac(model: nn.Module, ac_config):
     """Apply activation checkpointing to the model."""
@@ -164,6 +168,9 @@ def parallelize_encoders(
             fully_shard(block, **fsdp_config)
         # pyrefly: ignore [no-matching-overload]
         fully_shard(t5_model.hf_module, **fsdp_config)
+
+        # Disable FSDP's automatic gradient division for all FSDP modules
+        disable_fsdp_gradient_division(t5_model.hf_module)
 
         if parallel_dims.dp_replicate_enabled:
             logger.info("Applied HSDP to the T5 encoder model")
