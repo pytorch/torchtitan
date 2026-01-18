@@ -114,6 +114,20 @@ def parallelize_deepseekv3(
     else:
         use_deepep = False
 
+    use_mxfp8_a2a_dispatch_fwd = (
+        job_config.parallelism.expert_parallel_a2a_dispatch_fwd_precision == "mxfp8"
+    )
+    use_mxfp8_a2a_combine_bwd = (
+        job_config.parallelism.expert_parallel_a2a_combine_bwd_precision == "mxfp8"
+    )
+    if use_mxfp8_a2a_dispatch_fwd or use_mxfp8_a2a_combine_bwd:
+        assert (
+            not use_deepep
+        ), "MXFP8 all-to-all is not compatible with DeepEP. Please choose either DeepEP or MXFP8 all-to-all, but not both."
+        assert "quantize.grouped_mm.mx" in job_config.model.converters, (
+            "MXFP8 all-to-all requires MXFP8 grouped GEMM converter."
+            "Please add 'quantize.grouped_mm.mx' to model.converters in job config."
+        )
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
@@ -125,6 +139,8 @@ def parallelize_deepseekv3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
+            a2a_dispatch_fwd=job_config.parallelism.expert_parallel_a2a_dispatch_fwd_precision,
+            a2a_combine_bwd=job_config.parallelism.expert_parallel_a2a_combine_bwd_precision,
         )
 
     model_compile_enabled = (
