@@ -790,6 +790,15 @@ class Float8GroupedMM:
 
 @dataclass
 class MXLinear:
+    mxfp8_dim0_cast_kernel_choice: Literal["triton", "torch"] = "torch"
+    """
+    Temp work around for inductor performance gap.
+
+    torch is recommended for best performance.
+
+    Example: --quantize.linear.mx.mxfp8_dim0_cast_kernel_choice="torch"
+    """
+
     mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
     """
     Temp work around for inductor performance gap.
