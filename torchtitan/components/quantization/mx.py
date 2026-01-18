@@ -53,12 +53,18 @@ class MXLinearConverter(QuantizationConverter):
 
         # Configure MXFP8
         from torchao.prototype.mx_formats.config import (
+            MXFP8Dim0CastKernelChoice,
             MXFP8Dim1CastKernelChoice,
             MXLinearConfig as TorchAOMXLinearConfig,
         )
 
         mx_job_config = job_config.quantize.linear.mx
         config = TorchAOMXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
+        # pyrefly: ignore [missing-attribute]
+        config.mxfp8_dim0_cast_kernel_choice = MXFP8Dim0CastKernelChoice[
+            mx_job_config.mxfp8_dim0_cast_kernel_choice.upper()
+        ]
+        # pyrefly: ignore [missing-attribute]
         config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()
         ]
