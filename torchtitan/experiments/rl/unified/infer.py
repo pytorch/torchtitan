@@ -5,11 +5,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
+# Must set spawn method before any CUDA operations or vLLM imports
+# CUDA cannot be re-initialized in forked subprocesses
+# See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 import argparse
 
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
-
 from vllm import LLM, SamplingParams
 from vllm.logger import init_logger
 
