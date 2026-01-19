@@ -274,6 +274,9 @@ class Attention(nn.Module):
                 output = self.inner_attention(
                     xq, xk, xv, block_mask=attention_masks, scale=self.scaling
                 )
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
             case "varlen":
                 # TODO: pass self.scaling into varlen attention
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
@@ -288,12 +291,11 @@ class Attention(nn.Module):
             case "sdpa":
                 assert attention_masks is None
                 output = self.inner_attention(xq, xk, xv, scale=self.scaling)
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
-
-        output = output.transpose(
-            1, 2
-        ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
 
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
