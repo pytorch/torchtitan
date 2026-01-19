@@ -41,7 +41,7 @@ class MXLinearConverter(QuantizationConverter):
         # Can be removed if we enable the emulated versions
         assert has_cuda_capability(10, 0) or has_rocm_capability(
             9, 5
-        ), "MXFP8 is only supported on SM100 or later or ROCm gfx950 or later"
+        ), "MXFP8 is only supported on CUDA SM100 or later, or ROCm gfx950 or later"
 
         # TP not yet supported with torch.compile
         model_compile_enabled = (

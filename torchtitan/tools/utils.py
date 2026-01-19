@@ -25,12 +25,9 @@ def has_cuda_capability(major: int, minor: int) -> bool:
     )
 
 
-def is_rocm() -> bool:
-    return torch.cuda.is_available() and torch.version.hip is not None
-
-
 def has_rocm_capability(major: int, minor: int) -> bool:
-    return is_rocm() and torch.cuda.get_device_capability() >= (
+    is_rocm = torch.cuda.is_available() and torch.version.hip is not None
+    return is_rocm and torch.cuda.get_device_capability() >= (
         major,
         minor,
     )
