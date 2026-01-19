@@ -240,20 +240,32 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        assert (
-            isinstance(attention_masks, BlockMask) or attention_masks is None
-        ), attention_masks
+        match self.attn_type:
+            case "flex":
+                assert isinstance(attention_masks, BlockMask), attention_masks
+                output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+            # TODO(tianhai) Has not supported varlen attention until torch2.10.0rc1
+            # case "varlen":
+            #     assert isinstance(attention_masks, VarlenMetadata), attention_masks
+            #     output = self.inner_attention(
+            #         xq,
+            #         xk,
+            #         xv,
+            #         self.head_dim,
+            #         attention_masks,
+            #     )
+            case "sdpa":
+                assert attention_masks is None
+                output = self.inner_attention(xq, xk, xv)
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
-        if self.use_flex_attn:
-            assert isinstance(attention_masks, BlockMask), attention_masks
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
-        else:
-            assert attention_masks is None
-            output = self.inner_attention(xq, xk, xv)
-
-        output = output.transpose(
-            1, 2
-        ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
 

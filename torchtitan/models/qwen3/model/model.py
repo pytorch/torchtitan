@@ -226,16 +226,35 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
 
-        if self.use_flex_attn:
-            assert isinstance(attention_masks, BlockMask), attention_masks
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
-        else:
-            assert attention_masks is None
-            output = self.inner_attention(xq, xk, xv)
-
-        output = output.transpose(
-            1, 2
-        ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+        match self.attn_type:
+            case "flex":
+                assert isinstance(attention_masks, BlockMask), attention_masks
+                output = self.inner_attention(
+                    xq, xk, xv, block_mask=attention_masks, scale=self.scaling
+                )
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+            # TODO(tianhai) Has not supported varlen attention until torch2.10.0rc1
+            # case "varlen":
+            #     # TODO: pass self.scaling into varlen attention
+            #     assert isinstance(attention_masks, VarlenMetadata), attention_masks
+            #     output = self.inner_attention(
+            #         xq,
+            #         xk,
+            #         xv,
+            #         self.head_dim,
+            #         attention_masks,
+            #         scale=self.scaling,
+            #     )
+            case "sdpa":
+                assert attention_masks is None
+                output = self.inner_attention(xq, xk, xv, scale=self.scaling)
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
