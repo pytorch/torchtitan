@@ -67,6 +67,14 @@ def _apply_op_sac(
     Returns:
         nn.Module: The module with selective activation checkpointing applied.
     """
+    # Use CPU offload if enabled
+    if ac_config.cpu_offload:
+        from torchtitan.distributed.activation_checkpoint_offload import (
+            apply_selective_ac_with_cpu_offload,
+        )
+
+        return apply_selective_ac_with_cpu_offload(module, ac_config, base_fqn=base_fqn)
+
     from torch.utils.checkpoint import (
         CheckpointPolicy,
         create_selective_checkpoint_contexts,
@@ -146,6 +154,14 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     Returns:
         nn.Module: The module with full activation checkpointing applied.
     """
+    # Use CPU offload if enabled
+    if ac_config.cpu_offload:
+        from torchtitan.distributed.activation_checkpoint_offload import (
+            apply_full_ac_with_cpu_offload,
+        )
+
+        return apply_full_ac_with_cpu_offload(module, ac_config)
+
     return ptd_checkpoint_wrapper(
         module,
         preserve_rng_state=ac_config.preserve_rng_state,
@@ -308,6 +324,18 @@ def apply_ac(
     Returns:
         None
     """
+    # Special case: CPU offload without activation checkpointing
+    if ac_config.mode == "none" and ac_config.cpu_offload:
+        from torchtitan.distributed.activation_checkpoint_offload import (
+            apply_offload_wrapper_only,
+        )
+
+        for layer_id, transformer_block in model.layers.named_children():
+            transformer_block = apply_offload_wrapper_only(transformer_block)
+            model.layers.register_module(layer_id, transformer_block)
+        logger.info("Applied activation offloading WITHOUT checkpointing to the model")
+        return
+
     if ac_config.mode == "memory_budget":
         assert model_compile_enabled, "Memory budget mode requires model to be compiled"
         if ac_config.visualize_memory_budget_pareto:
@@ -319,7 +347,7 @@ def apply_ac(
 
         torch._functorch.config.activation_memory_budget = ac_config.memory_budget
         logger.info(f"Selected {ac_config.memory_budget} budget option")
-    else:
+    elif ac_config.mode != "none":
         for layer_id, transformer_block in model.layers.named_children():
             transformer_block = _apply_ac_to_transformer_block(
                 transformer_block,
@@ -331,4 +359,4 @@ def apply_ac(
             )
             model.layers.register_module(layer_id, transformer_block)
 
-    logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+        logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")

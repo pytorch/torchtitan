@@ -370,6 +370,21 @@ class Training:
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
     """
 
+    enable_detailed_memory_tracking: bool = False
+    """
+    Whether to enable detailed memory tracking at every training phase
+    """
+
+    clear_cache_between_steps: bool = False
+    """
+    Whether to clear CUDA cache between training steps to measure minimum memory requirements
+    """
+
+    skip_optimizer_step: bool = False
+    """
+    Whether to skip the optimizer step (for memory profiling purposes only)
+    """
+
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will
@@ -844,6 +859,14 @@ class ActivationCheckpoint:
     """
     Capture ac debug information. Will be slower. See
     https://docs.pytorch.org/docs/stable/checkpoint.html for details.
+    """
+
+    cpu_offload: bool = False
+    """
+    Enable CPU offloading for activation checkpoints. When enabled, saved activations
+    are moved to CPU RAM during forward pass and brought back to GPU during backward pass.
+    This trades memory for PCIe bandwidth, saving GPU memory at the cost of data transfer time.
+    Only applies when mode is 'full' or 'selective'.
     """
 
 
