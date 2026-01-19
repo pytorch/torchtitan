@@ -924,7 +924,7 @@ def main(args):
             label = labels[i] if labels is not None else token
             position_id = position_ids[i] if position_ids is not None else None
 
-            decoded = tokenizer.decode(token)
+            decoded = tokenizer.decode([token])
 
             if label == -100:
                 example_out += f"\033[31m{decoded}\033[0m({token}"
