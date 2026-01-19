@@ -449,8 +449,8 @@ class Qwen3Model(nn.Module, ModelProtocol):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
-        self.eos_id = model_args.eos_id
         self.head_dim = model_args.head_dim
+        self.enable_weight_tying = model_args.enable_weight_tying
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
@@ -493,6 +493,10 @@ class Qwen3Model(nn.Module, ModelProtocol):
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
+
+        if self.enable_weight_tying:
+            assert self.tok_embeddings is not None and self.output is not None
+            self.output.weight = self.tok_embeddings.weight
 
         # If weight tying is enabled, we don't need to initialize the output layer
         if self.output is not None:
