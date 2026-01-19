@@ -844,7 +844,9 @@ def main(args):
             for epoch in range(num_epochs):
                 # Generate a unique shuffle seed for this epoch from the main RNG
                 epoch_shuffle_seed = random.randint(0, 2**31 - 1)
-                print(f"Shuffling epoch {epoch + 1}/{num_epochs} (shuffle_seed={epoch_shuffle_seed})...")
+                print(
+                    f"Shuffling epoch {epoch + 1}/{num_epochs} (shuffle_seed={epoch_shuffle_seed})..."
+                )
                 epoch_dataset = dataset.shuffle(seed=epoch_shuffle_seed)
                 epoch_datasets.append(epoch_dataset)
 
@@ -854,9 +856,7 @@ def main(args):
         if args.pad_to_and_drop_larger_than:
             max_seq_len = args.pad_to_and_drop_larger_than
             len_before = len(dataset)
-            dataset = dataset.filter(
-                lambda x: len(x["inputs"]) <= max_seq_len
-            )
+            dataset = dataset.filter(lambda x: len(x["inputs"]) <= max_seq_len)
             dropped = len_before - len(dataset)
 
             # Pad samples and add position_ids/sequence_lengths
@@ -865,7 +865,9 @@ def main(args):
                 num_padding = max_seq_len - seq_len
 
                 # Pad inputs with pad token
-                padded_inputs = sample["inputs"] + [tokenizer.pad_token_id] * num_padding
+                padded_inputs = (
+                    sample["inputs"] + [tokenizer.pad_token_id] * num_padding
+                )
 
                 # Pad labels with -100 (ignore index)
                 if "labels" in sample:
@@ -910,6 +912,9 @@ def main(args):
         if args.save_to_disk:
             print(f"Saving to {args.save_to_disk}")
             dataset.save_to_disk(args.save_to_disk)
+        if args.push_to_hub:
+            print(f"Pushing to Hugging Face repo {args.push_to_hub}")
+            dataset.push_to_hub(args.save_to_disk, private=True)
 
         example = dataset[0]
 
@@ -973,6 +978,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--pad-to-and-drop-larger-than", type=int)
     parser.add_argument("--save-to-disk", type=str)
+    parser.add_argument("--push-to-hub", type=str)
     parser.add_argument("--show-example", action="store_true")
     args = parser.parse_args()
 
