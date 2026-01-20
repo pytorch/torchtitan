@@ -71,6 +71,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
             "llama3 FSDP+TP+cudagraph",
             "llama3_fsdp_tp_cudagraph",
             ngpu=4,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
