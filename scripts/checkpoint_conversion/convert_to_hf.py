@@ -31,7 +31,6 @@ def convert_to_hf(
     with torch.device("cpu"):
         # pyrefly: ignore[bad-instantiation]
         model = train_spec.model_cls(model_args)
-    # pyrefly: ignore [bad-argument-type]
     model = ModelWrapper(model)
 
     # pyrefly: ignore[bad-instantiation, not-callable]

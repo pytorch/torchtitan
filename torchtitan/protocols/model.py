@@ -6,7 +6,6 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Protocol
 
 import torch
 import torch.nn as nn
@@ -41,15 +40,18 @@ class BaseModelArgs:
         pass
 
 
-class ModelProtocol(Protocol):
+class ModelProtocol(nn.Module):
     """Defines the interface for a model class.
 
     This is used to enforce that all model classes have some methods that are
     required by the trainer.
+
+    NOTE: We keep protocol name for backward compatibility even though it is
+          not a Protocol anymore.
     """
 
     def __init__(self, model_args: BaseModelArgs) -> None:
-        pass
+        super().__init__()
 
     @abstractmethod
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
