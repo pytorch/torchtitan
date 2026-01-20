@@ -536,9 +536,6 @@ class Transformer(ModelProtocol):
     def _precompute_freqs_cis(self) -> torch.Tensor:
         return precompute_freqs_cis(
             self.model_args.dim // self.model_args.n_heads,
-            # Need to compute until at least the max token limit for generation
-            # TODO: explain in docs/composability.md why we removed the 2x
-            # relaxing in our CP enablement PR
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
             self.model_args.rope_scaling_args,

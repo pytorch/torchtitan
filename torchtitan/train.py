@@ -27,6 +27,7 @@ from torchtitan.components.metrics import (
 )
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -469,6 +470,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 extra_inputs=extra_inputs,
             )
 
+        if self.parallel_dims.cp_enabled:
+            inputs, labels, extra_kwargs = prepare_context_parallel_input(
+                inputs,
+                labels,
+                extra_kwargs,
+                self.parallel_dims.get_mesh("cp"),
+                self.device,
+            )
+
         return inputs, labels, extra_inputs, extra_kwargs
 
     def forward_backward_step(
@@ -480,30 +490,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
             input_dict, labels
         )
-        # apply context parallelism if cp is enabled
-        # ensure CP handles the separate freqs_cis buffer for each pp stage
-        cp_buffers: list[torch.Tensor] = [inputs, labels]
-        cp_seq_dims = [1, 1]
-        if hasattr(model_parts[0], "freqs_cis"):
-            for m in model_parts:
-                assert isinstance(m.freqs_cis, torch.Tensor)
-                cp_buffers.append(m.freqs_cis)
-            cp_seq_dims += [0 for _ in model_parts]
-
-        optional_context_parallel_ctx = None
-        if parallel_dims.cp_enabled:
-            cp_mesh = parallel_dims.get_mesh("cp")
-            optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
-                cp_mesh=cp_mesh,
-                cp_buffers=cp_buffers,
-                cp_seq_dims=cp_seq_dims,
-                cp_no_restore_buffers={inputs, labels},
-                cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
-            )
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
@@ -536,8 +526,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # Non-PP forward / backward
-            with self.train_context(optional_context_parallel_ctx):
-                assert len(model_parts) == 1
+            assert len(model_parts) == 1
+            with self.train_context():
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     loss = self.loss_fn(pred, labels)
