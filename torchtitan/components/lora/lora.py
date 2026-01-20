@@ -128,12 +128,21 @@ class LoRALinear(nn.Module):
     ):
         self.lora_a.to_empty(device=device, recurse=recurse)
         self.lora_b.to_empty(device=device, recurse=recurse)
+        return self
 
     def initialize_parameters(self):
         # Initialize as in
         # https://github.com/microsoft/LoRA/blob/4c0333854cb905966f8cc4e9a74068c1e507c7b7/loralib/layers.py#L119
         _lora_a_init_params(self.lora_a)
         _lora_b_init_params(self.lora_b)
+
+    def reset_parameters(self):
+        """Reset LoRA parameters. Called by init_weights during model initialization."""
+        _lora_a_init_params(self.lora_a)
+        _lora_b_init_params(self.lora_b)
+        # Ensure LoRA params have requires_grad=True after reset
+        self.lora_a.weight.requires_grad = True
+        self.lora_b.weight.requires_grad = True
 
     def adapter_params(self) -> list[str]:
         """
@@ -200,6 +209,7 @@ class LoRAConverter:
         self.alpha = lora_config.alpha
         self.dropout = lora_config.dropout
         self.apply_to_all_linears = lora_config.apply_to_all_linears
+        self._converted_model: Optional[nn.Module] = None
 
         logger.info(
             f"LoRA config: rank={self.rank}, alpha={self.alpha}, "
@@ -247,6 +257,20 @@ class LoRAConverter:
             else:
                 param.requires_grad = False
 
+        # Store reference for post_optimizer_hook to re-initialize LoRA params
+        self._converted_model = model
+
+        # Wrap the original init_weights to also initialize LoRA parameters
+        original_init_weights = model.init_weights
+
+        def init_weights_with_lora(*args, **kwargs):
+            # Call the original init_weights
+            original_init_weights(*args, **kwargs)
+            # Initialize LoRA parameters and ensure requires_grad is set
+            self._init_lora_params(model)
+
+        model.init_weights = init_weights_with_lora
+
         # Log the number of trainable parameters
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(
@@ -256,6 +280,27 @@ class LoRAConverter:
             f"LoRA adapters added. Trainable parameters: {trainable_params:,} / {total_params:,} "
             f"({100 * trainable_params / total_params:.2f}%)"
         )
+
+    def _init_lora_params(self, model: nn.Module) -> None:
+        """Initialize LoRA parameters and set requires_grad after model initialization."""
+        for name, module in model.named_modules():
+            if isinstance(module, LoRALinear):
+                # Re-initialize LoRA parameters
+                module.reset_parameters()
+
+        # Re-freeze base model params and unfreeze LoRA params
+        # This is necessary because init_weights may have touched some params
+        for name, param in model.named_parameters():
+            if "lora_a" in name or "lora_b" in name:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False
+
+        # Log trainable parameter count after init
+        trainable_params = sum(
+            p.numel() for p in model.parameters() if p.requires_grad
+        )
+        logger.info(f"LoRA params initialized. Trainable parameters: {trainable_params:,}")
 
     def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]) -> None:
         """Post-optimizer hook (no-op for LoRA)."""
