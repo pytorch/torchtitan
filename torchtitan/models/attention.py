@@ -46,9 +46,10 @@ class FlexAttentionWrapper(torch.nn.Module):
         block_mask as a keyword argument to be compatible with _ContextParallel.
     """
 
+    # Using dynamic=True to avoid CUDA crashes with CP, but need to debug NaN issue
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention,
-        mode="max-autotune-no-cudagraphs",
+        dynamic=True,
     )
 
     def forward(

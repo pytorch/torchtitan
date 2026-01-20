@@ -35,6 +35,7 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
+from torchtitan.utils.nan_tracker import create_nan_tracker_for_deepseek
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
@@ -307,6 +308,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.model_parts = [model]
 
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
+
+        # Initialize NaN tracker if enabled
+        self.nan_tracker = None
+        if job_config.debug.enable_nan_tracker:
+            rank = int(os.environ.get("RANK", 0))
+            self.nan_tracker = create_nan_tracker_for_deepseek(
+                self.model_parts[0],
+                rank=rank,
+                verbose=job_config.debug.nan_tracker_verbose,
+            )
+            logger.info("NaN tracker enabled - will track activations and gradients")
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
@@ -743,6 +755,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Track memory after forward/backward
         self.detailed_memory_tracker.measure("after_forward_backward", self.step)
         self.cuda_memory_tracker.measure_all("after_forward_backward", self.step)
+
+        # Check for NaN/Inf if tracker is enabled
+        if self.nan_tracker is not None:
+            if self.nan_tracker.has_nan():
+                self.nan_tracker.print_nan_report()
+                logger.error(f"NaN detected at step {self.step}! See report above.")
+            self.nan_tracker.step()  # Reset for next step
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
