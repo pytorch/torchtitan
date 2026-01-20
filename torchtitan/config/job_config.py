@@ -425,8 +425,15 @@ class Parallelism:
     Load balancer type for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer for SDPA
     - "ptrr": Use PTRRLoadBalancer for FlexAttention
-    - None or "": Disable load balancing
+    - None: Disable load balancing
     """
+
+    def __post_init__(self):
+        if self.context_parallel_load_balancer == "":
+            raise ValueError(
+                "context_parallel_load_balancer cannot be an empty string. "
+                "Use None to disable load balancing."
+            )
 
     context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"
     """

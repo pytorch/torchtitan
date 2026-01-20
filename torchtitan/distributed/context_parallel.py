@@ -109,7 +109,7 @@ def prepare_context_parallel_input(
         cp_mesh: Device mesh for context parallel dimension
         device: Device to create position tensor on
         load_balancer_type: Type of load balancer to use for sharding.
-            Options: "headtail", "ptrr", None, or "". Defaults to "headtail".
+            Options: "headtail", "ptrr", or None. Defaults to "headtail".
 
     Returns:
         Tuple of (sharded_inputs, sharded_labels, updated_extra_kwargs) where:
@@ -158,7 +158,7 @@ def cp_shard(
         load_balancer_type: Type of load balancer to use. Options:
             - "headtail": Use HeadTailLoadBalancer (for SDPA)
             - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
-            - None or "": Disable load balancing
+            - None: Disable load balancing
             Defaults to "headtail".
         input_seq_dim: Sequence dimension index for sharding. Defaults to 1,
             which covers most use cases where tensors have shape
@@ -181,7 +181,7 @@ def cp_shard(
     cp_world_size = cp_mesh.size(0)
 
     load_balancer = None
-    if load_balancer_type and load_balancer_type != "":
+    if load_balancer_type:
         match load_balancer_type:
             case "headtail":
                 # For SDPA, we use the _HeadTailLoadBalancer.
@@ -207,7 +207,7 @@ def cp_shard(
             case _:
                 raise ValueError(
                     f"Invalid load_balancer_type '{load_balancer_type}'. "
-                    f"Must be one of: 'headtail', 'ptrr', None, or ''"
+                    f"Must be one of: 'headtail', 'ptrr', or None"
                 )
 
     inputs = cast(
