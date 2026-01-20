@@ -710,6 +710,44 @@ class ActivationCheckpoint:
 
 
 @dataclass
+class LoRA:
+    """Configuration for LoRA (Low-Rank Adaptation) fine-tuning.
+
+    LoRA is a parameter-efficient fine-tuning technique that freezes the pretrained
+    model weights and injects trainable low-rank decomposition matrices into each
+    layer of the Transformer architecture.
+
+    To enable LoRA, add "lora" to the model.converters list in your config:
+        [model]
+        converters = ["lora"]
+
+        [lora]
+        rank = 8
+        alpha = 16.0
+        dropout = 0.0
+        apply_to_all_linears = true
+    """
+
+    rank: int = 8
+    """Rank of the low-rank approximation. Higher rank = more parameters but better quality."""
+
+    alpha: float = 16.0
+    """
+    Scaling factor for the low-rank approximation.
+    The LoRA output is scaled by (alpha / rank), so higher alpha means stronger LoRA effect.
+    """
+
+    dropout: float = 0.0
+    """Dropout probability applied to the LoRA layers. 0.0 means no dropout."""
+
+    apply_to_all_linears: bool = True
+    """
+    If True, apply LoRA to all nn.Linear layers in the model.
+    If False, only apply to attention layers (wq, wk, wv, wo).
+    """
+
+
+@dataclass
 class Compile:
     enable: bool = False
     """Whether to apply torch.compile"""
@@ -1006,6 +1044,7 @@ class JobConfig:
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint
     )
+    lora: LoRA = field(default_factory=LoRA)
     compile: Compile = field(default_factory=Compile)
     quantize: Quantize = field(default_factory=Quantize)
     comm: Comm = field(default_factory=Comm)
