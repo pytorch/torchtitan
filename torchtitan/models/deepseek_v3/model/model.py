@@ -404,13 +404,13 @@ class TransformerBlock(nn.Module):
             self.feed_forward.init_weights(self.weight_init_std)
 
 
-class DeepSeekV3Model(nn.Module, ModelProtocol):
+class DeepSeekV3Model(ModelProtocol):
     """
     DeepSeek-V3 Transformer model with attention and feed-forward layers.
     """
 
     def __init__(self, model_args: DeepSeekV3ModelArgs):
-        super().__init__()
+        super().__init__(model_args)
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
         self.register_buffer(

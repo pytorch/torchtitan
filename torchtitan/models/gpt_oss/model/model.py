@@ -268,13 +268,13 @@ class TransformerBlock(nn.Module):
         self.moe.init_weights(self.weight_init_std, buffer_device)
 
 
-class GptOssModel(nn.Module, ModelProtocol):
+class GptOssModel(ModelProtocol):
     """
     GPT-OSS Transformer model with attention and feed-forward layers.
     """
 
     def __init__(self, model_args: GptOssModelArgs):
-        super().__init__()
+        super().__init__(model_args)
         self.model_args = model_args
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
