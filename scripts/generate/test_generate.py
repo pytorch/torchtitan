@@ -36,7 +36,7 @@ from torchtitan.tools.utils import device_module, device_type
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
-# pyrefly: ignore [missing-import]
+# pyrefly: ignore[import-error]
 from generate._generation import generate
 
 
@@ -98,7 +98,6 @@ def test_generate(
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"{device_type}:{local_rank}")
-    # pyrefly: ignore [missing-attribute]
     device_module.set_device(device)
     device_memory_monitor = build_device_memory_monitor()
 
@@ -116,6 +115,7 @@ def test_generate(
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
         logger.info(f"Init model on init_device: {init_device}")
+        # pyrefly: ignore[bad-instantiation]
         model = train_spec.model_cls(model_args)
 
     parallel_dims = None
@@ -234,7 +234,7 @@ def test_generate(
                 "input_text": input_text,
                 "output_text": output_text,
             }
-            output_data["responses"].append(_data)
+            output_data["responses"].append(_data)  # pyrefly: ignore[missing-attribute]
 
             logger.info(f"{r}\n{input_text}{b}{output_text}\n{color.reset}")
 

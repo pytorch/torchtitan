@@ -42,19 +42,14 @@ class DeviceMemoryMonitor:
     def __init__(self, device: str = f"{device_type}:0"):
         # pyrefly: ignore [read-only]
         self.device = torch.device(device)  # device object
-        # pyrefly: ignore [missing-attribute]
         self.device_name = device_module.get_device_name(self.device)
-        # pyrefly: ignore [missing-attribute]
         self.device_index = device_module.current_device()
-        # pyrefly: ignore [missing-attribute]
         self.device_capacity = device_module.get_device_properties(
             self.device
         ).total_memory
         self.device_capacity_gib = self._to_gib(self.device_capacity)
 
-        # pyrefly: ignore [missing-attribute]
         device_module.reset_peak_memory_stats()
-        # pyrefly: ignore [missing-attribute]
         device_module.empty_cache()
 
     def _to_gib(self, memory_in_bytes):
@@ -67,7 +62,6 @@ class DeviceMemoryMonitor:
         return 100 * memory / self.device_capacity
 
     def get_peak_stats(self):
-        # pyrefly: ignore [missing-attribute]
         device_info = device_module.memory_stats(self.device)
 
         max_active = device_info.get("active_bytes.all.peak", -1)
@@ -98,7 +92,6 @@ class DeviceMemoryMonitor:
         )
 
     def reset_peak_stats(self):
-        # pyrefly: ignore [missing-attribute]
         device_module.reset_peak_memory_stats()
 
 
