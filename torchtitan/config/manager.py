@@ -254,18 +254,10 @@ if __name__ == "__main__":
     #
     # -----------------------------------------------------------------------------
 
-<<<<<<< Updated upstream
-    # pyrefly: ignore [missing-import]
-    from rich import print as rprint
-
-    # pyrefly: ignore [missing-import]
-    from rich.pretty import Pretty
-=======
     try:
 
         # pyrefly: ignore[missing-import]
         from rich import print as rprint
->>>>>>> Stashed changes
 
         # pyrefly: ignore[missing-import]
         from rich.pretty import Pretty
