@@ -140,7 +140,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"with {json.dumps(dataclasses.asdict(model_args), indent=2, ensure_ascii=False)}"
         )
         with (
-            torch.device("cuda"),
+            torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
         ):
             # pyrefly: ignore[bad-instantiation]

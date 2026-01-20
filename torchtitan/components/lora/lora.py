@@ -29,33 +29,14 @@ class LoRAConfig:
         apply_to_all_linears: If True, apply LoRA to all Linear layers.
             If False, only apply to attention layers (wq, wk, wv, wo). Default: True.
     """
-
     rank: int = 8
-    """Rank of the low-rank approximation"""
-
     alpha: float = 16.0
-    """Scaling factor for the low-rank approximation"""
-
     dropout: float = 0.0
-    """Dropout probability for LoRA layers"""
-
     apply_to_all_linears: bool = True
-    """If True, apply LoRA to all Linear layers. If False, only apply to attention layers."""
 
 
 def get_lora_config(job_config: JobConfig) -> LoRAConfig:
     """Get LoRA config from job_config, using defaults if not specified.
-
-    The LoRA config can be specified in the TOML file under [lora] section:
-    ```toml
-    [lora]
-    rank = 8
-    alpha = 16.0
-    dropout = 0.0
-    apply_to_all_linears = true
-    ```
-
-    If not specified, default values from LoRAConfig will be used.
     """
     lora_section = job_config.lora
     return LoRAConfig(
@@ -131,8 +112,6 @@ class LoRALinear(nn.Module):
         return self
 
     def initialize_parameters(self):
-        # Initialize as in
-        # https://github.com/microsoft/LoRA/blob/4c0333854cb905966f8cc4e9a74068c1e507c7b7/loralib/layers.py#L119
         _lora_a_init_params(self.lora_a)
         _lora_b_init_params(self.lora_b)
 
@@ -150,9 +129,8 @@ class LoRALinear(nn.Module):
         the model coming from the adapter.
 
         For LoRA this means lora_a.weight and lora_b.weight.
+        # TODO: update names when supporting EP
         """
-        # NOTE: this function has to be updated if the names of "lora_a" and "lora_b"
-        # in this module change.
         adapter_params = ["lora_a.weight", "lora_b.weight"]
         return adapter_params
 
@@ -174,16 +152,10 @@ class LoRALinear(nn.Module):
 
 
 def _lora_a_init_params(x: nn.Linear) -> None:
-    """
-    Initialize LoRA A weight to Kaiming uniform.
-    """
     nn.init.kaiming_uniform_(x.weight, a=math.sqrt(5))
 
 
 def _lora_b_init_params(x: nn.Linear) -> None:
-    """
-    Initialize LoRA B weight to zeros.
-    """
     nn.init.zeros_(x.weight)
 
 
