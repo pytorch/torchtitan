@@ -58,33 +58,21 @@ class VarlenAttentionWrapper(torch.nn.Module):
         xq: torch.Tensor,
         xk: torch.Tensor,
         xv: torch.Tensor,
-        head_dim: torch.Tensor,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
+        return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        cu_seq_q = attention_masks.cu_seq_q
-        cu_seq_k = attention_masks.cu_seq_k
-        max_q = attention_masks.max_q
-        max_k = attention_masks.max_k
-
-        n_local_heads = xq.shape[1]
-        # pyrefly: ignore [no-matching-overload]
-        xq_packed = xq.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
-        # pyrefly: ignore [no-matching-overload]
-        xk_packed = xk.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
-        # pyrefly: ignore [no-matching-overload]
-        xv_packed = xv.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
-
         return VarlenAttentionWrapper._compiled_varlen_attn(
-            xq_packed,
-            xk_packed,
-            xv_packed,
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
+            xq,
+            xk,
+            xv,
+            attention_masks.cu_seq_q,
+            attention_masks.cu_seq_k, 
+            attention_masks.max_q, 
+            attention_masks.max_k, 
             is_causal=True,
             scale=scale,
+            return_aux=torch.nn.attention.varlen.AuxRequest(lse=return_lse),
         )
 
 
@@ -121,6 +109,7 @@ class FlexAttentionWrapper(torch.nn.Module):
         block_mask: BlockMask,
         scale: float | None = None,
         return_lse: bool = False,
+        enable_gqa: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
@@ -135,6 +124,7 @@ class FlexAttentionWrapper(torch.nn.Module):
             v,
             block_mask=block_mask,
             scale=scale,
+            enable_gqa=enable_gqa,
             return_lse=return_lse,
         )
 
@@ -171,9 +161,10 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
         v: torch.Tensor,
         *,
         scale: float | None = None,
+        enable_gqa: bool = False,
     ) -> torch.Tensor:
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
+            return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True, enable_gqa=enable_gqa)
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:
