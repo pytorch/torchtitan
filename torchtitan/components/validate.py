@@ -190,6 +190,29 @@ class Validator(BaseValidator):
             inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
                 input_dict, labels, model_parts
             )
+            # Count valid tokens for this batch
+            local_valid_tokens = torch.tensor(0, dtype=torch.int64, device=device_type)
+            local_valid_tokens += (labels != IGNORE_INDEX).sum()
+
+            # All-reduce token count across DP ranks to get global token count
+            if parallel_dims.dp_enabled:
+                batch_mesh = parallel_dims.get_mesh("batch")
+                global_valid_tokens = dist_utils.dist_sum(
+                    local_valid_tokens, batch_mesh, None
+                )
+            else:
+                global_valid_tokens = local_valid_tokens.float()
+
+            optional_context_parallel_ctx = None
+            if parallel_dims.cp_enabled:
+                cp_mesh = parallel_dims.get_mesh("cp")
+                optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
+                    cp_mesh=cp_mesh,
+                    cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
+                    cp_seq_dims=[1, 1] + [0 for _ in model_parts],
+                    cp_no_restore_buffers={inputs, labels},
+                    cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+                )
 
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
@@ -232,28 +255,15 @@ class Validator(BaseValidator):
                         )
                         loss_sum = self.loss_fn(predictions, labels)
 
-            # Count valid tokens for this batch
-            local_valid_tokens = (labels != IGNORE_INDEX).sum()
-            accumulated_tokens += local_valid_tokens
-            accumulated_losses.append(loss_sum.detach())
-
+            accumulated_losses.append(loss_sum.detach() / global_valid_tokens)
             num_steps += 1
 
-        # All-reduce token count across DP ranks to get global token count
-        if parallel_dims.dp_enabled:
-            loss_mesh = parallel_dims.get_optional_mesh("dp_replicate", "dp_shard")
-            global_valid_tokens = dist_utils.dist_sum(
-                accumulated_tokens, loss_mesh, None
-            )
-        else:
-            global_valid_tokens = accumulated_tokens.float()
-
-        # Compute total loss and normalize by global token count
-        total_loss = torch.sum(torch.stack(accumulated_losses))
-        loss = total_loss / torch.clamp(global_valid_tokens, min=1.0)
+        # Compute average loss
+        loss = torch.sum(torch.stack(accumulated_losses))
+        loss /= num_steps
 
         if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_sum(
+            global_avg_loss = dist_utils.dist_mean(
                 loss, parallel_dims.get_optional_mesh("loss"), None
             )
         else:

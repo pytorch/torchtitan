@@ -480,6 +480,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def forward_backward_step(
         self,
+        *,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
         global_valid_tokens: torch.Tensor,
@@ -581,7 +582,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     input_dict[k] = v.to(self.device)
             labels = labels.to(self.device)
 
-            loss = self.forward_backward_step(input_dict, labels, global_valid_tokens)
+            loss = self.forward_backward_step(
+                input_dict=input_dict,
+                labels=labels,
+                global_valid_tokens=global_valid_tokens,
+            )
             accumulated_losses.append(loss.detach())
 
         grad_norm = dist_utils.clip_grad_norm_(

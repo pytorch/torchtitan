@@ -349,7 +349,7 @@ def apply_fsdp(
     # since FSDP would prefetch them immediately after the forward pass
     if model.norm is not None and model.output is not None:
         # pyrefly: ignore [no-matching-overload]
-        module = fully_shard(
+        fully_shard(
             [model.norm, model.output],
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",

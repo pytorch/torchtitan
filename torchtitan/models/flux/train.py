@@ -94,6 +94,7 @@ class FluxTrainer(Trainer):
 
     def forward_backward_step(
         self,
+        *,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
         global_valid_tokens: torch.Tensor | None,
@@ -224,7 +225,9 @@ class FluxTrainer(Trainer):
 
         input_dict, labels = next(data_iterator)
 
-        loss = self.forward_backward_step(input_dict, labels, None)
+        loss = self.forward_backward_step(
+            input_dict=input_dict, labels=labels, global_valid_tokens=None
+        )
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
