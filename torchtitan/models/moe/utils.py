@@ -13,7 +13,7 @@ from torchtitan.tools.utils import _round_up
 from .kernels import generate_permute_indices
 
 TOKEN_GROUP_ALIGN_SIZE_M = 1
-ValidTokenGroupAlignmentSize = Literal[1, 16, 32]
+ValidTokenGroupAlignmentSize = Literal[16, 32]
 
 
 def set_token_group_alignment_size_m(
@@ -26,7 +26,6 @@ def set_token_group_alignment_size_m(
     Valid values are: 16, or 32.
     Different values are needed for different cases:
 
-    * For bf16, We don't need to pad the indices. So TOKEN_GROUP_ALIGN_SIZE_M is 1.
     * For fp8, 16 byte alignment / 1 byte per elem = 16 elements.
     * For mxfp8, we need 32 (or block_size) because scaling block size is (1 x 32),
       so when doing per-token-group quantization on each logically distinct subtensor,
@@ -59,7 +58,11 @@ def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
         padded_max_len = _round_up(x_padded_per_expert, TOKEN_GROUP_ALIGN_SIZE_M)
 
     with torch.no_grad():
-        (permuted_indices, num_tokens_per_expert, _offsets,) = generate_permute_indices(
+        (
+            permuted_indices,
+            num_tokens_per_expert,
+            _offsets,
+        ) = generate_permute_indices(
             num_tokens_per_expert,
             num_local_experts,
             ep_degree,
