@@ -22,9 +22,11 @@ def maybe_enable_async_tp(job_config: JobConfig, tp_mesh: DeviceMesh):
             "Async TP requires 'model' in --compile.components and --compile.enable"
         )
 
+    # pyrefly: ignore [deprecated]
     from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
     torch._inductor.config._micro_pipeline_tp = True
+    # pyrefly: ignore [deprecated]
     enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
     logger.info("Async TP is enabled")
