@@ -89,6 +89,9 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
         if test_flavor.disabled:
             continue
 
+        # test
+        print(f"************** test_flavor.test_name:{test_flavor.test_name}. test_flavor.skip_rocm_test:{test_flavor.skip_rocm_test}")
+
         # Skip the test for ROCm
         if (
             getattr(args, "gpu_arch_type", "cuda") == "rocm"
