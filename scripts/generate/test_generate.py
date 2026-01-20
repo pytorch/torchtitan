@@ -36,7 +36,7 @@ from torchtitan.tools.utils import device_module, device_type
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
-# pyrefly: ignore[import-error]
+# pyrefly: ignore[missing-import]
 from generate._generation import generate
 
 
