@@ -711,23 +711,6 @@ class ActivationCheckpoint:
 
 @dataclass
 class LoRA:
-    """Configuration for LoRA (Low-Rank Adaptation) fine-tuning.
-
-    LoRA is a parameter-efficient fine-tuning technique that freezes the pretrained
-    model weights and injects trainable low-rank decomposition matrices into each
-    layer of the Transformer architecture.
-
-    To enable LoRA, add "lora" to the model.converters list in your config:
-        [model]
-        converters = ["lora"]
-
-        [lora]
-        rank = 8
-        alpha = 16.0
-        dropout = 0.0
-        apply_to_all_linears = true
-    """
-
     rank: int = 8
     """Rank of the low-rank approximation. Higher rank = more parameters but better quality."""
 
