@@ -38,12 +38,12 @@ class LoRAConfig:
 def get_lora_config(job_config: JobConfig) -> LoRAConfig:
     """Get LoRA config from job_config, using defaults if not specified.
     """
-    lora_section = job_config.lora
+    lora_config = job_config.lora
     return LoRAConfig(
-        rank=lora_section.rank,
-        alpha=lora_section.alpha,
-        dropout=lora_section.dropout,
-        apply_to_all_linears=lora_section.apply_to_all_linears,
+        rank=lora_config.rank,
+        alpha=lora_config.alpha,
+        dropout=lora_config.dropout,
+        apply_to_all_linears=lora_config.apply_to_all_linears,
     )
 
 
@@ -101,7 +101,6 @@ class LoRALinear(nn.Module):
         self.dropout = nn.Dropout(p=dropout) if dropout > 0.0 else nn.Identity()
         self.lora_a = nn.Linear(in_features=in_dim, out_features=rank, bias=False)
         self.lora_b = nn.Linear(in_features=rank, out_features=out_dim, bias=False)
-        self.merged = False
         self.initialize_parameters()
 
     def to_empty(
@@ -152,10 +151,16 @@ class LoRALinear(nn.Module):
 
 
 def _lora_a_init_params(x: nn.Linear) -> None:
+    """
+    Initialize LoRA A weight to Kaiming uniform.
+    """
     nn.init.kaiming_uniform_(x.weight, a=math.sqrt(5))
 
 
 def _lora_b_init_params(x: nn.Linear) -> None:
+    """
+    Initialize LoRA B weight to zeros.
+    """
     nn.init.zeros_(x.weight)
 
 
@@ -164,15 +169,6 @@ class LoRAConverter:
 
     This converter replaces nn.Linear layers with LoRALinear layers and sets
     requires_grad=True only for LoRA parameters, freezing all other parameters.
-
-    Configuration can be specified in the TOML file under [lora] section:
-    ```toml
-    [lora]
-    rank = 8
-    alpha = 16.0
-    dropout = 0.0
-    apply_to_all_linears = true
-    ```
     """
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
@@ -184,7 +180,7 @@ class LoRAConverter:
         self._converted_model: Optional[nn.Module] = None
 
         logger.info(
-            f"LoRA config: rank={self.rank}, alpha={self.alpha}, "
+            f"LoRA training active with rank={self.rank}, alpha={self.alpha}, "
             f"dropout={self.dropout}, apply_to_all_linears={self.apply_to_all_linears}"
         )
 
@@ -211,11 +207,11 @@ class LoRAConverter:
                 dropout=self.dropout,
                 use_bias=child.bias is not None,
             )
-            # First move to the same device and dtype as the original weights
+            # Move to the same device and dtype as the original weights
             lora_linear = lora_linear.to(
                 device=child.weight.device, dtype=child.weight.dtype
             )
-            # Then copy the original weights (after dtype conversion)
+            # Copy the original weights (after dtype conversion)
             lora_linear.weight.data.copy_(child.weight.data)
             if child.bias is not None:
                 lora_linear.bias.data.copy_(child.bias.data)
@@ -243,22 +239,27 @@ class LoRAConverter:
 
         model.init_weights = init_weights_with_lora
 
-        # Log the number of trainable parameters
+        # Log conversion summary
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(
             p.numel() for p in model.parameters() if p.requires_grad
         )
         logger.info(
-            f"LoRA adapters added. Trainable parameters: {trainable_params:,} / {total_params:,} "
+            f"Swapped to LoRALinear layers with {len(replacements)} linear modules converted"
+        )
+        logger.info(
+            f"Trainable params: {trainable_params:,} / {total_params:,} "
             f"({100 * trainable_params / total_params:.2f}%)"
         )
 
     def _init_lora_params(self, model: nn.Module) -> None:
         """Initialize LoRA parameters and set requires_grad after model initialization."""
+        lora_layer_count = 0
         for name, module in model.named_modules():
             if isinstance(module, LoRALinear):
                 # Re-initialize LoRA parameters
                 module.reset_parameters()
+                lora_layer_count += 1
 
         # Re-freeze base model params and unfreeze LoRA params
         # This is necessary because init_weights may have touched some params
@@ -268,11 +269,13 @@ class LoRAConverter:
             else:
                 param.requires_grad = False
 
-        # Log trainable parameter count after init
         trainable_params = sum(
             p.numel() for p in model.parameters() if p.requires_grad
         )
-        logger.info(f"LoRA params initialized. Trainable parameters: {trainable_params:,}")
+        logger.info(
+            f"LoRA parameters initialized for {lora_layer_count} layers, "
+            f"trainable params: {trainable_params:,}"
+        )
 
     def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]) -> None:
         """Post-optimizer hook (no-op for LoRA)."""
