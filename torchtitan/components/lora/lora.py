@@ -6,7 +6,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import cast, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -29,6 +29,7 @@ class LoRAConfig:
         apply_to_all_linears: If True, apply LoRA to all Linear layers.
             If False, only apply to attention layers (wq, wk, wv, wo). Default: True.
     """
+
     rank: int = 8
     alpha: float = 16.0
     dropout: float = 0.0
@@ -36,8 +37,7 @@ class LoRAConfig:
 
 
 def get_lora_config(job_config: JobConfig) -> LoRAConfig:
-    """Get LoRA config from job_config, using defaults if not specified.
-    """
+    """Get LoRA config from job_config, using defaults if not specified."""
     lora_config = job_config.lora
     return LoRAConfig(
         rank=lora_config.rank,
@@ -142,7 +142,9 @@ class LoRALinear(nn.Module):
             torch.Tensor: output tensor with shape ``(..., out_dim)``
 
         """
-        out = F.linear(x, self.weight, self.bias)
+        out = F.linear(
+            x, cast(torch.Tensor, self.weight), cast(Optional[torch.Tensor], self.bias)
+        )
         if self.disabled:
             return out
         lora_out = self.lora_a(self.dropout(x))
@@ -212,9 +214,9 @@ class LoRAConverter:
                 device=child.weight.device, dtype=child.weight.dtype
             )
             # Copy the original weights (after dtype conversion)
-            lora_linear.weight.data.copy_(child.weight.data)
-            if child.bias is not None:
-                lora_linear.bias.data.copy_(child.bias.data)
+            cast(torch.Tensor, lora_linear.weight).data.copy_(child.weight.data)
+            if lora_linear.bias is not None:
+                cast(torch.Tensor, lora_linear.bias).data.copy_(child.bias.data)
             # Replace the module
             setattr(parent_module, child_name, lora_linear)
 
@@ -233,17 +235,16 @@ class LoRAConverter:
 
         def init_weights_with_lora(*args, **kwargs):
             # Call the original init_weights
-            original_init_weights(*args, **kwargs)
+            if callable(original_init_weights):
+                original_init_weights(*args, **kwargs)
             # Initialize LoRA parameters and ensure requires_grad is set
             self._init_lora_params(model)
 
-        model.init_weights = init_weights_with_lora
+        object.__setattr__(model, "init_weights", init_weights_with_lora)
 
         # Log conversion summary
         total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(
-            p.numel() for p in model.parameters() if p.requires_grad
-        )
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logger.info(
             f"Swapped to LoRALinear layers with {len(replacements)} linear modules converted"
         )
@@ -269,9 +270,7 @@ class LoRAConverter:
             else:
                 param.requires_grad = False
 
-        trainable_params = sum(
-            p.numel() for p in model.parameters() if p.requires_grad
-        )
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logger.info(
             f"LoRA parameters initialized for {lora_layer_count} layers, "
             f"trainable params: {trainable_params:,}"
