@@ -397,6 +397,7 @@ def set_pg_timeouts(
         # todo: handle this better but we might be using torchcomms
         return
 
+
 @torch.no_grad()
 def clip_grad_norm_(
     parameters: torch.Tensor | Iterable[torch.Tensor],
@@ -496,7 +497,7 @@ def _clip_grad_norm_with_ep(
         if p.grad is None:
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-        # pyrefly: ignore[unsupported-operation]
+        # pyrefly: ignore[not-iterable]
         if "ep" in p.device_mesh.mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)

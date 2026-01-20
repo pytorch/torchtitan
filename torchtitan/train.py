@@ -14,9 +14,8 @@ from typing import Any, Iterable
 
 import torch
 import torch.distributed.checkpoint.stateful
-from torch.distributed.elastic.multiprocessing.errors import record
-
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
@@ -148,7 +147,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
-        # pyrefly: ignore [bad-argument-type]
         model_converters.convert(model)
 
         # metrics logging
@@ -166,7 +164,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-            # pyrefly: ignore [bad-argument-type]
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
