@@ -135,7 +135,6 @@ def test_generate(
 
         # apply_tp (with Sequence Parallel) on unevenly sharded
         # sequences would require https://github.com/pytorch/torchtitan/pull/686
-        # pyrefly: ignore [bad-argument-type]
         apply_tp_minus_sp(model, parallel_dims.get_mesh("tp"))
     else:
         parallel_dims = ParallelDims(
@@ -158,14 +157,11 @@ def test_generate(
     )
 
     # materalize model
-    # pyrefly: ignore [missing-attribute]
     model.to_empty(device=device_type)
     with torch.no_grad():
         model.init_weights()
-    # pyrefly: ignore [missing-attribute]
     model.eval()
 
-    # pyrefly: ignore [missing-attribute]
     state_dict = model.state_dict()
 
     # Checkpoint Loading
