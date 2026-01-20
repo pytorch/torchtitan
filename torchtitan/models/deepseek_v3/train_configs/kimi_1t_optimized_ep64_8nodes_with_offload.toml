@@ -1,0 +1,51 @@
+# OPTIMIZED: EP=64, 8 nodes, WITH all optimizations
+# Test: Measure memory WITH CPU offload + cache clearing + tracking
+# Configuration: 8 nodes, 64 GPUs, EP=64 (6 experts/GPU), seq=512, batch=1
+# Purpose: Measure optimization impact at EP=64
+
+[job]
+dump_folder = "./outputs/kimi_1t_optimized_ep64_8n_with_offload"
+description = "Optimized EP64 - CPU Offload + Cache Clearing - 8 nodes"
+
+[profiling]
+enable_profiling = true
+profile_freq = 10
+enable_memory_snapshot = false
+
+[metrics]
+log_freq = 1
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "./assets/hf/DeepSeek-V3-Base"
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+
+[training]
+local_batch_size = 1
+seq_len = 512
+steps = 5
+dataset = "c4_test"
+
+# OPTIMIZATIONS ENABLED
+enable_cpu_offload = true
+enable_detailed_memory_tracking = true
+clear_cache_between_steps = true
+skip_optimizer_step = true
+
+[parallelism]
+data_parallel_shard_degree = -1
+expert_parallel_degree = 64  # Same as baseline: 6 experts per GPU
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = false  # For cleaner memory tracking

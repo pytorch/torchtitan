@@ -62,8 +62,9 @@ def parallelize_deepseekv3(
         """
 
     use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+    # NOTE: CP + FlexAttention now supported in PyTorch 2.9+ (PRs #145896, #146397)
+    # if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
+    #     raise NotImplementedError("CP support for FlexAttention is still in progress.")
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters

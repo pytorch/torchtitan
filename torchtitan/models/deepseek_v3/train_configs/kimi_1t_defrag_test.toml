@@ -1,0 +1,60 @@
+# Kimi K2 1T - Memory Defragmentation Test
+# Testing different allocator settings + selective AC
+
+[job]
+dump_folder = "./outputs/kimi_1t_defrag_test"
+description = "Kimi K2 1T - Test fragmentation fixes"
+
+[profiling]
+enable_profiling = true
+save_traces_folder = "profile_trace"
+profile_freq = 3
+profiler_warmup = 1
+profiler_active = 1
+enable_memory_snapshot = true
+save_memory_snapshot_folder = "memory_snapshot"
+with_stack = true
+with_modules = true
+
+[metrics]
+log_freq = 1
+enable_tensorboard = false
+enable_wandb = false
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "./assets/hf/DeepSeek-V3-Base"
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+
+[training]
+local_batch_size = 1
+seq_len = 256
+steps = 5
+dataset = "c4_test"
+dtype = "bfloat16"
+enable_cpu_offload = true
+
+[parallelism]
+data_parallel_shard_degree = -1
+tensor_parallel_degree = 1
+pipeline_parallel_degree = 1
+expert_parallel_degree = 64
+
+[checkpoint]
+enable = false
+
+[activation_checkpoint]
+# Try selective instead of full to reduce allocation churn
+mode = "selective"
+selective_ac_option = '2'  # Checkpoint every 2 layers
+
+[compile]
+enable = false

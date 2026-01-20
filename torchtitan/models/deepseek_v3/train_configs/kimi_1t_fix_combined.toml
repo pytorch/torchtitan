@@ -1,0 +1,50 @@
+# Test 3: Combined Approach
+# Approach: Selective AC + Defragmentation + Better allocator
+
+[job]
+dump_folder = "./outputs/kimi_1t_fix_combined"
+
+[profiling]
+enable_profiling = true
+profile_freq = 3
+enable_memory_snapshot = true
+with_stack = true
+
+[metrics]
+log_freq = 1
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "./assets/hf/DeepSeek-V3-Base"
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+
+[training]
+local_batch_size = 1
+seq_len = 256
+steps = 5
+dataset = "c4_test"
+enable_cpu_offload = true
+# Moderate defragmentation (not every step)
+enable_memory_defrag = true
+defrag_freq = 2  # Every 2 steps
+aggressive_defrag = false
+
+[parallelism]
+data_parallel_shard_degree = -1
+expert_parallel_degree = 64
+
+[activation_checkpoint]
+# Selective AC
+mode = "selective"
+selective_ac_option = '2'
+
+[compile]
+enable = false

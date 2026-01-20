@@ -1,0 +1,81 @@
+[job]
+dump_folder = "./outputs"
+description = "Kimi K2 1T model training with Activation Offloading"
+print_config = false
+
+[profiling]
+enable_profiling = true
+save_traces_folder = "profile_trace"
+profile_freq = 5
+enable_memory_snapshot = true
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "./assets/hf/DeepSeek-V3-Base"
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 2_000
+decay_ratio = 0.8
+decay_type = "cosine"
+min_lr_factor = 0.1
+
+[training]
+local_batch_size = 1
+seq_len = 256
+max_norm = 1.0
+steps = 20
+dataset = "c4_test"
+dtype = "bfloat16"
+# Disable parameter/gradient CPU offload to test activation offload specifically
+enable_cpu_offload = false
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default"
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+pipeline_parallel_degree = 1
+pipeline_parallel_schedule = "Interleaved1F1B"
+expert_parallel_degree = 64
+expert_tensor_parallel_degree = 1
+
+[checkpoint]
+enable = false
+folder = "checkpoint"
+interval = 500
+last_save_model_only = true
+export_dtype = "bfloat16"
+async_mode = "disabled"
+
+[activation_checkpoint]
+mode = "full"
+selective_ac_option = 'op'
+# Enable CPU offloading for activations
+cpu_offload = true
+
+[compile]
+enable = false
+components = ["model", "loss"]
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output", "router.gate"]
+
+[quantize.grouped_mm.float8]
+fqns = ["experts"]

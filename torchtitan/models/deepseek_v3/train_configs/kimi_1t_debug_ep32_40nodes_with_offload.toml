@@ -1,0 +1,53 @@
+# DEBUG: Deep profiling to find memory bottleneck
+# Test: EP=32 with CPU offload - investigate why memory spikes to 73GB
+# Configuration: 40 nodes, 320 GPUs, EP=32, seq_len=512, batch_size=1
+# Purpose: Find where memory is being allocated during forward pass
+
+[job]
+dump_folder = "./outputs/kimi_1t_debug_ep32_40nodes_with_offload"
+description = "DEBUG - Memory Investigation - EP32 - 40 nodes"
+
+[profiling]
+enable_profiling = true
+profile_freq = 1  # Profile at step 1
+enable_memory_snapshot = true  # Enable memory snapshot
+save_traces_folder = "profile_traces"
+with_stack = true  # Capture stack traces
+with_modules = true
+
+[metrics]
+log_freq = 1
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "./assets/hf/DeepSeek-V3-Base"
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+
+[training]
+local_batch_size = 1
+seq_len = 512
+steps = 2  # Just 2 steps for quick debug
+dataset = "c4_test"
+
+# OPTIMIZATIONS ENABLED - Same as Job 1270
+enable_cpu_offload = true
+enable_detailed_memory_tracking = true
+clear_cache_between_steps = true
+
+[parallelism]
+data_parallel_shard_degree = -1
+expert_parallel_degree = 32  # 12 experts per GPU
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = false  # No compile for cleaner profiling

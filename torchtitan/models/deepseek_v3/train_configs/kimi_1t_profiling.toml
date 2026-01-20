@@ -1,0 +1,116 @@
+[job]
+dump_folder = "./outputs"
+description = "Kimi K2 1T model training"
+print_config = false
+
+[profiling]
+enable_profiling = true
+save_traces_folder = "profile_trace"
+profile_freq = 5
+enable_memory_snapshot = true
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "./assets/hf/DeepSeek-V3-Base"
+#converters = ["quantize.linear.float8"]
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+eps = 1e-8
+
+#[optimizer]
+#name = "Muon"
+##lr = 2.2e-4
+#lr = 1e-5
+#eps = 1e-8
+#weight_decay = 0.1
+#
+## Muon-specific parameters
+#mu = 0.95                    # Momentum factor for Muon
+#algorithm = "muon"           # Main algorithm to use for 2D matrices
+#nesterov = false             # Whether to use Nesterov momentum
+#adjust_lr = "rms_norm"       # How to adjust LR: "spectral_norm", "rms_norm", or null
+#flatten = false              # Whether to flatten 3D+ tensors to 2D
+#use_triton = true            # Whether to use Triton kernel for Newton-Schulz
+#
+## Parameter-specific optimizer selection
+#scalar_optimizer = "adamw"        # For 1D parameters (biases, layer norms)
+#embedding_optimizer = "adamw"     # For embedding layers
+#head_optimizer = "adamw"          # For model head/output layers
+#head_lr_scaling = false            # Apply 1/sqrt(dim) scaling to head layers
+#
+## Learning rate scaling factors
+#scalar_lr_factor = 1            # LR multiplier for scalar parameters
+#embedding_lr_factor = 1         # LR multiplier for embedding parameters
+#head_lr_factor = 1.0            # LR multiplier for head parameters (after head_lr_scaling)
+#routing_lr_factor = 1.0         # LR multiplier for routing parameters
+#expert_lr_factor = 1.0
+
+[lr_scheduler]
+warmup_steps = 2_000  # lr scheduler warm up, normally 20% of the train steps
+decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
+decay_type = "cosine"
+min_lr_factor = 0.1
+
+[training]
+local_batch_size = 1
+seq_len = 256
+max_norm = 1.0  # grad norm clipping
+steps = 20
+dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
+dtype = "bfloat16"
+enable_cpu_offload = true
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default" # default / never / always
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+pipeline_parallel_degree = 1
+pipeline_parallel_schedule = "Interleaved1F1B"
+expert_parallel_degree = 64
+expert_tensor_parallel_degree = 1
+
+[checkpoint]
+enable = false
+folder = "checkpoint"
+interval = 500
+last_save_model_only = true
+export_dtype = "bfloat16"
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem]"
+
+[activation_checkpoint]
+mode = "full"  # ["none", "selective", "full"]
+selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+[compile]
+enable = false
+components = ["model", "loss"] # ["model", "loss"]
+# fullgraph = false
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output", "router.gate"]
+
+[quantize.grouped_mm.float8]
+fqns = ["experts"]
+
+#[deepep]
+#sync_comm_stream = false
+#fused_weighted_scatter_add = false
+#fused_silu_gate_prob = true
+#
+#[debug]
+#moe_force_load_balance = true

@@ -86,7 +86,9 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.0
-    mscale_all_dim: float = 1.0  # When mscale == mscale_all_dim, effective mscale is 1.0
+    mscale_all_dim: float = (
+        1.0  # When mscale == mscale_all_dim, effective mscale is 1.0
+    )
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
@@ -102,10 +104,11 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
-            raise NotImplementedError(
-                "CP support for FlexAttention is still in progress."
-            )
+        # NOTE: CP + FlexAttention now supported in PyTorch 2.9+ (PRs #145896, #146397)
+        # if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
+        #     raise NotImplementedError(
+        #         "CP support for FlexAttention is still in progress."
+        #     )
 
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance

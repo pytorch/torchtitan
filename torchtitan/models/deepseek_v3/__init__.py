@@ -232,6 +232,38 @@ deepseekv3_args = {
         rope_factor=32.0,
         beta_fast=1,
     ),
+    # kimi_k2 with SDPA (no FlexAttention) for Context Parallel compatibility
+    "kimi_k2_sdpa": DeepSeekV3ModelArgs(
+        vocab_size=163840,
+        dim=7168,
+        inter_dim=18432,
+        moe_inter_dim=2048,
+        n_layers=61,
+        n_dense_layers=1,
+        n_heads=64,
+        norm_eps=1e-6,
+        moe_args=MoEArgs(
+            num_experts=384,
+            num_shared_experts=1,
+            top_k=8,
+            score_func="sigmoid",
+            route_norm=True,
+            route_scale=2.827,
+            score_before_experts=False,
+        ),
+        n_expert_groups=1,
+        n_limited_groups=1,
+        q_lora_rank=1536,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        use_flex_attn=False,  # Use SDPA for CP compatibility
+        attn_mask_type="causal",
+        rope_theta=50000.0,
+        rope_factor=32.0,
+        beta_fast=1,
+    ),
 }
 
 

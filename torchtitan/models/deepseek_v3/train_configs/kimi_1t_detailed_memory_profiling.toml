@@ -1,0 +1,78 @@
+# Kimi K2 1T - DETAILED MEMORY PROFILING Configuration
+#
+# Purpose: Get exact breakdown of where the 55 GB "activation memory" goes
+# Approach: Enhanced memory snapshots + instrumented checkpoints
+# Expected output: Detailed memory allocation report showing:
+#   - NCCL communication buffers
+#   - FSDP temporary storage
+#   - MoE all-to-all staging
+#   - CPU offload overhead
+#   - Actual checkpointed activations
+#   - PyTorch allocator overhead
+
+[job]
+dump_folder = "./outputs/kimi_1t_detailed_memory_profiling"
+description = "Kimi K2 1T - Detailed Memory Breakdown Profiling"
+print_config = true  # Print config for verification
+
+[profiling]
+enable_profiling = true
+save_traces_folder = "profile_trace"
+profile_freq = 3  # Profile step 3 (after warmup)
+profiler_warmup = 1
+profiler_active = 1
+enable_memory_snapshot = true
+save_memory_snapshot_folder = "memory_snapshot"
+with_stack = true  # Enable stack traces for memory allocations
+with_modules = true  # Enable module tracking
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+enable_wandb = false
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "./assets/hf/DeepSeek-V3-Base"
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+decay_type = "cosine"
+min_lr_factor = 0.1
+
+[training]
+local_batch_size = 1
+seq_len = 256
+max_norm = 1.0
+steps = 5  # Just 5 steps for profiling
+dataset = "c4_test"
+dtype = "bfloat16"
+enable_cpu_offload = true
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default"
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+pipeline_parallel_degree = 1
+expert_parallel_degree = 64
+expert_tensor_parallel_degree = 1
+
+[checkpoint]
+enable = false
+
+[activation_checkpoint]
+mode = "full"
+selective_ac_option = 'op'
+
+[compile]
+enable = false

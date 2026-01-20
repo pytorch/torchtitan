@@ -1,0 +1,43 @@
+# MEMORY TEST: 2k context length
+[job]
+dump_folder = "./outputs/kimi_1t_memory_2k"
+description = "Memory test - 2k context"
+
+[profiling]
+enable_profiling = false
+
+[metrics]
+log_freq = 1
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "./assets/hf/DeepSeek-V3-Base"
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+
+[training]
+local_batch_size = 1
+seq_len = 2048
+steps = 5
+dataset = "c4_test"
+enable_cpu_offload = true
+enable_detailed_memory_tracking = true
+clear_cache_between_steps = true
+skip_optimizer_step = true
+
+[parallelism]
+data_parallel_shard_degree = -1
+expert_parallel_degree = 64
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = false

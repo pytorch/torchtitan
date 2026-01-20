@@ -5,11 +5,19 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from typing import Optional
 
 import torch
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
 
 from torch.nn.attention.flex_attention import and_masks, BlockMask
+
+# Import CP block mask creator for Context Parallel + FlexAttention
+try:
+    from torch.distributed.tensor.experimental._attention import create_cp_block_mask
+except ImportError:
+    create_cp_block_mask = None
 
 from torchtitan.components.peft.lora import lora_or_linear, per_layer_config
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -478,6 +486,7 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
         input_batch: torch.Tensor,
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
+        cp_mesh: Optional[DeviceMesh] = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
         match self.model_args.attn_mask_type:
@@ -500,9 +509,23 @@ class DeepSeekV3Model(nn.Module, ModelProtocol):
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
                 )
-        return create_attention_mask(
-            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
-        )
+
+        combined_mask_mod = and_masks(*mask_mods)
+        seq_len = input_batch.shape[1]
+        H = self.model_args.n_heads  # Number of attention heads
+
+        # Use CP-aware block mask when Context Parallel is enabled
+        if cp_mesh is not None and create_cp_block_mask is not None:
+            return create_cp_block_mask(
+                mask_mod=combined_mask_mod,
+                B=B,
+                H=H,
+                Q_LEN=seq_len,
+                KV_LEN=seq_len,
+                device_mesh=cp_mesh,
+            )
+        else:
+            return create_attention_mask(combined_mask_mod, B, None, seq_len, seq_len)
 
     def forward(
         self,

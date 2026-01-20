@@ -1,0 +1,70 @@
+# Qwen3 1.7B - Local test WITH activation offloading
+
+[job]
+dump_folder = "./outputs/qwen3_1.7b_offload"
+description = "Qwen 3 1.7B local test - WITH activation offload"
+print_config = false
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "qwen3"
+flavor = "1.7B"
+hf_assets_path = "./assets/hf/Qwen3-1.7B"
+
+[optimizer]
+name = "AdamW"
+lr = 8e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 5
+
+[training]
+local_batch_size = 1
+seq_len = 2048
+max_norm = 1.0
+steps = 10
+dataset = "c4_test"
+dtype = "bfloat16"
+enable_cpu_offload = false
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default"
+tensor_parallel_degree = 1
+context_parallel_degree = 1
+
+[checkpoint]
+enable = false
+folder = "checkpoint"
+interval = 50
+last_save_model_only = false
+export_dtype = "bfloat16"
+async_mode = "disabled"
+
+[activation_checkpoint]
+mode = "full"
+selective_ac_option = "op"
+# ENABLE CPU OFFLOAD FOR ACTIVATIONS
+cpu_offload = true
+
+[compile]
+enable = false
+components = ["model", "loss"]
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output"]

@@ -1,0 +1,50 @@
+# BASELINE: Production-like config (NO optimizations)
+# Test: Measure memory usage WITHOUT any optimizations
+# Configuration: 40 nodes, 320 GPUs, EP=32, seq_len=512, batch_size=1
+# Purpose: Establish baseline memory consumption (like original config)
+
+[job]
+dump_folder = "./outputs/kimi_1t_baseline_ep32_40nodes_no_offload"
+description = "Baseline - No Optimizations - EP32 - 40 nodes"
+
+[profiling]
+enable_profiling = false
+profile_freq = 10
+enable_memory_snapshot = false
+
+[metrics]
+log_freq = 1
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "./assets/hf/DeepSeek-V3-Base"
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+
+[training]
+local_batch_size = 1
+seq_len = 512
+steps = 5
+dataset = "c4_test"
+
+# BASELINE: No optimizations (like original)
+# enable_cpu_offload = false (default)
+# enable_detailed_memory_tracking = false (default)
+# clear_cache_between_steps = false (default)
+
+[parallelism]
+data_parallel_shard_degree = -1
+expert_parallel_degree = 32
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = true
