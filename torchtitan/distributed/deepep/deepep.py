@@ -18,8 +18,11 @@ import torch
 from torch.distributed import ProcessGroup
 
 try:
-    from deep_ep import Buffer  # pyrefly: ignore[import-error]
-    from deep_ep.utils import EventHandle, EventOverlap  # pyrefly: ignore[import-error]
+    from deep_ep import Buffer  # pyrefly: ignore[missing-import]
+    from deep_ep.utils import (  # pyrefly: ignore[missing-import]
+        EventHandle,
+        EventOverlap,
+    )
 except ImportError as e:
     raise ImportError(
         "DeepEP is required for this module. "
