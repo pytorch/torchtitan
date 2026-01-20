@@ -6,12 +6,12 @@ print_config = false
 [profiling]
 enable_profiling = false
 save_traces_folder = "profile_trace"
-profile_freq = 1000
+profile_freq = 10
 enable_memory_snapshot = false
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 10
+log_freq = 1
 disable_color_printing = false
 enable_tensorboard = false
 save_tb_folder = "tb"
@@ -22,15 +22,7 @@ name = "llama3"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
 hf_assets_path = "./tests/assets/tokenizer"
-# Enable LoRA converter for fine-tuning
-converters = ["lora"]
-
-[lora]
-# LoRA configuration (all values are optional, defaults shown below)
-rank = 8
-alpha = 16.0
-dropout = 0.0
-apply_to_all_linears = true
+# converters = ["float8"]
 
 [optimizer]
 name = "AdamW"
@@ -47,7 +39,7 @@ min_lr_factor = 0.0
 local_batch_size = 8
 seq_len = 2048
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 10
 dataset = "c4_test"  # supported datasets: c4_test (2K), c4 (177M)
 
 [parallelism]
