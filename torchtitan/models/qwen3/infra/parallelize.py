@@ -290,15 +290,11 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
     if enable_async_tp:
-        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
-
         torch._inductor.config._micro_pipeline_tp = True
-        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
     logger.info(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"

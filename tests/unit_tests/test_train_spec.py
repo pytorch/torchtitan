@@ -26,9 +26,9 @@ from torchtitan.protocols.train_spec import (
 )
 
 
-class FakeModel(nn.Module, ModelProtocol):
+class FakeModel(ModelProtocol):
     def __init__(self, model_args: BaseModelArgs) -> None:
-        super().__init__()
+        super().__init__(model_args)
         self.linear = nn.Linear(8, 8)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
