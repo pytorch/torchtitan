@@ -252,9 +252,9 @@ class Attention(nn.Module):
 
         # Adding the q_norm and k_norm here
         # Last layer of adding q-k norm
-        if self.q_norm:
+        if self.q_norm:  # pyrefly: ignore[invalid-argument]
             xq = self.q_norm(xq)
-        if self.k_norm:
+        if self.k_norm:  # pyrefly: ignore[invalid-argument]
             xk = self.k_norm(xk)
 
         # Apply rotary embedding
@@ -274,6 +274,9 @@ class Attention(nn.Module):
                 output = self.inner_attention(
                     xq, xk, xv, block_mask=attention_masks, scale=self.scaling
                 )
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
             case "varlen":
                 # TODO: pass self.scaling into varlen attention
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
@@ -288,12 +291,11 @@ class Attention(nn.Module):
             case "sdpa":
                 assert attention_masks is None
                 output = self.inner_attention(xq, xk, xv, scale=self.scaling)
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
-
-        output = output.transpose(
-            1, 2
-        ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
 
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
@@ -575,14 +577,14 @@ class Qwen3Model(nn.Module, ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.rope_cache, attention_masks, positions)
 
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         h = self.norm(h) if self.norm else h
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         output = self.output(h) if self.output else h
         return output
