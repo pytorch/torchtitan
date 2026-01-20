@@ -167,6 +167,7 @@ class FluxTrainer(Trainer):
                     timesteps=timesteps,
                 )
 
+                print(f"The shape of the noise {latent_noise_pred.shape}")
                 # Scale loss as we used SUM reduction for mse loss function
                 loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
