@@ -91,8 +91,7 @@ class DualPipeExpertParallel(BaseExpertParallel):
             module,
             device_mesh,
             partition_fn=self._partition_fn,
-            # TODO: fix this, made a typo here to see if CI can catch it.
-            # pyrefly: ignore [bad-argument-typ]
+            # pyrefly: ignore [bad-argument-type]
             input_fn=self._token_dispatch,
             # pyrefly: ignore [bad-argument-type]
             output_fn=self._token_combine,
