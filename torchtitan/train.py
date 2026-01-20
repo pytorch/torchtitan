@@ -149,7 +149,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Build the collection of model converters. No-op if `model.converters` empty
         model_converters = build_model_converters(job_config, parallel_dims)
-        # pyrefly: ignore [bad-argument-type]
         model_converters.convert(model)
 
         # metrics logging
@@ -167,7 +166,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-            # pyrefly: ignore [bad-argument-type]
         ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
