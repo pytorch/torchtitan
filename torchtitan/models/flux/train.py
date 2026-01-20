@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Iterable
+
 import torch
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
@@ -94,8 +96,21 @@ class FluxTrainer(Trainer):
         self,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
+        """
+        Perform a single forward and backward pass through the model.
+
+        Args:
+            input_dict: Dictionary containing input data including prompts and other metadata
+            labels: Target tensor containing the ground truth image data
+            global_valid_tokens: Optional tensor tracking the total number of valid tokens across all processes.
+                This field is a placeholder for now as we rescale the loss within forward_backward_step for FLUX.
+
+        Returns:
+            torch.Tensor: The computed loss value for this training step
+        """
+
         # generate t5 and clip embeddings
         input_dict["image"] = labels
         input_dict = preprocess_data(
@@ -107,6 +122,19 @@ class FluxTrainer(Trainer):
             batch=input_dict,
         )
         labels = input_dict["img_encodings"]
+        print(f"labels.shape {labels.shape}")
+
+        # rewrite the global_valid_tokens because the `labels` are reset after image encoder.
+        local_valid_tokens = torch.tensor(
+            labels.numel(), dtype=torch.float32, device=self.device
+        )
+
+        print(f"local_valid_tokens {local_valid_tokens}")
+        if self.parallel_dims.dp_enabled:
+            batch_mesh = self.parallel_dims.get_mesh("batch")
+            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
+        else:
+            global_valid_tokens = local_valid_tokens.float()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -167,7 +195,9 @@ class FluxTrainer(Trainer):
                     timesteps=timesteps,
                 )
 
-                print(f"The shape of the noise {latent_noise_pred.shape}")
+                print(
+                    f"The shape of the noise {latent_noise_pred.shape}"
+                )  # 4, 256, 256
                 # Scale loss as we used SUM reduction for mse loss function
                 loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
@@ -177,6 +207,72 @@ class FluxTrainer(Trainer):
             loss.backward()
 
         return loss
+
+    def train_step(
+        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ):
+        self.optimizers.zero_grad()
+        # Save the current step learning rate for logging
+        lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+
+        # Keep these variables local to shorten the code as these are
+        # the major variables that are used in the training loop.
+        parallel_dims = self.parallel_dims
+
+        if self.gradient_accumulation_steps > 1:
+            raise ValueError("FLUX doesn't support gradient accumulation for now.")
+
+        input_dict, labels = next(data_iterator)
+
+        loss = self.forward_backward_step(input_dict, labels, None)
+
+        grad_norm = dist_utils.clip_grad_norm_(
+            [p for m in self.model_parts for p in m.parameters()],
+            self.job_config.training.max_norm,
+            foreach=True,
+            pp_mesh=parallel_dims.get_optional_mesh("pp"),
+            ep_enabled=parallel_dims.ep_enabled,
+        )
+        self.checkpointer.maybe_wait_for_staging()
+        self.optimizers.step()
+        self.lr_schedulers.step()
+
+        # log metrics
+        if not self.metrics_processor.should_log(self.step):
+            return
+
+        if parallel_dims.dp_cp_enabled:
+            loss = loss.detach()
+            ft_pg = self.ft_manager.loss_sync_pg
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
+
+            # NOTE: the loss returned by train
+            global_avg_loss, global_max_loss, global_ntokens_seen = (
+                dist_utils.dist_sum(loss, loss_mesh, ft_pg),
+                dist_utils.dist_max(loss, loss_mesh, ft_pg),
+                dist_utils.dist_sum(
+                    torch.tensor(
+                        self.ntokens_seen, dtype=torch.int64, device=self.device
+                    ),
+                    loss_mesh,
+                    ft_pg,
+                ),
+            )
+        else:
+            global_avg_loss = global_max_loss = loss.detach().item()
+            global_ntokens_seen = self.ntokens_seen
+
+        extra_metrics = {
+            "n_tokens_seen": global_ntokens_seen,
+            "lr": lr,
+        }
+        self.metrics_processor.log(
+            self.step,
+            global_avg_loss,
+            global_max_loss,
+            grad_norm.item(),
+            extra_metrics=extra_metrics,
+        )
 
 
 if __name__ == "__main__":

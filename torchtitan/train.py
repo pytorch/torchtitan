@@ -568,10 +568,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         local_valid_tokens = local_valid_tokens.to(self.device)
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
-            ft_pg = self.ft_manager.loss_sync_pg
-            global_valid_tokens = dist_utils.dist_sum(
-                local_valid_tokens, batch_mesh, ft_pg
-            )
+            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
         else:
             global_valid_tokens = local_valid_tokens.float()
 
