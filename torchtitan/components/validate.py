@@ -167,9 +167,6 @@ class Validator(BaseValidator):
         parallel_dims = self.parallel_dims
 
         accumulated_losses = []
-        accumulated_tokens = torch.tensor(
-            0, dtype=torch.int64, device=utils.device_type
-        )
         device_type = utils.device_type
         num_steps = 0
 
@@ -261,10 +258,9 @@ class Validator(BaseValidator):
         # Compute average loss
         loss = torch.sum(torch.stack(accumulated_losses))
         loss /= num_steps
-
         if parallel_dims.dp_cp_enabled:
             global_avg_loss = dist_utils.dist_mean(
-                loss, parallel_dims.get_optional_mesh("loss"), None
+                loss, parallel_dims.get_optional_mesh("loss")
             )
         else:
             global_avg_loss = loss.item()

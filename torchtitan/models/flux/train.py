@@ -123,14 +123,12 @@ class FluxTrainer(Trainer):
             batch=input_dict,
         )
         labels = input_dict["img_encodings"]
-        print(f"labels.shape {labels.shape}")
 
         # rewrite the global_valid_tokens because the `labels` are reset after image encoder.
         local_valid_tokens = torch.tensor(
             labels.numel(), dtype=torch.float32, device=self.device
         )
 
-        print(f"local_valid_tokens {local_valid_tokens}")
         if self.parallel_dims.dp_enabled:
             batch_mesh = self.parallel_dims.get_mesh("batch")
             global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
@@ -196,9 +194,6 @@ class FluxTrainer(Trainer):
                     timesteps=timesteps,
                 )
 
-                print(
-                    f"The shape of the noise {latent_noise_pred.shape}"
-                )  # 4, 256, 256
                 # Scale loss as we used SUM reduction for mse loss function
                 loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
