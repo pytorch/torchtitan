@@ -4,45 +4,34 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
+"""
+TorchComms training entry point.
 
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+This module provides backward compatibility for running training with torchcomms.
+The recommended approach is to use `--parallelism.collective_api=torchcomms` or
+`--parallelism.collective_api=torchcomms_via_process_group` with the base Trainer.
+This module exists for users who want to run `torchtitan/experiments/torchcomms/train.py`
+directly and defaults to torchcomms_via_process_group for backward compatibility.
+"""
+
+from torchtitan.config import JobConfig
 from torchtitan.train import main, Trainer
-
-from .parallel_dims import TorchCommsParallelDims
 
 
 class TorchCommsTrainer(Trainer):
-    parallel_dims: TorchCommsParallelDims
+    """Trainer that forces torchcomms_via_process_group collective API.
 
-    def init_distributed(self) -> ParallelDims:
-        job_config = self.job_config
-        dist_utils.init_distributed(
-            job_config.comm,
-            enable_cpu_backend=job_config.training.enable_cpu_offload,
-            base_folder=job_config.job.dump_folder,
-        )
+    This class ensures that torchcomms is used regardless of the config setting,
+    providing backward compatibility for users running this module directly.
+    Uses torchcomms_via_process_group (TORCHCOMMS_PATCH_FOR_COMPILE=0) by default.
+    """
 
-        world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = job_config.parallelism
-
-        return TorchCommsParallelDims(
-            dp_shard=parallelism_config.data_parallel_shard_degree,
-            dp_replicate=parallelism_config.data_parallel_replicate_degree,
-            cp=parallelism_config.context_parallel_degree,
-            tp=parallelism_config.tensor_parallel_degree,
-            pp=parallelism_config.pipeline_parallel_degree,
-            ep=parallelism_config.expert_parallel_degree,
-            etp=parallelism_config.expert_tensor_parallel_degree,
-            world_size=world_size,
-        )
-
-    def close(self) -> None:
-        # Call finalize on all comms after training and before destroying process group.
-        if hasattr(self, "parallel_dims"):
-            for comm in self.parallel_dims.comms:
-                comm.finalize()
-        super().close()
+    def __init__(self, job_config: JobConfig):
+        # Force torchcomms_via_process_group for backward compatibility
+        # (original behavior used init_device_mesh which corresponds to PATCH=0)
+        if job_config.parallelism.collective_api == "process_group":
+            job_config.parallelism.collective_api = "torchcomms_via_process_group"
+        super().__init__(job_config)
 
 
 if __name__ == "__main__":
