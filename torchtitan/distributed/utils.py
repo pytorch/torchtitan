@@ -385,13 +385,17 @@ def set_pg_timeouts(
     torch.distributed.barrier(device_ids=[device_module.current_device()])
     device_module.synchronize()
 
-    # None represents the 'default' PG, not part of the mesh
-    groups: list[torch.distributed.ProcessGroup | None] = [
-        mesh.get_group()
-        for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
-    ] + [None]
-    for group in groups:
-        torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+    try:
+        # None represents the 'default' PG, not part of the mesh
+        groups: list[torch.distributed.ProcessGroup | None] = [
+            mesh.get_group()
+            for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
+        ] + [None]
+        for group in groups:
+            torch.distributed.distributed_c10d._set_pg_timeout(timeout, group)
+    except RuntimeError:
+        # todo: handle this better but we might be using torchcomms
+        return
 
 
 @torch.no_grad()

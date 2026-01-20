@@ -14,9 +14,8 @@ from typing import Any, Iterable
 
 import torch
 import torch.distributed.checkpoint.stateful
-from torch.distributed.elastic.multiprocessing.errors import record
-
 import torchtitan.protocols.train_spec as train_spec_module
+from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
@@ -375,6 +374,33 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         parallelism_config = job_config.parallelism
+        collective_api = parallelism_config.collective_api
+
+        # Use TorchCommsParallelDims for torchcomms-based collective APIs
+        if collective_api in ("torchcomms", "torchcomms_via_process_group"):
+            # Set TORCHCOMMS_PATCH_FOR_COMPILE BEFORE importing torchcomms
+            # "torchcomms" uses native device mesh (PATCH=1), optimized for compile
+            # "torchcomms_via_process_group" uses process group-based mesh (PATCH=0)
+            if collective_api == "torchcomms":
+                os.environ["TORCHCOMMS_PATCH_FOR_COMPILE"] = "1"
+            else:
+                os.environ["TORCHCOMMS_PATCH_FOR_COMPILE"] = "0"
+
+            from torchtitan.experiments.torchcomms.parallel_dims import (
+                TorchCommsParallelDims,
+            )
+
+            return TorchCommsParallelDims(
+                dp_shard=parallelism_config.data_parallel_shard_degree,
+                dp_replicate=parallelism_config.data_parallel_replicate_degree,
+                cp=parallelism_config.context_parallel_degree,
+                tp=parallelism_config.tensor_parallel_degree,
+                pp=parallelism_config.pipeline_parallel_degree,
+                ep=parallelism_config.expert_parallel_degree,
+                etp=parallelism_config.expert_tensor_parallel_degree,
+                world_size=world_size,
+            )
+
         return ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
@@ -717,6 +743,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.ntokens_seen = state_dict["ntokens_seen"]
 
     def close(self) -> None:
+        if (
+            hasattr(self, "parallel_dims")
+            and hasattr(self.parallel_dims, "comms")
+            and self.parallel_dims.comms
+        ):
+            for comm in self.parallel_dims.comms:
+                comm.finalize()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
