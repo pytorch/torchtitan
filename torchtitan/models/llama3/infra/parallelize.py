@@ -249,7 +249,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = torch.compile(
-            transformer_block, backend=compile_config.backend, fullgraph=True
+            transformer_block, backend=compile_config.backend, fullgraph=True, mode="light"
         )
         # pyrefly: ignore [missing-attribute]
         model.layers.register_module(layer_id, transformer_block)
