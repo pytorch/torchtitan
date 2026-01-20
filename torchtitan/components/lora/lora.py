@@ -57,21 +57,13 @@ def get_lora_config(job_config: JobConfig) -> LoRAConfig:
 
     If not specified, default values from LoRAConfig will be used.
     """
-    lora_config = LoRAConfig()
-
-    # Check if job_config has a 'lora' attribute (from custom config)
-    if hasattr(job_config, "lora"):
-        lora_section = job_config.lora
-        if hasattr(lora_section, "rank"):
-            lora_config.rank = lora_section.rank
-        if hasattr(lora_section, "alpha"):
-            lora_config.alpha = lora_section.alpha
-        if hasattr(lora_section, "dropout"):
-            lora_config.dropout = lora_section.dropout
-        if hasattr(lora_section, "apply_to_all_linears"):
-            lora_config.apply_to_all_linears = lora_section.apply_to_all_linears
-
-    return lora_config
+    lora_section = job_config.lora
+    return LoRAConfig(
+        rank=lora_section.rank,
+        alpha=lora_section.alpha,
+        dropout=lora_section.dropout,
+        apply_to_all_linears=lora_section.apply_to_all_linears,
+    )
 
 
 class LoRALinear(nn.Module):
@@ -252,6 +244,8 @@ class LoRAConverter:
         for name, param in model.named_parameters():
             if "lora_a" in name or "lora_b" in name:
                 param.requires_grad = True
+            else:
+                param.requires_grad = False
 
         # Log the number of trainable parameters
         total_params = sum(p.numel() for p in model.parameters())

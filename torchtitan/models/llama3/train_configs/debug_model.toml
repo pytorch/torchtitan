@@ -22,7 +22,15 @@ name = "llama3"
 flavor = "debugmodel"
 # test folder with tokenizer.json, for debug purpose only
 hf_assets_path = "./tests/assets/tokenizer"
-# converters = ["float8"]
+# Enable LoRA converter for fine-tuning
+converters = ["lora"]
+
+[lora]
+# LoRA configuration (all values are optional, defaults shown below)
+rank = 8
+alpha = 16.0
+dropout = 0.0
+apply_to_all_linears = true
 
 [optimizer]
 name = "AdamW"
