@@ -131,8 +131,10 @@ class FluxTrainer(Trainer):
 
         if self.parallel_dims.dp_enabled:
             batch_mesh = self.parallel_dims.get_mesh("batch")
+            # pyrefly: ignore [bad-assignment]
             global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
         else:
+            # pyrefly: ignore [bad-assignment]
             global_valid_tokens = local_valid_tokens.float()
 
         # Keep these variables local to shorten the code as these are
@@ -195,6 +197,7 @@ class FluxTrainer(Trainer):
                 )
 
                 # Scale loss as we used SUM reduction for mse loss function
+                # pyrefly: ignore [unsupported-operation]
                 loss = self.loss_fn(latent_noise_pred, target) / global_valid_tokens
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
@@ -218,6 +221,7 @@ class FluxTrainer(Trainer):
         if self.gradient_accumulation_steps > 1:
             raise ValueError("FLUX doesn't support gradient accumulation for now.")
 
+        # pyrefly: ignore [no-matching-overload]
         input_dict, labels = next(data_iterator)
 
         loss = self.forward_backward_step(

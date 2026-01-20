@@ -200,6 +200,7 @@ def parallelize_encoders(
         fully_shard(t5_model.hf_module, **fsdp_config)
 
         # Disable FSDP's automatic gradient division for all FSDP modules
+        # pyrefly: ignore [bad-argument-type]
         disable_fsdp_gradient_division(t5_model.hf_module)
 
         if parallel_dims.dp_replicate_enabled:

@@ -189,6 +189,7 @@ class Validator(BaseValidator):
             )
             # Count valid tokens for this batch
             local_valid_tokens = torch.tensor(0, dtype=torch.int64, device=device_type)
+            # pyrefly: ignore [missing-attribute]
             local_valid_tokens += (labels != IGNORE_INDEX).sum()
 
             # All-reduce token count across DP ranks to get global token count

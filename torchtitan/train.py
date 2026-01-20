@@ -561,6 +561,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         for _microbatch in range(self.gradient_accumulation_steps):
             # pyrefly: ignore [no-matching-overload]
             input_dict, labels = next(data_iterator)
+            # pyrefly: ignore [missing-attribute]
             local_valid_tokens += (labels != IGNORE_INDEX).sum()
             microbatches.append((input_dict, labels))
 
@@ -585,6 +586,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             loss = self.forward_backward_step(
                 input_dict=input_dict,
                 labels=labels,
+                # pyrefly: ignore [bad-argument-type]
                 global_valid_tokens=global_valid_tokens,
             )
             accumulated_losses.append(loss.detach())
@@ -705,7 +707,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     self.job_config.validation.enable
                     and self.validator.should_validate(self.step)
                 ):
-                    # pyrefly: ignore [missing-attribute]
+                    # pyrefly: ignore [bad-argument-count]
                     self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
