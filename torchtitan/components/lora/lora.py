@@ -114,20 +114,10 @@ class LoRALinear(nn.Module):
         _lora_a_init_params(self.lora_a)
         _lora_b_init_params(self.lora_b)
 
-    def reset_parameters(self):
-        """Reset LoRA parameters. Called by init_weights during model initialization."""
-        _lora_a_init_params(self.lora_a)
-        _lora_b_init_params(self.lora_b)
-        # Ensure LoRA params have requires_grad=True after reset
-        self.lora_a.weight.requires_grad = True
-        self.lora_b.weight.requires_grad = True
-
     def adapter_params(self) -> list[str]:
         """
         Return a list of strings corresponding to the names of the ``nn.Parameter`` s in
         the model coming from the adapter.
-
-        For LoRA this means lora_a.weight and lora_b.weight.
         # TODO: update names when supporting EP
         """
         adapter_params = ["lora_a.weight", "lora_b.weight"]
@@ -259,7 +249,7 @@ class LoRAConverter:
         for name, module in model.named_modules():
             if isinstance(module, LoRALinear):
                 # Re-initialize LoRA parameters
-                module.reset_parameters()
+                module.initialize_parameters()
                 lora_layer_count += 1
 
         # Re-freeze base model params and unfreeze LoRA params
