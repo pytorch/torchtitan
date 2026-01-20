@@ -175,6 +175,9 @@ uv pip install git+https://github.com/deepseek-ai/DeepEP.git --no-build-isolatio
 >
 > See [GitHub Issue #224](https://github.com/deepseek-ai/DeepEP/issues/224#issuecomment-2985783610)
 
+> If you see /usr/bin/ld: cannot find -l:libnvshmem_host.so: No such file or directory
+> try ln -s /path/to/libnvshmem_host.so.3 /path/to/libnvshmem_host.so
+
 ### Step 3: Verify Installation
 
 ```bash
