@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TrajectoryData:
+class Episodes:
     """
     Data from one generation batch.
 
@@ -28,7 +28,7 @@ class TrajectoryData:
         vllm_token_log_probs: List of per-token log prob lists
         prompt_token_ids: List of prompt token ID lists
         expected_answers: List of expected answers for reward computation
-        rewards: Rewards for each completion (initialized to zeros, filled by Scorer)
+        rewards: Rewards for each completion (initialized to zeros, filled by Grader)
     """
 
     policy_version: int
@@ -40,11 +40,11 @@ class TrajectoryData:
     rewards: torch.Tensor
 
 
-class Scorer(Actor):
+class Grader(Actor):
     """
     Evaluates completions and assigns rewards to trajectory data.
 
-    The Scorer receives trajectory data from the Generator
+    The Grader receives trajectory data from the Generator
     and computes rewards using a reward function. Advantage computation
     is done by the Trainer.
 
@@ -65,10 +65,10 @@ class Scorer(Actor):
         # Set reward function
         self.reward_fn = reward_fn if reward_fn is not None else trivial_reward_function
 
-        logger.info(f"Scorer initialized with group_size={self.group_size}")
+        logger.info(f"Grader initialized with group_size={self.group_size}")
 
     @endpoint
-    async def score(self, trajectory: TrajectoryData) -> TrajectoryData:
+    async def score(self, trajectory: Episodes) -> Episodes:
         """
         Score a trajectory by computing rewards.
 
@@ -76,10 +76,10 @@ class Scorer(Actor):
             trajectory: Trajectory data (with or without rewards)
 
         Returns:
-            TrajectoryData with computed rewards
+            Episodes with computed rewards
         """
         logger.info(
-            f"Scorer scoring trajectory (policy v{trajectory.policy_version})..."
+            f"Grader scoring trajectory (policy v{trajectory.policy_version})..."
         )
 
         # Compute rewards using reward function
@@ -96,7 +96,7 @@ class Scorer(Actor):
         trajectory.rewards = rewards
 
         logger.info(
-            f"Scorer finished scoring: "
+            f"Grader finished scoring: "
             f"reward_mean={reward_mean.item():.4f}, reward_std={reward_std.item():.4f}"
         )
 
@@ -111,4 +111,4 @@ class Scorer(Actor):
             reward_fn: New reward function to use
         """
         self.reward_fn = reward_fn
-        logger.info("Scorer reward function updated")
+        logger.info("Grader reward function updated")

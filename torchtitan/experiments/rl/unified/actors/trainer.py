@@ -14,7 +14,7 @@ import torchtitan.protocols.train_spec as train_spec_module
 from monarch.actor import Actor, endpoint
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.rl.unified.actors.scorer import TrajectoryData
+from torchtitan.experiments.rl.unified.actors.grader import Episodes
 from torchtitan.experiments.rl.unified.job_config import JobConfig
 from torchtitan.experiments.rl.unified.models.utils import (
     replace_with_vllm_compatible_flash_attention,
@@ -175,13 +175,13 @@ class Trainer(Actor):
         return titan_state
 
     @endpoint
-    async def step(self, trajectory: TrajectoryData) -> dict:
+    async def step(self, trajectory: Episodes) -> dict:
         """Perform one training step.
 
         Computes advantages from rewards, then updates the policy.
 
         Args:
-            trajectory: Trajectory data with rewards filled by Scorer
+            trajectory: Trajectory data with rewards filled by Grader
 
         Returns:
             Training metrics

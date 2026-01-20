@@ -8,7 +8,7 @@
 Multiprocess RL training loop using Monarch Actors.
 
 This demonstrates:
-1. Distributed actor architecture with Generator (vLLM), Scorer, and Trainer (TorchTitan) components
+1. Distributed actor architecture with Generator (vLLM), Grader, and Trainer (TorchTitan) components
 2. File based weight synchronization between trainer and generator
 3. Separate scoring component for reward and advantage computation
 
@@ -26,7 +26,7 @@ from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import Generator
-from torchtitan.experiments.rl.unified.actors.scorer import Scorer
+from torchtitan.experiments.rl.unified.actors.grader import Grader
 from torchtitan.experiments.rl.unified.actors.trainer import Trainer
 from vllm.model_executor.layers.batch_invariant import (
     init_batch_invariance,
@@ -106,10 +106,10 @@ async def main():
         job_config,  # Pass full job_config
     )
 
-    # Spawn scorer on trainer mesh (can share resources with trainer)
-    scorer = trainer_mesh.spawn(
-        "scorer",
-        Scorer,
+    # Spawn grader on trainer mesh (can share resources with trainer)
+    grader = trainer_mesh.spawn(
+        "grader",
+        Grader,
         job_config,  # Pass full job_config
     )
 
@@ -132,12 +132,12 @@ async def main():
 
     for step in range(num_steps):
         # Fully sync RL loop with separate scoring step
-        # 1. Generator produces trajectory (without rewards)
-        trajectory = generator.generate.call().get().item(gpus=0)
-        # 2. Scorer computes rewards
-        trajectory = scorer.score.call(trajectory).get().item(gpus=0)
+        # 1. Generator produces episode (without rewards)
+        episode = generator.generate.call().get().item(gpus=0)
+        # 2. Grader computes rewards
+        episode = grader.score.call(episode).get().item(gpus=0)
         # 3. Trainer computes advantages and updates policy
-        metrics = trainer.step.call(trajectory).get().item(gpus=0)
+        metrics = trainer.step.call(episode).get().item(gpus=0)
         # 4. Sync weights back to generator
         weights = trainer.get_weights.call().get().item(gpus=0)
         generator.update.call(metrics["policy_version"], weights).get()

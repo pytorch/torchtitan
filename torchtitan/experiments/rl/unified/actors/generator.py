@@ -18,7 +18,7 @@ from torchtitan.distributed import utils as dist_utils
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
 
-from torchtitan.experiments.rl.unified.actors.scorer import TrajectoryData
+from torchtitan.experiments.rl.unified.actors.grader import Episodes
 from torchtitan.experiments.rl.unified.job_config import JobConfig
 
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -271,11 +271,11 @@ class Generator(Actor):
         logger.info("Generator initialized with vLLM engine")
 
     @endpoint
-    async def generate(self) -> TrajectoryData:
+    async def generate(self) -> Episodes:
         """Generate trajectories without computing rewards/advantages.
 
         Returns:
-            TrajectoryData for the Scorer to process (rewards=None)
+            Episodes for the Scorer to process (rewards=None)
         """
         logger.info(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
@@ -302,8 +302,8 @@ class Generator(Actor):
 
             logger.info(f"Generated {len(completions)} completions for scoring")
 
-            # Create trajectory data (rewards initialized to zeros, filled by Scorer)
-            trajectory = TrajectoryData(
+            # Create trajectory data (rewards initialized to zeros, filled by Grader)
+            trajectory = Episodes(
                 policy_version=self.policy_version,
                 completions=completions,
                 vllm_token_ids=vllm_token_ids,
