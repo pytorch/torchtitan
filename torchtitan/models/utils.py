@@ -256,14 +256,8 @@ class MoEStateDictAdapter(StateDictAdapter):
                 # Extract individual expert weight (2D) as plain tensor
                 expert_weight = local_grouped_weights[local_expert_index, :, :]
             else:
-                # Use index_select to get 3D tensor directly, then create DTensor and squeeze
-                expert_weight_3d = torch.index_select(
-                    local_grouped_weights,
-                    0,
-                    torch.tensor(
-                        [local_expert_index], device=local_grouped_weights.device
-                    ),
-                )
+                # Use slicing and unsqueeze get a 3D tensor, then create DTensor and squeeze
+                expert_weight_3d = local_grouped_weights[local_expert_index, :, :].unsqueeze(0)
                 expert_weight = DTensor.from_local(
                     expert_weight_3d,
                     sub_mesh,
