@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+import torch._inductor.config
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
@@ -52,7 +53,6 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
-    # pyrefly: ignore [missing-attribute]
     torch._higher_order_ops.inductor_compiled_code,
 }
 
@@ -207,23 +207,17 @@ def apply_non_moe_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             "attention": PrepareModuleInput(
-                # pyrefly: ignore [bad-argument-type]
                 input_layouts=(Shard(1), Replicate(), None),
-                # pyrefly: ignore [bad-argument-type]
                 desired_input_layouts=(Replicate(), Replicate(), None),
             ),
             "attention.wq": ColwiseParallel(use_local_output=False),
             "attention.wk": ColwiseParallel(use_local_output=False),
             "attention.wv": ColwiseParallel(use_local_output=False),
             "attention.inner_attention": PrepareModuleInputOutput(
-                # pyrefly: ignore [bad-argument-type]
                 input_layouts=(Shard(1), Shard(1), Shard(1)),
-                # pyrefly: ignore [bad-argument-type]
                 desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
                 use_local_input=True,
-                # pyrefly: ignore [bad-argument-type]
                 output_layouts=(Shard(1), Shard(1)),
-                # pyrefly: ignore [bad-argument-type]
                 desired_output_layouts=(Shard(1), Shard(1)),
                 use_local_output=False,
             ),
@@ -248,11 +242,7 @@ def apply_non_moe_tp(
         )
 
     if enable_async_tp:
-        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
-
-        # pyrefly: ignore [implicit-import]
         torch._inductor.config._micro_pipeline_tp = True
-        enable_symm_mem_for_group(tp_mesh.get_group().group_name)
 
     logger.info(
         f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"

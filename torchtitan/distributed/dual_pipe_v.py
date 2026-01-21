@@ -300,12 +300,10 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
         output = forward_stage.forward_one_chunk(
             # pyrefly: ignore [bad-argument-type]
             forward_mb_index,
-            arg_mbs[
-                forward_mb_index
-            ],  # pyrefly: ignore[index-error, unsupported-operation]
-            kwarg_mbs[
-                forward_mb_index
-            ],  # pyrefly: ignore[index-error, unsupported-operation]
+            # pyrefly: ignore[bad-index, unsupported-operation]
+            arg_mbs[forward_mb_index],
+            # pyrefly: ignore[bad-index, unsupported-operation]
+            kwarg_mbs[forward_mb_index],
         )
         schedule._maybe_compute_loss(
             forward_stage, output, ctx.target_mbs, forward_mb_index

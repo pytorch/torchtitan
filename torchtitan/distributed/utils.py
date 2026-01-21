@@ -224,22 +224,16 @@ def create_context_parallel_ctx(
 
 class TrainContext(Protocol):
     @abstractmethod
-    def __call__(
-        self,
-        cp_context: contextlib.AbstractContextManager[None] | None = None,
-    ) -> contextlib.AbstractContextManager[None]:
+    def __call__(self) -> contextlib.AbstractContextManager[None]:
         pass
 
 
 def get_train_context(enable_loss_parallel: bool) -> TrainContext:
     @contextlib.contextmanager
-    def context(cp_context: contextlib.AbstractContextManager[None] | None = None):
+    def context():
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
-
-            if cp_context:
-                stack.enter_context(cp_context)
 
             yield
 
@@ -493,7 +487,7 @@ def _clip_grad_norm_with_ep(
         if p.grad is None:
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-        # pyrefly: ignore[unsupported-operation]
+        # pyrefly: ignore[not-iterable]
         if "ep" in p.device_mesh.mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)

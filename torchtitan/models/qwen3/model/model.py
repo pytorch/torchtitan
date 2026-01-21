@@ -274,6 +274,9 @@ class Attention(nn.Module):
                 output = self.inner_attention(
                     xq, xk, xv, block_mask=attention_masks, scale=self.scaling
                 )
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
             case "varlen":
                 # TODO: pass self.scaling into varlen attention
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
@@ -288,12 +291,11 @@ class Attention(nn.Module):
             case "sdpa":
                 assert attention_masks is None
                 output = self.inner_attention(xq, xk, xv, scale=self.scaling)
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
-
-        output = output.transpose(
-            1, 2
-        ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
 
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
@@ -423,7 +425,7 @@ class TransformerBlock(nn.Module):
             self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Qwen3Model(nn.Module, ModelProtocol):
+class Qwen3Model(ModelProtocol):
     """
     Qwen3Model Module
 
@@ -443,7 +445,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
     """
 
     def __init__(self, model_args: Qwen3ModelArgs):
-        super().__init__()
+        super().__init__(model_args)
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
@@ -551,9 +553,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
                     input_batch, tokenizer.eos_id
                 )
             case _:
-                raise NotImplementedError(
-                    "Only varlen and flex attn masks are supported"
-                )
+                raise TypeError("Only varlen and flex attn masks are supported")
 
     def forward(
         self,

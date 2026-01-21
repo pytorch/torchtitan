@@ -21,7 +21,7 @@ from torchtitan.protocols import ModelProtocol
 from .args import FluxModelArgs
 
 
-class FluxModel(nn.Module, ModelProtocol):
+class FluxModel(ModelProtocol):
     """
     Transformer model for flow matching on sequences.
 
@@ -33,7 +33,7 @@ class FluxModel(nn.Module, ModelProtocol):
     """
 
     def __init__(self, model_args: FluxModelArgs):
-        super().__init__()
+        super().__init__(model_args)
 
         self.model_args = model_args
 
