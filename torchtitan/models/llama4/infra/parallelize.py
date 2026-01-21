@@ -653,13 +653,15 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                     # by wrapping each submod's forward instead of their __call__
                     moe = submod
                     for attr_name, submod in moe.named_children():
-                        setattr(
-                            moe,
-                            attr_name,
-                            torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
-                            ),
-                        )
+                        # temp workaround: compile everything except GroupedExperts
+                        if not isinstance(submod, moe_module.GroupedExperts):
+                            setattr(
+                                moe,
+                                attr_name,
+                                torch.compile(
+                                    submod, backend=compile_config.backend, fullgraph=True
+                                ),
+                            )
                 else:
                     setattr(
                         block,
@@ -687,14 +689,8 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
         in moe_module._run_experts_grouped_mm.__qualname__
     )
     if not already_patched:
-        moe_module._run_experts_grouped_mm = torch.compile(
-            moe_module._run_experts_grouped_mm,
-            backend=compile_config.backend,
-            fullgraph=True,
-        )
-
         if ep_enabled:
-            compiled_fn = moe_module._run_experts_grouped_mm
+            fn = moe_module._run_experts_grouped_mm
 
             # keep function logic in sync with `already_patched` above
             def _run_experts_grouped_mm_dynamic(
@@ -706,7 +702,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
             ) -> torch.Tensor:
                 # dynamic number of tokens in expert parallel
                 torch._dynamo.mark_dynamic(x, 0)
-                return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)
+                return fn(w1, w2, w3, x, num_tokens_per_expert)
 
             moe_module._run_experts_grouped_mm = _run_experts_grouped_mm_dynamic
 
