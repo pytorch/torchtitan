@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
@@ -35,6 +35,7 @@ from torchtitan.distributed.expert_parallel import (
     DeepEPExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
+    MXFP8ExpertParallel,
     ReordererSequenceParallel,
     TensorParallel,
 )
@@ -130,6 +131,20 @@ def parallelize_llama(
     else:
         use_deepep = False
 
+    use_mxfp8_a2a_dispatch_fwd = (
+        job_config.parallelism.expert_parallel_a2a_dispatch_fwd_precision == "mxfp8"
+    )
+    use_mxfp8_a2a_combine_bwd = (
+        job_config.parallelism.expert_parallel_a2a_combine_bwd_precision == "mxfp8"
+    )
+    if use_mxfp8_a2a_dispatch_fwd or use_mxfp8_a2a_combine_bwd:
+        assert (
+            not use_deepep
+        ), "MXFP8 all-to-all is not compatible with DeepEP. Please choose either DeepEP or MXFP8 all-to-all, but not both."
+        assert "quantize.grouped_mm.mx" in job_config.model.converters, (
+            "MXFP8 all-to-all requires MXFP8 grouped GEMM converter."
+            "Please add 'quantize.grouped_mm.mx' to model.converters in job config."
+        )
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
@@ -141,6 +156,8 @@ def parallelize_llama(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
+            a2a_dispatch_fwd=job_config.parallelism.expert_parallel_a2a_dispatch_fwd_precision,
+            a2a_combine_bwd=job_config.parallelism.expert_parallel_a2a_combine_bwd_precision,
         )
 
     model_compile_enabled = (
@@ -499,6 +516,8 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     dual_pipe_v: bool = False,
     use_deepep: bool = False,
+    a2a_dispatch_fwd: Literal["default", "mxfp8"] = "default",
+    a2a_combine_bwd: Literal["default", "mxfp8"] = "default",
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -568,7 +587,24 @@ def apply_moe_ep_tp(
                 logger.info("Applying DeepEP to MoE layer")
             else:
                 # input / output sharding on the batch / tokens dim
-                experts_plan = ExpertParallel()
+                logger.info("Applying Expert Parallelism to MoE layer")
+                logger.info(
+                    f"Expert parallel all-to-all dispatch forward precision: {a2a_dispatch_fwd}"
+                )
+                logger.info(
+                    f"Expert parallel all-to-all combine backward precision: {a2a_combine_bwd}"
+                )
+
+                use_mxfp8_a2a_dispatch_fwd = a2a_dispatch_fwd == "mxfp8"
+                use_mxfp8_a2a_combine_bwd = a2a_combine_bwd == "mxfp8"
+
+                if use_mxfp8_a2a_dispatch_fwd or use_mxfp8_a2a_combine_bwd:
+                    experts_plan = MXFP8ExpertParallel(
+                        use_mxfp8_a2a_dispatch_fwd=use_mxfp8_a2a_dispatch_fwd,
+                        use_mxfp8_a2a_combine_bwd=use_mxfp8_a2a_combine_bwd,
+                    )
+                else:
+                    experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()
