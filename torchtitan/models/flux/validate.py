@@ -235,7 +235,7 @@ class FluxValidator(Validator):
                     parallel_dims.get_mesh("cp"),
                     (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                     None,  # No attention masks for Flux
-                    disable_load_balancer=True,
+                    load_balancer_type=None,
                 )
 
             with self.validation_context():
