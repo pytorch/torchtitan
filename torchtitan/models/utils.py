@@ -257,7 +257,9 @@ class MoEStateDictAdapter(StateDictAdapter):
                 expert_weight = local_grouped_weights[local_expert_index, :, :]
             else:
                 # Use slicing and unsqueeze get a 3D tensor, then create DTensor and squeeze
-                expert_weight_3d = local_grouped_weights[local_expert_index, :, :].unsqueeze(0)
+                expert_weight_3d = local_grouped_weights[
+                    local_expert_index, :, :
+                ].unsqueeze(0)
                 expert_weight = DTensor.from_local(
                     expert_weight_3d,
                     sub_mesh,
