@@ -497,16 +497,16 @@ class Qwen3Model(nn.Module, ModelProtocol):
         if self.enable_weight_tying:
             assert self.tok_embeddings is not None and self.output is not None
             self.output.weight = self.tok_embeddings.weight
-
-        # If weight tying is enabled, we don't need to initialize the output layer
-        if self.output is not None:
-            nn.init.trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
-            )
+        else:
+            # If weight tying is enabled, we don't need to initialize the output layer
+            if self.output is not None:
+                nn.init.trunc_normal_(
+                    self.output.weight,
+                    mean=0.0,
+                    std=final_out_std,
+                    a=-cutoff_factor * final_out_std,
+                    b=cutoff_factor * final_out_std,
+                )
 
     def _precompute_rope_cache(self) -> torch.Tensor:
         return precompute_rope_cache(
