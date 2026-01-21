@@ -21,7 +21,7 @@ from torchtitan.models.attention import (
     get_block_causal_mask_mod_by_seq_lens,
     ScaledDotProductAttentionWrapper,
 )
-from torchtitan.models.moe import build_moe, FeedForward
+from torchtitan.models.moe import build_moe, fast_init_trunc_normal_, fast_init_normal_, FeedForward
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -379,8 +379,8 @@ class Attention(nn.Module):
             linear_list.append(self.wq)
 
         for linear in linear_list:
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            fast_init_trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        fast_init_trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
         self.kv_norm.reset_parameters()
         if self.q_lora_rank > 0:
@@ -510,7 +510,7 @@ class DeepSeekV3Model(ModelProtocol):
         with torch.device(buffer_device):
             self.freqs_cis = precompute_freqs_cis(self.model_args)
         if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight)
+            fast_init_normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
                 # pyrefly: ignore [not-callable]
@@ -520,7 +520,7 @@ class DeepSeekV3Model(ModelProtocol):
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
-            nn.init.trunc_normal_(
+            fast_init_trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,
