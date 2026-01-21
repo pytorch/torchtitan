@@ -345,6 +345,8 @@ def init_distributed(
         _warn_overwrite_env(DUMP_ON_TIMEOUT, "1")
         dump_dir = os.path.join(base_folder, comm_config.save_traces_folder)
         prefix = comm_config.save_traces_file_prefix
+        # test
+        print(f"**************** base_folder:{base_folder} comm_config.save_traces_folder:{comm_config.save_traces_folder} dump_dir:{dump_dir}")
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
