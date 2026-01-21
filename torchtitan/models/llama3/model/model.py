@@ -422,7 +422,7 @@ class TransformerBlock(nn.Module):
         self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Transformer(nn.Module, ModelProtocol):
+class Transformer(ModelProtocol):
     """
     Transformer Module
 
@@ -442,7 +442,7 @@ class Transformer(nn.Module, ModelProtocol):
     """
 
     def __init__(self, model_args: TransformerModelArgs):
-        super().__init__()
+        super().__init__(model_args)
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
@@ -499,9 +499,6 @@ class Transformer(nn.Module, ModelProtocol):
     def _precompute_freqs_cis(self) -> torch.Tensor:
         return precompute_freqs_cis(
             self.model_args.dim // self.model_args.n_heads,
-            # Need to compute until at least the max token limit for generation
-            # TODO: explain in docs/composability.md why we removed the 2x
-            # relaxing in our CP enablement PR
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
             self.model_args.rope_scaling_args,
@@ -551,9 +548,7 @@ class Transformer(nn.Module, ModelProtocol):
                     input_batch, tokenizer.eos_id
                 )
             case _:
-                raise NotImplementedError(
-                    "Only varlen and flex attn masks are supported"
-                )
+                raise TypeError("Only varlen and flex attn masks are supported")
 
     def forward(
         self,

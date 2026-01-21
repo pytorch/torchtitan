@@ -136,29 +136,24 @@ class FluxTrainer(Trainer):
             latents = pack_latents(latents)
             target = pack_latents(noise - labels)
 
-        optional_context_parallel_ctx = None
+        # Apply CP sharding if enabled
         if self.parallel_dims.cp_enabled:
-            cp_mesh = self.parallel_dims.get_mesh("cp")
-            optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
-                cp_mesh=cp_mesh,
-                cp_buffers=[
-                    latents,
-                    latent_pos_enc,
-                    t5_encodings,
-                    text_pos_enc,
-                    target,
-                ],
-                cp_seq_dims=[1, 1, 1, 1, 1],
-                cp_no_restore_buffers={
-                    latents,
-                    latent_pos_enc,
-                    t5_encodings,
-                    text_pos_enc,
-                    target,
-                },
-                cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+            from torchtitan.distributed.context_parallel import cp_shard
+
+            (
+                latents,
+                latent_pos_enc,
+                t5_encodings,
+                text_pos_enc,
+                target,
+            ), _ = cp_shard(
+                self.parallel_dims.get_mesh("cp"),
+                (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
+                None,  # No attention masks for Flux
+                load_balancer_type=None,
             )
-        with self.train_context(optional_context_parallel_ctx):
+
+        with self.train_context():
             with self.maybe_enable_amp:
                 latent_noise_pred = model(
                     img=latents,
@@ -172,7 +167,7 @@ class FluxTrainer(Trainer):
                 loss = self.loss_fn(latent_noise_pred, target)
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
-            # pyrefly: ignore[delete-error]
+            # pyrefly: ignore[unsupported-delete]
             del (latent_noise_pred, noise, target)
             loss.backward()
 
