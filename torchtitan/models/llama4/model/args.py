@@ -80,7 +80,11 @@ class TransformerModelArgs(BaseModelArgs):
             job_config.parallelism.context_parallel_degree > 1
             and self.attn_type != "sdpa"
         ):
-            raise NotImplementedError("CP support is only supported for SDPA.")
+            raise NotImplementedError(
+                f"Context Parallel only supports SDPA attention. "
+                f"Got attn_type='{self.attn_type}'. "
+                f"FlexAttention and varlen attention are not supported with CP."
+            )
 
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
