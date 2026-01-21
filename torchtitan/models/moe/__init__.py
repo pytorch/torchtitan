@@ -6,4 +6,4 @@
 
 from .moe import build_moe, ExpertRoutingHistogram, FeedForward, MoE, MoEArgs
 
-__all__ = ["FeedForward", "MoE", "MoEArgs", "build_moe", "ExpertRoutingHistogram"]
+__all__ = ["FeedForward", "MoE", "MoEArgs", "build_moe", "ExpertRoutingHistogram", "fast_init_trunc_normal_", "fast_init_normal_"]
