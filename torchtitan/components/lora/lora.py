@@ -6,7 +6,7 @@
 
 import math
 from dataclasses import dataclass
-from typing import cast, List, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -47,26 +47,73 @@ def get_lora_config(job_config: JobConfig) -> LoRAConfig:
     )
 
 
-class LoRALinear(nn.Module):
-    """LoRA linear layer as introduced in `LoRA: Low-Rank Adaptation of Large Language Models <https://arxiv.org/abs/2106.09685>`_.
+class _LoRALinearFunction(torch.autograd.Function):
+    """Memory-efficient LoRA linear computation.
 
-    LoRA perturbs a given layer via a low-rank approximation where only
-    the rank decomposition matrices are trainable. In a linear layer instead of
-    :math:`x \\mapsto W_0x` a LoRALinear layer is defined as
-    :math:`x \\mapsto W_0x + (\\alpha / r)BAx`, where :math:`r` is the rank of
-    the matrices :math:`A` and :math:`B` and :math:`\\alpha` is a scaling factor.
-    As in the original implementation, we support dropout before multiplication
-    by the low-rank matrices.
+    Forward: out = X @ W.T + bias + scale * (X @ A.T @ B.T)
+
+    Memory optimizations:
+    - Only saves X, A, B for backward
+    - Uses in-place addmm_ operations
+    """
+
+    @staticmethod
+    def forward(ctx, X, W, bias, A, B, scale):  # type: ignore[override]
+        orig_shape = X.shape
+        X_2d = X.view(-1, X.shape[-1]) if X.dim() == 3 else X
+
+        out = torch.empty(X_2d.shape[0], W.shape[0], dtype=X.dtype, device=X.device)
+        torch.mm(X_2d, W.t(), out=out)
+
+        if bias is not None:
+            out.add_(bias)
+
+        out.addmm_(X_2d @ A.T, B.T, alpha=scale)
+
+        if X.dim() == 3:
+            out = out.view(orig_shape[0], orig_shape[1], -1)
+
+        ctx.custom_saved_tensors = (W, scale)
+        ctx.save_for_backward(A, B, X)
+        ctx.has_bias = bias is not None
+        return out
+
+    @staticmethod
+    def backward(ctx, dY):  # type: ignore[override]
+        W, scale = ctx.custom_saved_tensors
+        A, B, X = ctx.saved_tensors
+
+        batch, seq_len, hd = X.shape
+        dY = dY.reshape(-1, dY.shape[-1])
+        X = X.reshape(-1, X.shape[-1])
+        A, B = A.t(), B.t()
+
+        d_A = torch.empty_like(A)
+        d_B = torch.empty_like(B)
+        d_A.addmm_(X.t(), dY @ B.t(), alpha=scale, beta=0)
+        d_B.addmm_(A.t() @ X.t(), dY, alpha=scale, beta=0)
+
+        dX = dY @ W
+        dX.addmm_(dY @ B.t(), A.t(), alpha=scale)
+        d_bias = dY.sum(dim=0) if ctx.has_bias else None
+
+        return dX.view(batch, seq_len, hd), None, d_bias, d_A.t(), d_B.t(), None
+
+
+class LoRALinear(nn.Module):
+    """LoRA linear layer.
+
+    Implements: x -> W_0 @ x + (alpha / rank) * B @ A @ x
+
+    See: https://arxiv.org/abs/2106.09685
 
     Args:
-        in_dim (int): input dimension
-        out_dim (int): output dimension
-        rank (int): rank of the low-rank approximation
-        alpha (float): scaling factor for the low-rank approximation
-        dropout (float): dropout probability. Default: 0.0
-        use_bias (bool): whether to include bias in the original linear layer.
-            Default: False
-
+        in_dim: Input dimension.
+        out_dim: Output dimension.
+        rank: Rank of the low-rank approximation.
+        alpha: Scaling factor.
+        dropout: Dropout probability.
+        use_bias: Whether to include bias.
     """
 
     def __init__(
@@ -77,6 +124,9 @@ class LoRALinear(nn.Module):
         alpha: float,
         dropout: float = 0.0,
         use_bias: bool = False,
+        weight: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
+        dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.in_dim = in_dim
@@ -84,24 +134,40 @@ class LoRALinear(nn.Module):
         self.rank = rank
         self.alpha = alpha
         self.use_bias = use_bias
-
-        # Setup weight and bias
-        linear = nn.Linear(in_features=in_dim, out_features=out_dim, bias=self.use_bias)
-        weight = linear.weight
-        bias = linear.bias if self.use_bias else None
-
-        # 'self.disabled' is a flag showing whether to turn off LoRA adapters,
-        # this can be used in DPO for treating the lora adapters as the policy model
-        # and disabling it to treat the base model as the reference model
         self.disabled = False
-        self.register_parameter("weight", nn.Parameter(weight))
-        self.register_parameter(
-            "bias", nn.Parameter(bias) if bias is not None else None
-        )
+
+        # Setup weight - reuse provided tensor or create on meta device
+        if weight is not None:
+            self.register_parameter("weight", nn.Parameter(weight, requires_grad=False))
+        else:
+            self.register_parameter(
+                "weight",
+                nn.Parameter(
+                    torch.empty(out_dim, in_dim, device="meta", dtype=dtype),
+                    requires_grad=False,
+                ),
+            )
+
+        # Setup bias
+        if use_bias:
+            if bias is not None:
+                self.register_parameter("bias", nn.Parameter(bias, requires_grad=False))
+            else:
+                self.register_parameter(
+                    "bias",
+                    nn.Parameter(
+                        torch.empty(out_dim, device="meta", dtype=dtype),
+                        requires_grad=False,
+                    ),
+                )
+        else:
+            self.register_parameter("bias", None)
+
         self.dropout = nn.Dropout(p=dropout) if dropout > 0.0 else nn.Identity()
-        self.lora_a = nn.Linear(in_features=in_dim, out_features=rank, bias=False)
-        self.lora_b = nn.Linear(in_features=rank, out_features=out_dim, bias=False)
-        self.initialize_parameters()
+
+        # LoRA layers on meta device
+        self.lora_a = nn.Linear(in_dim, rank, bias=False, device="meta", dtype=dtype)
+        self.lora_b = nn.Linear(rank, out_dim, bias=False, device="meta", dtype=dtype)
 
     def to_empty(
         self, *, device: Optional[Union[str, torch.device, int]], recurse: bool = True
@@ -115,53 +181,35 @@ class LoRALinear(nn.Module):
         _lora_b_init_params(self.lora_b)
 
     def adapter_params(self) -> list[str]:
-        """
-        Return a list of strings corresponding to the names of the ``nn.Parameter`` s in
-        the model coming from the adapter.
-        # TODO: update names when supporting EP
-        """
-        adapter_params = ["lora_a.weight", "lora_b.weight"]
-        return adapter_params
+        """Return names of LoRA adapter parameters."""
+        return ["lora_a.weight", "lora_b.weight"]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x (torch.Tensor): input tensor with shape ``(..., in_dim)``
-
-        Returns:
-            torch.Tensor: output tensor with shape ``(..., out_dim)``
-
-        """
-        out = F.linear(
-            x, cast(torch.Tensor, self.weight), cast(Optional[torch.Tensor], self.bias)
-        )
         if self.disabled:
-            return out
-        lora_out = self.lora_a(self.dropout(x))
-        lora_out = (self.alpha / self.rank) * self.lora_b(lora_out)
-        return out + lora_out
+            return F.linear(x, self.weight, self.bias)  # type: ignore[arg-type]
+
+        return _LoRALinearFunction.apply(
+            self.dropout(x),
+            self.weight,
+            self.bias,
+            self.lora_a.weight,
+            self.lora_b.weight,
+            self.alpha / self.rank,
+        )
 
 
 def _lora_a_init_params(x: nn.Linear) -> None:
-    """
-    Initialize LoRA A weight to Kaiming uniform.
-    """
+    """Initialize LoRA A weight to Kaiming uniform."""
     nn.init.kaiming_uniform_(x.weight, a=math.sqrt(5))
 
 
 def _lora_b_init_params(x: nn.Linear) -> None:
-    """
-    Initialize LoRA B weight to zeros.
-    """
+    """Initialize LoRA B weight to zeros."""
     nn.init.zeros_(x.weight)
 
 
 class LoRAConverter:
-    """Model converter that adds LoRA adapters to Linear layers.
-
-    This converter replaces nn.Linear layers with LoRALinear layers and sets
-    requires_grad=True only for LoRA parameters, freezing all other parameters.
-    """
+    """Model converter that adds LoRA adapters to Linear layers."""
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         lora_config = get_lora_config(job_config)
@@ -178,87 +226,72 @@ class LoRAConverter:
 
     def convert(self, model: nn.Module) -> None:
         """Inplace conversion of the model to use LoRA adapters."""
-        # First, freeze all parameters
-        for param in model.parameters():
-            param.requires_grad = False
-
-        # Collect all Linear layers to replace (to avoid modifying while iterating)
         replacements = []
-        for name, module in model.named_modules():
+        for module in model.modules():
             for child_name, child in module.named_children():
                 if isinstance(child, nn.Linear) and not isinstance(child, LoRALinear):
                     replacements.append((module, child_name, child))
 
-        # Replace Linear layers with LoRALinear
         for parent_module, child_name, child in replacements:
+            has_bias = child.bias is not None
+            original_weight = child.weight.data
+            original_bias = child.bias.data if has_bias else None
+
+            # Break reference chain before creating new module
+            child.weight = None  # type: ignore[assignment]
+            if has_bias:
+                child.bias = None  # type: ignore[assignment]
+
             lora_linear = LoRALinear(
                 in_dim=child.in_features,
                 out_dim=child.out_features,
                 rank=self.rank,
                 alpha=self.alpha,
                 dropout=self.dropout,
-                use_bias=child.bias is not None,
+                use_bias=has_bias,
+                weight=original_weight,
+                bias=original_bias,
+                dtype=child.weight.dtype
+                if child.weight is not None
+                else original_weight.dtype,
             )
-            # Move to the same device and dtype as the original weights
-            lora_linear = lora_linear.to(
-                device=child.weight.device, dtype=child.weight.dtype
-            )
-            # Copy the original weights (after dtype conversion)
-            cast(torch.Tensor, lora_linear.weight).data.copy_(child.weight.data)
-            if lora_linear.bias is not None:
-                cast(torch.Tensor, lora_linear.bias).data.copy_(child.bias.data)
-            # Replace the module
             setattr(parent_module, child_name, lora_linear)
 
-        # Enable gradients only for LoRA parameters
-        for name, param in model.named_parameters():
-            if "lora_a" in name or "lora_b" in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
-
-        # Store reference for post_optimizer_hook to re-initialize LoRA params
+        self._set_lora_requires_grad(model)
         self._converted_model = model
 
-        # Wrap the original init_weights to also initialize LoRA parameters
+        # Wrap init_weights to also initialize LoRA parameters
         original_init_weights = model.init_weights
 
         def init_weights_with_lora(*args, **kwargs):
-            # Call the original init_weights
             if callable(original_init_weights):
                 original_init_weights(*args, **kwargs)
-            # Initialize LoRA parameters and ensure requires_grad is set
             self._init_lora_params(model)
 
         object.__setattr__(model, "init_weights", init_weights_with_lora)
 
-        # Log conversion summary
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(
-            f"Swapped to LoRALinear layers with {len(replacements)} linear modules converted"
-        )
+        logger.info(f"Converted {len(replacements)} linear modules to LoRALinear")
         logger.info(
             f"Trainable params: {trainable_params:,} / {total_params:,} "
             f"({100 * trainable_params / total_params:.2f}%)"
         )
 
+    def _set_lora_requires_grad(self, model: nn.Module) -> None:
+        """Set requires_grad: True for LoRA params, False for others."""
+        for name, param in model.named_parameters():
+            param.requires_grad = "lora_a" in name or "lora_b" in name
+
     def _init_lora_params(self, model: nn.Module) -> None:
-        """Initialize LoRA parameters and set requires_grad after model initialization."""
+        """Initialize LoRA parameters after model initialization."""
         lora_layer_count = 0
-        for name, module in model.named_modules():
+        for module in model.modules():
             if isinstance(module, LoRALinear):
-                # Re-initialize LoRA parameters
                 module.initialize_parameters()
                 lora_layer_count += 1
 
-        # Re-freeze base model params and unfreeze LoRA params
-        # This is necessary because init_weights may have touched some params
-        for name, param in model.named_parameters():
-            if "lora_a" in name or "lora_b" in name:
-                param.requires_grad = True
-            else:
-                param.requires_grad = False
+        self._set_lora_requires_grad(model)
 
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         logger.info(
@@ -266,7 +299,7 @@ class LoRAConverter:
             f"trainable params: {trainable_params:,}"
         )
 
-    def post_optimizer_hook(self, model: Union[nn.Module, List[nn.Module]]) -> None:
+    def post_optimizer_hook(self, model: Union[nn.Module, list[nn.Module]]) -> None:
         """Post-optimizer hook (no-op for LoRA)."""
         pass
 
