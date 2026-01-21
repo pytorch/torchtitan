@@ -187,6 +187,7 @@ class Validator(BaseValidator):
             inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
                 input_dict, labels, model_parts
             )
+            
             # Count valid tokens for this batch
             local_valid_tokens = torch.tensor(0, dtype=torch.int64, device=device_type)
             # pyrefly: ignore [missing-attribute]
