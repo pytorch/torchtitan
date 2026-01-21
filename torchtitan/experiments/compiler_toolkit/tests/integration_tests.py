@@ -196,6 +196,12 @@ def main():
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(
+        "--gpu_arch_type",
+        default="cuda",
+        choices=["cuda", "rocm"],
+        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+    )
+    parser.add_argument(
         "--test_name",
         default="all",
         help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",

@@ -66,4 +66,4 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train --gpu_arch_type ${{ matrix.gpu-arch-type }} python -m torchtitan.experiments.compiler_toolkit.tests.integration_tests $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
+        TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train python -m torchtitan.experiments.compiler_toolkit.tests.integration_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
