@@ -37,7 +37,10 @@ def get_compile_backend_with_passes(
         # Perform auto optimization in aten fx-level and execute code in aot_eager/inductor backend
         # The autobucketing logic is here: https://github.com/pytorch/pytorch/pull/163960
         from torch._inductor.config import aten_distributed_optimizations as dist_opts
-        from torch._inductor.fx_passes.overlap_scheduling import (
+        # from torch._inductor.fx_passes.overlap_scheduling import (
+        #     schedule_overlap_bucketing,
+        # )
+        from torchtitan.experiments.simple_fsdp.overlap.overlap_scheduling import (
             schedule_overlap_bucketing,
         )
 
@@ -45,6 +48,7 @@ def get_compile_backend_with_passes(
         torch._inductor.config.allow_buffer_reuse = False
 
         if compile_config.backend == "aot_eager":
+            torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
             from torch._dynamo.backends.common import (
                 aot_autograd as aot_autograd_backend,
             )
@@ -63,7 +67,7 @@ def get_compile_backend_with_passes(
                 keep_inference_input_mutations=True,
             )
         elif compile_config.backend == "inductor":
-
+            torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
             def inductor_autobucketing_reordering_pass(
                 gm: torch.fx.Graph,
             ) -> torch.fx.GraphModule:
