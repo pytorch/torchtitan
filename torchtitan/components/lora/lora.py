@@ -26,14 +26,12 @@ class LoRAConfig:
         rank: Rank of the low-rank approximation. Default: 8.
         alpha: Scaling factor for the low-rank approximation. Default: 16.0.
         dropout: Dropout probability for LoRA layers. Default: 0.0.
-        apply_to_all_linears: If True, apply LoRA to all Linear layers.
-            If False, only apply to attention layers (wq, wk, wv, wo). Default: True.
+        TODO: add support to layers to apply, e.g. only attention layers or all linear.
     """
 
     rank: int = 8
     alpha: float = 16.0
     dropout: float = 0.0
-    apply_to_all_linears: bool = True
 
 
 def get_lora_config(job_config: JobConfig) -> LoRAConfig:
@@ -43,7 +41,6 @@ def get_lora_config(job_config: JobConfig) -> LoRAConfig:
         rank=lora_config.rank,
         alpha=lora_config.alpha,
         dropout=lora_config.dropout,
-        apply_to_all_linears=lora_config.apply_to_all_linears,
     )
 
 
@@ -216,12 +213,11 @@ class LoRAConverter:
         self.rank = lora_config.rank
         self.alpha = lora_config.alpha
         self.dropout = lora_config.dropout
-        self.apply_to_all_linears = lora_config.apply_to_all_linears
         self._converted_model: Optional[nn.Module] = None
 
         logger.info(
             f"LoRA training active with rank={self.rank}, alpha={self.alpha}, "
-            f"dropout={self.dropout}, apply_to_all_linears={self.apply_to_all_linears}"
+            f"dropout={self.dropout}"
         )
 
     def convert(self, model: nn.Module) -> None:
