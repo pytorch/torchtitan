@@ -60,7 +60,6 @@ class VarlenAttentionWrapper(torch.nn.Module):
         xv: torch.Tensor,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
-        return_lse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return VarlenAttentionWrapper._compiled_varlen_attn(
             xq,
@@ -72,7 +71,6 @@ class VarlenAttentionWrapper(torch.nn.Module):
             attention_masks.max_k, 
             is_causal=True,
             scale=scale,
-            return_aux=torch.nn.attention.varlen.AuxRequest(lse=return_lse),
         )
 
 

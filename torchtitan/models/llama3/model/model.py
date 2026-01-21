@@ -269,36 +269,32 @@ class Attention(nn.Module):
 
         xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, positions=positions)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-
         match self.attn_type:
             case "flex":
                 assert isinstance(attention_masks, BlockMask), attention_masks
-                output = self.inner_attention(xq, xk, xv, block_mask=attention_masks)
-                output = output.transpose(
-                    1, 2
-                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+                output = self.inner_attention(
+                    xq.transpose(1,2), # (bs, n_heads, seqlen, head_dim)
+                    xk.transpose(1,2), # (bs, n_kv_heads, seqlen, head_dim)
+                    xv.transpose(1,2), # (bs, n_kv_heads, seqlen, head_dim)
+                    block_mask=attention_masks, 
+                    enable_gqa=self.n_heads > self.n_kv_heads
+                ).transpose(1,2).contiguous() # (bs, seqlen, n_local_heads, head_dim)
             case "varlen":
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
-                    xq,
-                    xk,
-                    xv,
-                    self.head_dim,
+                    xq.flatten(0, 1), # (bs * seqlen, n_heads, head_dim)
+                    xk.flatten(0, 1), # (bs * seqlen, n_kv_heads, head_dim)
+                    xv.flatten(0, 1), # (bs * seqlen, n_kv_heads, head_dim)
                     attention_masks,
                 )
             case "sdpa":
                 assert attention_masks is None
-                output = self.inner_attention(xq, xk, xv)
-                output = output.transpose(
-                    1, 2
-                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+                output = self.inner_attention(
+                    xq.transpose(1, 2),  # (bs, n_heads, seqlen, head_dim)
+                    xk.transpose(1, 2),  # (bs, n_kv_heads, seqlen, head_dim)
+                    xv.transpose(1, 2),  # (bs, n_kv_heads, seqlen, head_dim)
+                    enable_gqa=self.n_heads > self.n_kv_heads
+                ).transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
