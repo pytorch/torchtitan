@@ -23,6 +23,7 @@ class ExpertRoutingHistogram:
     counts: list[float]
 
 
+# see https://arxiv.org/pdf/2310.10837
 def moe_init_std(dim_in: int, n_layers: int) -> float:
     return (2 / (dim_in * n_layers)) ** 0.5
 
@@ -746,6 +747,10 @@ class TokenChoiceTopKRouter(nn.Module):
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
     def init_weights(self, init_std: float, n_layers: int):
+        # Init gate with each row normalized
+        # From "Approximating Two-Layer Feedforward Networks for Efficient Transformers"
+        # https://arxiv.org/pdf/2310.10837
+
         # NOTE: Must use in-place operations here. When FSDP wraps parameters as
         # DTensor, direct .data assignment (e.g., self.gate.weight.data = x) is
         # silently ignored, leaving weights uninitialized. This causes NaN loss
