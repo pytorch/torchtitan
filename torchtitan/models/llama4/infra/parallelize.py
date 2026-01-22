@@ -110,7 +110,6 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, tp_mesh)
 
-    # Check if using DeepEP/HybridEP for MoE communication
     backend = job_config.parallelism.expert_parallel_comm_backend
     if backend in ("deepep", "hybridep"):
         if not parallel_dims.ep_enabled:
@@ -126,12 +125,9 @@ def parallelize_llama(
 
         use_deepep = True
 
-        # Import and configure backend
         from torchtitan.distributed.deepep import configure_backend
-
         configure_backend(backend=backend)
 
-        # Register custom ops for SAC based on backend
         if backend == "hybridep":
             from torchtitan.distributed.deepep import hybridep  # noqa: F401
             _op_sac_save_list.add(torch.ops.hybridep.dispatch.default)

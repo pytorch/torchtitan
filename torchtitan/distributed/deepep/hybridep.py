@@ -10,44 +10,8 @@ HybridEP: Expert Parallel Communication Backend for GB200 NVLink72 Systems.
 This module implements the HybridEP backend for MoE (Mixture of Experts) training,
 optimized for NVIDIA GB200 systems with NVLink72 connectivity.
 
-Key Features:
-    - Flexible hybrid topology: Configure NVLink vs InfiniBand communication boundaries
-    - TMA (Tensor Memory Accelerator) instructions for minimal SM overhead
-    - Warp-level pipeline parallelism within execution blocks
-    - BF16 and FP8 data type support
-    - Full CUDA Graph compatibility with zero CPU-GPU synchronization
-
-Architecture:
-    HybridEP uses a dense routing representation (multi-hot) instead of sparse indices,
-    which enables TMA-optimized kernels for better performance on GB200 hardware.
-    
-    Forward:  tokens [N, H] + routing [N, K] → dispatch_with_permute → permuted [M, H]
-    Backward: grads [M, H] → combine_with_unpermute → grads [N, H]
-
 Reference:
     https://github.com/deepseek-ai/DeepEP/blob/hybrid-ep/Hybrid-EP_Implementation.md
-
-Example:
-    >>> from torchtitan.distributed.deepep import hybridep
-    >>> 
-    >>> # Configure (optional, can use env vars instead)
-    >>> hybridep.configure(num_sms_dispatch=16, num_sms_combine=16)
-    >>> 
-    >>> # Dispatch tokens to experts
-    >>> hidden, tokens_per_expert, state = hybridep.dispatch_tokens(
-    ...     hidden_states=x,              # [num_tokens, hidden_dim]
-    ...     selected_experts_indices=idx, # [num_tokens, top_k]
-    ...     top_scores=scores,            # [num_tokens, top_k]
-    ...     num_local_experts=4,
-    ...     num_experts=256,
-    ...     group=ep_group,
-    ... )
-    >>> 
-    >>> # Run expert computation...
-    >>> expert_output = experts(hidden, tokens_per_expert)
-    >>> 
-    >>> # Combine results back
-    >>> output = hybridep.combine_tokens(expert_output, state)
 """
 
 import os
@@ -58,23 +22,12 @@ import torch
 from torch.distributed import ProcessGroup
 
 
-# ============================================================================
-# Module-Level Configuration
-# ============================================================================
-# These can be set via environment variables or the configure() function.
-# Environment variables are read at import time; configure() can override later.
-
 _num_sms_dispatch: int = int(os.environ.get("HYBRIDEP_NUM_SMS_DISPATCH", "16"))
 """Number of SMs dedicated to the dispatch kernel. Higher values may improve
 throughput but reduce SMs available for compute overlap."""
 
 _num_sms_combine: int = int(os.environ.get("HYBRIDEP_NUM_SMS_COMBINE", "16"))
 """Number of SMs dedicated to the combine kernel."""
-
-
-# ============================================================================
-# Module-Level State (Lazily Initialized)
-# ============================================================================
 
 _hybrid_ep_cls: Any = None
 """Lazily-loaded HybridEPBuffer class from deep_ep library."""
@@ -102,10 +55,6 @@ retrieving the ID value in setup_context.
 """
 
 
-# ============================================================================
-# DispatchState: Return Type for dispatch_tokens
-# ============================================================================
-
 @dataclass
 class DispatchState:
     """State from dispatch_tokens needed for combine_tokens.
@@ -125,11 +74,6 @@ class DispatchState:
     num_recv_tokens: int
     permuted_scores: Optional[torch.Tensor] = None
 
-
-# ============================================================================
-# Handle Cache Management
-# ============================================================================
-# These functions manage the dispatch handle cache for activation checkpointing.
 
 def _get_next_cache_id() -> torch.Tensor:
     """Generate a unique cache_id as a CPU tensor.
@@ -181,10 +125,6 @@ def _pop_cached_handle(cache_id_int: int, context: str = "") -> None:
     """
     _handle_cache.pop(cache_id_int, None)
 
-
-# ============================================================================
-# Input Preprocessing Utilities
-# ============================================================================
 
 def _preprocess_dispatch_inputs(
     selected_experts_indices: torch.Tensor,
@@ -252,10 +192,6 @@ def _apply_scores_to_hidden(
         return hidden_states, None
     return hidden_states, scores
 
-
-# ============================================================================
-# Configuration API
-# ============================================================================
 
 def configure(
     num_sms_dispatch: Optional[int] = None,
@@ -406,11 +342,9 @@ def _dispatch_impl(
         non_blocking=num_permuted_tokens is not None,
     )
 
-    # Cache handle for combine operation
     cache_id = _get_next_cache_id()
     _cache_handle(cache_id, handle)
 
-    # Ensure output tensors are valid
     if dispatched_expert_scores is None:
         dispatched_expert_scores = torch.empty(0, device=x.device, dtype=torch.float32)
 
@@ -446,11 +380,6 @@ def _combine_impl(x: torch.Tensor, cache_id: torch.Tensor) -> torch.Tensor:
 
     return combined_token
 
-
-# ============================================================================
-# Autograd Registration
-# ============================================================================
-# Register backward functions for the custom ops to enable gradient computation.
 
 def _dispatch_backward(
     ctx: Any,
@@ -547,7 +476,6 @@ def _combine_setup_context(ctx: Any, inputs: Tuple, output: torch.Tensor) -> Non
     ctx.saved_handle = _get_cached_handle(ctx.cache_id_int)
 
 
-# Register autograd functions
 torch.library.register_autograd(
     "hybridep::dispatch",
     _dispatch_backward,
@@ -559,10 +487,6 @@ torch.library.register_autograd(
     setup_context=_combine_setup_context,
 )
 
-
-# ============================================================================
-# Buffer Management
-# ============================================================================
 
 def get_buffer(
     group: ProcessGroup,
@@ -635,7 +559,6 @@ def get_buffer(
             needs_reinit = True
 
     if needs_reinit:
-        # Clear stale handles when buffer is recreated
         _handle_cache.clear()
 
         _buffer = HybridEPBuffer(
@@ -650,10 +573,6 @@ def get_buffer(
 
     return _buffer
 
-
-# ============================================================================
-# Public API
-# ============================================================================
 
 def dispatch_tokens(
     hidden_states: torch.Tensor,
@@ -696,29 +615,14 @@ def dispatch_tokens(
         - tokens_per_expert: Count of tokens assigned to each local expert.
             Shape: [num_local_experts], useful for grouped GEMM.
         - state: DispatchState to pass to combine_tokens.
-    
-    Example:
-        >>> hidden, tpe, state = hybridep.dispatch_tokens(
-        ...     hidden_states=x,
-        ...     selected_experts_indices=router_indices,
-        ...     top_scores=router_scores,
-        ...     num_local_experts=4,
-        ...     num_experts=256,
-        ...     group=ep_process_group,
-        ... )
-        >>> # hidden is now grouped by expert, ready for batched computation
-        >>> expert_output = grouped_expert_forward(hidden, tpe)
-        >>> output = hybridep.combine_tokens(expert_output, state)
     """
     # Validate and normalize inputs
     selected_experts_indices, top_scores = _preprocess_dispatch_inputs(
         selected_experts_indices, top_scores
     )
 
-    # Infer top_k from input shape
     top_k = selected_experts_indices.shape[1] if selected_experts_indices.dim() == 2 else 1
 
-    # Ensure buffer is initialized with correct sizing
     get_buffer(
         group=group,
         hidden_dim=hidden_states.shape[1],
@@ -729,7 +633,6 @@ def dispatch_tokens(
         fp8_dispatch=False,
     )
 
-    # Execute dispatch via custom op
     (
         hidden_states,
         dispatched_expert_scores,
@@ -743,7 +646,6 @@ def dispatch_tokens(
         num_permuted_tokens,
     )
 
-    # Optionally apply routing scores now or save for combine
     hidden_states, permuted_scores = _apply_scores_to_hidden(
         hidden_states, dispatched_expert_scores, score_before_experts
     )
@@ -776,12 +678,7 @@ def combine_tokens(
     Returns:
         Combined hidden states in original token order.
         Shape: [num_tokens, hidden_dim]
-    
-    Example:
-        >>> # After expert computation
-        >>> output = hybridep.combine_tokens(expert_output, state)
     """
-    # Apply scores if they were deferred from dispatch
     if state.permuted_scores is not None:
         hidden_states = hidden_states * state.permuted_scores.to(
             hidden_states.dtype
@@ -790,17 +687,10 @@ def combine_tokens(
     return torch.ops.hybridep.combine(hidden_states, state.cache_id)
 
 
-# ============================================================================
-# Module Exports
-# ============================================================================
-
 __all__ = [
-    # Primary API
     "dispatch_tokens",
     "combine_tokens",
-    # Configuration
     "configure",
     "get_buffer",
-    # Types
     "DispatchState",
 ]
