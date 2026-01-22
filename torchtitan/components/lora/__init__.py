@@ -5,15 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.lora.lora import (
-    get_lora_config,
-    LoRAConfig,
     LoRAConverter,
     LoRALinear,
 )
 
 __all__ = [
-    "get_lora_config",
-    "LoRAConfig",
     "LoRAConverter",
     "LoRALinear",
 ]
