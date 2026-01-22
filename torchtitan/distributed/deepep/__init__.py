@@ -19,10 +19,6 @@ import torch
 from torch.distributed import ProcessGroup
 
 
-# ============================================================================
-# Backend Selection for Unified Interface
-# ============================================================================
-
 _backend_mode: Literal["deepep", "hybridep"] = "deepep"
 
 
@@ -105,10 +101,6 @@ def combine_tokens(
         from .deepep import combine_tokens as _combine
         return _combine(hidden_states, state)
 
-
-# ============================================================================
-# Legacy Exports (backward compatibility with existing code)
-# ============================================================================
 
 from .deepep import (
     dispatch_tokens as deepep_dispatch_tokens,

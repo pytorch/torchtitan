@@ -112,12 +112,9 @@ def parallelize_deepseekv3(
 
         use_deepep = True
 
-        # Import and configure backend
         from torchtitan.distributed.deepep import configure_backend
-
         configure_backend(backend=backend)
 
-        # Register custom ops for SAC based on backend
         if backend == "hybridep":
             from torchtitan.distributed.deepep import hybridep  # noqa: F401
             _op_sac_save_list.add(torch.ops.hybridep.dispatch.default)
