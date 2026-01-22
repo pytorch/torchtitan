@@ -17,59 +17,6 @@ from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
 
 
-class _LoRALinearFunction(torch.autograd.Function):
-    """Memory-efficient LoRA linear computation.
-
-    Forward: out = X @ W.T + bias + scale * (X @ A.T @ B.T)
-
-    Memory optimizations:
-    - Only saves X, A, B for backward
-    - Uses in-place addmm_ operations
-    """
-
-    @staticmethod
-    def forward(ctx, X, W, bias, A, B, scale):  # type: ignore[override]
-        orig_shape = X.shape
-        X_2d = X.view(-1, X.shape[-1]) if X.dim() == 3 else X
-
-        out = torch.empty(X_2d.shape[0], W.shape[0], dtype=X.dtype, device=X.device)
-        torch.mm(X_2d, W.t(), out=out)
-
-        if bias is not None:
-            out.add_(bias)
-
-        out.addmm_(X_2d @ A.T, B.T, alpha=scale)
-
-        if X.dim() == 3:
-            out = out.view(orig_shape[0], orig_shape[1], -1)
-
-        ctx.custom_saved_tensors = (W, scale)
-        ctx.save_for_backward(A, B, X)
-        ctx.has_bias = bias is not None
-        return out
-
-    @staticmethod
-    def backward(ctx, dY):  # type: ignore[override]
-        W, scale = ctx.custom_saved_tensors
-        A, B, X = ctx.saved_tensors
-
-        batch, seq_len, hd = X.shape
-        dY = dY.reshape(-1, dY.shape[-1])
-        X = X.reshape(-1, X.shape[-1])
-        A, B = A.t(), B.t()
-
-        d_A = torch.empty_like(A)
-        d_B = torch.empty_like(B)
-        d_A.addmm_(X.t(), dY @ B.t(), alpha=scale, beta=0)
-        d_B.addmm_(A.t() @ X.t(), dY, alpha=scale, beta=0)
-
-        dX = dY @ W
-        dX.addmm_(dY @ B.t(), A.t(), alpha=scale)
-        d_bias = dY.sum(dim=0) if ctx.has_bias else None
-
-        return dX.view(batch, seq_len, hd), None, d_bias, d_A.t(), d_B.t(), None
-
-
 class LoRALinear(nn.Module):
     """LoRA linear layer.
 
@@ -103,6 +50,7 @@ class LoRALinear(nn.Module):
         self.out_dim = out_dim
         self.rank = rank
         self.alpha = alpha
+        self.scaling = alpha / rank
         self.use_bias = use_bias
         self.disabled = False
 
@@ -155,17 +103,18 @@ class LoRALinear(nn.Module):
         return ["lora_a.weight", "lora_b.weight"]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.disabled:
-            return F.linear(x, self.weight, self.bias)  # type: ignore[arg-type]
+        # Base linear: out = x @ W.T + bias
+        out = F.linear(x, self.weight, self.bias)  # type: ignore[arg-type]
 
-        return _LoRALinearFunction.apply(
-            self.dropout(x),
-            self.weight,
-            self.bias,
-            self.lora_a.weight,
-            self.lora_b.weight,
-            self.alpha / self.rank,
-        )
+        if self.disabled:
+            return out
+
+        # LoRA path: out += scale * (x @ A.T @ B.T)
+        x = self.dropout(x)
+        lora_out = self.lora_b(self.lora_a(x))
+        out = out + self.scaling * lora_out
+
+        return out
 
 
 def _lora_a_init_params(x: nn.Linear) -> None:
