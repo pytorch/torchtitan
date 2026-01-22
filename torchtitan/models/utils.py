@@ -37,6 +37,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         # Store metadata for GroupedExperts <-> individual experts conversion
         self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}
         self.grouped_expert_weight_shape = {}  # {titan_abstract_key: shape}
+        self.grouped_expert_weight_mesh = {}  # {titan_abstract_key: device_mesh}
         self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
 
     def _calculate_strided_shard_shard_indices(
@@ -96,7 +97,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         dim_size: int,
         dtensor_placements: tuple,
         device_mesh: DeviceMesh,
-    ) -> tuple[int | None, int | None]:
+    ) -> tuple[int, int]:
 
         mesh_names = []
         dim_i_placements = []
@@ -110,7 +111,7 @@ class MoEStateDictAdapter(StateDictAdapter):
                 dim_i_placements.append(placement)
 
         # Calculate local expert indices based on sharding strategy
-        start_index, end_index = None, None
+        start_index, end_index = 0, dim_size
         if len(dim_i_placements) == 2:
             # Handle StridedShard(i) + Shard(i) case
             assert isinstance(
@@ -149,8 +150,8 @@ class MoEStateDictAdapter(StateDictAdapter):
             end_index = start_index + block_size
 
         elif len(dim_i_placements) == 0:
-            # No need to split on this dimension
-            return start_index, end_index
+            # No sharding on this dimension means all elements are local
+            pass
 
         else:
             raise NotImplementedError(
@@ -180,7 +181,7 @@ class MoEStateDictAdapter(StateDictAdapter):
             grouped_expert_weight: DTensor containing all experts' weights
 
         Returns:
-            Dictionary mapping individual expert keys to their DTensor weights
+            Dictionary mapping individual expert keys to their DTensor or plain tensor weights
         """
         # pyrefly: ignore [missing-attribute]
         device_mesh = grouped_expert_weight.device_mesh
@@ -195,33 +196,44 @@ class MoEStateDictAdapter(StateDictAdapter):
             dtensor_placements=dtensor_placements,
             device_mesh=device_mesh,
         )
-        assert (
-            start_index is not None and end_index is not None
-        ), "Start index and end index can not be None on dim-0!"
 
         # Step 2: Store indices for potential future use in from_hf()
         self.local_experts_indices[titan_abstract_key] = (start_index, end_index)
 
-        # Step 3: Create new placements for individual expert weights
-        new_placements = []
+        # Step 3: Identify mesh dimensions that shard on dim-0 (expert dimension)
+        # exclude expert dimension
+        # and build new sub-mesh/placements for individual expert weights
+        sub_mesh_names = []
+        sub_placements = []
+
         for i, name in enumerate(device_mesh.mesh_dim_names):
             placement = dtensor_placements[i]
-            if placement.dim == 0:
-                # Convert dim-0 sharding to replication for individual experts
-                new_placements.append(Replicate())
+            if isinstance(placement, Replicate):
+                # Replicate (hybrid) doesn't shard any dim, keep in sub-mesh
+                sub_mesh_names.append(name)
+                sub_placements.append(Replicate())
+            elif isinstance(placement, (Shard, _StridedShard)) and placement.dim == 0:
+                # Shards on expert dim, exclude from sub-mesh
+                pass
             elif isinstance(placement, Shard):
-                # Keep other shard dimensions (individual expert weight has 2D)
-                new_placements.append(Shard(placement.dim))
+                # Shards on non-expert dim, keep in sub-mesh
+                sub_mesh_names.append(name)
+                sub_placements.append(Shard(placement.dim))
             elif isinstance(placement, _StridedShard):
-                # Keep strided shard with same parameters
-                new_placements.append(
+                # Strided shard on non-expert dim, keep in sub-mesh
+                sub_mesh_names.append(name)
+                sub_placements.append(
                     # pyrefly: ignore [unexpected-positional-argument]
                     _StridedShard(placement.dim, placement.split_factor)
                 )
             else:
                 raise ValueError(f"Unsupported placement type: {type(placement)}")
 
-        # Step 4: Create individual expert DTensors
+        # Step 4: Create sub-mesh excluding dim-0 sharding dimensions
+        # If all mesh dimensions were sharding on dim-0, sub_mesh will be None (use plain tensors)
+        sub_mesh = device_mesh[tuple(sub_mesh_names)] if sub_mesh_names else None
+
+        # Step 5: Create individual expert tensors
         assert isinstance(
             grouped_expert_weight, DTensor
         ), "Expected DTensor for grouped expert weight"
@@ -240,15 +252,21 @@ class MoEStateDictAdapter(StateDictAdapter):
             expert_key = abstract_key.format(layer_id, expert_id)
             local_expert_index = expert_id - start_index
 
-            # Extract individual expert weight and add batch dimension temporarily
-            expert_weight = local_grouped_weights[local_expert_index, :, :].unsqueeze(0)
-
-            # Create DTensor and remove batch dimension (experts dimension is removed)
-            expert_dtensor = DTensor.from_local(
-                expert_weight, device_mesh, new_placements, run_check=False
-            ).squeeze(0)
-
-            local_expert_tensors[expert_key] = expert_dtensor
+            if sub_mesh is None:
+                # Extract individual expert weight (2D) as plain tensor
+                expert_weight = local_grouped_weights[local_expert_index, :, :]
+            else:
+                # Use slicing and unsqueeze get a 3D tensor, then create DTensor and squeeze
+                expert_weight_3d = local_grouped_weights[
+                    local_expert_index, :, :
+                ].unsqueeze(0)
+                expert_weight = DTensor.from_local(
+                    expert_weight_3d,
+                    sub_mesh,
+                    sub_placements,
+                    run_check=False,
+                ).squeeze(0)
+            local_expert_tensors[expert_key] = expert_weight
 
         return local_expert_tensors
 
@@ -257,7 +275,6 @@ class MoEStateDictAdapter(StateDictAdapter):
         expert_weights_by_layer: dict[str, dict[str, dict[int, torch.Tensor]]],
         abstract_key: str,
         layer_num: str,
-        device_mesh: DeviceMesh,
     ) -> torch.Tensor | None:
         """
         Args:
@@ -272,7 +289,6 @@ class MoEStateDictAdapter(StateDictAdapter):
                 Used to collect individual expert weights before concatenating them into GroupedExperts.
             abstract_key: TorchTitan templage key with {} placeholders for layer and expert IDs
             layer_num: Layer identifier
-            device_mesh: DeviceMesh for the target GroupedExperts weight DTensor
 
         Returns:
             Concatenated GroupedExperts weight DTensor if all experts are available, otherwise None
@@ -288,17 +304,21 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         sorted_expert_ids = sorted(experts.keys())
         sorted_experts = [experts[i] for i in sorted_expert_ids]
-        # pyrefly: ignore [missing-attribute]
-        local_tensor = torch.stack(sorted_experts, dim=0)._local_tensor
+
+        # Stack experts - result may be DTensor or plain tensor depending on sub_mesh
+        local_tensor = torch.stack(sorted_experts, dim=0)
+        if isinstance(local_tensor, DTensor):
+            local_tensor = local_tensor._local_tensor
 
         assert (
             abstract_key in self.grouped_expert_weight_placements
             and abstract_key in self.grouped_expert_weight_shape
-        ), "GroupedExperts weight metadata (placements, shape) can not be None!"
+            and abstract_key in self.grouped_expert_weight_mesh
+        ), "GroupedExperts weight metadata (placements, shape, mesh) can not be None!"
 
         stacked_dtensor = DTensor.from_local(
             local_tensor,
-            device_mesh,
+            self.grouped_expert_weight_mesh[abstract_key],
             self.grouped_expert_weight_placements[abstract_key],
             run_check=False,
         )
