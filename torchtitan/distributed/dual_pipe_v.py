@@ -99,11 +99,6 @@ class DualPipeExpertParallel(BaseExpertParallel):
         )
 
 
-# Thread-local flag to track if we're in the backward thread
-# Any SyncHook.forward call from the backward thread is checkpoint recomputation
-_backward_thread_flag = threading.local()
-
-
 class HookCoordinator:
     def __init__(self):
         # Barrier for 2 threads (forward and backward) to synchronize
@@ -147,34 +142,16 @@ class HookCoordinator:
         return self._coordination_enabled
 
 
-def _is_in_backward_thread() -> bool:
-    """Check if current thread is the backward thread."""
-    return getattr(_backward_thread_flag, 'value', False)
-
-
-def _set_backward_thread_flag(value: bool):
-    """Set the backward thread flag for current thread."""
-    _backward_thread_flag.value = value
-
-
 # Global coordinator
 _hook_coordinator = HookCoordinator()
 
-
+def is_bwd():
+    return torch._C._current_graph_task_id() != -1
 class SyncHook(torch.autograd.Function):
     @staticmethod
     # pyrefly: ignore [bad-override]
     def forward(ctx, x, hook_name=""):
         ctx.hook_name = hook_name
-
-        # Skip barrier if we're in the backward thread - this means we're being called
-        # during checkpoint recomputation (the forward thread never sets this flag)
-        if _is_in_backward_thread():
-            print("skipping backward barrier", flush=True)
-            ctx.skip_backward_barrier = True
-            return x
-
-        ctx.skip_backward_barrier = False
 
         # handle edge case for transformer level boundary
         if _hook_coordinator._coordination_enabled and hook_name == "D":
@@ -190,13 +167,6 @@ class SyncHook(torch.autograd.Function):
     # pyrefly: ignore [bad-override]
     def backward(ctx, grad_output):
         hook_name = ctx.hook_name
-
-        # Skip barrier if this backward corresponds to a checkpoint recompute forward
-        # These are "extra" backward nodes created by checkpoint that don't have
-        # corresponding partners in the other thread
-        if ctx.skip_backward_barrier:
-            print("skipping backward barrier", flush=True)
-            return grad_output, None
 
         # Edge case, skip initial barrier, all subsequent backward hooks will acquire
         if hook_name == "D" and _hook_coordinator._cycle_count == 0:
@@ -298,43 +268,28 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
     _hook_coordinator.enable_coordination(num_layers=min_num_layers)
     main_stream = torch.accelerator.current_stream(device_module)
 
+    backward_exception = []
     # Shared container for exception from backward thread
     def run_backward():
-        # Mark this thread as the backward thread so SyncHook.forward
-        # can detect checkpoint recomputation (forward called from backward thread)
-        _set_backward_thread_flag(True)
-
-        # pyrefly: ignore [missing-attribute]
-        schedule._assert_unsharded(backward_stage)
-        # Set the backward thread to use the same stream as forward
-        # pyrefly: ignore [missing-attribute]
-        device_module.set_stream(main_stream)
-        with record_function(
-            f"backward_stage_{backward_stage_index}_mb_{backward_mb_index}"
-        ):
-            loss = schedule._maybe_get_loss(backward_stage, backward_mb_index)
+        try:
             # pyrefly: ignore [missing-attribute]
-            schedule.backward_counter[backward_stage_index] += 1
-            last_backward = (
+            schedule._assert_unsharded(backward_stage)
+            # Set the backward thread to use the same stream as forward
+            # pyrefly: ignore [missing-attribute]
+            device_module.set_stream(main_stream)
+            with record_function(
+                f"backward_stage_{backward_stage_index}_mb_{backward_mb_index}"
+            ):
+                loss = schedule._maybe_get_loss(backward_stage, backward_mb_index)
                 # pyrefly: ignore [missing-attribute]
-                schedule.backward_counter[backward_stage_index]
-                == schedule._n_microbatches
-            )
-            backward_stage.backward_one_chunk(
-                # pyrefly: ignore [bad-argument-type]
-                backward_mb_index,
-                loss=loss,
-                full_backward=True,
-                last_backward=last_backward,
-            )
-
-            if backward_is_prev_stage_on_this_rank:
-                stage_index_to_stage[backward_stage_index - 1].set_local_bwd_input(
-                    backward_stage.get_local_bwd_output(backward_mb_index),
-                    # pyrefly: ignore [bad-argument-type]
-                    backward_mb_index,
+                schedule.backward_counter[backward_stage_index] += 1
+                last_backward = (
+                    # pyrefly: ignore [missing-attribute]
+                    schedule.backward_counter[backward_stage_index]
+                    == schedule._n_microbatches
                 )
                 backward_stage.backward_one_chunk(
+                    # pyrefly: ignore [bad-argument-type]
                     backward_mb_index,
                     loss=loss,
                     full_backward=True,
@@ -344,14 +299,25 @@ def overlap_callback(action: _Action, ctx: _PipelineContext):
                 if backward_is_prev_stage_on_this_rank:
                     stage_index_to_stage[backward_stage_index - 1].set_local_bwd_input(
                         backward_stage.get_local_bwd_output(backward_mb_index),
+                        # pyrefly: ignore [bad-argument-type]
                         backward_mb_index,
                     )
+                    backward_stage.backward_one_chunk(
+                        backward_mb_index,
+                        loss=loss,
+                        full_backward=True,
+                        last_backward=last_backward,
+                    )
+
+                    if backward_is_prev_stage_on_this_rank:
+                        stage_index_to_stage[backward_stage_index - 1].set_local_bwd_input(
+                            backward_stage.get_local_bwd_output(backward_mb_index),
+                            backward_mb_index,
+                        )
         except BaseException as e:
             backward_exception.append(e)
             # Abort barrier to unblock forward thread if it's waiting
             _hook_coordinator.disable_coordination()
-        finally:
-            _set_backward_thread_flag(False)
 
     def run_forward():
         # pyrefly: ignore [missing-attribute]
