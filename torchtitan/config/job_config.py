@@ -723,12 +723,6 @@ class LoRA:
     dropout: float = 0.0
     """Dropout probability applied to the LoRA layers. 0.0 means no dropout."""
 
-    apply_to_all_linears: bool = True
-    """
-    If True, apply LoRA to all nn.Linear layers in the model.
-    If False, only apply to attention layers (wq, wk, wv, wo).
-    """
-
 
 @dataclass
 class Compile:
