@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
@@ -16,32 +15,6 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
-
-
-@dataclass
-class LoRAConfig:
-    """Configuration for LoRA (Low-Rank Adaptation) fine-tuning.
-
-    Args:
-        rank: Rank of the low-rank approximation. Default: 8.
-        alpha: Scaling factor for the low-rank approximation. Default: 16.0.
-        dropout: Dropout probability for LoRA layers. Default: 0.0.
-        TODO: add support to layers to apply, e.g. only attention layers or all linear.
-    """
-
-    rank: int = 8
-    alpha: float = 16.0
-    dropout: float = 0.0
-
-
-def get_lora_config(job_config: JobConfig) -> LoRAConfig:
-    """Get LoRA config from job_config, using defaults if not specified."""
-    lora_config = job_config.lora
-    return LoRAConfig(
-        rank=lora_config.rank,
-        alpha=lora_config.alpha,
-        dropout=lora_config.dropout,
-    )
 
 
 class _LoRALinearFunction(torch.autograd.Function):
@@ -209,10 +182,9 @@ class LoRAConverter:
     """Model converter that adds LoRA adapters to Linear layers."""
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        lora_config = get_lora_config(job_config)
-        self.rank = lora_config.rank
-        self.alpha = lora_config.alpha
-        self.dropout = lora_config.dropout
+        self.rank = job_config.lora.rank
+        self.alpha = job_config.lora.alpha
+        self.dropout = job_config.lora.dropout
         self._converted_model: Optional[nn.Module] = None
 
         logger.info(
