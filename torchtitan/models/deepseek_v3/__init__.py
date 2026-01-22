@@ -32,7 +32,7 @@ deepseekv3_args = {
         dim=256,
         inter_dim=1024,
         moe_inter_dim=256,
-        n_layers=6,
+        n_layers=24,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
@@ -97,8 +97,8 @@ deepseekv3_args = {
         qk_rope_head_dim=64,
         v_head_dim=128,
         mscale=0.70,
-        attn_type="flex",
-        attn_mask_type="block_causal",
+        # attn_type="flex",
+        # attn_mask_type="block_causal",
     ),
     "236B": DeepSeekV3ModelArgs(
         vocab_size=102400,
