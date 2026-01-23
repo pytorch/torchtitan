@@ -609,27 +609,17 @@ def muon_update_batch_dim_sharded_async(
     - This is mathematically equivalent to orthogonalizing each expert's weights independently
 
     This function processes all params locally without all-to-all or all-gather.
+
+    Optimized for CPU offloading with:
+    - Double-buffered CUDA streams to overlap transfer and compute
+    - Batched Newton-Schulz for fewer kernel launches
+    - Single sync point at end (no intermediate cuda.synchronize())
     """
-    U = muon_update_pre_orthogonalize(
-        G=G,
-        M=M,
-        momentum=momentum,
-        nesterov=nesterov,
-    )
+    # Check if we need CPU offloading (tensors are on CPU)
+    original_device = G[0].device
+    needs_gpu_transfer = original_device.type != "cuda"
 
-    # Orthogonalize each tensor locally
-    # Newton-Schulz treats dim 0 as batch, processing each slice independently
-    U = [
-        muon_update_newton_schulz(
-            u,
-            newton_schulz_func=newton_schulz_func,
-            flatten=flatten,
-            epsilon=epsilon,
-        )
-        for u in U
-    ]
-
-    # Compute scaled learning rate
+    # Compute scaled learning rate upfront
     # Use the first tensor's shape (they should all be the same shape within a batch)
     if adjust_lr is None:
         adjusted_lr = lr
@@ -640,16 +630,132 @@ def muon_update_batch_dim_sharded_async(
     else:
         raise ValueError(f"Unknown adjust_lr value: {adjust_lr}")
 
-    # Update model parameters with orthogonalized output
-    muon_update_post_orthogonalize(
-        X=X,
-        U=U,
-        base_lr=lr,
-        adjusted_lr=adjusted_lr,
-        weight_decay=weight_decay,
-    )
+    if needs_gpu_transfer:
+        # PIPELINED MODE: Double-buffered streams for maximum overlap
+        # Timeline: transfer[i+1] overlaps with compute[i] overlaps with writeback[i-1]
+        cuda_device = torch.device("cuda")
+        dtype = M[0].dtype
+        n_tensors = len(X)
 
-    yield  # Single yield to make this a generator
+        # Mini-batch size for batched Newton-Schulz (fewer kernel launches)
+        BATCH_SIZE = 4
+
+        # Create streams: one for H2D transfers, one for compute, one for D2H transfers
+        h2d_stream = torch.cuda.Stream()
+        compute_stream = torch.cuda.Stream()
+        d2h_stream = torch.cuda.Stream()
+
+        # Double buffer: prefetch next batch while computing current
+        prefetch_data = None  # Will hold (g_batch, m_batch, x_batch, indices) for next iteration
+
+        def prefetch_batch(start_idx):
+            """Prefetch a batch of tensors to GPU (non-blocking)."""
+            end_idx = min(start_idx + BATCH_SIZE, n_tensors)
+            indices = list(range(start_idx, end_idx))
+            with torch.cuda.stream(h2d_stream):
+                g_batch = [G[i].to(dtype=dtype).to(cuda_device, non_blocking=True) for i in indices]
+                m_batch = [M[i].to(cuda_device, non_blocking=True) for i in indices]
+                x_batch = [X[i].to(cuda_device, non_blocking=True) for i in indices]
+            return (g_batch, m_batch, x_batch, indices)
+
+        def compute_batch(g_batch, m_batch, x_batch, indices):
+            """Compute momentum update and Newton-Schulz on GPU."""
+            with torch.cuda.stream(compute_stream):
+                # Wait for H2D transfer to complete (lightweight stream sync)
+                compute_stream.wait_stream(h2d_stream)
+
+                u_batch = []
+                for j in range(len(indices)):
+                    g_gpu, m_gpu = g_batch[j], m_batch[j]
+                    # Update momentum: M = mu * M + G
+                    m_gpu.mul_(momentum)
+                    m_gpu.add_(g_gpu)
+                    # Compute U
+                    if nesterov:
+                        u_gpu = m_gpu * momentum + g_gpu
+                    else:
+                        u_gpu = m_gpu.clone()
+                    u_batch.append(u_gpu.to(dtype=torch.bfloat16))
+
+                # Batched Newton-Schulz: stack same-shape tensors for single kernel
+                if len(u_batch) > 1 and all(u.shape == u_batch[0].shape for u in u_batch):
+                    u_stacked = torch.stack(u_batch, dim=0)
+                    u_stacked = muon_update_newton_schulz(u_stacked, newton_schulz_func, flatten, epsilon)
+                    u_batch = list(u_stacked.unbind(0))
+                else:
+                    u_batch = [muon_update_newton_schulz(u, newton_schulz_func, flatten, epsilon) for u in u_batch]
+
+                # Apply weight decay and update
+                for j in range(len(indices)):
+                    x_batch[j].mul_(1 - lr * weight_decay)
+                    x_batch[j].sub_(u_batch[j] * adjusted_lr)
+
+            return m_batch, x_batch
+
+        def writeback_batch(m_batch, x_batch, indices):
+            """Write results back to CPU (non-blocking)."""
+            with torch.cuda.stream(d2h_stream):
+                # Wait for compute to complete
+                d2h_stream.wait_stream(compute_stream)
+                for j, i in enumerate(indices):
+                    M[i].copy_(m_batch[j], non_blocking=True)
+                    X[i].copy_(x_batch[j], non_blocking=True)
+
+        # Pipeline: prefetch first batch
+        if n_tensors > 0:
+            prefetch_data = prefetch_batch(0)
+
+        # Main loop with double buffering
+        for batch_start in range(0, n_tensors, BATCH_SIZE):
+            # Get current batch (already prefetched)
+            g_batch, m_batch, x_batch, indices = prefetch_data
+
+            # Start prefetching NEXT batch (overlaps with current compute)
+            next_start = batch_start + BATCH_SIZE
+            if next_start < n_tensors:
+                prefetch_data = prefetch_batch(next_start)
+
+            # Compute current batch
+            m_batch, x_batch = compute_batch(g_batch, m_batch, x_batch, indices)
+
+            # Writeback current batch (overlaps with next iteration's prefetch/compute)
+            writeback_batch(m_batch, x_batch, indices)
+
+        # Single sync at end to ensure all D2H transfers complete
+        torch.cuda.synchronize()
+
+        yield  # Single yield to make this a generator
+    else:
+        # STANDARD GPU MODE: Process all tensors together (original behavior)
+        U = muon_update_pre_orthogonalize(
+            G=G,
+            M=M,
+            momentum=momentum,
+            nesterov=nesterov,
+        )
+
+        # Orthogonalize each tensor locally
+        # Newton-Schulz treats dim 0 as batch, processing each slice independently
+        U = [
+            muon_update_newton_schulz(
+                u,
+                newton_schulz_func=newton_schulz_func,
+                flatten=flatten,
+                epsilon=epsilon,
+            )
+            for u in U
+        ]
+
+        # Update model parameters with orthogonalized output
+        muon_update_post_orthogonalize(
+            X=X,
+            U=U,
+            base_lr=lr,
+            adjusted_lr=adjusted_lr,
+            weight_decay=weight_decay,
+        )
+
+        yield  # Single yield to make this a generator
 
 
 def muon_update_batch_async(
@@ -673,146 +779,333 @@ def muon_update_batch_async(
     Batched version of Muon update. Batch size should be equal to number of GPUs.
     All tensors in a batch should have identical shape, sharding, and dtype.
     Identical hyperparameters are used for all tensors in the batch.
+
+    Memory-optimized for CPU offloading: when tensors are on CPU, moves ALL computation
+    to GPU (momentum update, all_to_all, Newton-Schulz, weight update) then copies back.
     """
 
     assert len(X) == len(G)
     assert len(X) == len(M)
     assert len(X) == world_size
 
-    # Update momentum and compute the inputs for orthogonalization
-    U = muon_update_pre_orthogonalize(
-        G=to_local(G),
-        M=to_local(M),
-        momentum=momentum,
-        nesterov=nesterov,
-    )
+    # Check early if we're in CPU offloading mode
+    G_local = to_local(G)
+    M_local = to_local(M)
+    X_local = to_local(X)
+    original_device = M_local[0].device
+    needs_gpu_transfer = original_device.type != "cuda"
 
-    # Get one whole matrix for each device to orthogonalize
-    if shard_dim is not None:
-        # Use all-to-all to transform from a batch of shards to a single whole matrix
-        # https://www.essential.ai/blog/infra
-        assert (
-            process_group is not None
-        ), "process_group must be provided for sharded DTensors"
-        assert isinstance(X[0], DTensor), "X should contain DTensors"
-        assert not isinstance(U[0], DTensor), "U should contain local shards"
+    if needs_gpu_transfer:
+        # ====== CPU OFFLOADING PATH: Do ALL computation on GPU ======
+        # This avoids slow CPU foreach operations for momentum and weight updates
+        cuda_device = torch.device("cuda")
+        dtype = M_local[0].dtype
 
-        # Debug: print full tensor info before the divisibility check
-        x0 = X[0]
-        x0_mesh = x0.device_mesh
-        x0_mesh_sizes = {name: x0_mesh.size(i) for i, name in enumerate(x0_mesh.mesh_dim_names)}
-
-        assert (
-            X[0].size(shard_dim) % world_size == 0
-        ), f"Shard dimension {shard_dim} size {X[0].size(shard_dim)} is not divisible by world size {world_size}. " \
-           f"Tensor info: global_shape={tuple(X[0].shape)}, local_shape={X[0].to_local().shape}, " \
-           f"mesh={X[0].device_mesh.mesh_dim_names}, mesh_sizes={x0_mesh_sizes}, placements={X[0].placements}"
-
-        # Allocate buffers to receive shards of one whole matrix from other devices
-        single_matrix_shards = [torch.empty_like(u) for u in U]
-
-        # Redistribute the shards to form one unique full tensor on each device
-        # Sync CUDA before collective to ensure all prior GPU ops are complete
-        # This can prevent NCCL hangs due to async GPU operations
+        # Transfer G, M to GPU for momentum update
+        G_gpu = [g.to(dtype=dtype).to(cuda_device, non_blocking=True) for g in G_local]
+        M_gpu = [m.to(cuda_device, non_blocking=True) for m in M_local]
         torch.cuda.synchronize()
 
-        # N sequential all_gathers - only keep result for our assigned param
-        single_matrix_shards = None
-        for param_idx in range(world_size):
-            # Allocate output buffer for this all_gather
-            gathered = [torch.empty_like(U[param_idx]) for _ in range(world_size)]
+        # Momentum update on GPU (equivalent to muon_update_pre_orthogonalize)
+        torch._foreach_mul_(M_gpu, momentum)
+        torch._foreach_add_(M_gpu, G_gpu)
 
-            # All ranks send their shard of param_idx
-            dist.all_gather(gathered, U[param_idx].contiguous(), group=process_group)
+        if nesterov:
+            U_gpu = torch._foreach_mul(M_gpu, momentum)
+            torch._foreach_add_(U_gpu, G_gpu)
+        else:
+            # U shares memory with M when not using nesterov
+            U_gpu = M_gpu
 
-            # Only keep if this is our assigned parameter
-            if param_idx == device_rank:
-                single_matrix_shards = gathered
-            # Otherwise 'gathered' goes out of scope and memory can be freed
+        # Free G_gpu - no longer needed
+        del G_gpu
 
-        yield
+        # Convert to bfloat16 for communication
+        U_gpu = [u.to(dtype=torch.bfloat16) for u in U_gpu]
 
-        # Concatentate shards to form a whole matrix to orthogonalize
-        single_matrix = torch.cat(single_matrix_shards, dim=shard_dim)
-        single_matrix = muon_update_newton_schulz(
-            single_matrix,
-            newton_schulz_func=newton_schulz_func,
-            flatten=flatten,
-            epsilon=epsilon,
-        )
+        # Get one whole matrix for each device to orthogonalize
+        if shard_dim is not None:
+            # Use all-to-all to transform from a batch of shards to a single whole matrix
+            assert process_group is not None, "process_group must be provided for sharded DTensors"
+            assert isinstance(X[0], DTensor), "X should contain DTensors"
 
-        # Split result back into shards
-        # Contiguous is needed for communication to work correctly
-        orth_shards = [
-            x.contiguous()
-            for x in torch.tensor_split(single_matrix, world_size, dim=shard_dim)
-        ]
+            # Validation
+            x0 = X[0]
+            x0_mesh = x0.device_mesh
+            x0_mesh_sizes = {name: x0_mesh.size(i) for i, name in enumerate(x0_mesh.mesh_dim_names)}
+            assert (
+                X[0].size(shard_dim) % world_size == 0
+            ), f"Shard dimension {shard_dim} size {X[0].size(shard_dim)} is not divisible by world size {world_size}. " \
+               f"Tensor info: global_shape={tuple(X[0].shape)}, local_shape={X[0].to_local().shape}, " \
+               f"mesh={X[0].device_mesh.mesh_dim_names}, mesh_sizes={x0_mesh_sizes}, placements={X[0].placements}"
 
-        # N sequential all_gathers - collect results as we go
-        for shard_idx in range(world_size):
-            # Allocate output buffer for this all_gather
-            gathered = [torch.empty_like(orth_shards[shard_idx]) for _ in range(world_size)]
+            # Make contiguous for all_to_all
+            U_gpu = [u.contiguous() for u in U_gpu]
 
-            # All ranks send their shard at index shard_idx
-            dist.all_gather(gathered, orth_shards[shard_idx].contiguous(), group=process_group)
+            # First all_to_all: batch of shards -> single whole matrix
+            single_matrix_shards = [torch.empty_like(U_gpu[0]) for _ in range(world_size)]
+            dist.all_to_all(single_matrix_shards, U_gpu, group=process_group)
+            del U_gpu
 
-            # gathered[r] = rank r's orth_shards[shard_idx] = O^r_{shard_idx}
-            # We need U[r] = O^r_{device_rank}
-            # So when shard_idx == device_rank: U[r] = gathered[r] for all r
-            if shard_idx == device_rank:
-                for r in range(world_size):
-                    U[r].copy_(gathered[r])
-
-        yield
-
-    else:
-        # Matrices are not sharded, so we can directly orthogonalize
-        # Get a single matrix corresponding to this device
-        single_matrix = U[device_rank]
-        assert not isinstance(single_matrix, DTensor)
-
-        single_matrix = muon_update_newton_schulz(
-            single_matrix,
-            newton_schulz_func=newton_schulz_func,
-            flatten=flatten,
-            epsilon=epsilon,
-        )
-
-        if process_group is not None and process_group.size() > 1:
-            # Allocate empty tensors to receive updates from other devices
-            U = [torch.empty_like(u) for u in U]
-
-            # All gather orthogonalized results from other devices into buffer
-            work = dist.all_gather(
-                U, single_matrix.contiguous(), group=process_group, async_op=True
-            )
             yield
-            work.wait()
+
+            # Concatenate shards to form whole matrix
+            single_matrix = torch.cat(single_matrix_shards, dim=shard_dim)
+            del single_matrix_shards
+
+            # Newton-Schulz orthogonalization (on GPU)
+            single_matrix = muon_update_newton_schulz(
+                single_matrix,
+                newton_schulz_func=newton_schulz_func,
+                flatten=flatten,
+                epsilon=epsilon,
+            )
+
+            # Split result back into shards
+            orth_shards = [
+                x.contiguous()
+                for x in torch.tensor_split(single_matrix, world_size, dim=shard_dim)
+            ]
+            del single_matrix
+
+            # Second all_to_all to redistribute orthogonalized shards
+            U_orth_gpu = [torch.empty_like(orth_shards[0]) for _ in range(world_size)]
+            dist.all_to_all(U_orth_gpu, orth_shards, group=process_group)
+            del orth_shards
+
+            yield
 
         else:
-            # Single GPU case, no need to gather
-            assert world_size == 1
-            U = [single_matrix]
+            # Matrices are not sharded, orthogonalize directly
+            single_matrix = U_gpu[device_rank]
 
-    # Compute scaled learning rate
-    # Do this before to_local(X) because we use the full tensor shape, not the shard shape
-    if adjust_lr is None:
-        adjusted_lr = lr
-    elif adjust_lr == "spectral_norm":
-        adjusted_lr = adjust_lr_spectral_norm(lr, X[0].shape)
-    elif adjust_lr == "rms_norm":
-        adjusted_lr = adjust_lr_rms_norm(lr, X[0].shape)
+            single_matrix = muon_update_newton_schulz(
+                single_matrix,
+                newton_schulz_func=newton_schulz_func,
+                flatten=flatten,
+                epsilon=epsilon,
+            )
+
+            if process_group is not None and process_group.size() > 1:
+                U_orth_gpu = [torch.empty_like(single_matrix) for _ in range(world_size)]
+                work = dist.all_gather(
+                    U_orth_gpu, single_matrix.contiguous(), group=process_group, async_op=True
+                )
+                yield
+                work.wait()
+                del single_matrix
+            else:
+                assert world_size == 1
+                U_orth_gpu = [single_matrix]
+
+        # Compute scaled learning rate (use full tensor shape from X[0])
+        if adjust_lr is None:
+            adjusted_lr = lr
+        elif adjust_lr == "spectral_norm":
+            adjusted_lr = adjust_lr_spectral_norm(lr, X[0].shape)
+        elif adjust_lr == "rms_norm":
+            adjusted_lr = adjust_lr_rms_norm(lr, X[0].shape)
+        else:
+            raise ValueError(f"Unknown adjust_lr value: {adjust_lr}")
+
+        # Transfer X to GPU for weight update
+        X_gpu = [x.to(cuda_device, non_blocking=True) for x in X_local]
+        torch.cuda.synchronize()
+
+        # Weight update on GPU (equivalent to muon_update_post_orthogonalize)
+        torch._foreach_mul_(X_gpu, 1 - lr * weight_decay)
+        U_scaled = torch._foreach_mul(U_orth_gpu, adjusted_lr)
+        torch._foreach_sub_(X_gpu, U_scaled)
+        del U_scaled, U_orth_gpu
+
+        # Copy M and X back to CPU
+        for i in range(world_size):
+            M_local[i].copy_(M_gpu[i], non_blocking=True)
+            X_local[i].copy_(X_gpu[i], non_blocking=True)
+
+        torch.cuda.synchronize()
+        del M_gpu, X_gpu
+
     else:
-        raise ValueError(f"Unknown adjust_lr value: {adjust_lr}")
+        # ====== STANDARD GPU PATH ======
+        # Update momentum and compute the inputs for orthogonalization
+        U = muon_update_pre_orthogonalize(
+            G=G_local,
+            M=M_local,
+            momentum=momentum,
+            nesterov=nesterov,
+        )
 
-    # Update model parameters with orthogonalized output
-    muon_update_post_orthogonalize(
-        X=to_local(X),
-        U=U,
-        base_lr=lr,
-        adjusted_lr=adjusted_lr,
-        weight_decay=weight_decay,
-    )
+        # Get one whole matrix for each device to orthogonalize
+        # JQ: This is the N sequential gather version
+        # if shard_dim is not None:
+        #     # Use all-to-all to transform from a batch of shards to a single whole matrix
+        #     # https://www.essential.ai/blog/infra
+        #     assert (
+        #         process_group is not None
+        #     ), "process_group must be provided for sharded DTensors"
+        #     assert isinstance(X[0], DTensor), "X should contain DTensors"
+        #     assert not isinstance(U[0], DTensor), "U should contain local shards"
+
+        #     # Debug: print full tensor info before the divisibility check
+        #     x0 = X[0]
+        #     x0_mesh = x0.device_mesh
+        #     x0_mesh_sizes = {name: x0_mesh.size(i) for i, name in enumerate(x0_mesh.mesh_dim_names)}
+
+        #     assert (
+        #         X[0].size(shard_dim) % world_size == 0
+        #     ), f"Shard dimension {shard_dim} size {X[0].size(shard_dim)} is not divisible by world size {world_size}. " \
+        #     f"Tensor info: global_shape={tuple(X[0].shape)}, local_shape={X[0].to_local().shape}, " \
+        #     f"mesh={X[0].device_mesh.mesh_dim_names}, mesh_sizes={x0_mesh_sizes}, placements={X[0].placements}"
+
+        #     # Allocate buffers to receive shards of one whole matrix from other devices
+        #     single_matrix_shards = [torch.empty_like(u) for u in U]
+
+        #     # Redistribute the shards to form one unique full tensor on each device
+        #     # Sync CUDA before collective to ensure all prior GPU ops are complete
+        #     # This can prevent NCCL hangs due to async GPU operations
+        #     torch.cuda.synchronize()
+
+        #     # N sequential all_gathers - only keep result for our assigned param
+        #     single_matrix_shards = None
+        #     for param_idx in range(world_size):
+        #         # Allocate output buffer for this all_gather
+        #         gathered = [torch.empty_like(U[param_idx]) for _ in range(world_size)]
+
+        #         # All ranks send their shard of param_idx
+        #         dist.all_gather(gathered, U[param_idx].contiguous(), group=process_group)
+
+        #         # Only keep if this is our assigned parameter
+        #         if param_idx == device_rank:
+        #             single_matrix_shards = gathered
+        #         # Otherwise 'gathered' goes out of scope and memory can be freed
+
+        #     yield
+
+        #     # Concatentate shards to form a whole matrix to orthogonalize
+        #     single_matrix = torch.cat(single_matrix_shards, dim=shard_dim)
+        #     single_matrix = muon_update_newton_schulz(
+        #         single_matrix,
+        #         newton_schulz_func=newton_schulz_func,
+        #         flatten=flatten,
+        #         epsilon=epsilon,
+        #     )
+
+        #     # Split result back into shards
+        #     # Contiguous is needed for communication to work correctly
+        #     orth_shards = [
+        #         x.contiguous()
+        #         for x in torch.tensor_split(single_matrix, world_size, dim=shard_dim)
+        #     ]
+
+        #     # N sequential all_gathers - collect results as we go
+        #     for shard_idx in range(world_size):
+        #         # Allocate output buffer for this all_gather
+        #         gathered = [torch.empty_like(orth_shards[shard_idx]) for _ in range(world_size)]
+
+        #         # All ranks send their shard at index shard_idx
+        #         dist.all_gather(gathered, orth_shards[shard_idx].contiguous(), group=process_group)
+
+        #         # gathered[r] = rank r's orth_shards[shard_idx] = O^r_{shard_idx}
+        #         # We need U[r] = O^r_{device_rank}
+        #         # So when shard_idx == device_rank: U[r] = gathered[r] for all r
+        #         if shard_idx == device_rank:
+        #             for r in range(world_size):
+        #                 U[r].copy_(gathered[r])
+
+        #     yield
+
+        # Get one whole matrix for each device to orthogonalize
+        if shard_dim is not None:
+            assert process_group is not None, "process_group must be provided for sharded DTensors"
+            assert isinstance(X[0], DTensor), "X should contain DTensors"
+            assert not isinstance(U[0], DTensor), "U should contain local shards"
+
+            x0 = X[0]
+            x0_mesh = x0.device_mesh
+            x0_mesh_sizes = {name: x0_mesh.size(i) for i, name in enumerate(x0_mesh.mesh_dim_names)}
+            assert (
+                X[0].size(shard_dim) % world_size == 0
+            ), f"Shard dimension {shard_dim} size {X[0].size(shard_dim)} is not divisible by world size {world_size}. " \
+               f"Tensor info: global_shape={tuple(X[0].shape)}, local_shape={X[0].to_local().shape}, " \
+               f"mesh={X[0].device_mesh.mesh_dim_names}, mesh_sizes={x0_mesh_sizes}, placements={X[0].placements}"
+
+            # Sync CUDA before collective to prevent NCCL hangs from async GPU ops
+            torch.cuda.synchronize()
+
+            single_matrix_shards = [torch.empty_like(U[0]) for _ in range(world_size)]
+            dist.all_to_all(single_matrix_shards, [u.contiguous() for u in U], group=process_group)
+
+            yield
+
+            single_matrix = torch.cat(single_matrix_shards, dim=shard_dim)
+            del single_matrix_shards
+
+            single_matrix = muon_update_newton_schulz(
+                single_matrix,
+                newton_schulz_func=newton_schulz_func,
+                flatten=flatten,
+                epsilon=epsilon,
+            )
+
+            orth_shards = [
+                x.contiguous()
+                for x in torch.tensor_split(single_matrix, world_size, dim=shard_dim)
+            ]
+            del single_matrix
+
+            output_shards = [torch.empty_like(orth_shards[0]) for _ in range(world_size)]
+            dist.all_to_all(output_shards, orth_shards, group=process_group)
+            del orth_shards
+
+            for i in range(world_size):
+                U[i].copy_(output_shards[i])
+            del output_shards
+
+            yield
+
+        else:
+            single_matrix = U[device_rank]
+            assert not isinstance(single_matrix, DTensor)
+
+            single_matrix = muon_update_newton_schulz(
+                single_matrix,
+                newton_schulz_func=newton_schulz_func,
+                flatten=flatten,
+                epsilon=epsilon,
+            )
+
+            if process_group is not None and process_group.size() > 1:
+                U_gathered = [torch.empty_like(single_matrix) for _ in range(world_size)]
+                work = dist.all_gather(
+                    U_gathered, single_matrix.contiguous(), group=process_group, async_op=True
+                )
+                yield
+                work.wait()
+                del single_matrix
+                U = U_gathered
+            else:
+                assert world_size == 1
+                U = [single_matrix]
+
+        # Compute scaled learning rate
+        if adjust_lr is None:
+            adjusted_lr = lr
+        elif adjust_lr == "spectral_norm":
+            adjusted_lr = adjust_lr_spectral_norm(lr, X[0].shape)
+        elif adjust_lr == "rms_norm":
+            adjusted_lr = adjust_lr_rms_norm(lr, X[0].shape)
+        else:
+            raise ValueError(f"Unknown adjust_lr value: {adjust_lr}")
+
+        # Update model parameters with orthogonalized output
+        muon_update_post_orthogonalize(
+            X=X_local,
+            U=U,
+            base_lr=lr,
+            adjusted_lr=adjusted_lr,
+            weight_decay=weight_decay,
+        )
 
 
 def adamw_update_foreach_async(
