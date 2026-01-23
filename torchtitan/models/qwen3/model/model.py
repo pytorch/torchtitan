@@ -465,6 +465,9 @@ class Qwen3Model(nn.Module, ModelProtocol):
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
 
+        if self.enable_weight_tying:
+            self.output.weight = self.tok_embeddings.weight
+
     def init_weights(
         self,
         buffer_device: torch.device | None = None,
@@ -495,6 +498,9 @@ class Qwen3Model(nn.Module, ModelProtocol):
         cutoff_factor = 3
 
         if self.enable_weight_tying:
+            # since when the model is intialized on meta device, 
+            # the tying in the __init__ may not have worked correctly
+            # we ensure the weights are tied here
             assert self.tok_embeddings is not None and self.output is not None
             self.output.weight = self.tok_embeddings.weight
         else:
