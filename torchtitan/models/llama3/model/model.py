@@ -208,6 +208,7 @@ class Attention(nn.Module):
         )
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
+        self.enable_gqa = self.n_heads > self.n_kv_heads
 
         self.wq = nn.Linear(
             model_args.dim, model_args.n_heads * self.head_dim, bias=False
@@ -277,7 +278,7 @@ class Attention(nn.Module):
                     xk.transpose(1,2), # (bs, n_kv_heads, seqlen, head_dim)
                     xv.transpose(1,2), # (bs, n_kv_heads, seqlen, head_dim)
                     block_mask=attention_masks, 
-                    enable_gqa=self.n_heads > self.n_kv_heads
+                    enable_gqa=self.enable_gqa
                 ).transpose(1,2).contiguous() # (bs, seqlen, n_local_heads, head_dim)
             case "varlen":
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
@@ -293,7 +294,7 @@ class Attention(nn.Module):
                     xq.transpose(1, 2),  # (bs, n_heads, seqlen, head_dim)
                     xk.transpose(1, 2),  # (bs, n_kv_heads, seqlen, head_dim)
                     xv.transpose(1, 2),  # (bs, n_kv_heads, seqlen, head_dim)
-                    enable_gqa=self.n_heads > self.n_kv_heads
+                    enable_gqa=self.enable_gqa
                 ).transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")

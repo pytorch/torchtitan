@@ -175,6 +175,7 @@ class Attention(nn.Module):
         self.head_dim = model_args.head_dim
         self.scaling = self.head_dim**-0.5
         self.attn_type = getattr(model_args, "attn_type", "sdpa")
+        self.enable_gqa = self.n_heads > self.n_kv_heads
 
         # RMSNorm added here to the here to include the q-k norm
         # This is one of the main differences between Llama3 and Qwen3
@@ -269,7 +270,7 @@ class Attention(nn.Module):
                     xv.transpose(1,2), # (bs, n_kv_heads, seqlen, head_dim)
                     block_mask=attention_masks, 
                     scale=self.scaling, 
-                    enable_gqa=self.n_heads > self.n_kv_heads
+                    enable_gqa=self.enable_gqa
                 ).transpose(1,2).contiguous() # (bs, seqlen, n_local_heads, head_dim)
             case "varlen":
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
@@ -287,7 +288,7 @@ class Attention(nn.Module):
                     xk.transpose(1, 2),  # (bs, n_kv_heads, seqlen, head_dim)
                     xv.transpose(1, 2),  # (bs, n_kv_heads, seqlen, head_dim)
                     scale=self.scaling, 
-                    enable_gqa=self.n_heads > self.n_kv_heads
+                    enable_gqa=self.enable_gqa
                 ).transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
