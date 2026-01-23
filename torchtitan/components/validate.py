@@ -207,6 +207,7 @@ class Validator(BaseValidator):
                 cp_mesh = parallel_dims.get_mesh("cp")
                 optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
                     cp_mesh=cp_mesh,
+                    # pyrefly: ignore [bad-argument-type]
                     cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
                     cp_seq_dims=[1, 1] + [0 for _ in model_parts],
                     cp_no_restore_buffers={inputs, labels},

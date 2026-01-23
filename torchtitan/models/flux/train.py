@@ -97,7 +97,7 @@ class FluxTrainer(Trainer):
         *,
         input_dict: dict[str, torch.Tensor],
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | None,
+        global_valid_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Perform a single forward and backward pass through the model.
@@ -111,6 +111,10 @@ class FluxTrainer(Trainer):
         Returns:
             torch.Tensor: The computed loss value for this training step
         """
+
+        assert (
+            global_valid_tokens is None
+        ), "FLUX model don't need to rescale loss by number of global valid tokens"
 
         # generate t5 and clip embeddings
         input_dict["image"] = labels
@@ -224,9 +228,7 @@ class FluxTrainer(Trainer):
         # pyrefly: ignore [no-matching-overload]
         input_dict, labels = next(data_iterator)
 
-        loss = self.forward_backward_step(
-            input_dict=input_dict, labels=labels, global_valid_tokens=None
-        )
+        loss = self.forward_backward_step(input_dict=input_dict, labels=labels)
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
