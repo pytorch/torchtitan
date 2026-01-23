@@ -35,13 +35,14 @@ gptoss_configs = {
             num_experts=8,
             num_shared_experts=0,
             score_func="softmax",
-            route_norm=False,
+            route_norm=True,  # Normalize over selected experts (match production configs)
             route_scale=1.0,
             score_before_experts=False,
             top_k=4,
             use_grouped_mm=True,
             load_balance_coeff=1e-3,
         ),
+        use_router_bias=True,  # GPT-OSS models have learned router gate bias
         attn_mask_type="causal",
     ),
     "20b": GptOssModelArgs(
@@ -50,17 +51,15 @@ gptoss_configs = {
             num_experts=32,
             num_shared_experts=0,
             score_func="softmax",
-            route_norm=False,
+            route_norm=True,  # Normalize over selected experts (equivalent to softmax over top-k)
             route_scale=1.0,
             score_before_experts=False,
             top_k=4,
             use_grouped_mm=True,
             load_balance_coeff=None,  # Disabled for fine-tuning - not part of official GPT-OSS model
-            use_router_bias=True,  # GPT-OSS models have learned router bias
-            use_expert_bias=True,  # GPT-OSS models have learned expert biases
-            topk_before_score=True,  # GPT-OSS uses TopK-then-Score routing
         ),
-        attn_mask_type="causal",  # Preserve sample boundaries using EOS token
+        use_router_bias=True,  # GPT-OSS models have learned router gate bias
+        attn_mask_type="causal",
     ),
     "120b": GptOssModelArgs(
         n_layers=36,
@@ -68,17 +67,15 @@ gptoss_configs = {
             num_experts=128,
             num_shared_experts=0,
             score_func="softmax",
-            route_norm=False,
+            route_norm=True,  # Normalize over selected experts (equivalent to softmax over top-k)
             route_scale=1.0,
             score_before_experts=False,
             top_k=8,  # 120B uses top-8 routing (vs top-4 for 20B)
             use_grouped_mm=True,
             load_balance_coeff=None,  # Disabled for fine-tuning - not part of official GPT-OSS model
-            use_router_bias=True,  # GPT-OSS models have learned router bias
-            use_expert_bias=True,  # GPT-OSS models have learned expert biases
-            topk_before_score=True,  # GPT-OSS uses TopK-then-Score routing
         ),
-        attn_mask_type="causal",  # Preserve sample boundaries using EOS token
+        use_router_bias=True,  # GPT-OSS models have learned router gate bias
+        attn_mask_type="causal",
     ),
 }
 
