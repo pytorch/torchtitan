@@ -283,9 +283,9 @@ class Attention(nn.Module):
             case "varlen":
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
-                    xq.flatten(0, 1), # (bs * seqlen, n_heads, head_dim)
-                    xk.flatten(0, 1), # (bs * seqlen, n_kv_heads, head_dim)
-                    xv.flatten(0, 1), # (bs * seqlen, n_kv_heads, head_dim)
+                    xq, # (bs, n_heads, seqlen, head_dim)
+                    xk, # (bs, n_kv_heads, seqlen, head_dim)
+                    xv, # (bs, n_kv_heads, seqlen, head_dim)
                     attention_masks,
                 )
             case "sdpa":
