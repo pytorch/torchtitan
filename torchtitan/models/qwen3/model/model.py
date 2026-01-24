@@ -128,19 +128,6 @@ def apply_rotary_emb(
     xk_out = (xk * cos) + (rotate_half(xk) * sin)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
-
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -260,6 +247,10 @@ class Attention(nn.Module):
 
         # Apply rotary embedding
         xq, xk = apply_rotary_emb(xq, xk, rope_cache, positions)
+
+        xq = xq.transpose(1, 2) # (bs, n_heads, seqlen, head_dim)
+        xk = xk.transpose(1, 2) # (bs, n_kv_heads, seqlen, head_dim)
+        xv = xv.transpose(1, 2) # (bs, n_kv_heads, seqlen, head_dim)
 
         match self.attn_type:
             case "flex":
