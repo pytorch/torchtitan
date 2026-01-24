@@ -284,9 +284,9 @@ class Attention(nn.Module):
             case "sdpa":
                 assert attention_masks is None
                 output = self.inner_attention(
-                    xq.transpose(1, 2),  # (bs, n_heads, seqlen, head_dim)
-                    xk.transpose(1, 2),  # (bs, n_kv_heads, seqlen, head_dim)
-                    xv.transpose(1, 2),  # (bs, n_kv_heads, seqlen, head_dim)
+                    xq, # (bs, n_heads, seqlen, head_dim)
+                    xk, # (bs, n_kv_heads, seqlen, head_dim)
+                    xv, # (bs, n_kv_heads, seqlen, head_dim)
                     scale=self.scaling, 
                     enable_gqa=self.enable_gqa
                 ).transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
