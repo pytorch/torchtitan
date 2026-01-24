@@ -274,9 +274,9 @@ class Attention(nn.Module):
             case "flex":
                 assert isinstance(attention_masks, BlockMask), attention_masks
                 output = self.inner_attention(
-                    xq.transpose(1,2), # (bs, n_heads, seqlen, head_dim)
-                    xk.transpose(1,2), # (bs, n_kv_heads, seqlen, head_dim)
-                    xv.transpose(1,2), # (bs, n_kv_heads, seqlen, head_dim)
+                    xq, # (bs, n_heads, seqlen, head_dim)
+                    xk, # (bs, n_kv_heads, seqlen, head_dim)
+                    xv, # (bs, n_kv_heads, seqlen, head_dim)
                     block_mask=attention_masks, 
                     enable_gqa=self.enable_gqa
                 ).transpose(1,2).contiguous() # (bs, seqlen, n_local_heads, head_dim)
