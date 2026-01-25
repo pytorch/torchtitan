@@ -172,8 +172,8 @@ class Attention(nn.Module):
         q, k = apply_rotary_emb(q, k, rope_cache)
 
         xq = q.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        xk = k.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        xv = v.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
 
         assert isinstance(attention_masks, BlockMask), attention_masks
         output, lse = self.inner_attention(

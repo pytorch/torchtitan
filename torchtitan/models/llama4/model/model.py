@@ -267,8 +267,8 @@ class Attention(nn.Module):
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, positions=positions)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        xk = xk.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        xv = xv.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
 
         if self.attn_type == "flex":
             assert isinstance(attention_masks, dict), attention_masks
