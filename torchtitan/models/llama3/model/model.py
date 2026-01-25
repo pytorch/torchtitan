@@ -166,6 +166,7 @@ def apply_rotary_emb(
     xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
+
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -264,29 +265,37 @@ class Attention(nn.Module):
         match self.attn_type:
             case "flex":
                 assert isinstance(attention_masks, BlockMask), attention_masks
-                output = self.inner_attention(
-                    xq, # (bs, n_heads, seqlen, head_dim)
-                    xk, # (bs, n_kv_heads, seqlen, head_dim)
-                    xv, # (bs, n_kv_heads, seqlen, head_dim)
-                    block_mask=attention_masks, 
-                    enable_gqa=self.enable_gqa
-                ).transpose(1,2).contiguous() # (bs, seqlen, n_local_heads, head_dim)
+                output = (
+                    self.inner_attention(
+                        xq,  # (bs, n_heads, seqlen, head_dim)
+                        xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                        xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                        block_mask=attention_masks,
+                        enable_gqa=self.enable_gqa,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )  # (bs, seqlen, n_local_heads, head_dim)
             case "varlen":
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
-                    xq, # (bs, n_heads, seqlen, head_dim)
-                    xk, # (bs, n_kv_heads, seqlen, head_dim)
-                    xv, # (bs, n_kv_heads, seqlen, head_dim)
+                    xq,  # (bs, n_heads, seqlen, head_dim)
+                    xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                    xv,  # (bs, n_kv_heads, seqlen, head_dim)
                     attention_masks,
                 )
             case "sdpa":
                 assert attention_masks is None
-                output = self.inner_attention(
-                    xq, # (bs, n_heads, seqlen, head_dim)
-                    xk, # (bs, n_kv_heads, seqlen, head_dim)
-                    xv, # (bs, n_kv_heads, seqlen, head_dim)
-                    enable_gqa=self.enable_gqa
-                ).transpose(1, 2).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+                output = (
+                    self.inner_attention(
+                        xq,  # (bs, n_heads, seqlen, head_dim)
+                        xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                        xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                        enable_gqa=self.enable_gqa,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 

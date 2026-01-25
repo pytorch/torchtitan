@@ -68,11 +68,15 @@ class VarlenAttentionWrapper(torch.nn.Module):
         max_k = attention_masks.max_k
 
         # pyrefly: ignore [no-matching-overload]
-        xq_packed = xq.transpose(1, 2).flatten(0, 1) # (bs * seqlen, n_heads, head_dim)
+        xq_packed = xq.transpose(1, 2).flatten(0, 1)  # (bs * seqlen, n_heads, head_dim)
         # pyrefly: ignore [no-matching-overload]
-        xk_packed = xk.transpose(1, 2).flatten(0, 1) # (bs * seqlen, n_kv_heads, head_dim)
+        xk_packed = xk.transpose(1, 2).flatten(
+            0, 1
+        )  # (bs * seqlen, n_kv_heads, head_dim)
         # pyrefly: ignore [no-matching-overload]
-        xv_packed = xv.transpose(1, 2).flatten(0, 1) # (bs * seqlen, n_kv_heads, head_dim)
+        xv_packed = xv.transpose(1, 2).flatten(
+            0, 1
+        )  # (bs * seqlen, n_kv_heads, head_dim)
 
         return VarlenAttentionWrapper._compiled_varlen_attn(
             xq_packed,
@@ -175,7 +179,9 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
         enable_gqa: bool = False,
     ) -> torch.Tensor:
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True, enable_gqa=enable_gqa)
+            return F.scaled_dot_product_attention(
+                q, k, v, scale=scale, is_causal=True, enable_gqa=enable_gqa
+            )
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:
