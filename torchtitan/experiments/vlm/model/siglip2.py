@@ -213,7 +213,6 @@ class VisionTransformer(nn.Module):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-
         # TODO: this is duplicated in the main model forward.
         # TODO: is this really required? Can we call this `get_attention_masks`
         # inside the main model forward? At that time PP should already split the

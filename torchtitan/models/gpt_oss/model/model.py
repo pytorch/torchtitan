@@ -216,7 +216,6 @@ class TransformerBlock(nn.Module):
     """
 
     def __init__(self, layer_id: int, model_args: GptOssModelArgs):
-
         super().__init__()
         self.use_sliding_attention = layer_id % 2 == 0
         self.attention = Attention(model_args)
@@ -334,7 +333,6 @@ class GptOssModel(ModelProtocol):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-
         basic_mask_mods = []
         sliding_window_mask_mods = [
             get_sliding_window_mask_mod(self.model_args.sliding_window_size)
