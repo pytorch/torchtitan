@@ -39,9 +39,12 @@ Sessionx.vim
 
 # macOS dir files
 .DS_Store
+.venv/
+slurm-*
 
 # env files
 .env
+.venv/
 
 # Vibe coding
 .claude

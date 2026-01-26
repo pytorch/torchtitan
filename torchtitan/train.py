@@ -213,6 +213,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.loss_fn, self.gradient_accumulation_steps
         )
 
+        if job_config.training.epochs is not None:
+            steps_per_epoch = len(self.dataloader) // max(
+                self.gradient_accumulation_steps, 1
+            )
+            self.job_config.training.steps = (
+                steps_per_epoch * job_config.training.epochs
+            )
+            logger.info(
+                f"Set total training steps to {self.job_config.training.steps} ({job_config.training.epochs} "
+                f"epochs at {steps_per_epoch} steps/epoch)"
+            )
+        if job_config.checkpoint.interval == "epoch":
+            steps_per_epoch = len(self.dataloader) // max(
+                self.gradient_accumulation_steps, 1
+            )
+            self.job_config.checkpoint.interval = steps_per_epoch
+            logger.info(
+                f"Set checkpoint interval to {self.job_config.checkpoint.interval}"
+            )
+
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
@@ -414,6 +434,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             for k, v in input_dict.items():
                 if isinstance(v, torch.Tensor):
                     input_dict[k] = v.to(device_type)
+                elif isinstance(v, list):
+                    input_dict[k] = [
+                        x.to(device_type) for x in v if isinstance(x, torch.Tensor)
+                    ]
             labels = labels.to(device_type)
 
             yield input_dict, labels
@@ -456,6 +480,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         """
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+
+        # Map position_ids from dataloader to positions expected by model forward
+        if "position_ids" in extra_inputs:
+            extra_inputs["positions"] = extra_inputs.pop("position_ids")
+
         # For arguments, like attention_masks, we have to put them in a separate
         # dict as extra_inputs are not forwarded to other stages in PP, but
         # extra_kwargs are.
@@ -469,6 +498,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
             )
+
+        # Remove sequence_lengths from extra_inputs after attention mask creation
+        # as it's not needed by model forward
+        extra_inputs.pop("sequence_lengths", None)
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(

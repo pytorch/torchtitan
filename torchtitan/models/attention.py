@@ -34,6 +34,7 @@ __all__ = [
     "get_sliding_window_mask_mod",
     "get_fixed_block_mask_mod",
     "create_attention_mask",
+    "create_varlen_metadata_from_sequence_lengths",
 ]
 
 
@@ -255,6 +256,35 @@ def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
     return blocked_mask_mod
 
 
+def _get_document_ids_from_seq_lens(
+    seq_lens: list[torch.Tensor],
+) -> torch.Tensor:
+    """
+    Convert a batch tensor of seq lens into integer IDs denoting sample ownership.
+    For example, seq_lens = [2, 3, 1] would return [0, 0, 1, 1, 1, 2].
+    Args:
+        seq_lens (list[torch.Tensor]): Sequence lengths of samples in each pack in the batch,
+            shape (batch_size, n), where n is the max number of sequences in a pack and can vary
+            across packs.
+    Returns:
+        Tensor: Document IDs of shape (batch_size, max_seq_len).
+    """
+    batch_size = len(seq_lens)
+    batch_document_ids = []
+    for sample_idx in range(batch_size):
+        # We assume seq lens sum to max seq lens, so document_ids should be of
+        # shape (max_seq_len, )
+        document_ids = torch.cat(
+            [
+                torch.full((seq_len,), i, dtype=torch.long, device=seq_len.device)
+                for i, seq_len in enumerate(seq_lens[sample_idx])
+            ]
+        )
+        batch_document_ids.append(document_ids)
+    batch_document_ids = torch.stack(batch_document_ids)
+    return batch_document_ids
+
+
 def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     """Creates a sliding window mask that only attends to tokens within a fixed window size.
 
@@ -342,6 +372,69 @@ def create_varlen_metadata_for_document(
         all_seq_lengths = torch.cat(all_seq_lengths)
         # device to host sync but only done once per model forward
         max_seqlen = all_seq_lengths.max().item()
+
+    return VarlenMetadata(
+        cu_seq_q=packed_cu_seqlens,
+        cu_seq_k=packed_cu_seqlens,
+        max_q=max_seqlen,
+        max_k=max_seqlen,
+    )
+
+
+def create_varlen_metadata_from_sequence_lengths(
+    sequence_lengths: list[torch.Tensor],
+    seq_len: int,
+    device: torch.device,
+) -> VarlenMetadata:
+    """
+    Creates cumulative sequence length indices needed for variable length attention
+    from explicit sequence lengths provided by the data loader.
+
+    This is an alternative to `create_varlen_metadata_for_document` that doesn't
+    rely on EOS token detection, making it suitable for multi-turn chat data
+    that has multiple EOS tokens per sample.
+
+    Args:
+        sequence_lengths: List of tensors, one per batch element, containing
+            the lengths of each document/turn within that batch element.
+        seq_len: The sequence length dimension of the batch.
+        device: The device to place the output tensors on.
+
+    Returns:
+        VarlenMetadata containing cumulative sequence length indices for q, k, and max_seq_len
+    """
+    batch_size = len(sequence_lengths)
+    cu_seqlens_list = []
+    all_seq_lengths = []
+    offset = 0
+
+    for b in range(batch_size):
+        sample_seq_lens = sequence_lengths[b]
+        # Compute cumulative sequence lengths for this sample
+        sample_cu_seqlens = torch.cat(
+            [
+                torch.tensor([0], dtype=torch.int32, device=device),
+                torch.cumsum(sample_seq_lens.to(torch.int32), dim=0),
+            ]
+        )
+
+        all_seq_lengths.append(sample_seq_lens)
+
+        # Adjust for batch offset (excluding the final cumulative sum)
+        cu_seqlens_adjusted = (sample_cu_seqlens[:-1] + offset).to(torch.int32)
+        cu_seqlens_list.append(cu_seqlens_adjusted)
+
+        offset += seq_len
+
+    packed_cu_seqlens = torch.cat(
+        cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
+    ).to(torch.int32)
+
+    max_seqlen = 0
+    if len(all_seq_lengths) > 0:
+        all_seq_lengths_cat = torch.cat(all_seq_lengths)
+        # device to host sync but only done once per model forward
+        max_seqlen = all_seq_lengths_cat.max().item()
 
     return VarlenMetadata(
         cu_seq_q=packed_cu_seqlens,

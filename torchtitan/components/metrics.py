@@ -134,7 +134,13 @@ class TensorBoardLogger(BaseLogger):
 class WandBLogger(BaseLogger):
     """Logger implementation for Weights & Biases."""
 
-    def __init__(self, log_dir: str, job_config: JobConfig, tag: str | None = None):
+    def __init__(
+        self,
+        log_dir: str,
+        job_config: JobConfig,
+        tag: str | None = None,
+        group: str | None = None,
+    ):
         # Import wandb here to avoid startup import
         import wandb
 
