@@ -9,6 +9,7 @@
 
 import torch
 import torch.nn as nn
+from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._composable.replicate import replicate
 
 from torch.distributed.device_mesh import DeviceMesh
@@ -268,6 +269,21 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     logger.info("Compiling each TransformerBlock with torch.compile")
 
 
+def disable_fsdp_gradient_division(model: nn.Module) -> None:
+    """
+    Disable FSDP's automatic gradient division for all FSDP modules.
+
+    Set gradient_divide_factor=1.0 to disable FSDP's automatic gradient division.
+    We handle gradient scaling ourselves in the training loop with global token count.
+
+    Args:
+        model: The model containing FSDP-wrapped modules
+    """
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            module.set_gradient_divide_factor(1.0)
+
+
 def apply_fsdp(
     model: nn.Module,
     dp_mesh: DeviceMesh,
@@ -338,8 +354,12 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
+
     # pyrefly: ignore[no-matching-overload]
     fully_shard(model, **fsdp_config)
+
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)
 
 
 def apply_ddp(

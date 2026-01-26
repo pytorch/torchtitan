@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.loss import LossFunction
+from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
@@ -188,6 +188,32 @@ class Validator(BaseValidator):
                 input_dict, labels, model_parts
             )
 
+            # Count valid tokens for this batch
+            local_valid_tokens = torch.tensor(0, dtype=torch.int64, device=device_type)
+            # pyrefly: ignore [missing-attribute]
+            local_valid_tokens += (labels != IGNORE_INDEX).sum()
+
+            # All-reduce token count across DP ranks to get global token count
+            if parallel_dims.dp_enabled:
+                batch_mesh = parallel_dims.get_mesh("batch")
+                global_valid_tokens = dist_utils.dist_sum(
+                    local_valid_tokens, batch_mesh, None
+                )
+            else:
+                global_valid_tokens = local_valid_tokens.float()
+
+            optional_context_parallel_ctx = None
+            if parallel_dims.cp_enabled:
+                cp_mesh = parallel_dims.get_mesh("cp")
+                optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
+                    cp_mesh=cp_mesh,
+                    # pyrefly: ignore [bad-argument-type]
+                    cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
+                    cp_seq_dims=[1, 1] + [0 for _ in model_parts],
+                    cp_no_restore_buffers={inputs, labels},
+                    cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+                )
+
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
                 assert self.pp_has_first_stage is not None
@@ -214,10 +240,8 @@ class Validator(BaseValidator):
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-                loss = (
-                    # using sum instead of mean because we already rescale the
-                    # loss_fn down by a factor of n_microbatches in
-                    # torchtitan/distributed/pipeline_parallel.py
+                loss_sum = (
+                    # using sum because loss_fn already uses reduction='sum'
                     torch.sum(torch.stack(losses)).to(device_type)
                     if self.pp_has_last_stage
                     else torch.tensor([-1.0], device=device_type)
@@ -229,10 +253,9 @@ class Validator(BaseValidator):
                         predictions = model_parts[0](
                             inputs, **extra_inputs, **extra_kwargs
                         )
-                        loss = self.loss_fn(predictions, labels)
+                        loss_sum = self.loss_fn(predictions, labels)
 
-            accumulated_losses.append(loss.detach())
-
+            accumulated_losses.append(loss_sum.detach() / global_valid_tokens)
             num_steps += 1
 
         # Compute average loss
