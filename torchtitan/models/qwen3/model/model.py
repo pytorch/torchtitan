@@ -498,7 +498,7 @@ class Qwen3Model(nn.Module, ModelProtocol):
         cutoff_factor = 3
 
         if self.enable_weight_tying:
-            # since when the model is intialized on meta device,
+            # since when the model is initialized on meta device,
             # the tying in the __init__ may not have worked correctly
             # we ensure the weights are tied here
             assert self.tok_embeddings is not None and self.output is not None
