@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 import torch
 
-from datasets import Dataset, load_dataset
+from datasets import Dataset, load_dataset, load_from_disk
 from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
@@ -32,6 +32,11 @@ def _process_c4_text(sample: dict[str, Any]) -> str:
     return sample["text"]
 
 
+def _load_pretrain_mixin(dataset_path: str):
+    """Load pretrain mixin dataset with default configuration."""
+    return load_from_disk(dataset_path)
+
+
 # Add your dataset here - more information at docs/datasets.md
 DATASETS = {
     "c4": DatasetConfig(
@@ -47,6 +52,11 @@ DATASETS = {
     "c4_validation": DatasetConfig(
         path="allenai/c4",
         loader=partial(_load_c4_dataset, split="validation"),
+        sample_processor=_process_c4_text,
+    ),
+    "pretrain_mixin": DatasetConfig(
+        path="/home/dakota/datasets/combined_all",
+        loader=_load_pretrain_mixin,
         sample_processor=_process_c4_text,
     ),
 }
@@ -143,6 +153,9 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
                         self._data, "epoch"
                     ):
                         self._data.set_epoch(self._data.epoch + 1)
+
+    def __len__(self):
+        return len(self._data)
 
     def load_state_dict(self, state_dict):
         self._token_buffer = state_dict["token_buffer"]

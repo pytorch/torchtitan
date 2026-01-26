@@ -444,9 +444,14 @@ def pipeline_module_split(
     models = []
 
     schedule_class = get_schedule_class(pp_schedule)
-    style = (
-        "v" if schedule_class in (ScheduleZBVZeroBubble, ScheduleDualPipeV) else "loop"
-    )
+    if ScheduleDualPipeV is not None:
+        style = (
+            "v"
+            if schedule_class in (ScheduleZBVZeroBubble, ScheduleDualPipeV)
+            else "loop"
+        )
+    else:
+        style = "v" if schedule_class is ScheduleZBVZeroBubble else "loop"
 
     def _get_stage_indices() -> tuple[int, ...]:
         """

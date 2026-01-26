@@ -364,6 +364,7 @@ class TransformerBlock(nn.Module):
 
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
+        self.n_layers = model_args.n_layers
 
     def forward(
         self,
@@ -398,8 +399,7 @@ class TransformerBlock(nn.Module):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            # pyrefly: ignore [not-callable, missing-attribute]
-            self.moe.init_weights(self.weight_init_std, buffer_device)
+            self.moe.init_weights(self.weight_init_std, buffer_device, self.n_layers)
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 

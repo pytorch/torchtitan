@@ -16,6 +16,7 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
     create_varlen_metadata_for_document,
+    create_varlen_metadata_from_sequence_lengths,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -363,6 +364,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
+        self.n_layers = model_args.n_layers
 
         self.attention = Attention(model_args)
 
@@ -420,7 +422,7 @@ class TransformerBlock(nn.Module):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            self.moe.init_weights(self.weight_init_std, buffer_device)
+            self.moe.init_weights(self.weight_init_std, buffer_device, self.n_layers)
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 
@@ -548,6 +550,14 @@ class Qwen3Model(ModelProtocol):
                     raise ValueError(
                         f"varlen attention is only supported with block_causal \
                         attention mask type, got {self.model_args.attn_mask_type}"
+                    )
+                # Use explicit sequence_lengths from extra_inputs if available,
+                # otherwise fall back to EOS-based document detection
+                if extra_inputs is not None and "sequence_lengths" in extra_inputs:
+                    return create_varlen_metadata_from_sequence_lengths(
+                        extra_inputs["sequence_lengths"],
+                        input_batch.shape[1],
+                        input_batch.device,
                     )
                 return create_varlen_metadata_for_document(
                     input_batch, tokenizer.eos_id
