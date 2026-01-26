@@ -30,7 +30,6 @@ class LoRALinear(nn.Module):
         rank: Rank of the low-rank approximation.
         alpha: Scaling factor.
         dropout: Dropout probability.
-        use_bias: Whether to include bias.
     """
 
     def __init__(
@@ -40,7 +39,6 @@ class LoRALinear(nn.Module):
         rank: int,
         alpha: float,
         dropout: float = 0.0,
-        use_bias: bool = False,
         weight: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
         dtype: Optional[torch.dtype] = None,
@@ -51,8 +49,6 @@ class LoRALinear(nn.Module):
         self.rank = rank
         self.alpha = alpha
         self.scaling = alpha / rank
-        self.use_bias = use_bias
-        self.disabled = False
 
         # Setup weight - reuse provided tensor or create on meta device
         if weight is not None:
@@ -67,19 +63,16 @@ class LoRALinear(nn.Module):
             )
 
         # Setup bias
-        if use_bias:
-            if bias is not None:
-                self.register_parameter("bias", nn.Parameter(bias, requires_grad=False))
-            else:
-                self.register_parameter(
-                    "bias",
-                    nn.Parameter(
-                        torch.empty(out_dim, device="meta", dtype=dtype),
-                        requires_grad=False,
-                    ),
-                )
+        if bias is not None:
+            self.register_parameter("bias", nn.Parameter(bias, requires_grad=False))
         else:
-            self.register_parameter("bias", None)
+            self.register_parameter(
+                "bias",
+                nn.Parameter(
+                    torch.empty(out_dim, device="meta", dtype=dtype),
+                    requires_grad=False,
+                ),
+            )
 
         self.dropout = nn.Dropout(p=dropout) if dropout > 0.0 else nn.Identity()
 
@@ -95,8 +88,8 @@ class LoRALinear(nn.Module):
         return self
 
     def initialize_parameters(self):
-        _lora_a_init_params(self.lora_a)
-        _lora_b_init_params(self.lora_b)
+        nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_b.weight)
 
     def adapter_params(self) -> list[str]:
         """Return names of LoRA adapter parameters."""
@@ -106,25 +99,12 @@ class LoRALinear(nn.Module):
         # Base linear: out = x @ W.T + bias
         out = F.linear(x, self.weight, self.bias)  # type: ignore[arg-type]
 
-        if self.disabled:
-            return out
-
         # LoRA path: out += scale * (x @ A.T @ B.T)
         x = self.dropout(x)
         lora_out = self.lora_b(self.lora_a(x))
         out = out + self.scaling * lora_out
 
         return out
-
-
-def _lora_a_init_params(x: nn.Linear) -> None:
-    """Initialize LoRA A weight to Kaiming uniform."""
-    nn.init.kaiming_uniform_(x.weight, a=math.sqrt(5))
-
-
-def _lora_b_init_params(x: nn.Linear) -> None:
-    """Initialize LoRA B weight to zeros."""
-    nn.init.zeros_(x.weight)
 
 
 class LoRAConverter:
@@ -134,7 +114,6 @@ class LoRAConverter:
         self.rank = job_config.lora.rank
         self.alpha = job_config.lora.alpha
         self.dropout = job_config.lora.dropout
-        self._converted_model: Optional[nn.Module] = None
 
         logger.info(
             f"LoRA training active with rank={self.rank}, alpha={self.alpha}, "
@@ -143,39 +122,30 @@ class LoRAConverter:
 
     def convert(self, model: nn.Module) -> None:
         """Inplace conversion of the model to use LoRA adapters."""
-        replacements = []
-        for module in model.modules():
+        num_replaced = 0
+        for module in list(model.modules()):
             for child_name, child in module.named_children():
+                # TODO: Add support for GroupedExperts.
                 if isinstance(child, nn.Linear) and not isinstance(child, LoRALinear):
-                    replacements.append((module, child_name, child))
+                    original_weight = child.weight.data
+                    original_bias = child.bias.data if child.bias is not None else None
 
-        for parent_module, child_name, child in replacements:
-            has_bias = child.bias is not None
-            original_weight = child.weight.data
-            original_bias = child.bias.data if has_bias else None
+                    # Break reference chain before creating new module
+                    child.weight = None  # type: ignore[assignment]
+                    child.bias = None  # type: ignore[assignment]
 
-            # Break reference chain before creating new module
-            child.weight = None  # type: ignore[assignment]
-            if has_bias:
-                child.bias = None  # type: ignore[assignment]
-
-            lora_linear = LoRALinear(
-                in_dim=child.in_features,
-                out_dim=child.out_features,
-                rank=self.rank,
-                alpha=self.alpha,
-                dropout=self.dropout,
-                use_bias=has_bias,
-                weight=original_weight,
-                bias=original_bias,
-                dtype=child.weight.dtype
-                if child.weight is not None
-                else original_weight.dtype,
-            )
-            setattr(parent_module, child_name, lora_linear)
-
-        self._set_lora_requires_grad(model)
-        self._converted_model = model
+                    lora_linear = LoRALinear(
+                        in_dim=child.in_features,
+                        out_dim=child.out_features,
+                        rank=self.rank,
+                        alpha=self.alpha,
+                        dropout=self.dropout,
+                        weight=original_weight,
+                        bias=original_bias,
+                        dtype=original_weight.dtype,
+                    )
+                    setattr(module, child_name, lora_linear)
+                    num_replaced += 1
 
         # Wrap init_weights to also initialize LoRA parameters
         original_init_weights = model.init_weights
@@ -189,7 +159,7 @@ class LoRAConverter:
 
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"Converted {len(replacements)} linear modules to LoRALinear")
+        logger.info(f"Converted {num_replaced} linear modules to LoRALinear")
         logger.info(
             f"Trainable params: {trainable_params:,} / {total_params:,} "
             f"({100 * trainable_params / total_params:.2f}%)"
