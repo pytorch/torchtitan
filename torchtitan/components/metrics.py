@@ -401,6 +401,19 @@ class MetricsProcessor:
         grad_norm: float,
         extra_metrics: dict[str, Any] | None = None,
     ):
+        """
+        Log training metrics including loss, throughput, and memory statistics.
+
+        Args:
+            step: Current training step
+            global_avg_loss: Global average loss across all valid tokens on all ranks
+                Defined as global_loss_sum / global_valid_tokens
+            global_max_loss: Maximum local loss across all ranks
+                Defined as max(local_loss_sum / global_valid_tokens)
+            grad_norm: Gradient norm after clipping
+            extra_metrics: Optional additional metrics to log
+
+        """
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
 
         time_delta = time.perf_counter() - self.time_last_log
