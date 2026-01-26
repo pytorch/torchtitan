@@ -58,6 +58,10 @@ class ModelConvertersContainer(ModelConverter):
     """
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
+        #if {"lora", "float8"}.issubset(job_config.model.converters):
+        #    raise NotImplementedError(
+        #        "LoRA is incompatible with FP8 linear subclass."
+        #    )
         converter_classes = [
             _registry_model_converter_cls[name] for name in job_config.model.converters
         ]
