@@ -449,8 +449,8 @@ class Qwen3Model(ModelProtocol):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
-        self.eos_id = model_args.eos_id
         self.head_dim = model_args.head_dim
+        self.enable_weight_tying = model_args.enable_weight_tying
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
@@ -464,6 +464,9 @@ class Qwen3Model(ModelProtocol):
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+
+        if self.enable_weight_tying:
+            self.output.weight = self.tok_embeddings.weight
 
     def init_weights(
         self,
@@ -494,15 +497,22 @@ class Qwen3Model(ModelProtocol):
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
 
-        # If weight tying is enabled, we don't need to initialize the output layer
-        if self.output is not None:
-            nn.init.trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
-            )
+        if self.enable_weight_tying:
+            # since when the model is initialized on meta device,
+            # the tying in the __init__ may not have worked correctly
+            # we ensure the weights are tied here
+            assert self.tok_embeddings is not None and self.output is not None
+            self.output.weight = self.tok_embeddings.weight
+        else:
+            # If weight tying is enabled, we don't need to initialize the output layer
+            if self.output is not None:
+                nn.init.trunc_normal_(
+                    self.output.weight,
+                    mean=0.0,
+                    std=final_out_std,
+                    a=-cutoff_factor * final_out_std,
+                    b=cutoff_factor * final_out_std,
+                )
 
     def _precompute_rope_cache(self) -> torch.Tensor:
         return precompute_rope_cache(
