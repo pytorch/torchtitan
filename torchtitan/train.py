@@ -20,7 +20,7 @@ import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
-from torchtitan.components.loss import rescale_accumulated_loss
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
@@ -209,9 +209,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config.training.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
-        self.loss_fn = rescale_accumulated_loss(
-            self.loss_fn, self.gradient_accumulation_steps
-        )
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -390,8 +387,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
-        """Returns an iterator that processes batches from the data iterator."""
-        device_type = utils.device_type
+        """Returns an iterator that processes batches from the data iterator.
+
+        Note: Tensors are yielded on CPU. The caller is responsible for moving
+        them to GPU when needed. This allows for more efficient memory usage
+        when doing gradient accumulation.
+        """
         data_iterator = iter(data_iterable)
 
         while True:
@@ -410,12 +411,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 time.perf_counter() - data_load_start
             )
 
-            # Move tensors to the appropriate device
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(device_type)
-            labels = labels.to(device_type)
-
+            # Tensors stay on CPU; moved to GPU per-microbatch during training
             yield input_dict, labels
 
     def post_dataloading_process(
@@ -483,7 +479,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         return inputs, labels, extra_inputs, extra_kwargs
 
     def forward_backward_step(
-        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+        self,
+        *,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
@@ -518,10 +518,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             loss = (
-                # using sum instead of mean because we already rescale the
-                # loss_fn down by a factor of n_microbatches in
-                # torchtitan/distributed/pipeline_parallel.py
-                torch.sum(torch.stack(losses)).to(self.device)
+                # Rescale PP loss to be "local loss sum / global valid tokens)
+                # because each microbathes could have different number of valid tokens
+                (torch.sum(torch.stack(losses)) / global_valid_tokens).to(self.device)
                 if self.pp_has_last_stage
                 else torch.tensor([-1.0], device=self.device)
             )
@@ -531,11 +530,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context():
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                    loss = self.loss_fn(pred, labels)
+                    # Compute loss sum (reduction='sum')
+                    loss_sum = self.loss_fn(pred, labels)
+
+                    # Scale the loss by the inverse of the total weight denominator before backward
+                    # This ensures gradients are properly normalized across all microbatches
+                    loss = loss_sum / global_valid_tokens
+
                 # need to free pred before bwd to avoid peaking memory
                 del pred
                 loss.backward()
 
+        # The returned loss here is local SUM loss / global_valid_tokens
         return loss
 
     def train_step(
@@ -549,13 +555,40 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
 
-        accumulated_losses = []
-        # If data runs out during gradient accumulation, that
-        # entire step will not be executed.
+        # Collect all microbatches on CPU and count total valid tokens
+        microbatches = []
+        local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _microbatch in range(self.gradient_accumulation_steps):
             # pyrefly: ignore [no-matching-overload]
             input_dict, labels = next(data_iterator)
-            loss = self.forward_backward_step(input_dict, labels)
+            # pyrefly: ignore [missing-attribute]
+            local_valid_tokens += (labels != IGNORE_INDEX).sum()
+            microbatches.append((input_dict, labels))
+
+        # All-reduce to get global token count across DP ranks
+        # Move to GPU for distributed communication
+        local_valid_tokens = local_valid_tokens.to(self.device)
+        if parallel_dims.dp_enabled:
+            batch_mesh = parallel_dims.get_mesh("batch")
+            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
+        else:
+            global_valid_tokens = local_valid_tokens.float()
+
+        # Process each microbatch: move to GPU, forward/backward, then free
+        accumulated_losses = []
+        for input_dict, labels in microbatches:
+            # Move tensors to GPU
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(self.device)
+            labels = labels.to(self.device)
+
+            loss = self.forward_backward_step(
+                input_dict=input_dict,
+                labels=labels,
+                # pyrefly: ignore [bad-argument-type]
+                global_valid_tokens=global_valid_tokens,
+            )
             accumulated_losses.append(loss.detach())
 
         grad_norm = dist_utils.clip_grad_norm_(
@@ -580,8 +613,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
             loss_mesh = parallel_dims.get_optional_mesh("loss")
+
+            # loss = local_loss_sum / global_valid_tokens
+            # summing across ranks will have result:
+            # global_avg_loss = sum(local_loss_sum) / global_valid_tokens = global_loss_sum / global_valid_tokens
             global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_mean(loss, loss_mesh, ft_pg),
+                dist_utils.dist_sum(loss, loss_mesh, ft_pg),
                 dist_utils.dist_max(loss, loss_mesh, ft_pg),
                 dist_utils.dist_sum(
                     torch.tensor(
@@ -670,10 +707,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     self.job_config.validation.enable
                     and self.validator.should_validate(self.step)
                 ):
-                    # pyrefly: ignore [missing-attribute]
-                    with self.loss_fn.no_rescale():
-                        # pyrefly: ignore [bad-argument-count]
-                        self.validator.validate(self.model_parts, self.step)
+                    # pyrefly: ignore [bad-argument-count]
+                    self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:
