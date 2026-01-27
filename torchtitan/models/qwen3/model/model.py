@@ -129,18 +129,6 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -175,6 +163,7 @@ class Attention(nn.Module):
         self.head_dim = model_args.head_dim
         self.scaling = self.head_dim**-0.5
         self.attn_type = getattr(model_args, "attn_type", "sdpa")
+        self.enable_gqa = self.n_heads > self.n_kv_heads
 
         # RMSNorm added here to the here to include the q-k norm
         # This is one of the main differences between Llama3 and Qwen3
@@ -260,40 +249,47 @@ class Attention(nn.Module):
         # Apply rotary embedding
         xq, xk = apply_rotary_emb(xq, xk, rope_cache, positions)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xq = xq.transpose(1, 2)  # (bs, n_heads, seqlen, head_dim)
+        xk = xk.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        xv = xv.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
 
         match self.attn_type:
             case "flex":
                 assert isinstance(attention_masks, BlockMask), attention_masks
-                output = self.inner_attention(
-                    xq, xk, xv, block_mask=attention_masks, scale=self.scaling
-                )
-                output = output.transpose(
-                    1, 2
-                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+                output = (
+                    self.inner_attention(
+                        xq,  # (bs, n_heads, seqlen, head_dim)
+                        xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                        xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                        block_mask=attention_masks,
+                        scale=self.scaling,
+                        enable_gqa=self.enable_gqa,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )  # (bs, seqlen, n_local_heads, head_dim)
             case "varlen":
-                # TODO: pass self.scaling into varlen attention
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
-                    xq,
-                    xk,
-                    xv,
-                    self.head_dim,
+                    xq,  # (bs, n_heads, seqlen, head_dim)
+                    xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                    xv,  # (bs, n_kv_heads, seqlen, head_dim)
                     attention_masks,
                     scale=self.scaling,
                 )
             case "sdpa":
                 assert attention_masks is None
-                output = self.inner_attention(xq, xk, xv, scale=self.scaling)
-                output = output.transpose(
-                    1, 2
-                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+                output = (
+                    self.inner_attention(
+                        xq,  # (bs, n_heads, seqlen, head_dim)
+                        xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                        xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                        scale=self.scaling,
+                        enable_gqa=self.enable_gqa,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
