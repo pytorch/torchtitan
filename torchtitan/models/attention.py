@@ -32,6 +32,7 @@ __all__ = [
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_sliding_window_mask_mod",
+    "get_block_causal_mask_mod_by_seq_lens",
     "get_fixed_block_mask_mod",
     "create_attention_mask",
     "create_varlen_metadata_from_sequence_lengths",
@@ -283,6 +284,25 @@ def _get_document_ids_from_seq_lens(
         batch_document_ids.append(document_ids)
     batch_document_ids = torch.stack(batch_document_ids)
     return batch_document_ids
+
+
+def get_block_causal_mask_mod_by_seq_lens(
+    seq_lens: list[torch.Tensor],
+) -> _mask_mod_signature:
+    document_ids = _get_document_ids_from_seq_lens(seq_lens)
+
+    def mask_mod(b, h, q_idx, kv_idx):
+        """
+        Defines the logic of a block causal mask by combining both a standard causal mask
+        and a block diagonal document mask.
+        See :func:`~torchtune.modules.attention_utils.create_block_causal_mask`
+        for an illustration.
+        """
+        causal_mask = q_idx >= kv_idx
+        document_mask = document_ids[b, q_idx] == document_ids[b, kv_idx]
+        return causal_mask & document_mask
+
+    return mask_mod
 
 
 def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:

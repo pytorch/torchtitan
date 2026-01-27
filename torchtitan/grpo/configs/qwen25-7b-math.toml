@@ -43,7 +43,7 @@ global_batch_size = 256
 max_norm = 0.25  # grad norm clipping
 steps = 1000
 dataset = "c4"
-seed = 42
+
 
 [compile]
 enable=false

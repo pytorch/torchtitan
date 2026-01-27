@@ -17,7 +17,6 @@ from torchtitan.models.attention import (
     FlexAttentionWrapper,
     ScaledDotProductAttentionWrapper,
     create_attention_mask,
-    get_block_causal_mask_mod_by_seq_lens,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
@@ -28,22 +27,16 @@ from torchtitan.protocols.train_spec import ModelProtocol
 from .args import Qwen3NextModelArgs
 
 try:
-    from causal_conv1d import causal_conv1d_fn
-
-    HAS_CASUAL_CONV1D = True
-except ImportError:
-    HAS_CASUAL_CONV1D = False
-    causal_conv1d_fn = None
-
-try:
     from fla.modules import FusedRMSNormGated
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+    from fla.modules.convolution import causal_conv1d as causal_conv1d_fn
 
     HAS_FLA = True
 except ImportError:
     HAS_FLA = False
     FusedRMSNormGated = None
     chunk_gated_delta_rule = None
+    causal_conv1d_fn = None
 
 
 # Adapted from https://github.com/pytorch/torchtune/blob/main/torchtune/models/qwen2/_positional_embeddings.py
@@ -79,10 +72,10 @@ def apply_rotary_emb(
     xk: torch.Tensor,
     rope_cache: torch.Tensor,
     partial_ratio: float = 1.0,
-    position_ids: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if position_ids is not None:
-        rope_cache = rope_cache[position_ids]
+    if positions is not None:
+        rope_cache = rope_cache[positions]
         rope_cache = rope_cache.unsqueeze(2)  # [batch_size, seqlen, 1, head_dim * 2]
     else:
         rope_cache = reshape_for_broadcast(rope_cache, xq)
@@ -143,6 +136,7 @@ class Attention(nn.Module):
         self.head_dim = model_args.head_dim
         self.scaling = self.head_dim**-0.5
         self.partial_rotary_factor = model_args.partial_rotary_factor
+        self.attn_type = getattr(model_args, "attn_type", "sdpa")
 
         self.q_norm = ZeroCenteredRMSNorm(self.head_dim, eps=model_args.norm_eps)
         self.k_norm = ZeroCenteredRMSNorm(self.head_dim, eps=model_args.norm_eps)
@@ -155,11 +149,11 @@ class Attention(nn.Module):
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
-        self.use_flex_attn = model_args.use_flex_attn
-        if self.use_flex_attn:
-            self.inner_attention = FlexAttentionWrapper()
-        else:
-            self.inner_attention = ScaledDotProductAttentionWrapper()
+        match self.attn_type:
+            case "flex":
+                self.inner_attention = FlexAttentionWrapper()
+            case _:
+                raise ValueError(f"Unknown attention type: {self.attn_type}")
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
@@ -173,7 +167,7 @@ class Attention(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
-        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ):
         bs, seqlen, _ = x.shape
         xq, gate = torch.chunk(self.wq(x), 2, dim=-1)
@@ -193,7 +187,7 @@ class Attention(nn.Module):
             xk,
             rope_cache,
             partial_ratio=self.partial_rotary_factor,
-            position_ids=position_ids,
+            positions=positions,
         )
 
         keys = repeat_kv(xk, self.n_rep)
@@ -203,12 +197,9 @@ class Attention(nn.Module):
         xk = keys.transpose(1, 2)
         xv = values.transpose(1, 2)
 
-        if self.use_flex_attn:
-            output = self.inner_attention(
-                xq, xk, xv, block_mask=attention_masks["flex_attn"], scale=self.scaling
-            )
-        else:
-            output = self.inner_attention(xq, xk, xv, scale=self.scaling)
+        output = self.inner_attention(
+            xq, xk, xv, block_mask=attention_masks["flex_attn"], scale=self.scaling
+        )
 
         output = output.transpose(1, 2).contiguous().view(bs, seqlen, -1)
         output = output * torch.sigmoid(gate.view(bs, seqlen, -1))
@@ -305,7 +296,7 @@ class GatedDeltaNet(nn.Module):
         hidden_states: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
-        position_ids: torch.Tensor | None,
+        positions: torch.Tensor | None,
     ):
         # hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
 
@@ -323,15 +314,14 @@ class GatedDeltaNet(nn.Module):
 
         mixed_qkv = torch.cat((query, key, value), dim=-1)
         mixed_qkv = mixed_qkv.transpose(1, 2)
-
-        mixed_qkv = causal_conv1d_fn(
+        mixed_qkv, _ = causal_conv1d_fn(
             x=mixed_qkv,
             weight=self.conv1d.weight.squeeze(1),
             bias=self.conv1d.bias,
             activation=self.activation,
             seq_idx=(
                 attention_masks.get("seq_idx", None)
-                if attention_masks is not None
+                if isinstance(attention_masks, dict)
                 else None
             ),
         )
@@ -635,13 +625,13 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         rope_cache: torch.Tensor,
         attention_masks: AttentionMasksType | None,
-        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ):
         x = x + self.attention(
             self.attention_norm(x),
             rope_cache,
             attention_masks,
-            position_ids=position_ids,
+            positions=positions,
         )
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x))
@@ -659,18 +649,18 @@ class TransformerBlock(nn.Module):
             self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Qwen3NextModel(nn.Module, ModelProtocol):
+class Qwen3NextModel(ModelProtocol):
     def __init__(self, model_args: Qwen3NextModelArgs):
-        super().__init__()
+        super().__init__(model_args)
 
         have_linear_attention = any(
             lt == "linear_attention" for lt in model_args.layer_types
         )
         if have_linear_attention:
-            if not HAS_FLA or not HAS_CASUAL_CONV1D:
+            if not HAS_FLA:
                 raise ImportError(
-                    "The 'causal_conv1d' and packages are required for models with 'linear_attention' layers. "
-                    "Please install them to proceed: `pip install flash-linear-attention causal_conv1d`"
+                    "The 'flash-linear-attention' package is required for models with 'linear_attention' layers. "
+                    "Please install it to proceed: `pip install flash-linear-attention`"
                 )
 
         self.model_args = model_args
@@ -725,6 +715,14 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
         ret = {}
         mask_mods = [get_causal_mask_mod()]
         match self.model_args.attn_mask_type:
+            case "causal":
+                return create_attention_mask(
+                    and_masks(*mask_mods),
+                    1,
+                    None,
+                    input_batch.shape[1],
+                    input_batch.shape[1],
+                )
             case "block_causal":
                 B, T = input_batch.shape
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
@@ -775,7 +773,7 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
-        position_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ):
         h = self.tok_embeddings(tokens)
         for layer in self.layers.values():
@@ -783,7 +781,7 @@ class Qwen3NextModel(nn.Module, ModelProtocol):
                 h,
                 self.rope_cache,
                 attention_masks=attention_masks,
-                position_ids=position_ids,
+                positions=positions,
             )
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h

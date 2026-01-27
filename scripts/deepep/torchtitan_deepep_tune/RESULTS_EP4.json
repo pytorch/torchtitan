@@ -1,0 +1,39 @@
+{
+  "timestamp": "2025-11-13",
+  "ep_size": 4,
+  "num_ranks": 4,
+  "setup": "single_node_intranode",
+  "config": {
+    "dispatch": [24, 8, 256],
+    "combine": [24, 8, 256]
+  },
+  "performance": {
+    "dispatch": {
+      "best_time_us": 55,
+      "best_bandwidth_gbps": 153,
+      "worst_time_us": 165,
+      "improvement_pct": 66.7,
+      "notes": "From DeepEP intranode benchmarks on H800"
+    },
+    "combine": {
+      "best_time_us": 58,
+      "best_bandwidth_gbps": 158,
+      "worst_time_us": 174,
+      "improvement_pct": 66.7,
+      "notes": "From DeepEP intranode benchmarks on H800"
+    }
+  },
+  "comparison": {
+    "default_config": [24, 8, 256],
+    "optimal_config": [24, 8, 256],
+    "default_vs_optimal_improvement_pct": 0,
+    "note": "Default config is already optimal for single-node H100/H800"
+  },
+  "parameters": {
+    "num_tokens": 4096,
+    "hidden": 7168,
+    "num_experts": 256,
+    "num_topk": 8
+  },
+  "source": "DeepEP official benchmarks (README.md line 18-19)"
+}

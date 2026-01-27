@@ -92,7 +92,7 @@ def parallelize_deepseekv3(
             tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            cp_enabled=parallel_dims.cp_enabled,
+            positions_enabled=parallel_dims.cp_enabled or job_config.training.dataset_type == "preprocessed",
         )
         maybe_enable_async_tp(job_config, tp_mesh)
 
@@ -212,7 +212,7 @@ def apply_non_moe_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
-    cp_enabled: bool,
+    positions_enabled: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -251,7 +251,7 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    positions_sharding = Replicate() if cp_enabled else None
+    positions_sharding = Replicate() if positions_enabled else None
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {

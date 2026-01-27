@@ -9,12 +9,16 @@ import math
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
+
+from torchtitan.components.peft.lora import lora_or_linear, per_layer_config
 from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.config.job_config import PEFT
 from torchtitan.models.attention import (
     create_attention_mask,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
+    get_block_causal_mask_mod_by_seq_lens,
     ScaledDotProductAttentionWrapper,
 )
 from torchtitan.models.moe import build_moe, FeedForward
@@ -105,8 +109,8 @@ def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
     # Basic RoPE frequency calculation
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
 
-    # YaRN scaling for extended context. YaRN is used to extend the context length after pre-training.
-    if seqlen > args.original_seq_len:
+    # YaRN scaling for extended context
+    if factor != 1.0:
         low, high = find_correction_range(
             beta_fast, beta_slow, dim, base, args.original_seq_len
         )
@@ -196,9 +200,15 @@ def apply_rotary_emb(
 class Attention(nn.Module):
     """
     Multi-head attention (MLA) module.
+
+    Note: DeepSeek-V3 uses Multi-head Latent Attention (MLA) which already employs
+    low-rank approximation for Q/KV projections. When using LoRA fine-tuning:
+    - The built-in low-rank projections (wq_a/wq_b, wkv_a/wkv_b) are NOT wrapped with
+      additional LoRA adapters since they already use efficient low-rank representation.
+    - LoRA is only applied to the output projection (wo) to avoid redundancy.
     """
 
-    def __init__(self, model_args: DeepSeekV3ModelArgs):
+    def __init__(self, model_args: DeepSeekV3ModelArgs, peft_config: PEFT):
         super().__init__()
         self.dim = model_args.dim
         self.n_heads = model_args.n_heads
@@ -209,14 +219,26 @@ class Attention(nn.Module):
         self.qk_head_dim = model_args.qk_nope_head_dim + model_args.qk_rope_head_dim
         self.v_head_dim = model_args.v_head_dim
 
+        # NOTE: DeepSeek's built-in low-rank projections are kept as nn.Linear
+        # (not wrapped with LoRA) since they already serve as efficient low-rank
+        # representations. Adding LoRA on top would be redundant.
         if self.q_lora_rank == 0:
-            self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim, bias=False)
+            # When q_lora_rank == 0, use standard projection - apply LoRA here
+            self.wq = lora_or_linear(
+                self.dim,
+                self.n_heads * self.qk_head_dim,
+                bias=False,
+                peft_config=peft_config,
+            )
         else:
+            # Built-in low-rank path, don't add LoRA adapters
             self.wq_a = nn.Linear(self.dim, self.q_lora_rank, bias=False)
             self.q_norm = nn.RMSNorm(self.q_lora_rank, eps=model_args.norm_eps)
             self.wq_b = nn.Linear(
                 self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=False
             )
+            if peft_config.enable_peft and not peft_config.lora_train_norm:
+                self.q_norm.weight.requires_grad = False
         self.wkv_a = nn.Linear(
             self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
         )
@@ -226,12 +248,37 @@ class Attention(nn.Module):
             self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
         )
-        self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
+        if peft_config.enable_peft:
+            if not peft_config.lora_train_norm:
+                self.kv_norm.weight.requires_grad = False
+
+        # Output projection - apply LoRA here
+        self.wo = lora_or_linear(
+            self.n_heads * self.v_head_dim,
+            self.dim,
+            bias=False,
+            peft_config=peft_config,
+        )
         self.softmax_scale = self.qk_head_dim**-0.5
 
-        if model_args.max_seq_len > model_args.original_seq_len:
-            mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
-            self.softmax_scale = self.softmax_scale * mscale * mscale
+        # Apply mscale for YaRN using the ratio formula from HuggingFace:
+        # effective_mscale = yarn_get_mscale(factor, mscale) / yarn_get_mscale(factor, mscale_all_dim)
+        # When mscale == mscale_all_dim (e.g., both 1.0 for Kimi K2), they cancel out → effective_mscale = 1.0
+        if model_args.rope_factor != 1.0:
+
+            def yarn_get_mscale(scale: float, mscale: float) -> float:
+                return 0.1 * mscale * math.log(scale) + 1.0
+
+            mscale_numerator = yarn_get_mscale(
+                model_args.rope_factor, model_args.mscale
+            )
+            mscale_denominator = yarn_get_mscale(
+                model_args.rope_factor, model_args.mscale_all_dim
+            )
+            effective_mscale = mscale_numerator / mscale_denominator
+            self.softmax_scale = (
+                self.softmax_scale * effective_mscale * effective_mscale
+            )
 
         self.attn_type = model_args.attn_type
         match self.attn_type:
@@ -295,6 +342,7 @@ class Attention(nn.Module):
         )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
         kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        # TODO: self.n_heads is global count; with TP this should this be k_nope.size(2) for local heads?
         k = torch.cat(
             [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
         )  # (bsz, seqlen, n_heads, qk_head_dim)
@@ -344,12 +392,18 @@ class TransformerBlock(nn.Module):
     Transformer block with attention and feed-forward layers.
     """
 
-    def __init__(self, layer_id: int, model_args: DeepSeekV3ModelArgs):
+    def __init__(
+        self, layer_id: int, model_args: DeepSeekV3ModelArgs, peft_config: PEFT
+    ):
 
         super().__init__()
-        self.attention = Attention(model_args)
+        self.attention = Attention(model_args, peft_config)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+
+        if peft_config.enable_peft and not peft_config.lora_train_norm:
+            self.attention_norm.weight.requires_grad = False
+            self.ffn_norm.weight.requires_grad = False
 
         self.moe_enabled = layer_id >= model_args.n_dense_layers
         if self.moe_enabled:
@@ -358,9 +412,12 @@ class TransformerBlock(nn.Module):
                 dim=model_args.dim,
                 hidden_dim=model_args.moe_inter_dim,
                 moe_impl=model_args.moe_impl,
+                peft_config=peft_config,
             )
         else:
-            self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)
+            self.feed_forward = FeedForward(
+                model_args.dim, model_args.inter_dim, peft_config=peft_config
+            )
 
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
@@ -409,7 +466,7 @@ class DeepSeekV3Model(ModelProtocol):
     DeepSeek-V3 Transformer model with attention and feed-forward layers.
     """
 
-    def __init__(self, model_args: DeepSeekV3ModelArgs):
+    def __init__(self, model_args: DeepSeekV3ModelArgs, peft_config: PEFT):
         super().__init__(model_args)
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
@@ -419,7 +476,18 @@ class DeepSeekV3Model(ModelProtocol):
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
+            peft_config_layer = per_layer_config(peft_config, layer_id)
+            self.layers[str(layer_id)] = TransformerBlock(
+                layer_id, model_args, peft_config_layer
+            )
+            if (
+                peft_config.enable_peft
+                and (peft_config.layers_to_train is not None)
+                and (layer_id not in peft_config.layers_to_train)
+            ):
+                # We have layers that are not in the layers_to_train list, so we need to freeze them.
+                for param in self.layers[str(layer_id)].parameters():
+                    param.requires_grad = False
 
         self.norm = nn.RMSNorm(model_args.dim)
         self.output = nn.Linear(
@@ -429,6 +497,13 @@ class DeepSeekV3Model(ModelProtocol):
             bias=False,
         )
         self.model_args = model_args
+        if peft_config.enable_peft:
+            if not peft_config.train_embeddings:
+                self.tok_embeddings.weight.requires_grad = False
+            if not peft_config.train_output_layer:
+                self.output.weight.requires_grad = False
+                if not peft_config.lora_train_norm:
+                    self.norm.weight.requires_grad = False
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
         buffer_device = buffer_device or self.freqs_cis.device
@@ -466,6 +541,16 @@ class DeepSeekV3Model(ModelProtocol):
             case "block_causal":
                 B = input_batch.shape[0]
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+            case "block_causal_by_sequence_lengths":
+                sequence_lengths = extra_inputs.pop("sequence_lengths", None)
+                if sequence_lengths is None:
+                    raise RuntimeError(
+                        "`sequence_lengths` required for `block_causal_by_sequence_lengths`"
+                    )
+                B = input_batch.shape[0]
+                mask_mods.append(
+                    get_block_causal_mask_mod_by_seq_lens(sequence_lengths)
+                )
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
