@@ -357,6 +357,7 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, layer_id: int, model_args: Qwen3ModelArgs):
         super().__init__()
+        self.layer_id = layer_id
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
 
@@ -401,15 +402,14 @@ class TransformerBlock(nn.Module):
             torch.Tensor: Output tensor after applying attention and feedforward layers.
 
         """
-        x = x + self.attention(
+        h = x + self.attention(
             self.attention_norm(x), rope_cache, attention_masks, positions
         )
-
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x))
+            out = h + self.moe(self.ffn_norm(h))
         else:
-            x = x + self.feed_forward(self.ffn_norm(x))
-        return x
+            out = h + self.feed_forward(self.ffn_norm(h))
+        return out
 
     def init_weights(self, buffer_device: torch.device):
         for norm in (self.attention_norm, self.ffn_norm):
@@ -445,8 +445,8 @@ class Qwen3Model(ModelProtocol):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
+        self.eos_id = model_args.eos_id
         self.head_dim = model_args.head_dim
-        self.enable_weight_tying = model_args.enable_weight_tying
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
@@ -460,9 +460,6 @@ class Qwen3Model(ModelProtocol):
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
-
-        if self.enable_weight_tying:
-            self.output.weight = self.tok_embeddings.weight
 
     def init_weights(
         self,
@@ -493,22 +490,15 @@ class Qwen3Model(ModelProtocol):
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
 
-        if self.enable_weight_tying:
-            # since when the model is initialized on meta device,
-            # the tying in the __init__ may not have worked correctly
-            # we ensure the weights are tied here
-            assert self.tok_embeddings is not None and self.output is not None
-            self.output.weight = self.tok_embeddings.weight
-        else:
-            # If weight tying is enabled, we don't need to initialize the output layer
-            if self.output is not None:
-                nn.init.trunc_normal_(
-                    self.output.weight,
-                    mean=0.0,
-                    std=final_out_std,
-                    a=-cutoff_factor * final_out_std,
-                    b=cutoff_factor * final_out_std,
-                )
+        # If weight tying is enabled, we don't need to initialize the output layer
+        if self.output is not None:
+            nn.init.trunc_normal_(
+                self.output.weight,
+                mean=0.0,
+                std=final_out_std,
+                a=-cutoff_factor * final_out_std,
+                b=cutoff_factor * final_out_std,
+            )
 
     def _precompute_rope_cache(self) -> torch.Tensor:
         return precompute_rope_cache(
@@ -591,6 +581,8 @@ class Qwen3Model(ModelProtocol):
 
         # pyrefly: ignore[not-callable, invalid-argument]
         h = self.norm(h) if self.norm else h
-        # pyrefly: ignore[not-callable, invalid-argument]
+
+        # pyrefly: ignore [not-callable]
         output = self.output(h) if self.output else h
+
         return output
