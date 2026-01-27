@@ -737,6 +737,22 @@ class TestVLLMTorchTitan:
             else:
                 tt_attn_output_local = tt_attn_output.squeeze(0)
 
+        # Print comparison table with mean of diff for each token position
+        if rank == 0:
+            print("\n" + "=" * 50)
+            print("vLLM vs TorchTitan Attention Diff (per token)")
+            print("=" * 50)
+            print(f"{'Token':<12}{'Mean(Diff)':>18}{'Max(|Diff|)':>18}")
+            print("-" * 50)
+            for i in range(ctx.seq_len):
+                token_diff = (
+                    vllm_attn_output[i, :] - tt_attn_output_local[i, :]
+                ).float()
+                mean_diff = token_diff.mean().item()
+                max_abs_diff = token_diff.abs().max().item()
+                print(f"{'Token ' + str(i):<12}{mean_diff:>18.9f}{max_abs_diff:>18.9f}")
+            print("=" * 50)
+
         torch.testing.assert_close(
             vllm_attn_output.float(),
             tt_attn_output_local.float(),
