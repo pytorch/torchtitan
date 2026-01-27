@@ -33,7 +33,10 @@ class PreprocessedDataset(IterableDataset, Stateful):
         infinite: bool = False,
         shuffle_seed: int | None = 42,
     ) -> None:
-        ds = load_dataset(dataset_path if dataset_path else dataset_name, split="train")
+        try:
+            ds = load_dataset(dataset_path if dataset_path else dataset_name, split="train")
+        except:
+            ds = load_from_disk(dataset_path if dataset_path else dataset_name)
 
         if shuffle_seed is not None:
             ds = ds.shuffle(shuffle_seed)

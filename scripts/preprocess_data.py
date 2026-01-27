@@ -62,28 +62,44 @@ DATASET_INFO = r"""{
 }"""
 
 
-def process_packing_shard(shard, args, tokenizer_pad_id, rank, world_size):
+def process_packing_shard(
+    shard, args, tokenizer_pad_id, rank, world_size, epoch=0, rng_state=None
+):
+    """Pack a shard of the dataset.
+
+    Args:
+        epoch: Current epoch number (for logging)
+        rng_state: Random state to restore for this shard. If provided, restores random state.
+    """
+    if rng_state is not None:
+        # Restore the random state passed from main process
+        random.setstate(rng_state)
+
     packer = PackedDataset(
         shard,
         max_seq_len=args.pack_to_sequence_length,
         padding_idx=tokenizer_pad_id,
         split_across_pack=not args.chat,
         show_pbar=rank == 0,
+        packing_mode=args.packing_mode,
+    )
+
+    # Shuffle packs after packing (within this shard)
+    random.shuffle(packer.packs)
+
+    example = (
+        {
+            "inputs": packer.packs[0]["inputs"],
+            "labels": packer.packs[0]["labels"],
+            "position_ids": packer.packs[0]["position_ids"],
+            "sequence_lengths": packer.packs[0]["sequence_lengths"],
+        }
+        if len(packer.packs) > 0
+        else None
     )
 
     if args.save_to_disk:
         # create a schema that uses int64 for list sizes
-
-        example = (
-            {
-                "inputs": packer.packs[0]["inputs"],
-                "labels": packer.packs[0]["labels"],
-                "position_ids": packer.packs[0]["position_ids"],
-                "sequence_lengths": packer.packs[0]["sequence_lengths"],
-            }
-            if len(packer.packs) > 0
-            else None
-        )
 
         oriented_data = {
             "inputs": [pack["inputs"] for pack in packer.packs],
@@ -179,6 +195,11 @@ class PackedDataset(Dataset):
             For pre-training, typically this is set to True for general text completion. For
             fine-tuning, typically this is set to False to avoid truncating sentences in instruct
             tuning. Default is False.
+        packing_mode (str): Packing algorithm to use when split_across_pack=False.
+            - "random_fit": (default) No sorting, random bin selection. Avoids length-based bias
+              where long/short samples get grouped together.
+            - "ffd": First-Fit Decreasing. Sorts by length for better packing efficiency but
+              introduces correlation between sample length and pack position.
     """
 
     def __init__(
@@ -191,6 +212,7 @@ class PackedDataset(Dataset):
         split_across_pack: bool = False,
         group_size: int = 5000,
         show_pbar=True,
+        packing_mode: str = "random_fit",
     ) -> None:
         self.ds = ds
         self.max_seq_len = max_seq_len
@@ -206,8 +228,14 @@ class PackedDataset(Dataset):
         self.group_size = group_size
         if split_across_pack:
             self._pack_greedy()
-        else:
+        elif packing_mode == "ffd":
             self._pack_ffd()
+        elif packing_mode == "random_fit":
+            self._pack_random_fit()
+        else:
+            raise ValueError(
+                f"Unknown packing_mode: {packing_mode}. Use 'ffd' or 'random_fit'"
+            )
 
     def _get_empty_pack(self):
 
@@ -313,6 +341,117 @@ class PackedDataset(Dataset):
 
         if pbar:
             # Manually set pbar to total to show 100% at the end
+            pbar.n = pbar.total
+            pbar.refresh()
+            pbar.close()
+
+    def _pack_random_fit(self) -> None:
+        """Pack samples without length-based sorting to avoid bias.
+
+        Unlike FFD which sorts by length (introducing correlation between
+        sample length and pack position), this method:
+        1. Processes samples in their original (pre-shuffled) order
+        2. Randomly selects among bins that can fit each sample
+        3. Shuffles resulting packs within each group
+
+        Slightly less efficient than FFD but eliminates length-based bias.
+        """
+        ds_iterator = iter(self.ds)
+        finished_iterating = False
+
+        pbar = (
+            tqdm(
+                total=len(self.ds),
+                desc="Packing dataset (random-fit)",
+                dynamic_ncols=True,
+            )
+            if self.show_pbar
+            else None
+        )
+
+        while not finished_iterating:
+            # 1. Fetch a group of samples (no sorting!)
+            group = []
+            try:
+                for _ in range(self.group_size):
+                    sample = next(ds_iterator)
+                    seq_len = len(sample["inputs"])
+
+                    if seq_len > self.max_seq_len:
+                        self.dropped += 1
+                        continue
+                    group.append({"sample": sample, "seq_len": seq_len})
+            except StopIteration:
+                finished_iterating = True
+
+            if not group:
+                break
+
+            # 2. Pack using random-fit: for each sample, randomly pick a bin that fits
+            bins = []  # List of {"samples": [], "remaining_space": max_seq_len}
+
+            for item in group:
+                # Find all bins that can fit this sample
+                fitting_bins = [
+                    (i, bin)
+                    for i, bin in enumerate(bins)
+                    if bin["remaining_space"] >= item["seq_len"]
+                ]
+
+                if fitting_bins:
+                    # Randomly select among fitting bins (not first-fit)
+                    idx, chosen_bin = random.choice(fitting_bins)
+                    chosen_bin["samples"].append(item["sample"])
+                    chosen_bin["remaining_space"] -= item["seq_len"]
+                else:
+                    # No bin fits, create new one
+                    bins.append(
+                        {
+                            "samples": [item["sample"]],
+                            "remaining_space": self.max_seq_len - item["seq_len"],
+                        }
+                    )
+
+            # 3. Shuffle bins within this group to break any remaining order correlation
+            random.shuffle(bins)
+
+            # 4. Convert bins to packs
+            for bin_info in bins:
+                if self._should_stop_packing():
+                    break
+
+                current_pack = self._get_empty_pack()
+                # Also shuffle samples within each pack
+                random.shuffle(bin_info["samples"])
+
+                for sample in bin_info["samples"]:
+                    tokens = np.array(sample["inputs"], dtype=np.int32)
+                    labels = np.array(sample["labels"], dtype=np.int32)
+                    seq_len = len(tokens)
+
+                    current_pack["inputs"] = np.concatenate(
+                        (current_pack["inputs"], tokens)
+                    )
+                    current_pack["labels"] = np.concatenate(
+                        (current_pack["labels"], labels)
+                    )
+                    current_pack["position_ids"] = np.concatenate(
+                        (
+                            current_pack["position_ids"],
+                            np.arange(seq_len, dtype=np.int32),
+                        )
+                    )
+                    current_pack["sequence_lengths"].append(seq_len)
+
+                self._add_pack(current_pack)
+
+            if pbar:
+                pbar.update(len(group))
+
+            if self._should_stop_packing():
+                break
+
+        if pbar:
             pbar.n = pbar.total
             pbar.refresh()
             pbar.close()
@@ -466,7 +605,13 @@ class PackedDataset(Dataset):
 
 
 def main(args):
-    dataset = load_dataset(args.dataset, name=args.subset, split=args.split)
+    # Handle local files vs HuggingFace datasets
+    if os.path.exists(args.dataset):
+        # Local file - load as JSON/JSONL
+        dataset = load_dataset("json", data_files=args.dataset, split="train")
+    else:
+        # HuggingFace dataset
+        dataset = load_dataset(args.dataset, name=args.subset, split=args.split)
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
 
     def _tokenize(sample):
@@ -480,7 +625,17 @@ def main(args):
         inputs = []
         labels = []
 
-        for conversation in sample["conversations"]:
+        # Support both ShareGPT ("conversations") and OpenAI ("messages") column names
+        if "conversations" in sample:
+            conversations_list = sample["conversations"]
+        elif "messages" in sample:
+            conversations_list = sample["messages"]
+        else:
+            raise RuntimeError(
+                f"Expected 'conversations' or 'messages' column, got: {list(sample.keys())}"
+            )
+
+        for conversation in conversations_list:
             for message in conversation:
 
                 keys = list(message.keys())
@@ -501,23 +656,29 @@ def main(args):
                 else:
                     raise RuntimeError(f"Unknown chat format, keys are {keys}")
 
-            tokens = tokenizer.apply_chat_template(conversation, tokenize=True)
+            tokens = tokenizer.apply_chat_template(
+                conversation, tokenize=True, add_generation_prompt=False
+            )
             label = []
 
             current_len = 0
             for i in range(len(conversation)):
                 if i + 1 == len(conversation):
-                    next_tokens = tokenizer.apply_chat_template(conversation)[
-                        current_len:
-                    ]
+                    next_tokens = tokenizer.apply_chat_template(
+                        conversation, tokenize=True, add_generation_prompt=False
+                    )[current_len:]
                 else:
                     if "assistant" == conversation[i + 1]["role"]:
                         next_tokens = tokenizer.apply_chat_template(
-                            conversation[: i + 1], add_generation_prompt=True
+                            conversation[: i + 1],
+                            add_generation_prompt=True,
+                            tokenize=True,
                         )[current_len:]
                     else:
                         next_tokens = tokenizer.apply_chat_template(
-                            conversation[: i + 1]
+                            conversation[: i + 1],
+                            tokenize=True,
+                            add_generation_prompt=False,
                         )[current_len:]
 
                 if conversation[i]["role"] == "assistant":
@@ -535,11 +696,20 @@ def main(args):
             "labels": labels,
         }
 
-    dataset = dataset.shuffle(args.seed)
+    # Note: Don't shuffle here - shuffling happens per-epoch during packing
+    # to ensure each epoch has independent ordering
     if args.limit:
         dataset = dataset.select(range(args.limit))
     if args.chat and args.multiturn_only:
-        dataset = dataset.filter(lambda x: len(x["conversations"]) > 3)
+        # Support both ShareGPT ("conversations") and OpenAI ("messages") column names
+        def _get_conversation_len(x):
+            if "conversations" in x:
+                return len(x["conversations"])
+            elif "messages" in x:
+                return len(x["messages"])
+            return 0
+
+        dataset = dataset.filter(lambda x: _get_conversation_len(x) > 3)
 
     original_column_names = list(dataset.features.keys())
     dataset = dataset.map(
@@ -554,59 +724,201 @@ def main(args):
     dropped = 0
     if args.pack_to_sequence_length:
         num_shards = 64  # args.num_proc
-        shards = [
-            dataset.shard(num_shards=num_shards, index=i) for i in range(num_shards)
-        ]
-        with multiprocessing.Pool(processes=num_shards) as pool:
-            process_args = [
-                (shard, args, tokenizer.pad_token_id, index, num_shards)
-                for index, shard in enumerate(shards)
-            ]
+        num_epochs = args.epochs
 
-            results = pool.starmap(process_packing_shard, process_args)
+        # Seed random ONCE at the beginning - all randomness flows from here
+        random.seed(args.seed)
+        print(f"Initialized random seed: {args.seed}")
 
-        examples = []
-        filenames = []
+        all_examples = []
         total_tokens = 0
         packed_tokens = 0
+        file_counter = 0
 
-        for total, packed, dropped_, filename, example in tqdm(results):
-            if example:
-                examples.append(example)
-            if filename:
-                filenames.append(filename)
-            total_tokens += total
-            packed_tokens += packed
-            dropped += dropped_
+        for epoch in range(num_epochs):
+            # Generate a unique shuffle seed for this epoch from the main RNG
+            epoch_shuffle_seed = random.randint(0, 2**31 - 1)
+
+            # Shuffle dataset for this epoch using generated seed
+            epoch_dataset = dataset.shuffle(seed=epoch_shuffle_seed)
+
+            shards = [
+                epoch_dataset.shard(num_shards=num_shards, index=i)
+                for i in range(num_shards)
+            ]
+
+            print(
+                f"Packing epoch {epoch + 1}/{num_epochs} (shuffle_seed={epoch_shuffle_seed})..."
+            )
+
+            # Generate unique random states for each shard from main RNG
+            shard_rng_states = [random.getstate() for _ in range(num_shards)]
+            # Advance the RNG for each shard to ensure uniqueness
+            for _ in range(num_shards):
+                random.random()  # Advance state
+
+            with multiprocessing.Pool(processes=num_shards) as pool:
+                process_args = [
+                    (
+                        shard,
+                        args,
+                        tokenizer.pad_token_id,
+                        index,
+                        num_shards,
+                        epoch,
+                        shard_rng_states[index],
+                    )
+                    for index, shard in enumerate(shards)
+                ]
+
+                results = pool.starmap(process_packing_shard, process_args)
+
+            # Collect results from this epoch
+            epoch_filenames = []
+            for total, packed, dropped_, filename, example in results:
+                if example:
+                    all_examples.append(example)
+                if filename:
+                    epoch_filenames.append(filename)
+                total_tokens += total
+                packed_tokens += packed
+                dropped += dropped_
+
+            # Shuffle filenames within this epoch using main RNG (no re-seeding)
+            if args.save_to_disk and epoch_filenames:
+                random.shuffle(epoch_filenames)
+
+                # Rename files to global sequential order
+                for old_filename in epoch_filenames:
+                    old_path = os.path.join(args.save_to_disk, old_filename)
+                    new_filename = f"data-{file_counter:05d}-of-TOTAL.arrow"
+                    new_path = os.path.join(args.save_to_disk, new_filename)
+                    os.rename(old_path, new_path)
+                    file_counter += 1
+
+        # Fix the "of-TOTAL" placeholders in filenames
+        if args.save_to_disk:
+            for i in range(file_counter):
+                old_path = os.path.join(
+                    args.save_to_disk, f"data-{i:05d}-of-TOTAL.arrow"
+                )
+                new_filename = f"data-{i:05d}-of-{file_counter:05d}.arrow"
+                new_path = os.path.join(args.save_to_disk, new_filename)
+                os.rename(old_path, new_path)
 
         if total_tokens > 0:
             efficiency = packed_tokens / total_tokens
 
-        example = examples[0]
+        example = all_examples[0] if all_examples else None
 
         if args.save_to_disk:
             with open(os.path.join(args.save_to_disk, "dataset_info.json"), "wb") as f:
                 f.write(DATASET_INFO.encode())
 
             # verify we can open and do any conversion needed
-            dataset = load_dataset(args.save_to_disk, num_proc=args.num_proc)
-            print(f"!!! Warning, data is sorted by packed sequence lengths, shuffle before using")
+            final_dataset = load_dataset(args.save_to_disk, num_proc=args.num_proc)
+            print(
+                f"Created {len(final_dataset['train'])} packed samples across {num_epochs} epoch(s)"
+            )
+            if args.packing_mode == "ffd":
+                print(
+                    f"!!! Warning: FFD packing sorts by length, which may introduce bias. "
+                    f"Consider using --packing-mode=random_fit or shuffle before using."
+                )
 
     else:
-        if args.drop_larger_than:
+        # No packing - just shuffle and save tokenized samples
+        # Support multiple epochs: each epoch gets a different shuffle, then concatenated
+        num_epochs = args.epochs
+
+        # Seed random ONCE at the beginning - all randomness flows from here
+        random.seed(args.seed)
+        print(f"Initialized random seed: {args.seed}")
+
+        if num_epochs == 1:
+            dataset = dataset.shuffle(seed=args.seed)
+        else:
+            from datasets import concatenate_datasets
+
+            epoch_datasets = []
+            for epoch in range(num_epochs):
+                # Generate a unique shuffle seed for this epoch from the main RNG
+                epoch_shuffle_seed = random.randint(0, 2**31 - 1)
+                print(
+                    f"Shuffling epoch {epoch + 1}/{num_epochs} (shuffle_seed={epoch_shuffle_seed})..."
+                )
+                epoch_dataset = dataset.shuffle(seed=epoch_shuffle_seed)
+                epoch_datasets.append(epoch_dataset)
+
+            dataset = concatenate_datasets(epoch_datasets)
+            print(f"Concatenated {num_epochs} epochs: {len(dataset)} total samples")
+
+        if args.pad_to_and_drop_larger_than:
+            max_seq_len = args.pad_to_and_drop_larger_than
             len_before = len(dataset)
-            dataset = dataset.filter(
-                lambda x: len(x["inputs"]) <= args.drop_larger_than
-            )
+            dataset = dataset.filter(lambda x: len(x["inputs"]) <= max_seq_len)
             dropped = len_before - len(dataset)
+
+            # Pad samples and add position_ids/sequence_lengths
+            def _pad_and_add_metadata(sample):
+                seq_len = len(sample["inputs"])
+                num_padding = max_seq_len - seq_len
+
+                # Pad inputs with pad token
+                padded_inputs = (
+                    sample["inputs"] + [tokenizer.pad_token_id] * num_padding
+                )
+
+                # Pad labels with -100 (ignore index)
+                if "labels" in sample:
+                    padded_labels = sample["labels"] + [-100] * num_padding
+                else:
+                    # If no labels, create them from inputs and pad
+                    padded_labels = sample["inputs"] + [-100] * num_padding
+
+                # Position IDs: continue incrementing for padding
+                position_ids = list(range(max_seq_len))
+
+                # Sequence lengths: actual sequence + padding length
+                sequence_lengths = [seq_len]
+                if num_padding > 0:
+                    sequence_lengths.append(num_padding)
+
+                return {
+                    "inputs": padded_inputs,
+                    "labels": padded_labels,
+                    "position_ids": position_ids,
+                    "sequence_lengths": sequence_lengths,
+                }
+
+            dataset = dataset.map(
+                _pad_and_add_metadata,
+                num_proc=args.num_proc,
+            )
+        else:
+            # Add position_ids and sequence_lengths for consistency with packed format
+            def _add_position_ids_and_seq_lengths(sample):
+                seq_len = len(sample["inputs"])
+                return {
+                    "position_ids": list(range(seq_len)),
+                    "sequence_lengths": [seq_len],
+                }
+
+            dataset = dataset.map(
+                _add_position_ids_and_seq_lengths,
+                num_proc=args.num_proc,
+            )
 
         if args.save_to_disk:
             print(f"Saving to {args.save_to_disk}")
             dataset.save_to_disk(args.save_to_disk)
+        if args.push_to_hub:
+            print(f"Pushing to Hugging Face repo {args.push_to_hub}")
+            dataset.push_to_hub(args.save_to_disk, private=True)
 
         example = dataset[0]
 
-    if args.show_example:
+    if args.show_example and example is not None:
         inputs = example["inputs"]
         labels = example["labels"] if "labels" in example else None
         position_ids = example["position_ids"] if "position_ids" in example else None
@@ -617,7 +929,7 @@ def main(args):
             label = labels[i] if labels is not None else token
             position_id = position_ids[i] if position_ids is not None else None
 
-            decoded = tokenizer.decode(token)
+            decoded = tokenizer.decode([token])
 
             if label == -100:
                 example_out += f"\033[31m{decoded}\033[0m({token}"
@@ -649,10 +961,25 @@ if __name__ == "__main__":
     parser.add_argument("--chat", action="store_true")
     parser.add_argument("--multiturn-only", action="store_true")
     parser.add_argument("--pack-to-sequence-length", type=int)
-    parser.add_argument("--drop-larger-than", type=int)
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=1,
+        help="Number of epochs to pack. Each epoch shuffles and packs independently, "
+        "so the same sample appears in different packs across epochs.",
+    )
+    parser.add_argument(
+        "--packing-mode",
+        type=str,
+        default="random_fit",
+        choices=["ffd", "random_fit"],
+        help="Packing algorithm: 'ffd' (First-Fit Decreasing, sorted by length) or "
+        "'random_fit' (no sorting, random bin selection - default, avoids length bias)",
+    )
+    parser.add_argument("--pad-to-and-drop-larger-than", type=int)
     parser.add_argument("--save-to-disk", type=str)
+    parser.add_argument("--push-to-hub", type=str)
     parser.add_argument("--show-example", action="store_true")
     args = parser.parse_args()
 
     main(args)
-    

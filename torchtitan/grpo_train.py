@@ -188,8 +188,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         dist_utils.set_determinism(
             world_mesh,
             self.device,
-            job_config.training.seed,
-            job_config.training.deterministic,
+            job_config.debug,
+            distinct_seed_mesh_dims=["pp"],
         )
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
 
@@ -212,9 +212,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"Building {self.job_config.model.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            model = self.train_spec.model_cls(model_args)
+            try:
+                model = self.train_spec.model_cls(model_args, job_config.peft)
+            except TypeError:
+                model = self.train_spec.model_cls(model_args)
             if self.use_ref_model:
-                ref_model = self.train_spec.model_cls(model_args)
+                try:
+                    ref_model = self.train_spec.model_cls(model_args, job_config.peft)
+                except TypeError:
+                    ref_model = self.train_spec.model_cls(model_args)
             else:
                 ref_model = None
 
@@ -421,7 +427,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         self.train_context = dist_utils.get_train_context(
             loss_parallel_enabled,
-            parallelism_config.enable_compiled_autograd,
         )
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
             parallel_dims,
@@ -488,7 +493,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             self.model_parts[0].named_parameters(), key=lambda item: item[0]
         ):  # type: str, DTensor
             if param.requires_grad:
-                new_name, needs_permute = param_to_sglang_data(param_name)
+                new_name, needs_permute = param_to_sglang_data(
+                    param_name, self.job_config.model.name != "qwen3"
+                )
                 self.param_name_to_send_list.append(param_name)
                 local_shape = list(param.to_local().shape)
                 sglang_json["param_mappings"][param_name] = {
@@ -719,6 +726,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             dynamic_batch_size,
             dynamic_grad_acc_size,
             data_lens,
+            prep_time,
+            get_time,
+            dump_time,
         ) = self.data_handler.data_handling(
             self.sglang_nccl_group,
             self.cp_degree,
@@ -740,6 +750,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             dynamic_grad_acc_size,
             data_lens,
             data_loading_time,
+            prep_time,
+            get_time,
+            dump_time,
         )
 
     def create_microbatches(
@@ -1090,6 +1103,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 dynamic_grad_acc_size,
                 data_lens,
                 data_loading_time,
+                prep_time,
+                get_time,
+                dump_time,
             ) = self.grab_batch()
             logger.debug("creating microbatches...")
             microbatches, actual_grad_accum, batch_prep_time = self.create_microbatches(
@@ -1220,6 +1236,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 "loss_metrics/lr": lr,
                 "time_metrics/data_prep_s": data_loading_time,
                 "time_metrics/batch_prep_s": batch_prep_time,
+                "time_metrics/data_get_s": get_time,
+                "time_metrics/data_dump_s": dump_time,
+                "time_metrics/pred_data_s": prep_time,
             }
         )
         if data_iterator is not None:
@@ -1234,13 +1253,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                         "loss_metrics/ptx_scale": global_dynamic_scale,
                     }
                 )
-        self.metrics_processor.log(
-            self.step,
-            global_avg_loss,
-            global_max_loss,
-            grad_norm,
-            extra_metrics=extra_metrics,
-        )
+        return self.step, global_avg_loss, global_max_loss, grad_norm, extra_metrics
 
     def collate_metrics(self, metrics_per_nb, weights_per_nb):
         # For now we'll just assume we'll average them all together
@@ -1447,7 +1460,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.step += 1
                 self.gc_handler.run(self.step)
                 try:
-                    self.train_step(data_iterator)
+                    (
+                        step,
+                        global_avg_loss,
+                        global_max_loss,
+                        grad_norm,
+                        extra_metrics,
+                    ) = self.train_step(data_iterator)
                 except DataloaderExhaustedError:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
@@ -1460,9 +1479,28 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
 
                 # Update ref and inference weights...
+                ema_weight_start = time.perf_counter()
                 self.ema_ref_weights()
+                ema_weight_end = time.perf_counter()
+                send_weight_start = time.perf_counter()
                 self.send_weights()
-
+                send_weight_end = time.perf_counter()
+                if self.use_ref_model and (
+                    0.0 < self.job_config.grpo.ref_model_ema < 1.0
+                ):
+                    extra_metrics["time_metrics/ref_ema_s"] = (
+                        ema_weight_end - ema_weight_start
+                    )
+                extra_metrics["time_metrics/send_weights_s"] = (
+                    send_weight_end - send_weight_start
+                )
+                self.metrics_processor.log(
+                    self.step,
+                    global_avg_loss,
+                    global_max_loss,
+                    grad_norm,
+                    extra_metrics=extra_metrics,
+                )
                 # Back to normal timeout
 
                 self.checkpointer.save(

@@ -119,9 +119,11 @@ def prepare_context_parallel_input(
               sharded 'attention_masks'
     """
     attention_masks = extra_kwargs.get("attention_masks", None)
-    positions = torch.arange(
-        0, inputs.shape[1], dtype=torch.int32, device=device
-    ).expand(inputs.shape)
+    positions = extra_kwargs.get("positions", None)
+    if positions is None:
+        positions = torch.arange(
+            0, inputs.shape[1], dtype=torch.int32, device=device
+        ).expand(inputs.shape)
     (inputs, labels, positions), attention_masks = cp_shard(
         cp_mesh,
         (inputs, labels, positions),

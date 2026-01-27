@@ -7,17 +7,6 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 
-from dataclasses import dataclass, field
-
-from torch import nn
-
-from torchtitan.config import JobConfig
-from torchtitan.models.moe import MoEArgs
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.protocols.train_spec import BaseModelArgs
-
-from torchtitan.tools.logging import logger
-
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 #
@@ -57,7 +46,7 @@ class Qwen3NextModelArgs(BaseModelArgs):
     max_seq_len: int = 4096
     depth_init: bool = True
 
-    use_flex_attn: bool = True
+    attn_type: str = "flex"
     attn_mask_type: str = "block_causal"
 
     enable_weight_tying: bool = False
@@ -86,8 +75,12 @@ class Qwen3NextModelArgs(BaseModelArgs):
         self.max_seq_len = seq_len
 
         self.moe_args._debug_force_load_balance = (
-            job_config.training.debug_moe_force_load_balance
+            job_config.debug.moe_force_load_balance
         )
+
+        # Pass DeepEP config to MoE layer and validate
+        self.moe_args.deepep_config = job_config.deepep
+        self.moe_args.validate_deepep_config()
 
         if self.layer_types == []:
             self.layer_types = [
@@ -99,10 +92,16 @@ class Qwen3NextModelArgs(BaseModelArgs):
                 for i in range(self.n_layers)
             ]
 
-        if not self.use_flex_attn:
-            raise ValueError("Qwen3-Next requires FlexAttention")
+        if self.attn_type != "flex":
+            raise ValueError(f"Qwen3-Next requires `attn_type` be 'flex' but got {self.attn_type}")
+        if (
+            job_config.compile.enable
+            and "model" in job_config.compile.components
+            and job_config.compile.fullgraph
+        ):
+            raise ValueError("`compile.fullgraph` must be off for Qwen3-Next")
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
     ) -> tuple[int, float]:
-        return get_moe_model_nparams_and_flops(self, model, seq_len)
+        return get_moe_model_nparams_and_flops(self, model, 2 * self.head_dim, seq_len)

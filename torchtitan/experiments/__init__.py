@@ -16,5 +16,6 @@ _supported_experiments = frozenset(
         "autoparallel.deepseek_v3",
         "autoparallel.local_map_deepseek_v3",
         "qwen3_next",
+        "kimi_linear",
     ]
 )

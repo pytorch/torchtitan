@@ -6,6 +6,7 @@
 
 import enum
 import functools
+import json
 import os
 import queue
 import re
@@ -286,6 +287,7 @@ class CheckpointManager:
         self.initial_load_in_hf_quantized = (
             checkpoint_config.initial_load_in_hf_quantized
         )
+        self.initial_load_multipart = checkpoint_config.initial_load_multipart
         self.last_save_model_only = checkpoint_config.last_save_model_only
         self.last_save_in_hf = checkpoint_config.last_save_in_hf
         self.initial_load_legacy = checkpoint_config.initial_load_legacy
@@ -303,12 +305,10 @@ class CheckpointManager:
 
         # Async checkpoint related fields.
         async_mode = checkpoint_config.async_mode.lower()
-        if (
-            async_mode == AsyncMode.ASYNC
-            or async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
-            or self.enable_ft_dataloader_checkpoints
-        ):
-            self.pg = dist.new_group(backend="gloo")
+        # Always create a gloo process group for checkpoint operations.
+        # This avoids NCCL GPU memory allocation during gather_object() in DCP,
+        # which can cause OOM when GPU memory is near capacity (e.g., large MoE models).
+        self.pg = dist.new_group(backend="gloo")
 
         self.keep_latest_k = checkpoint_config.keep_latest_k
         if self.keep_latest_k > 0:
@@ -438,10 +438,13 @@ class CheckpointManager:
                 async_stager=self.stager,
             )
         else:
+            # Use gloo process_group to avoid NCCL GPU memory allocation
+            # during gather_object() which can cause OOM on high memory usage models
             ret = dcp.save(
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
+                process_group=self.pg,
             )
 
         # pyrefly: ignore [missing-attribute]
@@ -466,6 +469,7 @@ class CheckpointManager:
         checkpoint_id: str,
         from_hf: bool,
         from_quantized: bool,
+        from_multipart: bool,
     ) -> None:
         """Load the checkpoint with dcp.
         Args:
@@ -498,6 +502,52 @@ class CheckpointManager:
             if self.has_ref_model:
                 ref_state_dict = self.sd_adapter.from_hf(hf_state_dict)
                 self.states[REF_MODEL].load_state_dict(ref_state_dict)
+        elif from_multipart:
+            with open(os.path.join(checkpoint_id, "meta_data.json"), "r") as f:
+                multipart_meta = json.load(f)
+            num_parts = len(multipart_meta)
+
+            # DCP uses collectives, so we must load sequentially across ranks.
+            # But we can overlap load_state_dict with the next dcp.load using a background thread.
+            load_state_dict_queue = queue.Queue(maxsize=2)
+            load_error = None
+
+            def load_state_dict_worker():
+                nonlocal load_error
+                try:
+                    while True:
+                        item = load_state_dict_queue.get()
+                        if item is None:  # Sentinel to stop
+                            break
+                        subset, idx = item
+                        logger.info(f"Applying shard {idx}/{num_parts} to model ({len(subset)} tensors)")
+                        state_dict.update(subset)
+                        if MODEL in self.states:
+                            self.states[MODEL].load_state_dict(subset)
+                        if self.has_ref_model and REF_MODEL in self.states:
+                            self.states[REF_MODEL].load_state_dict(subset)
+                except Exception as e:
+                    load_error = e
+
+            worker = threading.Thread(target=load_state_dict_worker, daemon=True)
+            worker.start()
+
+            for index, (dcp_iter, keys_in_file) in enumerate(multipart_meta.items()):
+                state_dict_subset = {key: state_dict[key] for key in keys_in_file}
+                logger.info(f"Loading {len(keys_in_file)} tensors from multipart checkpoint shard {index+1}/{num_parts}")
+                dcp.load(
+                    state_dict_subset,
+                    checkpoint_id=os.path.join(checkpoint_id, str(dcp_iter)),
+                )
+                # Queue for background load_state_dict (blocks if previous one still processing)
+                load_state_dict_queue.put((state_dict_subset, index + 1))
+
+            # Signal worker to stop and wait for it
+            load_state_dict_queue.put(None)
+            worker.join()
+            if load_error is not None:
+                raise load_error
+
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
@@ -550,6 +600,12 @@ class CheckpointManager:
                 return
 
             states = self._flattened_model_states_sd()
+            # Clear CUDA cache before checkpoint to free GPU memory for DCP operations
+            # This is critical for high memory usage models (e.g., large MoE) to avoid
+            # OOM during gather_object() in distributed checkpoint coordination
+            GarbageCollection.collect(
+                "Pre-checkpoint GC with CUDA cache clear", empty_cuda_cache=True
+            )
             if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
                 if (DefaultStager is None) or (StagingOptions is None):
                     raise RuntimeError(
@@ -621,10 +677,12 @@ class CheckpointManager:
         model_only = False
         from_hf = False
         from_quantized = False
+        from_multipart = False
         if not os.path.exists(self.folder):
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
+            from_multipart = self.initial_load_multipart
             if from_hf:
                 assert (
                     model_only
@@ -634,6 +692,11 @@ class CheckpointManager:
                 assert (
                     from_hf
                 ), "Quantized checkpoint can only be loaded from HuggingFace format."
+
+            if from_multipart:
+                assert (
+                    model_only
+                ), "Multipart checkpoint can only be loaded from model only."
 
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
@@ -690,6 +753,7 @@ class CheckpointManager:
             checkpoint_id=checkpoint_id,
             from_hf=from_hf,
             from_quantized=from_quantized,
+            from_multipart=from_multipart,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -770,6 +834,7 @@ class CheckpointManager:
             # FT checkpoints are always DCP because FT checkpoint currently only save/load dataloader.
             from_hf=False,
             from_quantized=False,
+            from_multipart=False,
         )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
@@ -860,6 +925,10 @@ class CheckpointManager:
                 self.last_save_model_only
             ), "Only model can be saved when saving in HF safetensors format."
 
+        # Clear CUDA cache before checkpoint to free GPU memory for DCP operations
+        GarbageCollection.collect(
+            "Pre-checkpoint GC with CUDA cache clear (last step)", empty_cuda_cache=True
+        )
         self.dcp_save(
             states,
             checkpoint_id=self._create_checkpoint_id(curr_step),

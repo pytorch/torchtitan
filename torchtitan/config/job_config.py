@@ -39,9 +39,45 @@ class Job:
 
 
 @dataclass
+class PEFT:
+    enable_peft: bool = False
+    """Whether to enable PEFT"""
+
+    use_lora: bool = False
+    """Whether to use PEFT with LoRA"""
+
+    layers_to_train: List[int] | None = None
+    """List of layers to train for PEFT"""
+
+    lora_rank: int = 8
+    """Rank of the low-rank approximation for PEFT"""
+
+    lora_alpha: float = 1.0
+    """Alpha parameter for the PEFT"""
+
+    lora_dropout: float = 0.0
+    """Dropout probability for the PEFT"""
+
+    lora_train_norm: bool = False
+    """Whether to train the normalization layers while using LoRA"""
+
+    train_embeddings: bool = False
+    """Whether to train the embeddings for PEFT"""
+
+    train_output_layer: bool = False
+    """Whether to train the output layer for PEFT"""
+
+
+@dataclass
 class Profiling:
     enable_profiling: bool = False
     """Whether to enable pytorch profile"""
+
+    with_stack: bool = True
+    """Record source information (file and line number) for the ops"""
+
+    with_modules: bool = True
+    """Record module hierarchy (including function names) corresponding to the callstack of the op"""
 
     save_traces_folder: str = "profile_traces"
     """Trace files location"""
@@ -163,6 +199,92 @@ class Optimizer:
     is not compatible with gradients clipping, users should not call
     register_post_accumulate_grad_hook after the optimizer is built.
     """
+
+    # Dion-specific parameters
+    mu: float = 0.95
+    """Momentum factor for Dion optimizer"""
+
+    rank_fraction: float = 1.0
+    """r/d fraction for low-rank approximation in Dion. Used to compute the low-rank dimension."""
+
+    rank_multiple_of: int = 1
+    """Round up the low-rank dimension to a multiple of this number in Dion."""
+
+    algorithm: str = "dion"
+    """Algorithm to use for Dion optimizer. Can be 'dion', 'adamw', or 'lion'."""
+
+    power_iters: int = 1
+    """Number of power iterations for low-rank approximation in Dion."""
+
+    qr_method: str = "rcqr"
+    """Method for computing QR decomposition in Dion."""
+
+    cqr_warmup_steps: int = 150
+    """Warmup steps for CQR method in Dion (currently ignored)."""
+
+    rcqr_oversample: float = 1.25
+    """Random sketch matrix oversampling for RCQR in Dion."""
+
+    replicate_mesh_grad_sync: bool = True
+    """Whether Dion optimizer handles data-parallel gradient sync."""
+
+    # Mixed precision options for Dion
+    momentum_dtype: str | None = None
+    """Dtype for momentum state in Dion. None means same as parameter dtype."""
+
+    Q_dtype: str | None = None
+    """Dtype for Q matrix in Dion. None means same as parameter dtype."""
+
+    variance_dtype: str | None = None
+    """Dtype for variance state in Dion (for AdamW algorithm). None means same as parameter dtype."""
+
+    # Parameter-specific optimizer selection for Dion
+    scalar_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for 1D scalar parameters (biases, layer norms, etc.) when using Dion."""
+
+    embedding_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for embedding layers when using Dion."""
+
+    head_optimizer: Literal["adamw", "lion"] = "adamw"
+    """Optimizer to use for model head/output layers when using Dion."""
+
+    expert_optimizer: Literal["adamw", "lion"] | None = None
+    """Optimizer to use for model expert layers when using Dion."""
+
+    routing_optimizer: Literal["adamw", "lion"] | None = None
+    """Optimizer to use for model router parameters when using Dion."""
+
+    head_lr_scaling: bool = True
+    """Whether to apply 1/sqrt(dim) learning rate scaling for head layers."""
+
+    # Learning rate scaling factors for different parameter types
+    scalar_lr_factor: float = 1.0
+    """Learning rate scaling factor for scalar parameters."""
+
+    embedding_lr_factor: float = 1.0
+    """Learning rate scaling factor for embedding parameters."""
+
+    head_lr_factor: float = 1.0
+    """Learning rate scaling factor for head parameters (applied after head_lr_scaling if enabled)."""
+
+    expert_lr_factor: float = 1.0
+    """Learning rate scaling factor for expert parameters."""
+
+    routing_lr_factor: float = 1.0
+    """Learning rate scaling factor for routing parameters."""
+
+    # Muon-specific parameters
+    nesterov: bool = False
+    """Whether to use Nesterov momentum in Muon optimizer."""
+
+    adjust_lr: str | None = "spectral_norm"
+    """How to adjust the learning rate for Muon updates. Options: 'spectral_norm', 'rms_norm', or None."""
+
+    flatten: bool = False
+    """Whether to flatten 3D+ tensors to 2D for Muon updates."""
+
+    use_triton: bool = False
+    """Whether to use Triton kernel for Newton-Schulz in Muon optimizer."""
 
 
 @dataclass
@@ -493,6 +615,53 @@ class Parallelism:
 
 
 @dataclass
+class DeepEP:
+    """Configuration for DeepEP (Deep Expert Parallelism) MoE communication.
+
+    DeepEP provides optimized all-to-all communication for MoE token dispatch/combine.
+    These settings only take effect when model.use_deepep is enabled.
+    """
+
+    sync_comm_stream: bool = False
+    """
+    Whether to synchronize the DeepEP communication stream with the default CUDA stream.
+
+    DeepEP uses a separate communication stream for dispatch/combine operations.
+    Without sync (default): Better performance, but may cause race conditions if
+    the DeepEP version doesn't properly synchronize streams internally.
+
+    With sync enabled: Adds explicit CUDA event-based synchronization between the
+    comm stream and default stream after each dispatch/combine operation.
+    """
+
+    fused_weighted_scatter_add: bool = False
+    """
+    Whether to use fused weighted scatter_add kernel for combining expert outputs.
+
+    When enabled (default) and score_before_experts=False, the routing probability
+    multiplication is fused into the scatter_add operation in unpermute, providing
+    2-3x speedup over separate multiply + scatter_add.
+
+    When disabled, the multiplication happens in GroupedExperts.forward() after
+    expert computation (original behavior).
+    """
+
+    fused_silu_gate_prob: bool = False
+    """
+    Whether to use fused SiLU-Gate-Prob Triton kernel for expert computation.
+
+    When enabled, fuses silu(x@w1) * (x@w3) * prob into a single Triton kernel,
+    providing ~3.5x speedup over separate operations. Requires score_before_experts=False.
+
+    The kernel computes intermediates in float32 for numerical stability,
+    with bfloat16 input/output.
+
+    Note: This may cause ~0.15% gradient difference compared to unfused version
+    due to different operation ordering (prob applied before w2 matmul vs after).
+    """
+
+
+@dataclass
 class Checkpoint:
     enable: bool = False
     """Whether to enable checkpoint"""
@@ -557,6 +726,11 @@ class Checkpoint:
     initial_load_legacy: bool = False
     """
     From model checkpoint paths converted in our old branch
+    """
+
+    initial_load_multipart: bool = False
+    """
+    Enable loading of multipart checkpoints. This option is only used when `initial_load_path` is specified.
     """
 
     initial_load_in_hf: bool = False
@@ -739,6 +913,9 @@ class Compile:
     components: list[str] = field(default_factory=lambda: ["model", "loss"])
     """Which components to compile"""
     backend: str = "inductor"
+
+    """Use fullgraph when compiling"""
+    fullgraph: bool = True
 
 
 @dataclass
@@ -1104,6 +1281,7 @@ class GRPO:
     """
 
 
+@dataclass
 class Debug:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
@@ -1132,6 +1310,7 @@ class JobConfig:
     lr_scheduler: LRScheduler = field(default_factory=LRScheduler)
     training: Training = field(default_factory=Training)
     parallelism: Parallelism = field(default_factory=Parallelism)
+    deepep: DeepEP = field(default_factory=DeepEP)
     checkpoint: Checkpoint = field(default_factory=Checkpoint)
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint
@@ -1145,6 +1324,7 @@ class JobConfig:
     validation: Validation = field(default_factory=Validation)
     grpo: GRPO = field(default_factory=GRPO)
     debug: Debug = field(default_factory=Debug)
+    peft: PEFT = field(default_factory=PEFT)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

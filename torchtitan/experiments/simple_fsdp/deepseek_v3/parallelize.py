@@ -89,7 +89,7 @@ def parallelize_deepseekv3(
             parallel_dims.get_mesh("tp"),
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            cp_enabled=parallel_dims.cp_enabled,
+            positions_enabled=parallel_dims.cp_enabled or job_config.training.dataset_type == "preprocessed",
         )
         maybe_enable_async_tp(job_config, parallel_dims.get_mesh("tp"))
 

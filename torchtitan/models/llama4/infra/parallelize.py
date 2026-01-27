@@ -35,6 +35,7 @@ except ImportError:
     )
 
     PrepareModuleInputOutput = None
+from torchtitan.components.peft.lora import LoraColwiseParallel, LoraRowwiseParallel
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
@@ -410,6 +411,24 @@ def apply_fsdp(
                 > transformer_block.moe.experts.num_experts
             ):
                 _experts_shard_placement_fn = lambda param: Shard(1)
+            try:
+                if hasattr(transformer_block.moe.experts, "w1_lora_a"):
+                    # change dtype if mixed precision is enabled
+                    transformer_block.moe.experts.w1.requires_grad = False
+                    transformer_block.moe.experts.w2.requires_grad = False
+                    transformer_block.moe.experts.w3.requires_grad = False
+                    if param_dtype == torch.bfloat16:
+                        transformer_block.moe.experts.w1.data = (
+                            transformer_block.moe.experts.w1.data.to(torch.bfloat16)
+                        )
+                        transformer_block.moe.experts.w2.data = (
+                            transformer_block.moe.experts.w2.data.to(torch.bfloat16)
+                        )
+                        transformer_block.moe.experts.w3.data = (
+                            transformer_block.moe.experts.w3.data.to(torch.bfloat16)
+                        )
+            except AttributeError:
+                pass
 
             fully_shard(
                 transformer_block.moe.experts,
@@ -424,6 +443,44 @@ def apply_fsdp(
             transformer_block.moe.experts.set_gradient_divide_factor(
                 gradient_divide_factor,
             )
+        if not transformer_block.moe_enabled:
+            try:
+                if hasattr(transformer_block.feed_forward.w1, "lora_a"):
+                    if param_dtype == torch.bfloat16:
+                        transformer_block.feed_forward.w1.weight.data = (
+                            transformer_block.feed_forward.w1.weight.data.to(
+                                torch.bfloat16
+                            )
+                        )
+                        transformer_block.feed_forward.w2.weight.data = (
+                            transformer_block.feed_forward.w2.weight.data.to(
+                                torch.bfloat16
+                            )
+                        )
+                        transformer_block.feed_forward.w3.weight.data = (
+                            transformer_block.feed_forward.w3.weight.data.to(
+                                torch.bfloat16
+                            )
+                        )
+            except AttributeError:
+                pass
+        try:
+            if hasattr(transformer_block.attention.wq, "lora_a"):
+                if param_dtype == torch.bfloat16:
+                    transformer_block.attention.wq.weight.data = (
+                        transformer_block.attention.wq.weight.data.to(torch.bfloat16)
+                    )
+                    transformer_block.attention.wk.weight.data = (
+                        transformer_block.attention.wk.weight.data.to(torch.bfloat16)
+                    )
+                    transformer_block.attention.wv.weight.data = (
+                        transformer_block.attention.wv.weight.data.to(torch.bfloat16)
+                    )
+                    transformer_block.attention.wo.weight.data = (
+                        transformer_block.attention.wo.weight.data.to(torch.bfloat16)
+                    )
+        except AttributeError:
+            pass
 
         fully_shard(
             transformer_block,
@@ -559,11 +616,11 @@ def apply_moe_ep_tp(
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": ColwiseParallel(),
-                        "moe.shared_experts.w2": RowwiseParallel(
+                        "moe.shared_experts.w1": LoraColwiseParallel(),
+                        "moe.shared_experts.w2": LoraRowwiseParallel(
                             output_layouts=Partial()
                         ),
-                        "moe.shared_experts.w3": ColwiseParallel(),
+                        "moe.shared_experts.w3": LoraColwiseParallel(),
                     }
                 )
             parallelize_module(
@@ -651,7 +708,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                             moe,
                             attr_name,
                             torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=True
+                                submod, backend=compile_config.backend, fullgraph=compile_config.fullgraph
                             ),
                         )
                 else:
@@ -659,7 +716,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                         block,
                         attr_name,
                         torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=True
+                            submod, backend=compile_config.backend, fullgraph=compile_config.fullgraph
                         ),
                     )
 
@@ -669,7 +726,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
             transformer_block = torch.compile(
                 transformer_block,
                 backend=compile_config.backend,
-                fullgraph=True,
+                fullgraph=compile_config.fullgraph,
             )
 
         # pyrefly: ignore [missing-attribute]
@@ -684,7 +741,7 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
         moe_module._run_experts_grouped_mm = torch.compile(
             moe_module._run_experts_grouped_mm,
             backend=compile_config.backend,
-            fullgraph=True,
+            fullgraph=compile_config.fullgraph,
         )
 
         if ep_enabled:

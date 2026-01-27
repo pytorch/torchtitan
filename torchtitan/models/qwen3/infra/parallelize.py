@@ -14,13 +14,11 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
-    ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
-    RowwiseParallel,
     SequenceParallel,
 )
-
+from torchtitan.components.peft.lora import LoraColwiseParallel, LoraRowwiseParallel
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -102,7 +100,7 @@ def parallelize_qwen3(
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
-            cp_enabled=parallel_dims.cp_enabled,
+            positions_enabled=parallel_dims.cp_enabled or job_config.training.dataset_type == "preprocessed",
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
@@ -199,7 +197,7 @@ def apply_non_moe_tp(
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
-    cp_enabled: bool,
+    positions_enabled: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -210,12 +208,12 @@ def apply_non_moe_tp(
         model,
         tp_mesh,
         {
-            "tok_embeddings": RowwiseParallel(
+            "tok_embeddings": LoraRowwiseParallel(
                 input_layouts=Replicate(),
                 output_layouts=Shard(1),
             ),
             "norm": SequenceParallel(),
-            "output": ColwiseParallel(
+            "output": LoraColwiseParallel(
                 input_layouts=Shard(1),
                 output_layouts=Shard(-1) if loss_parallel else Replicate(),
                 use_local_output=not loss_parallel,
@@ -240,8 +238,8 @@ def apply_non_moe_tp(
         )
     else:
         rowwise_parallel, colwise_parallel, prepare_module_input = (
-            RowwiseParallel,
-            ColwiseParallel,
+            LoraRowwiseParallel,
+            LoraColwiseParallel,
             PrepareModuleInput,
         )
 
@@ -249,7 +247,7 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    positions_sharding = Replicate() if cp_enabled else None
+    positions_sharding = Replicate() if positions_enabled else None
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
