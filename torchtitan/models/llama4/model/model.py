@@ -165,18 +165,6 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -211,6 +199,7 @@ class Attention(nn.Module):
         )
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
+        self.enable_gqa = self.n_heads > self.n_kv_heads
 
         self.wq = nn.Linear(
             model_args.dim, model_args.n_heads * self.head_dim, bias=False
@@ -277,21 +266,28 @@ class Attention(nn.Module):
         if self.use_rope:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, positions=positions)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xk = xk.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        xv = xv.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
 
         if self.attn_type == "flex":
             assert isinstance(attention_masks, dict), attention_masks
             attention_mask = attention_masks["rope" if self.use_rope else "nope"]
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_mask)
+            output = self.inner_attention(
+                xq,  # (bs, n_local_heads, seqlen, head_dim)
+                xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                block_mask=attention_masks,
+                enable_gqa=self.enable_gqa,
+            )
         else:
-            assert attention_masks is None
-            output = self.inner_attention(xq, xk, xv)
+            assert attention_masks is None and self.attn_type == "sdpa"
+            output = self.inner_attention(
+                xq,  # (bs, n_local_heads, seqlen, head_dim)
+                xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                enable_gqa=self.enable_gqa,
+            )
 
         output = output.transpose(
             1, 2
