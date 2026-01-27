@@ -10,6 +10,7 @@ on:
   pull_request:
     paths:
       - 'torchtitan/experiments/transformers_modeling_backend/**'
+      - '.github/workflows/integration_test_8gpu_transformers_modeling_backend.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
