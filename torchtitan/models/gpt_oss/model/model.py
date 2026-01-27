@@ -88,7 +88,12 @@ def precompute_rope_cache(
     Precompute RoPE cache with optional YaRN scaling for extended context.
 
     YaRN (Yet another RoPE extensioN) allows extending context length beyond
-    the original training length by applying frequency scaling corrections.
+    the original training length by applying frequency scaling corrections
+    and mscale (concentration) for attention magnitude preservation.
+
+    The mscale factor is applied to cos/sin values, which scales both Q and K
+    after rotation. This produces mscale² scaling on attention logits, matching
+    the official GPT-OSS implementation in gpt_oss/torch/model.py.
 
     Args:
         dim: Embedding dimension (head_dim)
@@ -106,6 +111,7 @@ def precompute_rope_cache(
     freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
     # YaRN scaling for extended context (applied when seqlen > original_seq_len)
+    mscale = 1.0
     if max_seq_len > original_seq_len and rope_factor > 1.0:
         low, high = _find_yarn_correction_range(
             beta_fast, beta_slow, dim, base, original_seq_len
@@ -113,6 +119,8 @@ def precompute_rope_cache(
         smooth = 1 - _linear_ramp_factor(low, high, dim // 2)
         # Apply YaRN interpolation: blend scaled and unscaled frequencies
         freqs = freqs / rope_factor * (1 - smooth) + freqs * smooth
+        # Compute YaRN mscale (concentration) for attention magnitude preservation
+        mscale = compute_yarn_mscale(rope_factor)
 
     # Create position indexes `[0, 1, ..., max_seq_len - 1]`
     t = torch.arange(max_seq_len, dtype=freqs.dtype, device=freqs.device)
@@ -124,8 +132,14 @@ def precompute_rope_cache(
     # We cache the cos and sin embeddings instead of the IDs. This helps
     # ensure we have correct behavior when training with bf16
     # Size: [max_seq_len, (dim * 2)]
-    freqs = torch.cat([idx_theta, idx_theta], dim=-1)
-    rope_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
+    theta = torch.cat([idx_theta, idx_theta], dim=-1)
+
+    # Apply mscale to cos/sin per official GPT-OSS implementation.
+    # Since both Q and K are rotated with scaled cos/sin, attention logits
+    # are scaled by mscale², preserving attention sharpness at extended lengths.
+    cos = theta.cos() * mscale
+    sin = theta.sin() * mscale
+    rope_cache = torch.cat([cos, sin], dim=-1)
     return rope_cache
 
 
@@ -197,9 +211,9 @@ class Attention(nn.Module):
 
         self.n_rep = self.n_heads // self.n_kv_heads
 
-        # Compute YaRN mscale for extended context attention scaling
-        mscale = compute_yarn_mscale(model_args.rope_factor)
-        self.softmax_scale = mscale / math.sqrt(self.head_dim)
+        # Standard attention softmax scale.
+        # YaRN mscale is applied to cos/sin in the RoPE cache, not here.
+        self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
         self.wq = nn.Linear(
             model_args.dim,
