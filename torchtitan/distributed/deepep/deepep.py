@@ -245,7 +245,8 @@ def _sync_stream_if_async(async_finish: bool, after_event):
 
 
 def get_hidden_bytes(x: torch.Tensor) -> int:
-    """Calculate the number of hidden bytes for a tensor."""
+    """Calculate the number of hidden bytes for one token."""
+    # Use at least 2 bytes (bf16 size) so buffer works for both fp8 and bf16 without reallocation
     return x.size(1) * max(x.element_size(), 2)
 
 
@@ -375,17 +376,21 @@ def dispatch_tokens(
         (permuted_tokens, tokens_per_expert, state_for_combine)
     """
     # Ensure contiguous and proper shape
-    router_topk = (
-        selected_experts_indices.shape[1] if selected_experts_indices.dim() == 2 else 1
-    )
-    if selected_experts_indices.dim() != 2:
-        selected_experts_indices = selected_experts_indices.view(
-            -1, router_topk
-        ).contiguous()
-        top_scores = top_scores.view(-1, router_topk).contiguous()
-    else:
-        selected_experts_indices = selected_experts_indices.contiguous()
-        top_scores = top_scores.contiguous()
+    # router_topk = (
+    #     selected_experts_indices.shape[1] if selected_experts_indices.dim() == 2 else 1
+    # )
+    # if selected_experts_indices.dim() != 2:
+    #     selected_experts_indices = selected_experts_indices.view(
+    #         -1, router_topk
+    #     ).contiguous()
+    #     top_scores = top_scores.view(-1, router_topk).contiguous()
+    # else:
+    #     selected_experts_indices = selected_experts_indices.contiguous()
+    #     top_scores = top_scores.contiguous()
+
+    # router_topk = selected_experts_indices.shape[1]
+    selected_experts_indices = selected_experts_indices.contiguous()
+    top_scores = top_scores.contiguous()
 
     # Mask out zero-score tokens
     selected_experts_indices = selected_experts_indices.masked_fill(top_scores == 0, -1)
@@ -396,6 +401,7 @@ def dispatch_tokens(
 
     buffer = get_buffer(group, get_hidden_bytes(hidden_states))
 
+    # Calculate dispatch layout before actual dispatch
     (
         num_tokens_per_rank,
         num_tokens_per_rdma_rank,
@@ -406,6 +412,7 @@ def dispatch_tokens(
         topk_idx=selected_experts_indices, num_experts=num_experts
     )
 
+    # Dispatch tokens to experts
     (
         hidden_states,
         dispatched_indices,
