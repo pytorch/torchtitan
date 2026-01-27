@@ -43,8 +43,8 @@ class GptOssModelArgs(BaseModelArgs):
         original_seq_len (int): Original sequence length.
         rope_theta (float): Base for rotary positional encoding.
         rope_factor (float): Scaling factor for extended sequence lengths.
-        beta_fast (int): Fast beta correction factor.
-        beta_slow (int): Slow beta correction factor.
+        ntk_alpha (float): NTK-by-parts alpha (slow correction, used for high freq).
+        ntk_beta (float): NTK-by-parts beta (fast correction, used for low freq).
     """
 
     max_batch_size: int = 8
@@ -69,8 +69,8 @@ class GptOssModelArgs(BaseModelArgs):
     original_seq_len: int = 4096
     rope_theta: float = 150000.0
     rope_factor: float = 32
-    beta_fast: int = 32
-    beta_slow: int = 1
+    ntk_alpha: float = 1.0
+    ntk_beta: float = 32.0
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len

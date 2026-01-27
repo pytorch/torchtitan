@@ -24,64 +24,13 @@ from .args import GptOssModelArgs
 from .moe import GptOssMoE
 
 
-def _find_yarn_correction_dim(
-    num_rotations: float, dim: int, base: float, max_seq_len: int
-) -> float:
-    """YaRN helper: Find correction dimension."""
-    return (
-        dim
-        * math.log(max_seq_len / (num_rotations * 2 * math.pi))
-        / (2 * math.log(base))
-    )
-
-
-def _find_yarn_correction_range(
-    low_rot: float, high_rot: float, dim: int, base: float, max_seq_len: int
-) -> tuple[int, int]:
-    """YaRN helper: Find correction range."""
-    low = math.floor(_find_yarn_correction_dim(low_rot, dim, base, max_seq_len))
-    high = math.ceil(_find_yarn_correction_dim(high_rot, dim, base, max_seq_len))
-    return max(low, 0), min(high, dim - 1)
-
-
-def _linear_ramp_factor(min_val: float, max_val: float, dim: int) -> torch.Tensor:
-    """YaRN helper: Linear ramp for smooth interpolation."""
-    if min_val == max_val:
-        # Degenerate range: return zeros (all dimensions use same blend factor)
-        return torch.zeros(dim, dtype=torch.float32)
-    linear_func = (torch.arange(dim, dtype=torch.float32) - min_val) / (max_val - min_val)
-    ramp_func = torch.clamp(linear_func, 0, 1)
-    return ramp_func
-
-
-def compute_yarn_mscale(rope_factor: float) -> float:
-    """
-    Compute YaRN mscale (attention scaling factor) for extended context.
-
-    YaRN paper recommends scaling attention by this factor to maintain
-    perplexity at extended context lengths. Without mscale, model quality
-    degrades significantly when extending beyond the original training length.
-
-    Formula: mscale = 0.1 * ln(rope_factor) + 1.0
-
-    Args:
-        rope_factor: YaRN rope scaling factor (e.g., 32 for 32x context extension)
-
-    Returns:
-        Attention scaling multiplier (1.0 when rope_factor <= 1)
-    """
-    if rope_factor <= 1.0:
-        return 1.0
-    return 0.1 * math.log(rope_factor) + 1.0
-
-
 def precompute_rope_cache(
     dim: int,
     max_seq_len: int,
     base: float = 1_000_000.0,
     rope_factor: float = 1.0,
-    beta_fast: int = 32,
-    beta_slow: int = 1,
+    ntk_alpha: float = 1.0,
+    ntk_beta: float = 32.0,
     original_seq_len: int = 4096,
 ) -> torch.Tensor:
     """
@@ -91,56 +40,53 @@ def precompute_rope_cache(
     the original training length by applying frequency scaling corrections
     and mscale (concentration) for attention magnitude preservation.
 
-    The mscale factor is applied to cos/sin values, which scales both Q and K
-    after rotation. This produces mscale² scaling on attention logits, matching
-    the official GPT-OSS implementation in gpt_oss/torch/model.py.
-
     Args:
         dim: Embedding dimension (head_dim)
         max_seq_len: Maximum sequence length to precompute
-        base: RoPE theta base (function default: 1M; GPT-OSS config uses 150k via args.py)
-        rope_factor: YaRN scaling factor (GPT-OSS uses 32)
-        beta_fast: Fast frequency correction threshold (GPT-OSS uses 32)
-        beta_slow: Slow frequency correction threshold (GPT-OSS uses 1)
-        original_seq_len: Original pretrained context length (GPT-OSS uses 4096)
+        base: RoPE theta base frequency
+        rope_factor: YaRN scaling factor (1.0 = no scaling)
+        ntk_alpha: NTK-by-parts alpha (slow correction, used for high freq bound)
+        ntk_beta: NTK-by-parts beta (fast correction, used for low freq bound)
+        original_seq_len: Original pretrained context length
 
     Returns:
         Precomputed RoPE cache: [max_seq_len, dim * 2] (cos and sin concatenated)
     """
-    # Basic RoPE frequency calculation
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-
-    # YaRN scaling for extended context (applied when seqlen > original_seq_len)
+    freq = base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
     mscale = 1.0
-    if max_seq_len > original_seq_len and rope_factor > 1.0:
-        low, high = _find_yarn_correction_range(
-            beta_fast, beta_slow, dim, base, original_seq_len
-        )
-        smooth = 1 - _linear_ramp_factor(low, high, dim // 2)
-        # Apply YaRN interpolation: blend scaled and unscaled frequencies
-        freqs = freqs / rope_factor * (1 - smooth) + freqs * smooth
-        # Compute YaRN mscale (concentration) for attention magnitude preservation
-        mscale = compute_yarn_mscale(rope_factor)
 
-    # Create position indexes `[0, 1, ..., max_seq_len - 1]`
-    t = torch.arange(max_seq_len, dtype=freqs.dtype, device=freqs.device)
+    # YaRN scaling applies when rope_factor > 1.0
+    if rope_factor > 1.0:
+        # YaRN mscale (concentration) for attention magnitude preservation
+        mscale = 0.1 * math.log(rope_factor) + 1.0
 
-    # Outer product of theta and position index; output tensor has
-    # a shape of [max_seq_len, dim // 2]
-    idx_theta = torch.outer(t, freqs).float()
+        # Compute correction range (NTK by parts)
+        d_half = dim / 2
+        low = d_half * math.log(original_seq_len / (ntk_beta * 2 * math.pi)) / math.log(base)
+        high = d_half * math.log(original_seq_len / (ntk_alpha * 2 * math.pi)) / math.log(base)
+        assert 0 < low < high < d_half - 1, f"Invalid YaRN params: 0 < {low} < {high} < {d_half - 1}"
 
-    # We cache the cos and sin embeddings instead of the IDs. This helps
-    # ensure we have correct behavior when training with bf16
-    # Size: [max_seq_len, (dim * 2)]
-    theta = torch.cat([idx_theta, idx_theta], dim=-1)
+        # Linear ramp for smooth interpolation between low and high
+        ramp = (torch.arange(d_half, dtype=torch.float32) - low) / (high - low)
+        mask = 1 - ramp.clamp(0, 1)
 
-    # Apply mscale to cos/sin per official GPT-OSS implementation.
-    # Since both Q and K are rotated with scaled cos/sin, attention logits
-    # are scaled by mscale², preserving attention sharpness at extended lengths.
+        # Blend interpolated and extrapolated frequencies
+        interpolation = 1.0 / (rope_factor * freq)
+        extrapolation = 1.0 / freq
+        inv_freq = interpolation * (1 - mask) + extrapolation * mask
+    else:
+        inv_freq = 1.0 / freq
+
+    # Compute position embeddings
+    t = torch.arange(max_seq_len, dtype=inv_freq.dtype, device=inv_freq.device)
+    freqs = torch.outer(t, inv_freq).float()
+    theta = torch.cat([freqs, freqs], dim=-1)
+
+    # Apply mscale to cos/sin. Both Q and K are rotated with scaled
+    # cos/sin, so attention logits are scaled by mscale².
     cos = theta.cos() * mscale
     sin = theta.sin() * mscale
-    rope_cache = torch.cat([cos, sin], dim=-1)
-    return rope_cache
+    return torch.cat([cos, sin], dim=-1)
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -211,8 +157,7 @@ class Attention(nn.Module):
 
         self.n_rep = self.n_heads // self.n_kv_heads
 
-        # Standard attention softmax scale.
-        # YaRN mscale is applied to cos/sin in the RoPE cache, not here.
+        # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
         self.wq = nn.Linear(
@@ -424,8 +369,8 @@ class GptOssModel(ModelProtocol):
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
             self.model_args.rope_factor,
-            self.model_args.beta_fast,
-            self.model_args.beta_slow,
+            self.model_args.ntk_alpha,
+            self.model_args.ntk_beta,
             self.model_args.original_seq_len,
         )
 
