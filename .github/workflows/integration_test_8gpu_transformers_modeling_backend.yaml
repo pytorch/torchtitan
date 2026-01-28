@@ -7,6 +7,7 @@ on:
       - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/transformers_modeling_backend/**'
+      - '.github/workflows/integration_test_8gpu_transformers_modeling_backend.yaml'
   pull_request:
     paths:
       - 'torchtitan/experiments/transformers_modeling_backend/**'
