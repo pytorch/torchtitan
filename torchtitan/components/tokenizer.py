@@ -218,15 +218,14 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
         # Store BOS/EOS tokens as class attributes if they match
         if token_str == config_bos_token:
-            self.bos_token = token_str  # pyrefly: ignore[bad-assignment]
+            self.bos_token = token_str
             self.bos_id = (
-                # pyrefly: ignore[bad-assignment]
                 token_id
                 if token_id is not None
                 else self.tokenizer.token_to_id(token_str)
             )
         elif token_str == config_eos_token:
-            self.eos_token = token_str  # pyrefly: ignore[bad-assignment]
+            self.eos_token = token_str
             self.eos_id = (
                 token_id
                 if token_id is not None
@@ -318,7 +317,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         # First, determine if underlying tokenizer auto-adds BOS/EOS tokens empirically
         encoded_empty_str = self.tokenizer.encode("").ids
         if self.bos_id is not None and self.bos_id in encoded_empty_str:
-            self.hf_adds_bos = True  # pyrefly: ignore[bad-assignment]
+            self.hf_adds_bos = True
         if self.eos_id is not None and self.eos_id in encoded_empty_str:
             self.hf_adds_eos = True
 
