@@ -127,7 +127,6 @@ class FluxValidator(Validator):
         device_type = dist_utils.device_type
         num_steps = 0
 
-        # pyrefly: ignore [not-iterable]
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
@@ -139,6 +138,7 @@ class FluxValidator(Validator):
             if not isinstance(prompt, list):
                 prompt = [prompt]
             for p in prompt:
+                assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if save_img_count != -1 and save_img_count <= 0:
                     break
                 image = generate_image(
