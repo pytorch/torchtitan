@@ -84,7 +84,7 @@ register_torchtitan_model_from_train_spec(
     # TODO: Remove the model_flavor args when registering model,
     # allow passing model flavor option from config system. Now we have to specify
     # model_flavor during registration because we can not pass torchtitan job_config from LLM() Api
-    model_flavor="0.6B",
+    model_flavor="1.7B",
 )
 
 
