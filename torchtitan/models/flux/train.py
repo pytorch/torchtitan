@@ -138,7 +138,6 @@ class FluxTrainer(Trainer):
             # pyrefly: ignore [bad-assignment]
             global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
         else:
-            # pyrefly: ignore [bad-assignment]
             global_valid_tokens = local_valid_tokens.float()
 
         # Keep these variables local to shorten the code as these are

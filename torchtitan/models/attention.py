@@ -68,13 +68,10 @@ class VarlenAttentionWrapper(torch.nn.Module):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        # pyrefly: ignore [no-matching-overload]
         xq_packed = xq.transpose(1, 2).flatten(0, 1)  # (bs * seqlen, n_heads, head_dim)
-        # pyrefly: ignore [no-matching-overload]
         xk_packed = xk.transpose(1, 2).flatten(
             0, 1
         )  # (bs * seqlen, n_kv_heads, head_dim)
-        # pyrefly: ignore [no-matching-overload]
         xv_packed = xv.transpose(1, 2).flatten(
             0, 1
         )  # (bs * seqlen, n_kv_heads, head_dim)
