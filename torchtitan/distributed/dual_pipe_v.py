@@ -125,7 +125,7 @@ class HookCoordinator:
 
             # Reset barrier
             self._execution_barrier = threading.Barrier(2)
-            self._num_layers = num_layers  # pyrefly: ignore[bad-assignment]
+            self._num_layers = num_layers
 
     def disable_coordination(self):
         self._coordination_enabled = False
