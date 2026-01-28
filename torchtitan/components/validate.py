@@ -29,7 +29,7 @@ class BaseValidator:
     def __init__(self, job_config: JobConfig):
         self.job_config = job_config
 
-    def validate(self, model_parts: list[nn.Module]) -> dict[str, float]:
+    def validate(self, model_parts: list[nn.Module], step: int) -> None:
         raise NotImplementedError("validate method not implemented")
 
     def should_validate(self, step: int) -> bool:
@@ -154,7 +154,6 @@ class Validator(BaseValidator):
         return inputs, labels, extra_inputs, extra_kwargs
 
     @torch.no_grad()
-    # pyrefly: ignore [bad-override]
     def validate(
         self,
         model_parts: list[nn.Module],
@@ -170,7 +169,6 @@ class Validator(BaseValidator):
         device_type = utils.device_type
         num_steps = 0
 
-        # pyrefly: ignore [not-iterable]
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
@@ -190,7 +188,6 @@ class Validator(BaseValidator):
 
             # Count valid tokens for this batch
             local_valid_tokens = torch.tensor(0, dtype=torch.int64, device=device_type)
-            # pyrefly: ignore [missing-attribute]
             local_valid_tokens += (labels != IGNORE_INDEX).sum()
 
             # All-reduce token count across DP ranks to get global token count
