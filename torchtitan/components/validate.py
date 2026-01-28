@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Any, TypeAlias
+from typing import Any, cast, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -19,6 +19,7 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
+from torchtitan.protocols import ModelProtocol
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -132,8 +133,9 @@ class Validator(BaseValidator):
         extra_kwargs: dict[str, Any] = {}
 
         try:
-            # pyrefly: ignore [not-callable]
-            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
+            extra_kwargs["attention_masks"] = cast(
+                ModelProtocol, model_parts[0]
+            ).get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
@@ -287,6 +289,7 @@ def build_validator(
     pp_has_last_stage: bool | None = None,
 ) -> BaseValidator:
     """Build a simple validator focused on correctness."""
+    assert metrics_processor is not None
     return Validator(
         job_config=job_config,
         dp_world_size=dp_world_size,
@@ -296,7 +299,6 @@ def build_validator(
         loss_fn=loss_fn,
         validation_context=validation_context,
         maybe_enable_amp=maybe_enable_amp,
-        # pyrefly: ignore [bad-argument-type]
         metrics_processor=metrics_processor,
         pp_schedule=pp_schedule,
         pp_has_first_stage=pp_has_first_stage,
