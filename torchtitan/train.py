@@ -511,14 +511,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         inputs = input_dict["input"]
         extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
 
-        # Map position_ids from dataloader to positions expected by model forward
-        if "position_ids" in extra_inputs:
-            extra_inputs["positions"] = extra_inputs.pop("position_ids")
-
-        # For arguments, like attention_masks, we have to put them in a separate
-        # dict as extra_inputs are not forwarded to other stages in PP, but
-        # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
+        if "position_ids" in extra_inputs:
+            extra_kwargs["positions"] = extra_inputs.pop("position_ids")
 
         attn_type = getattr(self.model_args, "attn_type", "sdpa")
         if attn_type in ["flex", "varlen"]:
