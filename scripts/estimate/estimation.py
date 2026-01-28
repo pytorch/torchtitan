@@ -94,7 +94,6 @@ def estimate_memory(job_config: JobConfig):
             f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
         )
         with torch.device("meta"):
-            # pyrefly: ignore[bad-instantiation]
             model = train_spec.model_cls(model_args)
 
         # Build the collection of model converters. No-op if `model.converters` empty

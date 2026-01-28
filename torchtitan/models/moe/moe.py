@@ -563,7 +563,6 @@ class MoE(nn.Module):
                 self.experts.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:
-                # pyrefly: ignore[bad-assignment]
                 self.expert_bias = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
                 )
