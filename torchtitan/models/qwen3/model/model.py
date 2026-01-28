@@ -241,9 +241,9 @@ class Attention(nn.Module):
 
         # Adding the q_norm and k_norm here
         # Last layer of adding q-k norm
-        if self.q_norm:  # pyrefly: ignore[invalid-argument]
+        if self.q_norm:
             xq = self.q_norm(xq)
-        if self.k_norm:  # pyrefly: ignore[invalid-argument]
+        if self.k_norm:
             xk = self.k_norm(xk)
 
         # Apply rotary embedding

@@ -155,9 +155,9 @@ class ExpertParallel(BaseExpertParallel):
         # of GroupedExperts, as it does not need padding.
 
         (
-            self.input_shape,  # pyrefly: ignore[bad-assignment]
+            self.input_shape,
             routed_input,
-            self.permuted_indices,  # pyrefly: ignore[bad-assignment]
+            self.permuted_indices,
             num_tokens_per_expert_group,
         ) = _permute(
             routed_input, num_tokens_per_expert_group, ep_degree, num_local_experts
@@ -343,7 +343,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
             num_local_experts = mod.w1.shape[0]
         ep_group = device_mesh.get_group()
 
-        # pyrefly: ignore[bad-assignment]
         hidden_states, tokens_per_expert, self._state = dispatch_tokens(
             hidden_states,
             selected_experts_indices,

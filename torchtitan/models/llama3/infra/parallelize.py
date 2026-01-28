@@ -339,7 +339,6 @@ def apply_fsdp(
         )
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
-        # pyrefly: ignore[no-matching-overload]
         fully_shard(
             transformer_block,
             **fsdp_config,
@@ -355,7 +354,6 @@ def apply_fsdp(
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
 
-    # pyrefly: ignore[no-matching-overload]
     fully_shard(model, **fsdp_config)
 
     # Disable FSDP's automatic gradient division for all FSDP modules

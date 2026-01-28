@@ -15,7 +15,6 @@ from torchtitan.config import ConfigManager
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools.logging import logger
 
-# pyrefly: ignore[import-error]
 from transformers import AutoModelForCausalLM
 
 device_type = "cuda" if torch.cuda.is_available() else "cpu"
@@ -73,7 +72,6 @@ def forward_tt(config_path, checkpoint_path, test_set):
     model_args = train_spec.model_args[config.model.flavor]
     model_args.update_from_config(config)
 
-    # pyrefly: ignore[bad-instantiation]
     model = train_spec.model_cls(model_args)
 
     # materalize model
