@@ -51,6 +51,8 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
         result = []
         for m in modules:
             if isinstance(m, list):
+                # check if fqn_list is valid. In PP, bucketed module may
+                # not be in the current rank, and fqn_list is None.
                 if fqn_list := convert_modules_to_fqns(m, module_to_fqn_mapping):
                     result.append(fqn_list)
             else:
