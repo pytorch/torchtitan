@@ -173,7 +173,6 @@ deepseekv3_args = {
             route_scale=2.827,
             score_before_experts=False,
         ),
-        n_expert_groups=1,
         n_limited_groups=1,
         q_lora_rank=1536,
         kv_lora_rank=512,
