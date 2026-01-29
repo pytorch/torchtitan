@@ -331,6 +331,7 @@ def _unpermute_tokens(
 @dataclass
 class DispatchState:
     """State from dispatch needed for combine."""
+
     handle_id: torch.Tensor  # CPU tensor used to retrieve cached handle
     permuted_indices: torch.Tensor
     num_recv_tokens: int
