@@ -548,6 +548,7 @@ class Transformer(ModelProtocol):
             case "causal":
                 B = 1
             case "block_causal":
+                assert tokenizer.eos_id is not None
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
                 B = input_batch.shape[0]
             case _:
