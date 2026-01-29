@@ -47,15 +47,19 @@ def create_lora_linear(parent_cls: type) -> type:
         def _init_lora(self, rank: int, alpha: float, dropout: float) -> None:
             self._lora_scaling = alpha / rank
             self._lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-            device = self.weight.device
-            dtype = self.weight.dtype
             self.lora_a = nn.Linear(
-                self.in_features, rank, bias=False,
-                device=device, dtype=dtype
+                self.in_features,
+                rank,
+                bias=False,
+                device=self.weight.device,
+                dtype=self.weight.device,
             )
             self.lora_b = nn.Linear(
-                rank, self.out_features, bias=False,
-                device=device, dtype=dtype
+                rank,
+                self.out_features,
+                bias=False,
+                device=self.weight.device,
+                dtype=self.weight.device,
             )
             nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
             nn.init.zeros_(self.lora_b.weight)
@@ -111,12 +115,18 @@ class LoRAConverter:
             nn.Dropout(self.dropout) if self.dropout > 0 else nn.Identity()
         )
         linear.lora_a = nn.Linear(  # type: ignore[attr-defined]
-            linear.in_features, self.rank, bias=False,
-            device=linear.weight.device, dtype=linear.weight.dtype
+            linear.in_features,
+            self.rank,
+            bias=False,
+            device=linear.weight.device,
+            dtype=linear.weight.dtype,
         )
         linear.lora_b = nn.Linear(  # type: ignore[attr-defined]
-            self.rank, linear.out_features, bias=False,
-            device=linear.weight.device, dtype=linear.weight.dtype
+            self.rank,
+            linear.out_features,
+            bias=False,
+            device=linear.weight.device,
+            dtype=linear.weight.dtype,
         )
 
         if linear.weight.device.type != "meta":
