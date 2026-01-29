@@ -107,8 +107,11 @@ def _dispatch_op_impl(
     handle_id = _get_next_handle_id()
     _handle_cache[handle_id.item()] = handle
 
-    recv_num_tokens_per_expert = torch.tensor(recv_num_tokens_per_expert_list, dtype=torch.int32, device="cpu")
+    recv_num_tokens_per_expert = torch.tensor(
+        recv_num_tokens_per_expert_list, dtype=torch.int32, device="cpu"
+    )
     return recv_x, recv_indices, recv_scores, recv_num_tokens_per_expert, handle_id
+
 
 def _dispatch_setup_context(ctx, inputs, output):
     x, *_ = inputs
@@ -116,8 +119,14 @@ def _dispatch_setup_context(ctx, inputs, output):
     ctx.input_dtype = x.dtype
     ctx.saved_handle = _handle_cache.get(handle_id.item())
 
+
 def _dispatch_backward(
-    ctx, grad_recv_x, grad_recv_indices, grad_recv_scores, grad_recv_num_tokens_per_expert, grad_handle_id
+    ctx,
+    grad_recv_x,
+    grad_recv_indices,
+    grad_recv_scores,
+    grad_recv_num_tokens_per_expert,
+    grad_handle_id,
 ):
     """Backward for dispatch: performs combine on gradients."""
     global _buffer
@@ -149,6 +158,7 @@ def _dispatch_backward(
 
     return grad_x, None, grad_topk_weights, None, None, None, None
 
+
 @torch.library.impl(_lib, "combine", "CUDA")
 def _combine_op_impl(x: torch.Tensor, handle_id: torch.Tensor) -> torch.Tensor:
     """Execute DeepEP combine."""
@@ -174,10 +184,12 @@ def _combine_op_impl(x: torch.Tensor, handle_id: torch.Tensor) -> torch.Tensor:
 
     return combined
 
+
 def _combine_setup_context(ctx, inputs, output):
     _, handle_id = inputs
     # Pop handle from cache and save it for backward
     ctx.saved_handle = _handle_cache.pop(handle_id.item(), None)
+
 
 def _combine_backward(ctx, grad_combined):
     """Backward for combine: performs dispatch on gradients."""
@@ -203,6 +215,7 @@ def _combine_backward(ctx, grad_combined):
     after_event.current_stream_wait()
 
     return grad_x, None
+
 
 torch.library.register_autograd(
     "deepep::dispatch", _dispatch_backward, setup_context=_dispatch_setup_context
@@ -296,14 +309,16 @@ def _permute_tokens(
         Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         (sorted_hidden_states, permuted_scores, sorted_indices)
     """
-    num_tokens = hidden_states.shape[0] # num of unique tokens
+    num_tokens = hidden_states.shape[0]  # num of unique tokens
     num_experts = routing_map.shape[1]
 
     # mask transpose [num_tokens, num_experts] -> [num_experts, num_tokens]
     routing_map_t = routing_map.bool().T.contiguous()
     # create a dense expert-to-token mapping from the sparse token-to-expert mapping
     token_indices = (
-        torch.arange(num_tokens, device=routing_map.device).unsqueeze(0).expand(num_experts, -1)
+        torch.arange(num_tokens, device=routing_map.device)
+        .unsqueeze(0)
+        .expand(num_experts, -1)
     )
     sorted_indices = token_indices.masked_select(routing_map_t)
     # distribute tokens to experts, num of unique tokens -> num of all tokens to use
@@ -334,7 +349,9 @@ def _unpermute_tokens(
     """
     hidden_dim = permuted_hidden_states.shape[1]
     output_hidden_states = torch.zeros(
-        (num_tokens, hidden_dim), dtype=permuted_hidden_states.dtype, device=permuted_hidden_states.device
+        (num_tokens, hidden_dim),
+        dtype=permuted_hidden_states.dtype,
+        device=permuted_hidden_states.device,
     )
     output_hidden_states.scatter_add_(
         0, sorted_indices.unsqueeze(1).expand(-1, hidden_dim), permuted_hidden_states
@@ -345,6 +362,7 @@ def _unpermute_tokens(
 @dataclass
 class DispatchState:
     """State from dispatch needed for combine."""
+
     handle_id: torch.Tensor  # CPU tensor used to retrieve cached handle
     sorted_indices: torch.Tensor
     num_recv_tokens: int
