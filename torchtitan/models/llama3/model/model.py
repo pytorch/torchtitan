@@ -514,6 +514,7 @@ class Transformer(ModelProtocol):
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
+                assert tokenizer.eos_id is not None
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
@@ -541,6 +542,7 @@ class Transformer(ModelProtocol):
                         f"varlen attention is only supported with block_causal \
                         attention mask type, got {self.model_args.attn_mask_type}"
                     )
+                assert tokenizer.eos_id is not None
                 return create_varlen_metadata_for_document(
                     input_batch, tokenizer.eos_id
                 )

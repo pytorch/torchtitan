@@ -19,8 +19,10 @@ from typing_extensions import override
 
 class BaseTokenizer(ABC):
     # base tokenizer interface, for typing purpose mainly
+    eos_id: int | None
+
     def __init__(self):
-        self.eos_id = 0
+        self.eos_id = None
 
     @abstractmethod
     def encode(self, *args, **kwargs) -> list[int]:
@@ -56,7 +58,6 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
         # Initialize BOS/EOS token attributes (frequently used)
         self.bos_id = None
-        # pyrefly: ignore [bad-assignment]
         self.eos_id = None
         self.bos_token = None
         self.eos_token = None
