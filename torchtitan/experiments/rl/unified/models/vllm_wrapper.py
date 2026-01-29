@@ -114,6 +114,34 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             job_config=self.parallel_config,
         )
 
+        # Pre-extend RoPE cache to max_num_batched_tokens to avoid dynamic
+        # extension during forward (which causes CUDA graph capture errors)
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        if self.rope_cache_extension_fn is not None and max_num_batched_tokens > 0:
+            # Get the current rope cache from model
+            if hasattr(self.model, "rope_cache"):
+                current_cache = self.model.rope_cache
+            elif hasattr(self.model, "freqs_cis"):
+                current_cache = self.model.freqs_cis
+            else:
+                current_cache = None
+
+            if (
+                current_cache is not None
+                and max_num_batched_tokens > current_cache.shape[0]
+            ):
+                logger.info(
+                    f"Pre-extending RoPE cache from {current_cache.shape[0]} to {max_num_batched_tokens}"
+                )
+                extended_cache = self.rope_cache_extension_fn(
+                    max_seq_len=max_num_batched_tokens,
+                ).to(device=current_cache.device, dtype=current_cache.dtype)
+                # Update the model's rope cache
+                if hasattr(self.model, "rope_cache"):
+                    self.model.rope_cache = extended_cache
+                elif hasattr(self.model, "freqs_cis"):
+                    self.model.freqs_cis = extended_cache
+
     def _extend_rope_cache_if_needed(
         self, rope_cache: torch.Tensor, max_position: int
     ) -> torch.Tensor:

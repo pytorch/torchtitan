@@ -13,7 +13,14 @@ tensor parallelism to TorchTitan models in vLLM using TorchTitan's ParallelDims.
 
 
 import torch.distributed as dist
-from torchtitan.config.job_config import Comm, JobConfig, Model, Parallelism, Training
+from torchtitan.config.job_config import (
+    Comm,
+    Compile,
+    JobConfig,
+    Model,
+    Parallelism,
+    Training,
+)
 from torchtitan.distributed import utils as dist_utils
 
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -134,6 +141,10 @@ def create_job_config_from_vllm_config(
     job_config.training = Training(
         local_batch_size=1,  # Inference typically processes one batch at a time
         steps=1,  # Single step for inference
+    )
+
+    job_config.compile = Compile(
+        enable=(vllm_config.compilation_config.mode != 0), components=["model"]
     )
 
     return job_config

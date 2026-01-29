@@ -265,13 +265,22 @@ class VLLMNativeBenchmark:
                     f"Profiling ENABLED - traces will be saved to: {self.profile_dir}"
                 )
 
-            # Configure compilation based on use_cuda_graph setting
-            if self.config.use_cuda_graph:
-                compilation_config = {"cudagraph_mode": "FULL_AND_PIECEWISE"}
-                enforce_eager = False
+            compile_enabled = self.config.compile in ("vllm-native", "all")
+            print(f"Compile: {'Enabled' if compile_enabled else 'Disabled'}")
+
+            compilation_config = {}
+
+            if compile_enabled:
+                # Enable torch.compile with VLLM_COMPILE mode (3)
+                compilation_config["mode"] = 3
             else:
-                compilation_config = None
-                enforce_eager = True
+                # Disable compile (mode 0)
+                compilation_config["mode"] = 0
+
+            if self.config.use_cuda_graph:
+                compilation_config["cudagraph_mode"] = "FULL_AND_PIECEWISE"
+                # override compilation as vllm requires enable compile while enable cudagraph
+                compilation_config["mode"] = 0
 
             # Use external_launcher when launched with torchrun (TP > 1)
             # vLLM will pick up WORLD_SIZE, RANK, etc. from environment
@@ -285,7 +294,7 @@ class VLLMNativeBenchmark:
                 tensor_parallel_size=self.config.tp,
                 distributed_executor_backend=distributed_backend,
                 compilation_config=compilation_config,
-                enforce_eager=enforce_eager,
+                enforce_eager=not compile_enabled and not self.config.use_cuda_graph,
             )
             self.sampling_params = SamplingParams(
                 temperature=self.config.temperature,
@@ -415,19 +424,16 @@ class VLLMTorchTitanBenchmark:
                     f"Profiling ENABLED - traces will be saved to: {self.profile_dir}"
                 )
 
-            # Configure compilation settings
-            # --compile: controls CompilationMode (0 = disabled, 3 = VLLM_COMPILE)
-            # --use-cuda-graph: controls CUDA graph independently
+            # Configure compilation settings for vllm-torchtitan:
+            # Always disable vLLM's internal compilation (level 0) to avoid
+            # DTensor/Tensor mismatch during weight loading. We'll apply
+            # torch.compile manually after weights are loaded.
             compilation_config = {}
-            if compile_enabled:
-                # Enable torch.compile with VLLM_COMPILE mode (3)
-                compilation_config["level"] = 3
-            else:
-                # Disable compile (mode 0)
-                compilation_config["level"] = 0
 
             if self.config.use_cuda_graph:
                 compilation_config["cudagraph_mode"] = "FULL_AND_PIECEWISE"
+                # This will automatically enable vllm compile config,
+                # but since titan model is not marked as @support_torch_compile, compile will be skipped
                 enforce_eager = False
             else:
                 enforce_eager = True
@@ -450,6 +456,18 @@ class VLLMTorchTitanBenchmark:
                 distributed_executor_backend=distributed_backend,
                 compilation_config=compilation_config,
             )
+
+            # Apply torch.compile manually after weights are loaded
+            # This avoids DTensor/Tensor mismatch that occurs when vLLM
+            # compiles before loading weights
+            if compile_enabled:
+                print("Applying torch.compile to vLLM-TorchTitan model...")
+                # Access the model from vLLM's internal structure
+                model = (
+                    self.engine.llm_engine.model_executor.driver_worker.model_runner.model.model
+                )
+                apply_compile(model, backend="inductor")
+                print("✓ torch.compile applied successfully")
 
             self.sampling_params = SamplingParams(
                 temperature=self.config.temperature,

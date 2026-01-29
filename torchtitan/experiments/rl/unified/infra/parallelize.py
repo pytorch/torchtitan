@@ -49,6 +49,12 @@ def parallelize_qwen3(
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )
 
+    # NOTE(jianiw): Disable it for now as we apply compile in benchmarking script.
+    # if job_config.compile.enable:
+    #     print("[Parallelize] Applying compile to torchtitan model")
+    #     apply_compile(model)
+    #     print("[Parallelize] Applied compile to torchtitan model, Success!")
+
     return model
 
 
