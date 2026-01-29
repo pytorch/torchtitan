@@ -31,19 +31,20 @@ except ImportError as e:
 
 
 # Global buffer (single buffer per process, recreated if group changes)
+# pyrefly: ignore [bad-assignment]
 _buffer: Buffer = None
 
-# Global cache for dispatch handles, keyed by cache_id
-# SAC saves the cache_id tensor; we use it to retrieve the non-tensor handle
+# Global cache for dispatch handles, keyed by handle_id
+# SAC saves the handle_id tensor; we use it to retrieve the non-tensor handle
 _handle_cache: dict = {}
-_cache_counter: int = 0
+_handle_counter: int = 0
 
 
-def _get_next_cache_id() -> torch.Tensor:
-    """Generate a unique cache_id tensor on CPU to avoid GPU-CPU sync."""
-    global _cache_counter
-    _cache_counter += 1
-    return torch.tensor([_cache_counter], dtype=torch.int64, device="cpu")
+def _get_next_handle_id() -> torch.Tensor:
+    """Generate a unique handle_id tensor on CPU to avoid GPU-CPU sync."""
+    global _handle_counter
+    _handle_counter += 1
+    return torch.tensor([_handle_counter], dtype=torch.int64, device="cpu")
 
 
 # ============================================================================
@@ -52,7 +53,7 @@ def _get_next_cache_id() -> torch.Tensor:
 
 _lib = torch.library.Library("deepep", "DEF")
 
-# dispatch returns: (recv_x, recv_indices, recv_scores, num_recv_per_expert, cache_id)
+# dispatch returns: (recv_x, recv_indices, recv_scores, num_recv_per_expert, handle_id)
 _lib.define(
     "dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, "
     "Tensor num_tokens_per_rank, Tensor num_tokens_per_rdma_rank, "
@@ -61,7 +62,7 @@ _lib.define(
 )
 
 # combine returns: combined_x
-_lib.define("combine(Tensor x, Tensor cache_id) -> Tensor")
+_lib.define("combine(Tensor x, Tensor handle_id) -> Tensor")
 
 
 @torch.library.impl(_lib, "dispatch", "CUDA")
@@ -80,13 +81,13 @@ def _dispatch_op_impl(
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before dispatch"
 
-    previous_event = _create_event_if_async(True)
+    previous_event = EventOverlap(EventHandle())
 
     (
         recv_x,
         recv_indices,
         recv_scores,
-        num_recv_list,
+        recv_num_tokens_per_expert_list,
         handle,
         after_event,
     ) = buffer.dispatch(
@@ -102,43 +103,32 @@ def _dispatch_op_impl(
         allocate_on_comm_stream=True,
     )
 
-    _sync_stream_if_async(True, after_event)
+    after_event.current_stream_wait()
 
-    cache_id = _get_next_cache_id()
-    _handle_cache[cache_id.item()] = handle
+    handle_id = _get_next_handle_id()
+    _handle_cache[handle_id.item()] = handle
 
-    num_recv_tensor = torch.tensor(num_recv_list, dtype=torch.int32, device="cpu")
-    return recv_x, recv_indices, recv_scores, num_recv_tensor, cache_id
-
-
-@torch.library.impl(_lib, "combine", "CUDA")
-def _combine_op_impl(x: torch.Tensor, cache_id: torch.Tensor) -> torch.Tensor:
-    """Execute DeepEP combine."""
-    global _buffer
-
-    buffer = _buffer
-    assert buffer is not None, "Buffer must be initialized before combine"
-
-    handle = _handle_cache.get(cache_id.item())
-    assert handle is not None, f"Handle not found for cache_id={cache_id.item()}"
-
-    previous_event = _create_event_if_async(True)
-
-    combined, _, after_event = buffer.combine(
-        x=x,
-        handle=handle,
-        previous_event=previous_event,
-        async_finish=True,
-        allocate_on_comm_stream=True,
+    recv_num_tokens_per_expert = torch.tensor(
+        recv_num_tokens_per_expert_list, dtype=torch.int32, device="cpu"
     )
+    # pyrefly: ignore [bad-return]
+    return recv_x, recv_indices, recv_scores, recv_num_tokens_per_expert, handle_id
 
-    _sync_stream_if_async(True, after_event)
 
-    return combined
+def _dispatch_setup_context(ctx, inputs, output):
+    x, *_ = inputs
+    *_, handle_id = output
+    ctx.input_dtype = x.dtype
+    ctx.saved_handle = _handle_cache.get(handle_id.item())
 
 
 def _dispatch_backward(
-    ctx, grad_recv_x, grad_recv_indices, grad_recv_scores, grad_num_recv, grad_cache_id
+    ctx,
+    grad_recv_x,
+    grad_recv_indices,
+    grad_recv_scores,
+    grad_recv_num_tokens_per_expert,
+    grad_handle_id,
 ):
     """Backward for dispatch: performs combine on gradients."""
     global _buffer
@@ -146,10 +136,11 @@ def _dispatch_backward(
     if grad_recv_x is None:
         return None, None, None, None, None, None, None
 
-    handle = _handle_cache.get(ctx.cache_id_int)
-    assert handle is not None, f"Handle not found for cache_id={ctx.cache_id_int}"
+    # Use handle saved in setup_context instead of from cache
+    handle = ctx.saved_handle
+    assert handle is not None
 
-    previous_event = _create_event_if_async(True)
+    previous_event = EventOverlap(EventHandle())
 
     grad_x, grad_scores, after_event = _buffer.combine(
         x=grad_recv_x,
@@ -160,9 +151,8 @@ def _dispatch_backward(
         allocate_on_comm_stream=True,
     )
 
-    _sync_stream_if_async(True, after_event)
-    _handle_cache.pop(ctx.cache_id_int, None)
-
+    after_event.current_stream_wait()
+    # combine op involves weighted sum on float() so need to convert back
     grad_x = grad_x.to(ctx.input_dtype)
     grad_topk_weights = (
         grad_scores.to(ctx.input_dtype) if grad_scores is not None else None
@@ -171,11 +161,41 @@ def _dispatch_backward(
     return grad_x, None, grad_topk_weights, None, None, None, None
 
 
-def _dispatch_setup_context(ctx, inputs, output):
-    x, topk_idx, topk_weights, *_ = inputs
-    recv_x, recv_indices, recv_scores, num_recv, cache_id = output
-    ctx.cache_id_int = cache_id.item()
-    ctx.input_dtype = x.dtype
+@torch.library.impl(_lib, "combine", "CUDA")
+def _combine_op_impl(x: torch.Tensor, handle_id: torch.Tensor) -> torch.Tensor:
+    """Execute DeepEP combine."""
+    global _buffer
+
+    buffer = _buffer
+    assert buffer is not None, "Buffer must be initialized before combine"
+
+    # In inference mode, setup_context doesn't run, so we clean up handle_cache here.
+    # NOTE: For inference, use torch.inference_mode() instead of torch.no_grad()
+    if torch.is_inference_mode_enabled():
+        handle = _handle_cache.pop(handle_id.item(), None)
+    else:
+        handle = _handle_cache.get(handle_id.item())
+    assert handle is not None, f"Handle not found for handle_id={handle_id.item()}"
+
+    previous_event = EventOverlap(EventHandle())
+
+    combined, _, after_event = buffer.combine(
+        x=x,
+        handle=handle,
+        previous_event=previous_event,
+        async_finish=True,
+        allocate_on_comm_stream=True,
+    )
+
+    after_event.current_stream_wait()
+
+    return combined
+
+
+def _combine_setup_context(ctx, inputs, output):
+    _, handle_id = inputs
+    # Pop handle from cache and save it for backward
+    ctx.saved_handle = _handle_cache.pop(handle_id.item(), None)
 
 
 def _combine_backward(ctx, grad_combined):
@@ -183,7 +203,8 @@ def _combine_backward(ctx, grad_combined):
     global _buffer
 
     handle = ctx.saved_handle
-    previous_event = _create_event_if_async(True)
+    assert handle is not None, "Handle not found in combine backward"
+    previous_event = EventOverlap(EventHandle())
 
     grad_x, _, _, _, _, after_event = _buffer.dispatch(
         x=grad_combined,
@@ -199,15 +220,9 @@ def _combine_backward(ctx, grad_combined):
         allocate_on_comm_stream=True,
     )
 
-    _sync_stream_if_async(True, after_event)
+    after_event.current_stream_wait()
 
     return grad_x, None
-
-
-def _combine_setup_context(ctx, inputs, output):
-    x, cache_id = inputs
-    ctx.cache_id_int = cache_id.item()
-    ctx.saved_handle = _handle_cache.get(ctx.cache_id_int)
 
 
 torch.library.register_autograd(
@@ -218,19 +233,9 @@ torch.library.register_autograd(
 )
 
 
-def _create_event_if_async(async_finish: bool):
-    """Create EventOverlap handle if async mode is enabled."""
-    return EventOverlap(EventHandle()) if async_finish else None
-
-
-def _sync_stream_if_async(async_finish: bool, after_event):
-    """Synchronize current stream with communication stream if async mode is enabled."""
-    if async_finish and after_event is not None:
-        after_event.current_stream_wait()
-
-
 def get_hidden_bytes(x: torch.Tensor) -> int:
-    """Calculate the number of hidden bytes for a tensor."""
+    """Calculate the number of hidden bytes for one token."""
+    # Use at least 2 bytes (bf16 size) so buffer works for both fp8 and bf16 without reallocation
     return x.size(1) * max(x.element_size(), 2)
 
 
@@ -260,78 +265,75 @@ def get_buffer(group: ProcessGroup, hidden_bytes: int) -> Buffer:
     return _buffer
 
 
-def _indices_to_multihot(
-    indices: torch.Tensor, scores: torch.Tensor, num_local_experts: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Convert topk indices to multihot format for permutation."""
-    batch_size = indices.shape[0]
-    multihot_routing_map = torch.zeros(
-        (batch_size, num_local_experts), dtype=torch.long, device=indices.device
-    )
-    multihot_scores = torch.zeros(
-        (batch_size, num_local_experts), dtype=scores.dtype, device=indices.device
-    )
-
-    mask = indices != -1
-    valid_indices = indices[mask]
-    row_indices = torch.arange(batch_size, device=indices.device).repeat_interleave(
-        mask.sum(dim=1)
-    )
-    multihot_routing_map[row_indices, valid_indices] = 1
-    multihot_scores[row_indices, valid_indices] = scores[mask]
-
-    return multihot_routing_map.bool(), multihot_scores
-
-
 def _permute_tokens(
-    tokens: torch.Tensor,
-    routing_map: torch.Tensor,
-    scores: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
-    """Permute tokens by expert for grouped_mm.
+    hidden_states: torch.Tensor,
+    dispatched_indices: torch.Tensor,
+    dispatched_scores: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Convert dispatch output to grouped_mm format with permutation and token expansion.
+
+    Each token may be routed to multiple experts (top-k), so tokens are expanded and sorted
+    by expert ID for efficient grouped matrix multiplication. num_recv_tokens is the number
+    of unique tokens received, while num_all_tokens is the expanded count after replication.
+
+    Args:
+        hidden_states: Received tokens [num_recv_tokens, hidden_dim]
+        dispatched_indices: Expert indices for each token [num_recv_tokens, topk], -1 means masked
+        dispatched_scores: Routing scores [num_recv_tokens, topk]
 
     Returns:
-        (permuted_tokens, permuted_scores, sorted_indices)
+        permuted_hidden_states: Tokens sorted by expert [num_all_tokens, hidden_dim]
+        permuted_scores: Routing scores in same order [num_all_tokens]
+        permuted_indices: Original token indices for unpermutation [num_all_tokens]
     """
-    num_tokens = tokens.shape[0]
-    num_experts = routing_map.shape[1]
+    mask = dispatched_indices != -1
+    valid_expert_ids = dispatched_indices[mask]  # 1d tensor
+    valid_scores = dispatched_scores[mask]
 
-    routing_map_t = routing_map.bool().T.contiguous()
-    token_indices = torch.arange(num_tokens, device=routing_map.device)
-    token_indices = token_indices.unsqueeze(0).expand(num_experts, -1)
-    sorted_indices = token_indices.masked_select(routing_map_t)
-    sorted_tokens = tokens.index_select(0, sorted_indices)
+    # Repeat each token by its valid count and select tokens in expert order
+    sort_order = torch.argsort(valid_expert_ids, stable=True)
+    permuted_indices = torch.arange(
+        len(hidden_states), device=hidden_states.device
+    ).repeat_interleave(mask.sum(dim=1))[sort_order]
+    permuted_hidden_states = hidden_states.index_select(0, permuted_indices)
+    permuted_scores = valid_scores[sort_order]
 
-    if scores is not None:
-        sorted_scores = scores.T.contiguous().masked_select(routing_map_t)
-    else:
-        sorted_scores = None
-
-    return sorted_tokens, sorted_scores, sorted_indices
+    return permuted_hidden_states, permuted_scores, permuted_indices
 
 
 def _unpermute_tokens(
-    permuted_tokens: torch.Tensor,
-    sorted_indices: torch.Tensor,
+    permuted_hidden_states: torch.Tensor,
+    permuted_indices: torch.Tensor,
     num_tokens: int,
 ) -> torch.Tensor:
-    """Reverse permutation applied by _permute_tokens."""
-    hidden = permuted_tokens.shape[1]
-    output_tokens = torch.zeros(
-        (num_tokens, hidden), dtype=permuted_tokens.dtype, device=permuted_tokens.device
+    """Reverse permutation applied by _permute_tokens.
+
+    Args:
+        permuted_hidden_states: The permuted token tensor [num_all_tokens, hidden_dim]
+        permuted_indices: The indices used to permute the tokens [num_all_tokens]
+        num_tokens: Number of unique tokens received by the current rank
+
+    Returns:
+        Tokens aggregated and restored to their original order [num_tokens, hidden_dim]
+    """
+    hidden_dim = permuted_hidden_states.shape[1]
+    output_hidden_states = torch.zeros(
+        (num_tokens, hidden_dim),
+        dtype=permuted_hidden_states.dtype,
+        device=permuted_hidden_states.device,
     )
-    output_tokens.scatter_add_(
-        0, sorted_indices.unsqueeze(1).expand(-1, hidden), permuted_tokens
+    output_hidden_states.scatter_add_(
+        0, permuted_indices.unsqueeze(1).expand(-1, hidden_dim), permuted_hidden_states
     )
-    return output_tokens
+    return output_hidden_states
 
 
 @dataclass
 class DispatchState:
     """State from dispatch needed for combine."""
 
-    cache_id: torch.Tensor  # CPU tensor used to retrieve cached handle
-    sorted_indices: torch.Tensor
+    handle_id: torch.Tensor  # CPU tensor used to retrieve cached handle
+    permuted_indices: torch.Tensor
     num_recv_tokens: int
     permuted_scores: Optional[torch.Tensor] = None
 
@@ -359,18 +361,8 @@ def dispatch_tokens(
     Returns:
         (permuted_tokens, tokens_per_expert, state_for_combine)
     """
-    # Ensure contiguous and proper shape
-    router_topk = (
-        selected_experts_indices.shape[1] if selected_experts_indices.dim() == 2 else 1
-    )
-    if selected_experts_indices.dim() != 2:
-        selected_experts_indices = selected_experts_indices.view(
-            -1, router_topk
-        ).contiguous()
-        top_scores = top_scores.view(-1, router_topk).contiguous()
-    else:
-        selected_experts_indices = selected_experts_indices.contiguous()
-        top_scores = top_scores.contiguous()
+    selected_experts_indices = selected_experts_indices.contiguous()
+    top_scores = top_scores.contiguous()
 
     # Mask out zero-score tokens
     selected_experts_indices = selected_experts_indices.masked_fill(top_scores == 0, -1)
@@ -381,6 +373,7 @@ def dispatch_tokens(
 
     buffer = get_buffer(group, get_hidden_bytes(hidden_states))
 
+    # Calculate dispatch layout before actual dispatch
     (
         num_tokens_per_rank,
         num_tokens_per_rdma_rank,
@@ -391,12 +384,13 @@ def dispatch_tokens(
         topk_idx=selected_experts_indices, num_experts=num_experts
     )
 
+    # Dispatch tokens to experts
     (
         hidden_states,
         dispatched_indices,
         dispatched_expert_scores,
-        tokens_per_expert,
-        cache_id,
+        num_tokens_per_expert,
+        handle_id,
     ) = torch.ops.deepep.dispatch(
         hidden_states,
         selected_experts_indices,
@@ -407,21 +401,14 @@ def dispatch_tokens(
         num_tokens_per_expert_dispatch,
     )
 
-    dispatched_routing_map, dispatched_expert_scores_multihot = _indices_to_multihot(
-        dispatched_indices, dispatched_expert_scores, num_local_experts
-    )
-
     num_recv_tokens = hidden_states.shape[0]
 
-    # Sort tokens by expert for grouped_mm
-    hidden_states, permuted_scores, sorted_indices = _permute_tokens(
-        hidden_states, dispatched_routing_map, scores=dispatched_expert_scores_multihot
+    hidden_states, permuted_scores, permuted_indices = _permute_tokens(
+        hidden_states, dispatched_indices, dispatched_expert_scores
     )
 
-    # Compute tokens_per_expert from routing_map (matches the sorted tokens)
-    tokens_per_expert = (
-        dispatched_routing_map.sum(dim=0).to(torch.int32).to(hidden_states.device)
-    )
+    # num_tokens_per_expert is returned from dispatch as int32 on CPU, move to GPU
+    num_tokens_per_expert = num_tokens_per_expert.to(hidden_states.device)
 
     if score_before_experts and permuted_scores is not None:
         # Avoid float32 conversion to save memory
@@ -433,13 +420,13 @@ def dispatch_tokens(
         permuted_scores_for_state = permuted_scores
 
     state = DispatchState(
-        cache_id=cache_id,
-        sorted_indices=sorted_indices,
+        handle_id=handle_id,
+        permuted_indices=permuted_indices,
         num_recv_tokens=num_recv_tokens,
         permuted_scores=permuted_scores_for_state,
     )
 
-    return hidden_states, tokens_per_expert, state
+    return hidden_states, num_tokens_per_expert, state
 
 
 def combine_tokens(
@@ -454,9 +441,9 @@ def combine_tokens(
         ).reshape(-1, 1)
 
     hidden_states = _unpermute_tokens(
-        hidden_states, state.sorted_indices, state.num_recv_tokens
+        hidden_states, state.permuted_indices, state.num_recv_tokens
     )
 
-    hidden_states = torch.ops.deepep.combine(hidden_states, state.cache_id)
+    hidden_states = torch.ops.deepep.combine(hidden_states, state.handle_id)
 
     return hidden_states
