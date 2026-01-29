@@ -58,6 +58,7 @@ class GptOssModelArgs(BaseModelArgs):
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
     swiglu_limit: float = 7.0
+    use_router_bias: bool = False  # GPT-OSS models have learned router gate bias
     # Multi-Head Latent Attention (MLA)
     head_dim: int = 64
     n_heads: int = 64
