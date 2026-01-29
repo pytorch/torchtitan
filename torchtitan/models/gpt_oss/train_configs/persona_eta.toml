@@ -1,0 +1,121 @@
+[job]
+dump_folder = "./outputs/persona_eta"
+description = "GPT-OSS 20B persona_eta - 49K context with YaRN"
+print_config = true
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 5
+disable_color_printing = false
+enable_tensorboard = true
+save_tb_folder = "tb_persona_eta"
+enable_wandb = false
+
+[model]
+name = "gpt_oss"
+flavor = "20b"
+hf_assets_path = "/mnt/models/persona_epsilon_20b_mxfp4"  # For tokenizer (same vocab as base)
+# converters = ["quantize.linear.float8"]
+# 
+# [quantize.linear.float8]
+# enable_fsdp_float8_all_gather = true
+# precompute_float8_dynamic_scale_for_fsdp = true
+# filter_fqns = [
+#       "attention.wk",        # Small N=512
+#       "attention.wv",        # Small N=512
+#       "router",              # Small N=32, routing-critical
+#       "output",              # Optional: keep LM head in high precision
+#       "tok_embeddings",      # Optional: keep embeddings in high precision
+# ]
+
+[optimizer]
+name = "AdamW"
+lr = 5e-6  # Conservative SFT rate (FSDP gradient scaling now correct) 
+eps = 1e-8
+weight_decay = 0.01
+cpu_offload = true  # Same as SFT
+
+[optimizer.lr_multipliers]
+# Tuned for QAT - need larger updates to cross quantization boundaries
+embeddings = 0.1    # Nearly freeze - preserve base language understanding
+output = 1.0        # Full LR - allow output head to adapt
+attention = 1.0     # Full LR for attention projections
+experts = 1.0       # Higher LR for experts → effective 1.5e-5
+routers = 0.1       # Nearly freeze - protect routing stability
+norms = 0.1         # Nearly freeze - preserve normalization scales
+bias = 0.1          # Full LR for bias parameters
+
+[optimizer.weight_decay_multipliers]
+# Standard practice: no weight decay on embeddings, norms, and biases
+embeddings = 0.1    # Light weight decay on embeddings
+output = 1.0        # Full weight decay on output layer
+attention = 1.0     # Full weight decay on attention projections
+experts = 1.0       # Full weight decay on expert MLPs
+routers = 0.1       # Light weight decay for stability
+norms = 0.1         # Light weight decay on layer norms
+bias = 0.1          # No weight decay on all bias parameters
+
+[lr_scheduler]
+warmup_steps = 92  # ~10% of 926 steps
+decay_ratio = 0.7   # Less aggressive decay (was 0.9)
+decay_type = "cosine"
+min_lr_factor = 0.3  # Higher floor (was 0.1)
+
+[training]
+local_batch_size = 1
+global_batch_size = 6
+seq_len = 49152  # 49K context with YaRN
+max_norm = 1.0  # Gradient clipping threshold
+steps = 926  # 2 epochs: 2778 packed sequences / 6 batch = 463 steps/epoch
+dataset = "persona_eta"
+pack_samples = true
+pad_samples = false
+add_bos_eos = false  # Harmony format already contains proper start/end tokens
+mask_non_assistant = true  # Only train on assistant responses (prevents self-extension)
+gc_freq = 60  # Infrequent GC
+freeze_router_bias = true  # Freeze router bias
+freeze_expert_bias = true  # Freeze expert bias
+# Use same dtype as SFT
+dtype = "float32"  # Model initialization dtype
+mixed_precision_param = "bfloat16"  # FSDP param storage
+mixed_precision_reduce = "float32"  # Gradient accumulation precision
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default"
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 1
+
+[checkpoint]
+enable = true
+folder = "checkpoint_persona_eta"
+interval = 100  # Checkpoints at 100, 200, ..., 900
+enable_first_step_checkpoint = false
+last_save_model_only = false
+export_dtype = "float32"
+async_mode = "disabled"
+initial_load_path = "/mnt/models/openai/gpt-oss-20b"  # Load from quantized base model
+initial_load_in_hf = true  # Load from HuggingFace safetensors format
+initial_load_in_hf_quantized = true  # Dequantize weights on load
+
+[activation_checkpoint]
+mode = "selective"
+selective_ac_option = '1'  # Checkpoint every layer - same as SFT
+
+[compile]
+enable = true  # Disabled for QAT debugging
+
+[validation]
+enable = false
+dataset = "c4_validation"
+freq = 250
+steps = 50

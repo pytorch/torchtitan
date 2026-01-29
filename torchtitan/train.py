@@ -37,6 +37,32 @@ from torchtitan.tools.profiling import (
 )
 
 
+def _freeze_moe_parameters(model_parts: list[torch.nn.Module], job_config: JobConfig) -> None:
+    """Freeze MoE router/expert bias parameters based on config."""
+    freeze_router = getattr(job_config.training, "freeze_router_bias", False)
+    freeze_expert = getattr(job_config.training, "freeze_expert_bias", False)
+
+    if not (freeze_router or freeze_expert):
+        return
+
+    frozen_count = 0
+    for model in model_parts:
+        for name, param in model.named_parameters():
+            should_freeze = False
+            if freeze_router and "moe.router.gate.bias" in name:
+                should_freeze = True
+            if freeze_expert and "moe.expert_bias" in name:
+                should_freeze = True
+
+            if should_freeze and param.requires_grad:
+                param.requires_grad = False
+                frozen_count += 1
+                logger.debug(f"Froze parameter: {name}")
+
+    if frozen_count > 0:
+        logger.info(f"Froze {frozen_count} MoE bias parameters")
+
+
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # core configs
     job_config: JobConfig
@@ -266,6 +292,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"{device_mem_stats.max_reserved_gib:.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)"
         )
+
+        # Freeze MoE parameters if configured (before optimizer creation)
+        _freeze_moe_parameters(self.model_parts, job_config)
 
         # build optimizer after applying parallelisms to the model
         self.optimizers = self.train_spec.build_optimizers_fn(
@@ -709,11 +738,42 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         return self.step < self.job_config.training.steps
 
     def state_dict(self) -> dict[str, Any]:
-        return {"step": self.step, "ntokens_seen": self.ntokens_seen}
+        state = {"step": self.step, "ntokens_seen": self.ntokens_seen}
+
+        # Store RoPE parameters for validation on resume (model-agnostic)
+        rope_params = {}
+        for param in ("rope_theta", "rope_factor", "ntk_alpha", "ntk_beta", "original_seq_len"):
+            if hasattr(self.model_args, param):
+                rope_params[param] = getattr(self.model_args, param)
+        if rope_params:
+            state["rope_params"] = rope_params
+
+        return state
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         self.step = state_dict["step"]
         self.ntokens_seen = state_dict["ntokens_seen"]
+
+        # Validate RoPE parameters match checkpoint (prevents silent mismatches on resume)
+        if "rope_params" in state_dict:
+            saved_rope = state_dict["rope_params"]
+            mismatches = []
+            for param, saved_value in saved_rope.items():
+                if hasattr(self.model_args, param):
+                    current_value = getattr(self.model_args, param)
+                    # Use tolerance for float comparison
+                    if isinstance(saved_value, float):
+                        if abs(saved_value - current_value) > 1e-6:
+                            mismatches.append(f"{param}: checkpoint={saved_value} vs config={current_value}")
+                    elif saved_value != current_value:
+                        mismatches.append(f"{param}: checkpoint={saved_value} vs config={current_value}")
+
+            if mismatches:
+                raise ValueError(
+                    "RoPE parameter mismatch between checkpoint and current config:\n" +
+                    "\n".join(f"  - {m}" for m in mismatches) +
+                    "\n\nEnsure your TOML config matches the checkpoint's RoPE settings."
+                )
 
     def close(self) -> None:
         if hasattr(self, "checkpointer") and self.checkpointer:

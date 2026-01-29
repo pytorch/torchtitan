@@ -71,6 +71,8 @@ class GptOssModelArgs(BaseModelArgs):
     rope_factor: float = 32
     ntk_alpha: float = 1.0
     ntk_beta: float = 32.0
+    # Expert parallel communication backend: "standard" or "deepep"
+    moe_impl: str = "standard"
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
@@ -89,6 +91,101 @@ class GptOssModelArgs(BaseModelArgs):
         if job_config.parallelism.context_parallel_degree > 1:
             raise NotImplementedError(
                 "CP support for gpt-oss model is still in progress."
+            )
+
+        # Set MoE implementation based on expert parallel comm backend
+        self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
+
+        # Validate RoPE parameters against HF checkpoint config if loading from HF
+        if (
+            job_config.checkpoint.initial_load_in_hf
+            and job_config.checkpoint.initial_load_path
+        ):
+            self._validate_rope_params_from_hf(job_config.checkpoint.initial_load_path)
+        elif (
+            job_config.checkpoint.initial_load_in_hf and job_config.model.hf_assets_path
+        ):
+            self._validate_rope_params_from_hf(job_config.model.hf_assets_path)
+
+    def _validate_rope_params_from_hf(self, hf_path: str) -> None:
+        """Validate RoPE parameters match HF checkpoint config.json.
+
+        When loading from HF checkpoint, RoPE parameters (ntk_alpha, ntk_beta, rope_factor)
+        are NOT loaded from config.json - they use model_args defaults. This function
+        validates that the defaults match the checkpoint to avoid silent mismatches.
+        """
+        import json
+        import os
+
+        config_path = os.path.join(hf_path, "config.json")
+        if not os.path.exists(config_path):
+            logger.warning(
+                f"HF config.json not found at {config_path}, skipping RoPE validation"
+            )
+            return
+
+        with open(config_path, "r") as f:
+            hf_config = json.load(f)
+
+        # Check rope_scaling parameters (YaRN)
+        rope_scaling = hf_config.get("rope_scaling", {})
+        if rope_scaling:
+            # Map HF parameter names to new names
+            # beta_fast (old) -> ntk_beta (new)
+            # beta_slow (old) -> ntk_alpha (new)
+            hf_beta_fast = rope_scaling.get("beta_fast")
+            hf_beta_slow = rope_scaling.get("beta_slow")
+            hf_factor = rope_scaling.get("factor")
+            hf_orig_len = rope_scaling.get("original_max_position_embeddings")
+
+            mismatches = []
+            if (
+                hf_beta_fast is not None
+                and abs(float(hf_beta_fast) - self.ntk_beta) > 1e-6
+            ):
+                mismatches.append(
+                    f"beta_fast: HF={hf_beta_fast} vs model_args.ntk_beta={self.ntk_beta}"
+                )
+            if (
+                hf_beta_slow is not None
+                and abs(float(hf_beta_slow) - self.ntk_alpha) > 1e-6
+            ):
+                mismatches.append(
+                    f"beta_slow: HF={hf_beta_slow} vs model_args.ntk_alpha={self.ntk_alpha}"
+                )
+            if (
+                hf_factor is not None
+                and abs(float(hf_factor) - self.rope_factor) > 1e-6
+            ):
+                mismatches.append(
+                    f"factor: HF={hf_factor} vs model_args.rope_factor={self.rope_factor}"
+                )
+            if hf_orig_len is not None and hf_orig_len != self.original_seq_len:
+                mismatches.append(
+                    f"original_max_position_embeddings: HF={hf_orig_len} vs model_args.original_seq_len={self.original_seq_len}"
+                )
+
+            if mismatches:
+                raise ValueError(
+                    f"RoPE parameter mismatch between HF checkpoint and model_args:\n"
+                    + "\n".join(f"  - {m}" for m in mismatches)
+                    + "\n\nRoPE parameters are NOT auto-loaded from HF config.json. "
+                    + "You must set them in your TOML config or model flavor defaults to match the checkpoint."
+                )
+            else:
+                logger.info(
+                    f"[OK] RoPE parameters validated against HF checkpoint: ntk_alpha={self.ntk_alpha}, ntk_beta={self.ntk_beta}, rope_factor={self.rope_factor}"
+                )
+
+        # Check rope_theta
+        hf_rope_theta = hf_config.get("rope_theta")
+        if (
+            hf_rope_theta is not None
+            and abs(float(hf_rope_theta) - self.rope_theta) > 1e-6
+        ):
+            raise ValueError(
+                f"rope_theta mismatch: HF checkpoint has {hf_rope_theta}, but model_args has {self.rope_theta}. "
+                "Set model_args.rope_theta to match the checkpoint."
             )
 
     # pyrefly: ignore [bad-override]

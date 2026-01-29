@@ -1,0 +1,106 @@
+[job]
+dump_folder = "./outputs/persona_eta_131k_masked"
+description = "GPT-OSS 20B persona_eta - 131K context with loss masking (lr=2e-6)"
+print_config = true
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 10
+disable_color_printing = false
+enable_tensorboard = true
+save_tb_folder = "tb_persona_eta_131k_masked"
+enable_wandb = false
+
+[model]
+name = "gpt_oss"
+flavor = "20b"
+hf_assets_path = "./outputs/gpt-oss-20b"  # For tokenizer (same vocab as base)
+
+[optimizer]
+name = "AdamW"
+lr = 2e-6  # Reduced from 5e-6 for loss-masked training
+eps = 1e-8
+weight_decay = 0.01
+cpu_offload = true
+
+[optimizer.lr_multipliers]
+# Tuned for fine-tuning - preserve base capabilities
+embeddings = 0.5
+output = 0.5
+attention = 1.0
+experts = 1.0
+routers = 0.5
+norms = 0.5
+bias = 0.5
+
+[optimizer.weight_decay_multipliers]
+embeddings = 0.5    # Light weight decay on embeddings
+output = 0.5        # Light weight decay on output layer
+attention = 1.0     # Full weight decay on attention projections
+experts = 1.0       # Full weight decay on expert MLPs
+routers = 0.5       # Light weight decay for stability
+norms = 0.5         # Light weight decay on layer norms
+bias = 0.5          # Light weight decay on bias parameters
+
+[lr_scheduler]
+warmup_steps = 82  # ~10% of 822 steps
+decay_ratio = 0.9
+decay_type = "cosine"
+min_lr_factor = 0.1
+
+[training]
+local_batch_size = 1
+global_batch_size = 4  # DP=2 x 2 gradient accumulation
+seq_len = 131072  # 131K native context length (no YaRN needed)
+max_norm = 1.0    # Gradient clipping threshold
+steps = 822       # 3 epochs with loss masking
+dataset = "persona_eta"
+pack_samples = true
+pad_samples = false
+add_bos_eos = false  # Harmony format already contains proper start/end tokens
+mask_non_assistant = true  # Only train on assistant responses (prevents self-extension)
+gc_freq = 60      # Infrequent GC
+freeze_router_bias = false
+dtype = "bfloat16"           # Model initialization dtype
+mixed_precision_param = "bfloat16"  # FSDP param storage
+mixed_precision_reduce = "float32"  # Gradient accumulation precision
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1   # FSDP sharding
+tensor_parallel_degree = 4        # Split attention across 4 GPUs
+fsdp_reshard_after_forward = "default"
+enable_async_tensor_parallel = false
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 1
+
+[checkpoint]
+enable = true
+folder = "checkpoint_persona_eta_131k_masked"
+interval = 100    # Checkpoints at 100, 200, 300, 400, 500
+enable_first_step_checkpoint = false
+last_save_model_only = false
+export_dtype = "float32"
+async_mode = "disabled"
+initial_load_path = "./outputs/gpt-oss-20b"
+initial_load_in_hf = true
+initial_load_in_hf_quantized = true
+
+[activation_checkpoint]
+mode = "selective"
+selective_ac_option = '1'  # Checkpoint every layer
+
+[compile]
+enable = true
+
+[validation]
+enable = false
+dataset = "c4_validation"
+freq = 250
+steps = 50

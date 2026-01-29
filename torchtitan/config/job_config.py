@@ -307,6 +307,45 @@ class Training:
     dataloader: DataLoader = field(default_factory=DataLoader)
     """DataLoader configuration"""
 
+    pack_samples: bool = False
+    """
+    Use packed dataset mode (preserves sample boundaries).
+    When True, uses HuggingFacePackedDataset instead of HuggingFaceTextDataset.
+    Samples are greedily packed until seq_len is reached, then padded.
+    """
+
+    pad_samples: bool = False
+    """
+    Use padded dataset mode (one sample per sequence, no packing).
+    When True, each sample is loaded individually and padded to seq_len.
+    Cannot be used together with pack_samples.
+    """
+
+    add_bos_eos: bool = True
+    """
+    Whether to add BOS/EOS tokens to samples.
+    Set to False when using pre-formatted data (e.g., Harmony chat format).
+    """
+
+    mask_non_assistant: bool = False
+    """
+    Enable loss masking for non-assistant tokens (Harmony format).
+    When True, only assistant response tokens contribute to the loss.
+    Requires pack_samples=True or pad_samples=True.
+    """
+
+    freeze_router_bias: bool = False
+    """
+    Freeze the router gate bias parameters (layers.*.moe.router.gate.bias).
+    Use this to prevent the learned routing bias from changing during fine-tuning.
+    """
+
+    freeze_expert_bias: bool = False
+    """
+    Freeze the expert bias buffer (layers.*.moe.expert_bias).
+    This is the load-balancing bias; freezing prevents it from adapting during training.
+    """
+
 
 @dataclass
 class Parallelism:

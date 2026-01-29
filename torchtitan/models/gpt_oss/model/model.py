@@ -73,9 +73,9 @@ def precompute_rope_cache(
             * math.log(original_seq_len / (ntk_alpha * 2 * math.pi))
             / math.log(base)
         )
-        assert (
-            0 < low < high < d_half - 1
-        ), f"Invalid YaRN params: 0 < {low} < {high} < {d_half - 1}"
+        assert 0 < low < high < d_half - 1, (
+            f"Invalid YaRN params: 0 < {low} < {high} < {d_half - 1}"
+        )
 
         # Linear ramp for smooth interpolation between low and high
         ramp = (torch.arange(d_half, dtype=torch.float32) - low) / (high - low)
@@ -331,6 +331,7 @@ class GptOssModel(ModelProtocol):
         self.model_args = model_args
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+
         self.register_buffer(
             "rope_cache", self._precompute_rope_cache(), persistent=False
         )
