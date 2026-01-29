@@ -12,8 +12,8 @@ from torchtitan.tools.utils import _round_up
 
 from .kernels import generate_permute_indices
 
-TOKEN_GROUP_ALIGN_SIZE_M = 8
-ValidTokenGroupAlignmentSize = Literal[8, 16, 32]
+TOKEN_GROUP_ALIGN_SIZE_M = 1
+ValidTokenGroupAlignmentSize = Literal[16, 32]
 
 
 def set_token_group_alignment_size_m(
@@ -23,10 +23,9 @@ def set_token_group_alignment_size_m(
     Set the token group alignment size for token groups in MoE. This is implemented by
     padding each token group size to the next multiple of TOKEN_GROUP_ALIGN_SIZE_M.
 
-    Valid values are: 8, 16, or 32.
+    Valid values are: 16, or 32.
     Different values are needed for different cases:
 
-    * For bf16, 8 is enough (16 byte alignment / 2 bytes per elem = 8 elements).
     * For fp8, 16 byte alignment / 1 byte per elem = 16 elements.
     * For mxfp8, we need 32 (or block_size) because scaling block size is (1 x 32),
       so when doing per-token-group quantization on each logically distinct subtensor,
@@ -39,12 +38,31 @@ def set_token_group_alignment_size_m(
     TOKEN_GROUP_ALIGN_SIZE_M = alignment_size
 
 
+def need_indices_padding():
+    """
+    TOKEN_GROUP_ALIGN_SIZE_M only been set when MoE model is converted to quantized grouped_mm (FP8 or MXFP8)
+    If not, i.e. TOKEN_GROUP_ALIGN_SIZE_M is None, we don't need to pad the indices.
+    """
+    return TOKEN_GROUP_ALIGN_SIZE_M > 1
+
+
 def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
     global TOKEN_GROUP_ALIGN_SIZE_M
-    x_padded_per_expert = x.shape[0] + num_local_experts * TOKEN_GROUP_ALIGN_SIZE_M
-    padded_max_len = _round_up(x_padded_per_expert, TOKEN_GROUP_ALIGN_SIZE_M)
+    if TOKEN_GROUP_ALIGN_SIZE_M == 1:
+        # No alignment padding: the permuted buffer length should be exactly
+        # the number of real tokens.
+        padded_max_len = x.shape[0]
+    else:
+        # allocate extra room for padding/alignment
+        x_padded_per_expert = x.shape[0] + num_local_experts * TOKEN_GROUP_ALIGN_SIZE_M
+        padded_max_len = _round_up(x_padded_per_expert, TOKEN_GROUP_ALIGN_SIZE_M)
+
     with torch.no_grad():
-        (permuted_indices, num_tokens_per_expert, _offsets,) = generate_permute_indices(
+        (
+            permuted_indices,
+            num_tokens_per_expert,
+            _offsets,
+        ) = generate_permute_indices(
             num_tokens_per_expert,
             num_local_experts,
             ep_degree,
@@ -68,7 +86,7 @@ def _unpermute(out, input_shape, permuted_indices):
 
 def indices_padding_wrapper(func: Callable) -> Callable:
     """
-    In order to use torch._grouped_mm, we need to make sure the number of
+    In order to use (quantized) grouped_mm, we need to make sure the number of
     tokens each expert gets is a multiple of TOKEN_GROUP_ALIGN_SIZE_M. The
     generate_permute_indices kernel also helps achieve this via padding,
     without incurring synchronization between device and host.
