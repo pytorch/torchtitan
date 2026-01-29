@@ -282,9 +282,9 @@ def _permute_tokens(
         dispatched_scores: Routing scores [num_recv_tokens, topk]
 
     Returns:
-        sorted_hidden: Tokens sorted by expert [num_all_tokens, hidden_dim]
-        sorted_scores: Routing scores in same order [num_all_tokens]
-        sorted_indices: Original token indices for unpermutation [num_all_tokens]
+        permuted_hidden_states: Tokens sorted by expert [num_all_tokens, hidden_dim]
+        permuted_scores: Routing scores in same order [num_all_tokens]
+        permuted_indices: Original token indices for unpermutation [num_all_tokens]
     """
     mask = dispatched_indices != -1
     valid_expert_ids = dispatched_indices[mask]  # 1d tensor
@@ -292,25 +292,25 @@ def _permute_tokens(
 
     # Repeat each token by its valid count and select tokens in expert order
     sort_order = torch.argsort(valid_expert_ids, stable=True)
-    sorted_indices = torch.arange(
+    permuted_indices = torch.arange(
         len(hidden_states), device=hidden_states.device
     ).repeat_interleave(mask.sum(dim=1))[sort_order]
-    sorted_hidden = hidden_states.index_select(0, sorted_indices)
-    sorted_scores = valid_scores[sort_order]
+    permuted_hidden_states = hidden_states.index_select(0, permuted_indices)
+    permuted_scores = valid_scores[sort_order]
 
-    return sorted_hidden, sorted_scores, sorted_indices
+    return permuted_hidden_states, permuted_scores, permuted_indices
 
 
 def _unpermute_tokens(
     permuted_hidden_states: torch.Tensor,
-    sorted_indices: torch.Tensor,
+    permuted_indices: torch.Tensor,
     num_tokens: int,
 ) -> torch.Tensor:
-    """Reverse permutation applied by _dispatch_output_to_grouped.
+    """Reverse permutation applied by _permute_tokens.
 
     Args:
         permuted_hidden_states: The permuted token tensor [num_all_tokens, hidden_dim]
-        sorted_indices: The indices used to sort the tokens [num_all_tokens]
+        permuted_indices: The indices used to permute the tokens [num_all_tokens]
         num_tokens: Number of unique tokens received by the current rank
 
     Returns:
@@ -323,7 +323,7 @@ def _unpermute_tokens(
         device=permuted_hidden_states.device,
     )
     output_hidden_states.scatter_add_(
-        0, sorted_indices.unsqueeze(1).expand(-1, hidden_dim), permuted_hidden_states
+        0, permuted_indices.unsqueeze(1).expand(-1, hidden_dim), permuted_hidden_states
     )
     return output_hidden_states
 
@@ -331,9 +331,8 @@ def _unpermute_tokens(
 @dataclass
 class DispatchState:
     """State from dispatch needed for combine."""
-
     handle_id: torch.Tensor  # CPU tensor used to retrieve cached handle
-    sorted_indices: torch.Tensor
+    permuted_indices: torch.Tensor
     num_recv_tokens: int
     permuted_scores: Optional[torch.Tensor] = None
 
@@ -403,7 +402,7 @@ def dispatch_tokens(
 
     num_recv_tokens = hidden_states.shape[0]
 
-    hidden_states, permuted_scores, sorted_indices = _permute_tokens(
+    hidden_states, permuted_scores, permuted_indices = _permute_tokens(
         hidden_states, dispatched_indices, dispatched_expert_scores
     )
 
@@ -421,7 +420,7 @@ def dispatch_tokens(
 
     state = DispatchState(
         handle_id=handle_id,
-        sorted_indices=sorted_indices,
+        permuted_indices=permuted_indices,
         num_recv_tokens=num_recv_tokens,
         permuted_scores=permuted_scores_for_state,
     )
@@ -441,7 +440,7 @@ def combine_tokens(
         ).reshape(-1, 1)
 
     hidden_states = _unpermute_tokens(
-        hidden_states, state.sorted_indices, state.num_recv_tokens
+        hidden_states, state.permuted_indices, state.num_recv_tokens
     )
 
     hidden_states = torch.ops.deepep.combine(hidden_states, state.handle_id)
