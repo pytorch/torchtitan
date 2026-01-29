@@ -494,18 +494,25 @@ def _clip_grad_norm_with_ep(
         else:
             non_ep_params.append(p)
             non_ep_grads.append(p.grad)
+
+    # Either list can be empty depending on the parallelization strategy:
+    # - In torchtitan with separate dense/sparse meshes, both lists are typically non-empty
+    # - In autoparallel, all params may live on a single sparse mesh with "ep" dimension,
+    #   so non_ep_grads would be empty
+    # - In PP + EP setups, certain PP ranks may only own EP or non-EP layers
     ep_grads_total_norm = torch.nn.utils.get_total_norm(
         ep_grads, norm_type, error_if_nonfinite, foreach
     )
-    # ep_grads may be an empty list, in which case get_total_norm returns tensor(0.), a non-DTensor
-    # This can occur in PP + EP setups where certain PP ranks only own non-EP layers, for instance.
+    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
 
-    # pyrefly: ignore [missing-attribute]
     non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
         non_ep_grads, norm_type, error_if_nonfinite, foreach
-    ).full_tensor()
+    )
+    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
+    if isinstance(non_ep_grads_total_norm, DTensor):
+        non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
 
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
