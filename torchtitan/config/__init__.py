@@ -20,6 +20,7 @@ from .job_config import (
     FaultTolerance,
     Job,
     JobConfig,
+    LRMultipliers,
     LRScheduler,
     Metrics,
     Model,
@@ -29,6 +30,7 @@ from .job_config import (
     Quantize,
     Training,
     Validation,
+    WeightDecayMultipliers,
 )
 from .manager import ConfigManager
 
@@ -39,6 +41,7 @@ __all__ = [
     "Job",
     "Model",
     "Optimizer",
+    "LRMultipliers",
     "LRScheduler",
     "Metrics",
     "Checkpoint",
@@ -50,5 +53,6 @@ __all__ = [
     "Profiling",
     "Training",
     "Validation",
+    "WeightDecayMultipliers",
     "Debug",
 ]

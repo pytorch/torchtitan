@@ -131,6 +131,94 @@ class Model:
 
 
 @dataclass
+class LRMultipliers:
+    """Learning rate multipliers for different parameter groups.
+
+    Each multiplier is applied to the base learning rate to compute the
+    effective learning rate for that parameter group.
+
+    Example: base_lr=1e-5, experts=2.0 → experts get lr=2e-5
+    """
+
+    embeddings: float = 1.0
+    """Multiplier for embedding layer (tok_embeddings.weight)"""
+
+    output: float = 1.0
+    """Multiplier for output layer (output.weight, norm.weight - final RMSNorm before output)"""
+
+    attention: float = 1.0
+    """Multiplier for attention layers (wq, wk, wv, wo projections and sinks)"""
+
+    experts: float = 1.0
+    """Multiplier for MoE expert weights (mlp1/mlp2 weights and biases)"""
+
+    routers: float = 1.0
+    """Multiplier for MoE router/gate layers"""
+
+    norms: float = 1.0
+    """Multiplier for normalization layers (attention_norm, ffn_norm)"""
+
+    bias: float = 1.0
+    """Multiplier for all bias parameters. Bias parameters are matched first,
+    so this takes precedence over layer-specific multipliers for bias terms."""
+
+    def __post_init__(self):
+        """Validate multipliers are positive."""
+        for name in ['embeddings', 'output', 'attention', 'experts', 'routers', 'norms', 'bias']:
+            multiplier = getattr(self, name)
+            if multiplier <= 0:
+                raise ValueError(f"LR multiplier '{name}' must be positive, got {multiplier}")
+            if multiplier > 20.0:
+                logger.warning(
+                    f"LR multiplier '{name}' is very high ({multiplier}), "
+                    "this may cause training instability"
+                )
+
+
+@dataclass
+class WeightDecayMultipliers:
+    """Weight decay multipliers for different parameter groups.
+
+    Each multiplier is applied to the base weight_decay to compute the
+    effective weight decay for that parameter group. Use 0.0 to disable
+    weight decay for specific groups (recommended for embeddings, norms, biases).
+
+    Example: base weight_decay=0.1, embeddings=0.0 → embeddings get wd=0
+
+    Recommended settings for LLM training:
+        embeddings=0.0, output=0.0, norms=0.0, bias=0.0
+    """
+
+    embeddings: float = 1.0
+    """Multiplier for embedding layer (recommend 0.0)"""
+
+    output: float = 1.0
+    """Multiplier for output layer and final norm (recommend 0.0)"""
+
+    attention: float = 1.0
+    """Multiplier for attention layers (wq, wk, wv, wo projections)"""
+
+    experts: float = 1.0
+    """Multiplier for MoE expert weights"""
+
+    routers: float = 1.0
+    """Multiplier for MoE router/gate layers"""
+
+    norms: float = 1.0
+    """Multiplier for normalization layers (recommend 0.0)"""
+
+    bias: float = 1.0
+    """Multiplier for all bias parameters (recommend 0.0)"""
+
+    def __post_init__(self):
+        """Validate multipliers are non-negative."""
+        for name in ['embeddings', 'output', 'attention', 'experts', 'routers', 'norms', 'bias']:
+            multiplier = getattr(self, name)
+            if multiplier < 0:
+                raise ValueError(f"Weight decay multiplier '{name}' must be non-negative, got {multiplier}")
+
+
+@dataclass
 class Optimizer:
     name: str = "AdamW"
     """Optimizer to use"""
@@ -163,6 +251,12 @@ class Optimizer:
     is not compatible with gradients clipping, users should not call
     register_post_accumulate_grad_hook after the optimizer is built.
     """
+
+    lr_multipliers: LRMultipliers = field(default_factory=LRMultipliers)
+    """Per-group learning rate multipliers for fine-grained control over parameter updates"""
+
+    weight_decay_multipliers: WeightDecayMultipliers = field(default_factory=WeightDecayMultipliers)
+    """Per-group weight decay multipliers. Use 0.0 for embeddings, output, norms, biases."""
 
 
 @dataclass
