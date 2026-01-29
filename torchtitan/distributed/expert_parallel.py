@@ -318,22 +318,52 @@ class ReordererSequenceParallel(ParallelStyle):
 
 
 class DeepEPExpertParallel(BaseExpertParallel):
-    """Expert Parallel using DeepEP for efficient token dispatch/combine.
+    """Expert Parallel using DeepEP/HybridEP for efficient token dispatch/combine.
 
     Expects inputs as:
         (hidden_states, num_tokens_per_expert, selected_experts_indices, top_scores, num_experts)
 
     Args:
         score_before_experts: If True, apply routing scores before expert computation.
+        comm_backend: Communication backend - "deepep" for H100/NVLink Switch,
+                      "hybridep" for GB200/NVLink72. Default is "deepep".
+        
+        User-configurable HybridEP settings (from job_config.parallelism.hybridep):
+        hybridep_capacity_factor: Buffer capacity multiplier for load imbalance (default: 1.0).
+        hybridep_num_permuted_tokens: Pre-specified output size for non-blocking mode (default: None).
+        hybridep_pad_multiple: Pad output to a multiple of this value for MXFP8 (default: None).
+        
+        Model-specific HybridEP settings (set by model, not exposed to users):
+        hybridep_num_sms_dispatch: Number of SMs for dispatch kernel (default: 16).
+        hybridep_num_sms_combine: Number of SMs for combine kernel (default: 16).
     """
 
-    def __init__(self, score_before_experts: bool = True):
+    def __init__(
+        self,
+        score_before_experts: bool = True,
+        comm_backend: str = "deepep",
+        # User-configurable HybridEP settings (from job_config.parallelism.hybridep)
+        hybridep_capacity_factor: float = 1.0,
+        hybridep_num_permuted_tokens: int | None = None,
+        hybridep_pad_multiple: int | None = None,
+        # Model-specific HybridEP settings (not exposed to users)
+        hybridep_num_sms_dispatch: int = 16,
+        hybridep_num_sms_combine: int = 16,
+    ):
         super().__init__()
         self._state = None  # State preserved between dispatch and combine
         self.score_before_experts = score_before_experts
+        self.comm_backend = comm_backend
+        
+        # HybridEP-specific configuration
+        self.hybridep_capacity_factor = hybridep_capacity_factor
+        self.hybridep_num_permuted_tokens = hybridep_num_permuted_tokens
+        self.hybridep_pad_multiple = hybridep_pad_multiple
+        self.hybridep_num_sms_dispatch = hybridep_num_sms_dispatch
+        self.hybridep_num_sms_combine = hybridep_num_sms_combine
 
     def _token_dispatch(self, mod, inputs, device_mesh):
-        """Dispatch tokens via DeepEP."""
+        """Dispatch tokens via DeepEP or HybridEP based on configured backend."""
         from torchtitan.distributed.deepep import dispatch_tokens
 
         hidden_states, _, selected_experts_indices, top_scores, num_experts = inputs
@@ -351,6 +381,13 @@ class DeepEPExpertParallel(BaseExpertParallel):
             num_experts,
             ep_group,
             score_before_experts=self.score_before_experts,
+            backend=self.comm_backend,
+            # HybridEP-specific parameters (ignored for DeepEP)
+            num_permuted_tokens=self.hybridep_num_permuted_tokens,
+            capacity_factor=self.hybridep_capacity_factor,
+            num_sms_dispatch=self.hybridep_num_sms_dispatch,
+            num_sms_combine=self.hybridep_num_sms_combine,
+            pad_multiple=self.hybridep_pad_multiple,
         )
 
         return hidden_states, tokens_per_expert
@@ -365,11 +402,11 @@ class DeepEPExpertParallel(BaseExpertParallel):
             )
 
     def _token_combine(self, mod, routed_output, device_mesh):
-        """Combine tokens via DeepEP."""
+        """Combine tokens via DeepEP or HybridEP based on configured backend."""
         from torchtitan.distributed.deepep import combine_tokens
 
         # pyrefly: ignore [bad-argument-type]
-        routed_output = combine_tokens(routed_output, self._state)
+        routed_output = combine_tokens(routed_output, self._state, backend=self.comm_backend)
         self._state = None
         return routed_output
 

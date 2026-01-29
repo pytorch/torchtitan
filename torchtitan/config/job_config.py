@@ -301,6 +301,40 @@ class Training:
 
 
 @dataclass
+class HybridEPConfig:
+    """
+    HybridEP configuration for GB200/NVLink72 systems.
+    Only effective when expert_parallel_comm_backend="hybridep".
+    """
+
+    capacity_factor: float = 1.0
+    """
+    Buffer capacity multiplier: buffer_size = num_tokens × capacity_factor.
+    
+    Bounds:
+    - Lower: top_k (minimum for balanced routing)
+    - Upper: EP group size (maximum useful value)
+    
+    Example for top_k=8: use 8.0 (balanced) to 10.0 (25% headroom).
+    """
+
+    num_permuted_tokens: int | None = None
+    """
+    Output buffer size for grouped_mm. When set, enables CPU-free non-blocking
+    mode required for CUDA graph compatibility.
+    
+    Typical value: num_tokens × min(top_k, num_local_experts) (for balanced routing).
+    If None, uses blocking mode with automatic sizing.
+    """
+
+    pad_multiple: int | None = None
+    """
+    Pad dispatch output to this multiple for MXFP8 alignment.
+    Use 32 for MXFP8 quantization, None to disable.
+    """
+
+
+@dataclass
 class Parallelism:
     data_parallel_replicate_degree: int = 1
     """
@@ -474,10 +508,11 @@ class Parallelism:
     DeepEP/HybridEP requires installation:
     https://github.com/deepseek-ai/DeepEP.
 
-    For HybridEP, SM configuration can be set via environment variables:
-    - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
-    - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
+    For HybridEP-specific configuration, see the `hybridep` section below.
     """
+
+    hybridep: HybridEPConfig = field(default_factory=HybridEPConfig)
+    """HybridEP-specific configuration. Only effective when expert_parallel_comm_backend="hybridep"."""
 
 
 @dataclass

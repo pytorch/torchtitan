@@ -7,10 +7,11 @@
 """
 Expert Parallel Communication Backends for MoE Training.
 
-This module provides two backends for expert-parallel all-to-all communication:
+- DeepEP: Optimized for H100/NVLink Switch (sparse routing)
+- HybridEP: Optimized for GB200/NVLink72 (dense routing, TMA-accelerated)
 
-- **DeepEP**: Optimized for H100 with NVLink Switch (sparse routing format)
-- **HybridEP**: Optimized for GB200 with NVLink72 (dense routing, TMA-accelerated)
+Backend is selected via job_config.parallelism.expert_parallel_comm_backend.
+HybridEP config is in job_config.parallelism.hybridep.
 """
 
 from typing import Any, Literal, Optional, Tuple
@@ -19,27 +20,14 @@ import torch
 from torch.distributed import ProcessGroup
 
 
-_backend_mode: Literal["deepep", "hybridep"] = "deepep"
-
-
-def configure_backend(
-    backend: Literal["deepep", "hybridep"] = "deepep",
-) -> None:
-    """Configure which backend to use for the unified interface.
-    
-    Args:
-        backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72
-    
-    For HybridEP, SM configuration is read from environment variables:
-        - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
-        - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
-    """
-    global _backend_mode
-    _backend_mode = backend
-    
+def clear_handle_cache(backend: Literal["deepep", "hybridep"] = "deepep") -> None:
+    """Clear cached dispatch handles. Call at end of each training step."""
     if backend == "hybridep":
         from . import hybridep
-        hybridep.configure()
+        hybridep.clear_handle_cache()
+    else:
+        from . import deepep
+        deepep.clear_handle_cache()
 
 
 def dispatch_tokens(
@@ -50,15 +38,19 @@ def dispatch_tokens(
     num_experts: int,
     group: ProcessGroup,
     score_before_experts: bool = True,
+    backend: Literal["deepep", "hybridep"] = "deepep",
+    # HybridEP-specific (ignored for DeepEP)
     num_permuted_tokens: Optional[int] = None,
+    capacity_factor: float = 1.0,
+    num_sms_dispatch: int = 16,
+    num_sms_combine: int = 16,
+    pad_multiple: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, Any]:
-    """Dispatch tokens to experts via the configured backend.
+    """Dispatch tokens to experts via specified backend.
     
-    Returns:
-        Tuple of (hidden_states, tokens_per_expert, state).
-        The state object is backend-specific and should be passed to combine_tokens.
+    Returns: (permuted_hidden, tokens_per_expert, state)
     """
-    if _backend_mode == "hybridep":
+    if backend == "hybridep":
         from . import hybridep
         return hybridep.dispatch_tokens(
             hidden_states=hidden_states,
@@ -69,10 +61,13 @@ def dispatch_tokens(
             group=group,
             score_before_experts=score_before_experts,
             num_permuted_tokens=num_permuted_tokens,
+            capacity_factor=capacity_factor,
+            num_sms_dispatch=num_sms_dispatch,
+            num_sms_combine=num_sms_combine,
+            pad_multiple=pad_multiple,
         )
     else:
         from .deepep import dispatch_tokens as _dispatch
-        # Original deepep doesn't have num_permuted_tokens parameter
         return _dispatch(
             hidden_states=hidden_states,
             selected_experts_indices=selected_experts_indices,
@@ -87,14 +82,10 @@ def dispatch_tokens(
 def combine_tokens(
     hidden_states: torch.Tensor,
     state: Any,
+    backend: Literal["deepep", "hybridep"] = "deepep",
 ) -> torch.Tensor:
-    """Combine expert outputs via the configured backend.
-    
-    Args:
-        hidden_states: Expert outputs
-        state: State object returned by dispatch_tokens (backend-specific)
-    """
-    if _backend_mode == "hybridep":
+    """Combine expert outputs via specified backend."""
+    if backend == "hybridep":
         from . import hybridep
         return hybridep.combine_tokens(hidden_states, state)
     else:
@@ -102,17 +93,4 @@ def combine_tokens(
         return _combine(hidden_states, state)
 
 
-from .deepep import (
-    dispatch_tokens as deepep_dispatch_tokens,
-    combine_tokens as deepep_combine_tokens,
-)
-
-
-__all__ = [
-    "configure_backend",
-    "dispatch_tokens",
-    "combine_tokens",
-    "hybridep",
-    "deepep_dispatch_tokens",
-    "deepep_combine_tokens",
-]
+__all__ = ["dispatch_tokens", "combine_tokens", "clear_handle_cache"]
