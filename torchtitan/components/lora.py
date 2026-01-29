@@ -84,19 +84,19 @@ class LoRAConverter:
 
     def convert(self, model: nn.Module) -> None:
         """Apply LoRA to all Linear layers, freezing base model weights."""
-        for param in model.parameters():
-            param.requires_grad_(False)
-
         self._apply_lora(model)
 
         if self._is_meta_device(model):
             self._hook_init_weights(model)
 
     def _apply_lora(self, module: nn.Module) -> None:
-        """Recursively wrap Linear layers with LoRA."""
+        """Recursively freeze params and wrap Linear layers with LoRA."""
         for name, child in list(module._modules.items()):
             if name in ("lora_a", "lora_b") or child is None:
                 continue
+            # Freeze direct parameters of this module
+            for param in child.parameters(recurse=False):
+                param.requires_grad_(False)
             if isinstance(child, nn.Linear):
                 setattr(module, name, self._wrap_linear(child))
                 self._lora_modules.append(getattr(module, name))
