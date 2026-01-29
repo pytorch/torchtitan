@@ -169,7 +169,12 @@ def _combine_op_impl(x: torch.Tensor, handle_id: torch.Tensor) -> torch.Tensor:
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before combine"
 
-    handle = _handle_cache.get(handle_id.item())
+    # In inference mode, setup_context doesn't run, so we clean up handle_cache here.
+    # NOTE: For inference, use torch.inference_mode() instead of torch.no_grad()
+    if torch.is_inference_mode_enabled():
+        handle = _handle_cache.pop(handle_id.item(), None)
+    else:
+        handle = _handle_cache.get(handle_id.item())
     assert handle is not None, f"Handle not found for handle_id={handle_id.item()}"
 
     previous_event = EventOverlap(EventHandle())
