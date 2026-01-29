@@ -130,6 +130,10 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         # functionality such as hooks.
         Optimizer.__init__(self, all_params, optimizer_kwargs)
 
+    def init_cache_state_dict(self) -> None:
+        """Initialize cached state dict for TorchFT. No-op for base class."""
+        pass
+
 
 class OptimizersInBackwardContainer(OptimizersContainer):
     """OptimizersContainer for executing ``optim.step()`` in backward pass.
