@@ -312,19 +312,19 @@ class HybridEPConfig:
     Buffer capacity multiplier: buffer_size = num_tokens × capacity_factor.
     
     Bounds:
-    - Lower: top_k (minimum for balanced routing)
+    - Lower: 1.0 (minimum for balanced routing)
     - Upper: EP group size (maximum useful value)
     
-    Example for top_k=8: use 8.0 (balanced) to 10.0 (25% headroom).
+    Example: use 1.0 (balanced) to 1.25 (25% headroom).
     """
 
     num_permuted_tokens: int | None = None
     """
-    Output buffer size for grouped_mm. When set, enables CPU-free non-blocking
+    Determines output buffer size for grouped_mm. When set, enables CPU-free non-blocking
     mode required for CUDA graph compatibility.
     
-    Typical value: num_tokens × min(top_k, num_local_experts) (for balanced routing).
-    If None, uses blocking mode with automatic sizing.
+    Typical value: num_recevied_tokens × min(top_k, num_local_experts) (for balanced routing).
+    If None, uses blocking mode with D2H for sizing.
     """
 
     pad_multiple: int | None = None
@@ -506,7 +506,7 @@ class Parallelism:
     - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
 
     DeepEP/HybridEP requires installation:
-    https://github.com/deepseek-ai/DeepEP.
+    https://github.com/deepseek-ai/DeepEP (checkout to hybrid_ep branch if using HybridEP)
 
     For HybridEP-specific configuration, see the `hybridep` section below.
     """

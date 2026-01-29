@@ -7,8 +7,8 @@
 """
 Expert Parallel Communication Backends for MoE Training.
 
-- DeepEP: Optimized for H100/NVLink Switch (sparse routing)
-- HybridEP: Optimized for GB200/NVLink72 (dense routing, TMA-accelerated)
+- DeepEP: Support for NVLink8 (H100 / B200)
+- HybridEP: Optimized for GB200/NVLink72
 
 Backend is selected via job_config.parallelism.expert_parallel_comm_backend.
 HybridEP config is in job_config.parallelism.hybridep.
