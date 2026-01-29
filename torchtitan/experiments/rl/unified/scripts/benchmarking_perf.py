@@ -24,6 +24,15 @@ Usage:
     # Run with TP=2
     torchrun --nproc_per_node=2 benchmarking_perf.py --torchtitan-checkpoint /path/to/checkpoint --tp 2
 
+    # Run with torch.compile enabled for TorchTitan models
+    python benchmarking_perf.py --compile all --torchtitan-checkpoint /path/to/checkpoint
+
+    # Run with torch.compile only for vLLM-TorchTitan
+    python benchmarking_perf.py --compile vllm-torchtitan --skip-torchtitan-native
+
+    # Run with torch.compile only for TorchTitan native
+    python benchmarking_perf.py --compile torchtitan-native --torchtitan-checkpoint /path/to/checkpoint
+
 Profiling tips:
     - Only send a few requests through when profiling (use --num-runs 2)
     - Use --warmup-runs 1 for faster profiling setup
@@ -55,6 +64,7 @@ from torch.distributed.tensor.parallel import (
 )
 from torch.profiler import profile, ProfilerActivity, schedule
 from torchtitan.experiments.rl import unified  # noqa: F401
+from torchtitan.experiments.rl.unified.infra.parallelize import apply_compile
 
 
 # Must set spawn method before any CUDA operations or vLLM imports
@@ -133,6 +143,10 @@ class BenchmarkConfig:
     device: str = "cuda"
     # CUDA graph / compile options
     use_cuda_graph: bool = False  # Enable CUDA graph via compilation config
+    # Compile options for TorchTitan models
+    compile: str = (
+        "none"  # Compile option: "none", "vllm-torchtitan", "torchtitan-native", "all"
+    )
     # Profiling options
     profile: bool = False
     profile_dir: str = "./profiler_traces"
@@ -267,7 +281,7 @@ class VLLMNativeBenchmark:
                 model=self.config.model_path,
                 trust_remote_code=True,
                 dtype="bfloat16",
-                gpu_memory_utilization=0.9,
+                gpu_memory_utilization=0.5,
                 tensor_parallel_size=self.config.tp,
                 distributed_executor_backend=distributed_backend,
                 compilation_config=compilation_config,
@@ -388,6 +402,8 @@ class VLLMTorchTitanBenchmark:
             print(
                 f"CUDA Graph: {'Enabled' if self.config.use_cuda_graph else 'Disabled (eager mode)'}"
             )
+            compile_enabled = self.config.compile in ("vllm-torchtitan", "all")
+            print(f"Compile: {'Enabled' if compile_enabled else 'Disabled'}")
 
             # Set up profiling via environment variable (compatible with more vLLM versions)
             if self.config.profile:
@@ -399,12 +415,21 @@ class VLLMTorchTitanBenchmark:
                     f"Profiling ENABLED - traces will be saved to: {self.profile_dir}"
                 )
 
-            # Configure compilation based on use_cuda_graph setting
+            # Configure compilation settings
+            # --compile: controls CompilationMode (0 = disabled, 3 = VLLM_COMPILE)
+            # --use-cuda-graph: controls CUDA graph independently
+            compilation_config = {}
+            if compile_enabled:
+                # Enable torch.compile with VLLM_COMPILE mode (3)
+                compilation_config["level"] = 3
+            else:
+                # Disable compile (mode 0)
+                compilation_config["level"] = 0
+
             if self.config.use_cuda_graph:
-                compilation_config = {"cudagraph_mode": "FULL_AND_PIECEWISE"}
+                compilation_config["cudagraph_mode"] = "FULL_AND_PIECEWISE"
                 enforce_eager = False
             else:
-                compilation_config = None
                 enforce_eager = True
 
             # Use external_launcher when launched with torchrun (TP > 1)
@@ -420,7 +445,7 @@ class VLLMTorchTitanBenchmark:
                 dtype="bfloat16",
                 trust_remote_code=True,
                 enforce_eager=enforce_eager,
-                gpu_memory_utilization=0.9,
+                gpu_memory_utilization=0.5,
                 tensor_parallel_size=self.config.tp,
                 distributed_executor_backend=distributed_backend,
                 compilation_config=compilation_config,
@@ -726,6 +751,11 @@ class TorchTitanNativeBenchmark:
                     model_state_dict=state_dict,
                     options=StateDictOptions(strict=False),
                 )
+
+            # Apply compile if enabled for torchtitan-native
+            if self.config.compile in ("torchtitan-native", "all"):
+                print("Applying torch.compile to TorchTitan native model...")
+                apply_compile(self.model, backend="inductor")
 
             if local_rank == 0:
                 print("✓ TorchTitan native Qwen3 model loaded successfully")
@@ -1145,6 +1175,7 @@ class BenchmarkRunner:
         print(f"  Max tokens: {self.config.max_tokens}")
         print(f"  Warmup runs: {self.config.warmup_runs}")
         print(f"  Benchmark runs: {self.config.num_runs}")
+        print(f"  Compile: {self.config.compile}")
         if self.config.profile:
             print("  Profiling: ENABLED")
             print(f"  Profile dir: {self.config.profile_dir}")
@@ -1278,6 +1309,14 @@ def main():
         action="store_true",
         help="Enable CUDA graph via compilation config. If not set, uses eager mode (default: eager)",
     )
+    parser.add_argument(
+        "--compile",
+        type=str,
+        choices=["none", "vllm-torchtitan", "torchtitan-native", "all"],
+        default="none",
+        help="Enable torch.compile for specified approaches: "
+        "'none' (default), 'vllm-torchtitan', 'torchtitan-native', or 'all'",
+    )
 
     args = parser.parse_args()
 
@@ -1305,6 +1344,7 @@ def main():
         profile_warmup=args.profile_warmup,
         profile_active=args.profile_active,
         use_cuda_graph=args.use_cuda_graph,
+        compile=args.compile,
     )
 
     runner = BenchmarkRunner(config)
