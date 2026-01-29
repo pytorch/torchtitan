@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - nightly
-      - fix-nightly-cpu  # TODO: Remove after testing
-  pull_request:  # TODO: Remove after testing
   workflow_dispatch:
 
 permissions:
