@@ -242,7 +242,7 @@ def get_train_context(enable_loss_parallel: bool) -> TrainContext:
 
 def maybe_enable_amp(
     parallel_dims: ParallelDims, mixed_precision_param: str, device_type: str
-) -> contextlib.AbstractContextManager[None]:
+) -> contextlib.AbstractContextManager[None] | torch.autocast:
     if parallel_dims.fsdp_enabled:
         # FSDP handles mixed precision internally
         logger.info("Mixed precision training is handled by fully_shard")
@@ -257,7 +257,6 @@ def maybe_enable_amp(
         else:
             # the following code will only be executed for DDP or single-device training
             logger.info("Mixed precision training is handled by AMP")
-            # pyrefly: ignore [bad-return]
             return torch.autocast(
                 device_type,
                 dtype=TORCH_DTYPE_MAP[mixed_precision_param],
@@ -487,8 +486,9 @@ def _clip_grad_norm_with_ep(
         if p.grad is None:
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-        # pyrefly: ignore[not-iterable]
-        if "ep" in p.device_mesh.mesh_dim_names:
+        mesh_dim_names = p.device_mesh.mesh_dim_names
+        assert mesh_dim_names is not None
+        if "ep" in mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)
         else:
