@@ -314,7 +314,7 @@ def build_optimizers(
 
     if name == 'TE_FusedAdamW':
         try:
-            from transformer_engine.pytorch.optimizers.fused_adam import TE_FusedAdam
+            from transformer_engine.pytorch.optimizers.fused_adam import FusedAdam
         except (ImportError, ModuleNotFoundError) as e:
             raise ImportError(
                 "FusedAdam optimizer could not be imported from transformer_engine. "
@@ -323,7 +323,7 @@ def build_optimizers(
                 "git+https://github.com/NVIDIA/TransformerEngine.git@stable "
                 "or use another optimizer"
             ) from e
-        optimizer_classes["TE_FusedAdamW"] = TE_FusedAdam
+        optimizer_classes["TE_FusedAdamW"] = FusedAdam
         del optimizer_kwargs['fused'], optimizer_kwargs['foreach']
         optimizer_kwargs['exp_avg_dtype'] = torch.bfloat16
         optimizer_kwargs['exp_avg_sq_dtype'] = torch.bfloat16
