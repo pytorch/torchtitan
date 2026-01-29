@@ -44,6 +44,8 @@ class TransformerModelArgs(BaseModelArgs):
 
     attn_type: str = "sdpa"
     attn_mask_type: str = "causal"
+    flex_attention_kernel_options: dict | None = None
+    flex_attention_block_size: int | tuple[int, int] | None = None
     eos_id: int = 0
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
