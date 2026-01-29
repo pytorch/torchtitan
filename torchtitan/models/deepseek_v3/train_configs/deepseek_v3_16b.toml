@@ -4,7 +4,7 @@ description = "DeepSeek-V3 16B model training"
 print_config = false
 
 [profiling]
-enable_profiling = false
+enable_profiling = true
 save_traces_folder = "profile_trace"
 profile_freq = 10
 enable_memory_snapshot = false
@@ -38,7 +38,7 @@ min_lr_factor = 0.1
 local_batch_size = 4
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 20
 dataset = "c4"  # supported datasets: c4_test (2K), c4 (177M)
 
 [parallelism]
@@ -49,7 +49,7 @@ tensor_parallel_degree = 1
 enable_async_tensor_parallel = false
 pipeline_parallel_degree = 1
 pipeline_parallel_schedule = "Interleaved1F1B"
-expert_parallel_degree = 8
+expert_parallel_degree = 2
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
