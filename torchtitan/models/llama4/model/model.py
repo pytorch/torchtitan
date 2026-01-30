@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -216,11 +217,11 @@ class Attention(nn.Module):
         self.use_rope = use_rope
 
         self.attn_type = model_args.attn_type
+        self.inner_attention: nn.Module
         match self.attn_type:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
             case "sdpa":
-                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
             case "varlen":
                 raise ValueError("Varlen attention is not supported with Llama 4.")
@@ -514,8 +515,7 @@ class Transformer(ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                # pyrefly: ignore [not-callable]
-                layer.init_weights(buffer_device=buffer_device)
+                cast(TransformerBlock, layer).init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
@@ -590,14 +590,11 @@ class Transformer(ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        # pyrefly: ignore[not-callable, invalid-argument]
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis, attention_masks, positions)
 
-        # pyrefly: ignore[not-callable, invalid-argument]
-        h = self.norm(h) if self.norm else h
-        # pyrefly: ignore[not-callable, invalid-argument]
-        output = self.output(h) if self.output else h
+        h = self.norm(h) if self.norm is not None else h
+        output = self.output(h) if self.output is not None else h
         return output
