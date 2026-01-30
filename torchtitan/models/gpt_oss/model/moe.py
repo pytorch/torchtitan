@@ -11,7 +11,7 @@ import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torchtitan.models.moe.moe import MoE
-from torchtitan.models.moe.utils import _permute, _unpermute
+from torchtitan.models.moe.utils import _permute, _unpermute, need_indices_padding
 
 from .args import GptOssModelArgs
 
@@ -230,7 +230,7 @@ class GptOssGroupedExperts(nn.Module):
                 tp_degree = self.mlp1_weight.device_mesh.size(tp_dim_idx)
 
         if self.use_grouped_mm:
-            if (
+            if need_indices_padding() and (
                 not isinstance(self.mlp1_weight, DTensor)
                 # pyrefly: ignore[not-iterable]
                 or "ep" not in self.mlp1_weight.device_mesh.mesh_dim_names

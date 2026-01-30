@@ -180,13 +180,18 @@ def generate_permute_indices(
     # total tokens for each expert (sum over ranks)
     total_tokens_per_expert = tokens_per_expert_group.view(num_ranks, -1).sum(0)
 
-    # pad out empty experts to alignment requirement
-    total_tokens_per_expert = torch.clamp_min(total_tokens_per_expert, alignment)
+    if alignment > 1:
+        # pad out empty experts to alignment requirement
+        total_tokens_per_expert = torch.clamp_min(total_tokens_per_expert, alignment)
 
-    # align the chunk sizes (cdiv)
-    m_sizes = ((total_tokens_per_expert + alignment - 1) // alignment * alignment).to(
-        torch.int32
-    )
+        # align the chunk sizes (cdiv)
+        m_sizes = (
+            (total_tokens_per_expert + alignment - 1) // alignment * alignment
+        ).to(torch.int32)
+    elif alignment == 1:
+        # if we don't need to pad the indices, we just use the total tokens per expert
+        # there is no need to do clamp_min because we can allow 0-token experts.
+        m_sizes = total_tokens_per_expert.to(torch.int32)
 
     # additional prefix sum to get write offset of each expert in permuted_indices
     # write offsets is per local expert, not global
