@@ -96,7 +96,7 @@ async def main():
 
     # Initialize generator with trainer weights
     initial_weights = trainer.get_weights.call().get().item(gpus=0)
-    await generator.update.call(0, initial_weights)
+    generator.update.call(0, initial_weights).get()
 
     # Training loop
     logger.info("\n" + "=" * 80)
@@ -106,11 +106,11 @@ async def main():
     for step in range(num_steps):
         # Fully sync RL loop
         # NOTE: This is only getting Trajectory generated from trainer 0, and trainer 1's data is ignored.
-        # .get() is a blocking method which makes the loop fully sync
+        # .get() is a monarch synchronize API which makes the loop fully sync
         batch = generator.generate.call().get().item(gpus=0)
         metrics = trainer.step.call(batch).get().item(gpus=0)
         weights = trainer.get_weights.call().get().item(gpus=0)
-        await generator.update.call(metrics["policy_version"], weights)
+        generator.update.call(metrics["policy_version"], weights).get()
 
         logger.info(
             f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
