@@ -250,8 +250,10 @@ class TransformerBlock(nn.Module):
         """
         # Extract the appropriate mask for this layer
         if self.use_sliding_attention:
+            # pyrefly: ignore [missing-attribute]
             layer_mask = attention_masks.get("sliding_window_mask", None)
         else:
+            # pyrefly: ignore [missing-attribute]
             layer_mask = attention_masks.get("basic_mask", None)
         assert layer_mask is not None
 
@@ -266,13 +268,13 @@ class TransformerBlock(nn.Module):
         self.moe.init_weights(self.weight_init_std, buffer_device)
 
 
-class GptOssModel(nn.Module, ModelProtocol):
+class GptOssModel(ModelProtocol):
     """
     GPT-OSS Transformer model with attention and feed-forward layers.
     """
 
     def __init__(self, model_args: GptOssModelArgs):
-        super().__init__()
+        super().__init__(model_args)
         self.model_args = model_args
         self.max_seq_len = model_args.max_seq_len
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
@@ -304,6 +306,7 @@ class GptOssModel(nn.Module, ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
+                # pyrefly: ignore [not-callable]
                 layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()

@@ -172,12 +172,12 @@ class VLLMRolloutEngine:
                 dtype=generation.dtype,
                 # Parallelism configuration
                 tensor_parallel_size=generation.parallelism.tensor_parallel_degree,
-                distributed_executor_backend=generation.distributed_executor_backend,
+                distributed_executor_backend="external_launcher",
                 # Memory and performance
                 gpu_memory_utilization=generation.gpu_memory_utilization,
                 enforce_eager=generation.enforce_eager,
                 # Seed
-                seed=generation.seed,
+                seed=self.job_config.debug.seed,
                 # HuggingFace overrides to use TorchTitan model.
                 # TODO: make this field configurable and align with model registration
                 hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
@@ -340,9 +340,9 @@ class Generator(Actor):
         self.model_path = job_config.checkpoint.initial_load_path
         self.max_new_tokens = job_config.generation.sampling.max_tokens
         self.temperature = job_config.generation.sampling.temperature
-        self.group_size = job_config.rl.grpo_group_size
-        self.grpo_beta = job_config.rl.grpo_beta
-        self.use_stable_grpo = job_config.rl.use_stable_grpo
+        self.group_size = job_config.policy_optimization.grpo_group_size
+        self.grpo_beta = job_config.policy_optimization.grpo_beta
+        self.use_stable_grpo = job_config.policy_optimization.use_stable_grpo
 
         # Initialize distributed environment for SPMD generator
         world_size = dist_utils.init_distributed(

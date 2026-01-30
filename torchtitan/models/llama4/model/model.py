@@ -459,7 +459,7 @@ class TransformerBlock(nn.Module):
             self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Transformer(nn.Module, ModelProtocol):
+class Transformer(ModelProtocol):
     """
     Transformer Module
 
@@ -479,7 +479,7 @@ class Transformer(nn.Module, ModelProtocol):
     """
 
     def __init__(self, model_args: TransformerModelArgs):
-        super().__init__()
+        super().__init__(model_args)
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
@@ -596,14 +596,14 @@ class Transformer(nn.Module, ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis, attention_masks, positions)
 
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         h = self.norm(h) if self.norm else h
-        # pyrefly: ignore [not-callable]
+        # pyrefly: ignore[not-callable, invalid-argument]
         output = self.output(h) if self.output else h
         return output

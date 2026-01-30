@@ -62,10 +62,14 @@ class SiluAndMulFunction(Function):
         Returns:
             output: silu(gate) * up, shape [..., hidden_dim]
         """
+        from vllm.config import set_current_vllm_config, VllmConfig
         from vllm.model_executor.layers.activation import SiluAndMul as VLLMSiluAndMul
 
         # Use vLLM's implementation for forward
-        vllm_silu_and_mul = VLLMSiluAndMul()
+        # vLLM custom ops require a config context to be set
+        # Since these are parameter free we instantiate default config
+        with set_current_vllm_config(VllmConfig()):
+            vllm_silu_and_mul = VLLMSiluAndMul()
         output = vllm_silu_and_mul(x)
 
         # Save for backward

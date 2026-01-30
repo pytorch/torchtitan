@@ -14,6 +14,8 @@ from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import ConfigManager
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools.logging import logger
+
+# pyrefly: ignore[import-error]
 from transformers import AutoModelForCausalLM
 
 device_type = "cuda" if torch.cuda.is_available() else "cpu"
@@ -71,17 +73,15 @@ def forward_tt(config_path, checkpoint_path, test_set):
     model_args = train_spec.model_args[config.model.flavor]
     model_args.update_from_config(config)
 
+    # pyrefly: ignore[bad-instantiation]
     model = train_spec.model_cls(model_args)
 
     # materalize model
     device = torch.device(device_type)
-    # pyrefly: ignore [missing-attribute]
     model.to_empty(device=device)
     model.init_weights(buffer_device=device)
-    # pyrefly: ignore [missing-attribute]
     model.eval()
 
-    # pyrefly: ignore [bad-argument-type]
     modelWrapper = ModelWrapper(model)
     state_dict = modelWrapper._get_state_dict()
 
@@ -97,7 +97,6 @@ def forward_tt(config_path, checkpoint_path, test_set):
             input_ids = input_ids.unsqueeze(0)
 
         # obtains the logits of only the last token in the predictions
-        # pyrefly: ignore [not-callable]
         predictions = model(input_ids)[:, -1, :].unsqueeze(1)
         output_list.append(predictions)
 

@@ -14,11 +14,12 @@ This demonstrates:
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
 Command to run:
-VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_grpo.py \
+python3 torchtitan/experiments/rl/unified/simple_grpo.py \
     --job.config_file torchtitan/experiments/rl/unified/run_configs/qwen3_0.6b.toml
 """
 import asyncio
 import logging
+import os
 
 import torch
 from monarch.actor import this_host
@@ -41,6 +42,12 @@ async def main():
     config_manager = ConfigManager()
     job_config = config_manager.parse_args()
 
+    # Set vLLM environment variables from config
+    policy_opt = job_config.policy_optimization
+    if policy_opt.vllm_batch_invariant:
+        os.environ["VLLM_BATCH_INVARIANT"] = "1"
+    os.environ["VLLM_ATTENTION_BACKEND"] = policy_opt.vllm_attention_backend
+
     # RL Training config
     num_steps = job_config.training.steps
 
@@ -48,7 +55,6 @@ async def main():
     trainer_ddp_size = job_config.parallelism.data_parallel_replicate_degree
     trainer_tp_size = job_config.parallelism.tensor_parallel_degree
 
-    # TODO: add a flag to enable/disable batch_invariant
     init_batch_invariance()
     batch_invariant = vllm_is_batch_invariant()
 
