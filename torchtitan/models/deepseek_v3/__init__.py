@@ -7,8 +7,8 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
-from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.experiments.kimi_linear.model.tokenizer import build_kimi_tokenizer
 from torchtitan.hf_datasets.dataloader import build_dataloader
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
@@ -173,13 +173,12 @@ deepseekv3_args = {
             route_scale=2.827,
             score_before_experts=False,
         ),
-        n_limited_groups=1,
         q_lora_rank=1536,
         kv_lora_rank=512,
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,
-        use_flex_attn=True,
+        attn_type="flex",
         attn_mask_type="block_causal",
         rope_theta=50000.0,
         rope_factor=32.0,
@@ -197,7 +196,7 @@ def get_train_spec() -> TrainSpec:
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
+        build_tokenizer_fn=build_kimi_tokenizer, # falls back to hf tokenizer if tiktoken.model not found
         build_loss_fn=build_cross_entropy_loss,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )
