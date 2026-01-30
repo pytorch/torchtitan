@@ -22,7 +22,10 @@ from torchtitan.experiments.rl.unified.actors.grader import Episodes
 from torchtitan.experiments.rl.unified.job_config import JobConfig
 
 from vllm import EngineArgs, LLMEngine, SamplingParams
+from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
+
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +284,14 @@ class Generator(Actor):
         ],  # TODO: This field need to be removed once dataloader is implemented
         expected_answers: List[str],
     ):
+        # Set vLLM environment variables from config before any vLLM initialization
+        policy_opt = job_config.policy_optimization
+        if policy_opt.vllm_batch_invariant:
+            os.environ["VLLM_BATCH_INVARIANT"] = "1"
+            init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
+
+        os.environ["VLLM_ATTENTION_BACKEND"] = policy_opt.vllm_attention_backend
+
         # Store job_config for accessing configuration
         self.job_config = job_config
         self.prompt_texts = prompt_texts
