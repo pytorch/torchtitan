@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
 
 
 class VLLMAttention(torch.nn.Module):
@@ -53,6 +53,8 @@ class VLLMAttention(torch.nn.Module):
             quant_config=None,
             prefix=f"model.layers.{layer_name}.attention.inner_attention",
         )
+
+        self.layer_name = ''
 
     def forward(
         self,

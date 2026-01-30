@@ -11,6 +11,7 @@ This module provides TorchTitanVLLMModel: Core model class that adapts
 TorchTitan models for vLLM.
 """
 
+import os
 from functools import partial
 
 import torch
@@ -320,4 +321,39 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         loaded_params = {f"model.{name}" for name in torchtitan_state_dict.keys()}
 
+        # Apply per-block compilation if enabled via environment variable
+        self._compile_transformer_blocks_if_enabled()
+
         return loaded_params
+
+    def _compile_transformer_blocks_if_enabled(self):
+        """
+        Compile the model with torch.compile if enabled.
+
+        Controlled by environment variable TORCHTITAN_COMPILE_BLOCKS.
+        Set TORCHTITAN_COMPILE_BLOCKS=aot_eager to enable aot_eager compilation.
+        Other valid backends: inductor, eager, etc.
+        """
+        compile_backend = os.environ.get("TORCHTITAN_COMPILE_BLOCKS", "")
+        if not compile_backend:
+            return
+
+        # Increase cache size limit to accommodate all layers (default is 16)
+        # Each layer has a unique layer_name which creates a guard, causing recompilation
+        num_layers = len(self.model.layers)
+        import torch._dynamo.config
+
+        old_cache_limit = torch._dynamo.config.cache_size_limit
+        torch._dynamo.config.recompile_limit = 1024
+        torch._dynamo.config.cache_size_limit = 1024
+
+        logger.info(
+            f"Compiling full model forward with backend='{compile_backend}'..."
+        )
+
+        # Compile the entire model forward instead of per-layer
+        self.model.forward = torch.compile(self.model.forward, backend=compile_backend)
+
+        logger.info(
+            f"Successfully compiled model forward with backend='{compile_backend}'"
+        )
