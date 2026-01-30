@@ -316,7 +316,7 @@ def _find_best(
 
 
 # ---------- main ----------
-def pipeline(
+def auto_partition(
     forward_times: List[int], backward_times: List[int], num_stages: int
 ) -> List[int]:
 
@@ -348,7 +348,7 @@ if __name__ == "__main__":
         fwd_flops = [10, 20, 30, 15, 25]  # five block
         bwd_flops = [10, 20, 30, 15, 25]
         for stages in 1, 2, 3, 4, 5:
-            test_out = pipeline(fwd_flops, bwd_flops, stages)
+            test_out = auto_partition(fwd_flops, bwd_flops, stages)
             print(f"stages={stages}, result={test_out}, len={len(test_out)}")
 
     except Exception as e:

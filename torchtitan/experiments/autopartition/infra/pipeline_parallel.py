@@ -28,7 +28,7 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
-from torchtitan.experiments.autopartition.infra.autopipe import pipeline
+from torchtitan.experiments.autopartition.infra.autopipe import auto_partition
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
@@ -120,7 +120,7 @@ def autopipe_partition(model: nn.Module, num_stages: int, job_config: JobConfig)
     logger.info(f"Autopipe partitioning with mflops: {mflops_fwd}, {mflops_bwd}")
 
     # Partition layers by forward and backward flops
-    parts = pipeline(
+    parts = auto_partition(
         mflops_fwd,
         mflops_bwd,
         num_stages,
@@ -130,61 +130,60 @@ def autopipe_partition(model: nn.Module, num_stages: int, job_config: JobConfig)
 
 
 def _build_module_for_profile(model, flatten_module_names):
-    # txd: merge autopipe
-    module_names_for_profile = [[item] for item in flatten_module_names]
+    """Build a sequential module for profiling purposes.
 
-    def _build_sequential_module(
-        module_names: list[str],
-    ) -> tuple[PipelineStage, nn.Module]:
+    Args:
+        model: The original model to be profiled
+        flatten_module_names: List of module names to include in the sequential model
 
-        # Create a set of modules to keep for faster lookup
-        # modules_to_keep = set(module_names)
-        module_seq = nn.Sequential()
-        for mtk in module_names:
-            whole_model = copy.deepcopy(model)
-            modules_to_keep = set(mtk)
-            for module_name, module_value in whole_model.named_children():
-                # Handle layer-like structures (e.g., "layers.0", "layers.1")
-                if isinstance(module_value, (nn.ModuleDict, nn.ModuleList)):
-                    layers_to_keep = {
-                        name.split(".", 1)[1]
-                        for name in modules_to_keep
-                        if name.startswith(f"{module_name}.")
-                    }
-                    if layers_to_keep:
-                        # Keep only specified layers
-                        if isinstance(module_value, nn.ModuleDict):
-                            for layer_name in list(module_value.keys()):
-                                if layer_name not in layers_to_keep:
-                                    del module_value[layer_name]
-                        elif isinstance(module_value, nn.ModuleList):
-                            indices_to_keep = {
-                                int(idx) for idx in layers_to_keep if idx.isdigit()
-                            }
-                            new_layers = nn.ModuleList(
-                                [
-                                    layer
-                                    for i, layer in enumerate(module_value)
-                                    if i in indices_to_keep
-                                ]
-                            )
-                            setattr(whole_model, module_name, new_layers)
-                    else:
-                        # No layers from this structure needed, set to empty structure
-                        if isinstance(module_value, nn.ModuleDict):
-                            setattr(whole_model, module_name, nn.ModuleDict())
-                        elif isinstance(module_value, nn.ModuleList):
-                            setattr(whole_model, module_name, nn.ModuleList())
-                # Handle simple module attributes (e.g., "linear", "norm")
-                elif module_name not in modules_to_keep:
-                    # Replace with None
-                    setattr(whole_model, module_name, None)
-            module_seq.append(copy.deepcopy(whole_model))
-        return module_seq
+    Returns:
+        nn.Sequential: A sequential module containing the specified modules
+    """
+    module_seq = nn.Sequential()
+    base_model = copy.deepcopy(model)
 
-    seq_module = _build_sequential_module(module_names_for_profile)
+    for module_name in flatten_module_names:
+        # Create a copy of the base model for each module
+        model_copy = copy.deepcopy(base_model)
 
-    return seq_module
+        for child_name, child_module in model_copy.named_children():
+            # Handle layer-like structures (e.g., "layers.0", "layers.1")
+            if isinstance(child_module, (nn.ModuleDict, nn.ModuleList)):
+                # Check if current module name matches this structure
+                if module_name.startswith(f"{child_name}."):
+                    layer_index = module_name.split(".", 1)[1]
+                    if isinstance(child_module, nn.ModuleDict):
+                        # Keep only the specified layer
+                        for key in list(child_module.keys()):
+                            if key != layer_index:
+                                del child_module[key]
+                    elif isinstance(child_module, nn.ModuleList):
+                        # Keep only the specified layer index
+                        if layer_index.isdigit():
+                            layer_idx = int(layer_index)
+                            if 0 <= layer_idx < len(child_module):
+                                new_layers = nn.ModuleList([child_module[layer_idx]])
+                                setattr(model_copy, child_name, new_layers)
+                            else:
+                                # Invalid index, set to empty list
+                                setattr(model_copy, child_name, nn.ModuleList())
+                        else:
+                            # Invalid layer index format, set to empty list
+                            setattr(model_copy, child_name, nn.ModuleList())
+                else:
+                    # No layers from this structure needed, set to empty structure
+                    if isinstance(child_module, nn.ModuleDict):
+                        setattr(model_copy, child_name, nn.ModuleDict())
+                    elif isinstance(child_module, nn.ModuleList):
+                        setattr(model_copy, child_name, nn.ModuleList())
+            # Handle simple module attributes (e.g., "linear", "norm")
+            elif child_name != module_name:
+                # Replace with None for unused modules
+                setattr(model_copy, child_name, None)
+
+        module_seq.append(model_copy)
+
+    return module_seq
 
 
 def pipeline_llm(
@@ -268,26 +267,27 @@ def pipeline_llm(
         )
 
     # use auto_partition
-    flatten_module_names = [
-        item for sublist in module_names_per_stage for item in sublist
-    ]
+    if job_config.autopipe_config.auto_partition:
+        flatten_module_names = [
+            item for sublist in module_names_per_stage for item in sublist
+        ]
 
-    copied_model = copy.deepcopy(model)
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    apply_ac(
-        copied_model,
-        job_config.activation_checkpoint,
-        model_compile_enabled=job_config.compile.enable,
-        use_flex_attn=use_flex_attn,
-        op_sac_save_list=_op_sac_save_list,
-    )
-    seq_modules = _build_module_for_profile(copied_model, flatten_module_names)
+        copied_model = copy.deepcopy(model)
+        use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
+        apply_ac(
+            copied_model,
+            job_config.activation_checkpoint,
+            model_compile_enabled=job_config.compile.enable,
+            use_flex_attn=use_flex_attn,
+            op_sac_save_list=_op_sac_save_list,
+        )
+        seq_modules = _build_module_for_profile(copied_model, flatten_module_names)
 
-    parts = autopipe_partition(seq_modules, parallel_dims.pp, job_config)
-    module_names_per_stage = [
-        flatten_module_names[parts[i] : parts[i + 1]] for i in range(parallel_dims.pp)
-    ]
-    del copied_model, seq_modules
+        parts = autopipe_partition(seq_modules, parallel_dims.pp, job_config)
+        module_names_per_stage = [
+            flatten_module_names[parts[i] : parts[i + 1]] for i in range(parallel_dims.pp)
+        ]
+        del copied_model, seq_modules
 
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")

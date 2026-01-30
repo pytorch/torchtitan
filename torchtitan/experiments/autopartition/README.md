@@ -7,23 +7,27 @@ This method involves calculating the floating-point operations (FLOPs) of the em
 
 ## Quick Start
 
-### Compile
-
-First, we need to compile `autopipe.cpp`.
+Edit the run_train.sh
 ```bash
-pip install pybind11
-cd ./torchtitan/experiments/autopartition/infra/cpp
-mkdir build
-cd build
-cmake ..
-make
-mv *.so ../../
+#!/bin/bash
+
+NGPU=${NGPU:-"4"}
+export LOG_RANK=${LOG_RANK:-0}
+# Autopartition training configuration file (default: debug model config)
+CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/experiments/autopartition/train_configs/debug_model.toml"}
+# Autopartition training script entry point
+TRAIN_FILE=${TRAIN_FILE:-"torchtitan.experiments.autopartition.train"}
+
+# Launch distributed training with torchrun, set custom config module
+torchrun --nproc_per_node ${NGPU} \
+    -m ${TRAIN_FILE} --job.config_file ${CONFIG_FILE} \
+    --job.custom_config_module "torchtitan.experiments.autopartition.job_config" "$@"
+
 ```
 
-The following command uses Llama 3 as an example:
-
 ```bash
-CONFIG_FILE="./torchtitan/experiments/autopartition/train_configs/debug_model.toml" ./run_train.sh
+# run
+./run_train.sh
 ```
 
 ## Performance

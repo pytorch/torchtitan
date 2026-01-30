@@ -8,10 +8,10 @@ from dataclasses import dataclass, field
 
 
 @dataclass
-class CustomConfig:
+class AutoPipeConfig:
     auto_partition: bool = True
     """Whether to use autopartition method to split module, default False"""
 
 @dataclass
 class JobConfig:
-    custom_config: CustomConfig = field(default_factory=CustomConfig)
+    autopipe_config: AutoPipeConfig = field(default_factory=AutoPipeConfig)
