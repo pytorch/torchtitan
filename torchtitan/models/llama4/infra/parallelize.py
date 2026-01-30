@@ -133,12 +133,9 @@ def parallelize_llama(
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
-        # tp_mesh might have been set above if tp_enabled, otherwise get it here
-        if tp_mesh is None:
-            tp_mesh = parallel_dims.get_mesh("tp")
         apply_moe_ep_tp(
             model,
-            tp_mesh=tp_mesh,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
             ep_mesh=parallel_dims.get_optional_mesh("ep"),
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
@@ -304,7 +301,6 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
@@ -595,11 +591,9 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
     # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
     # but it is experimental.
     torch._dynamo.config.capture_scalar_outputs = True
-    # Workaround for https://github.com/pytorch/pytorch/issues/166926
-    # pyrefly: ignore [missing-attribute]
-    torch._C._dynamo.eval_frame._set_lru_cache(False)
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
+        # pyrefly: ignore[missing-attribute]
         if transformer_block.moe_enabled:
             # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
             # So we must weave compile wrappers around those FSDP hooks to

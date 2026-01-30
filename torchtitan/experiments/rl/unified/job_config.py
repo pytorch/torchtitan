@@ -56,14 +56,6 @@ class Generate:
     gpu_memory_utilization: float = 0.5
     """Fraction of GPU memory to use for generation engine (0.0 to 1.0)"""
 
-    distributed_executor_backend: str = "external_launcher"
-    """
-    Backend for distributed execution.
-    'external_launcher' means vLLM does not spawn processes (use torchrun/external launcher)
-    """
-    seed: int = 42
-    """Random seed for sampling"""
-
     enforce_eager: bool = True
     """Whether to enforce eager execution (disable CUDA graphs)"""
 
@@ -75,8 +67,8 @@ class Generate:
 
 
 @dataclass
-class RL:
-    """Reinforcement Learning configuration for GRPO training."""
+class PolicyOptimization:
+    """Policy optimization configuration for GRPO training."""
 
     grpo_beta: int = 0.1
     """Beta parameter for GRPO (Group Relative Policy Optimization) algorithm"""
@@ -86,6 +78,12 @@ class RL:
 
     grpo_group_size: int = 8
     """Number of samples in each GRPO group for policy optimization"""
+
+    vllm_batch_invariant: bool = True
+    """Enable vLLM batch invariant mode for deterministic backward pass"""
+
+    vllm_attention_backend: str = "FLASH_ATTN"
+    """vLLM attention backend to use (e.g., FLASH_ATTN, XFORMERS)"""
 
 
 @dataclass
@@ -99,4 +97,4 @@ class JobConfig(BaseJobConfig):
 
     generation: Generate = field(default_factory=Generate)
     """Generation configuration for vLLM engine"""
-    rl: RL = field(default_factory=RL)
+    policy_optimization: PolicyOptimization = field(default_factory=PolicyOptimization)
