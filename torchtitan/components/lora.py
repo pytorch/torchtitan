@@ -50,14 +50,14 @@ def create_lora_linear(parent_cls: type) -> type:
                 rank,
                 bias=False,
                 device=self.weight.device,
-                dtype=self.weight.device,
+                dtype=self.weight.dtype,
             )
             self.lora_b = nn.Linear(
                 rank,
                 self.out_features,
                 bias=False,
                 device=self.weight.device,
-                dtype=self.weight.device,
+                dtype=self.weight.dtype,
             )
             nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
             nn.init.zeros_(self.lora_b.weight)
@@ -151,6 +151,9 @@ class LoRAConverter:
                 original_init_weights(*args, **kwargs)
             device = args[0] if args else kwargs.get("buffer_device", "cuda")
             for module in self._lora_modules:
+                module.weight.requires_grad_(False)
+                if module.bias is not None:
+                    module.bias.requires_grad_(False)
                 module.lora_a.to_empty(device=device, recurse=True)  # type: ignore[union-attr]
                 module.lora_b.to_empty(device=device, recurse=True)  # type: ignore[union-attr]
                 self._init_lora_weights(module)
