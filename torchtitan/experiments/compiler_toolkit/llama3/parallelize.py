@@ -69,7 +69,7 @@ def parallelize_llama(
     # Get compiler passes from config
     compiler_passes = get_compiler_passes_from_config(model, job_config)
 
-    # Create compilers with specified passes (defaults to no passes)
+    # Create compilers with specified passes
     fw_compiler, bw_compiler = make_compiler_with_passes(
         compiler_passes, dump_folder=job_config.job.dump_folder
     )
@@ -81,6 +81,7 @@ def parallelize_llama(
         bw_compiler=bw_compiler,
         joint_custom_passes=joint_custom_passes,
         dump_folder=job_config.job.dump_folder,
+        job_config=job_config,
     )
 
     # TODO: CompiledModule should take sample input as well, so that we can

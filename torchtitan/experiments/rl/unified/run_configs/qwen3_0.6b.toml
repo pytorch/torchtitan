@@ -48,8 +48,6 @@ components = ["model", "loss"]
 [generation]
 dtype = "bfloat16"
 gpu_memory_utilization = 0.5
-distributed_executor_backend = "external_launcher"
-seed = 42
 enforce_eager = true
 
 [generation.parallelism]

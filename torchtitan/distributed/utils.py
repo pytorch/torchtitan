@@ -382,9 +382,7 @@ def set_pg_timeouts(
     # otherwise, some ranks may issue collectives with the new/shorter timeout and
     # those may time out, before other ranks have finished with initialization done
     # under the old/slow timeout.
-    # pyrefly: ignore [missing-attribute]
     torch.distributed.barrier(device_ids=[device_module.current_device()])
-    # pyrefly: ignore [missing-attribute]
     device_module.synchronize()
 
     # None represents the 'default' PG, not part of the mesh
@@ -469,9 +467,9 @@ def clip_grad_norm_(
         if math.isinf(norm_type):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
         else:
-            total_norm **= norm_type
+            total_norm **= norm_type  # pyrefly: ignore[unsupported-operation]
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
-            total_norm **= 1.0 / norm_type
+            total_norm **= 1.0 / norm_type  # pyrefly: ignore[unsupported-operation]
 
     torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
     return total_norm
@@ -495,7 +493,7 @@ def _clip_grad_norm_with_ep(
         if p.grad is None:
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-        # pyrefly: ignore [not-iterable]
+        # pyrefly: ignore[not-iterable]
         if "ep" in p.device_mesh.mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)
@@ -519,17 +517,19 @@ def _clip_grad_norm_with_ep(
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
         total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
+            # pyrefly: ignore[unsupported-operation]
+            ep_grads_total_norm**norm_type
+            + non_ep_grads_total_norm**norm_type
         )
-        total_norm **= 1.0 / norm_type
+        total_norm **= 1.0 / norm_type  # pyrefly: ignore[unsupported-operation]
 
     if pp_mesh is not None:
         if math.isinf(norm_type):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
         else:
-            total_norm **= norm_type
+            total_norm **= norm_type  # pyrefly: ignore[unsupported-operation]
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
-            total_norm **= 1.0 / norm_type
+            total_norm **= 1.0 / norm_type  # pyrefly: ignore[unsupported-operation]
 
     torch.nn.utils.clip_grads_with_norm_(ep_params, max_norm, total_norm, foreach)
     torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)

@@ -145,13 +145,10 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 tokenizer = Tokenizer(bpe_model)
 
                 # Configure GPT-2 style components for proper space handling
-                # pyrefly: ignore [read-only]
                 tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
                     add_prefix_space=False
                 )
-                # pyrefly: ignore [read-only]
                 tokenizer.decoder = decoders.ByteLevel()
-                # pyrefly: ignore [read-only]
                 tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
 
                 return tokenizer
@@ -221,14 +218,15 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
         # Store BOS/EOS tokens as class attributes if they match
         if token_str == config_bos_token:
-            self.bos_token = token_str
+            self.bos_token = token_str  # pyrefly: ignore[bad-assignment]
             self.bos_id = (
+                # pyrefly: ignore[bad-assignment]
                 token_id
                 if token_id is not None
                 else self.tokenizer.token_to_id(token_str)
             )
         elif token_str == config_eos_token:
-            self.eos_token = token_str
+            self.eos_token = token_str  # pyrefly: ignore[bad-assignment]
             self.eos_id = (
                 token_id
                 if token_id is not None
@@ -320,7 +318,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         # First, determine if underlying tokenizer auto-adds BOS/EOS tokens empirically
         encoded_empty_str = self.tokenizer.encode("").ids
         if self.bos_id is not None and self.bos_id in encoded_empty_str:
-            self.hf_adds_bos = True
+            self.hf_adds_bos = True  # pyrefly: ignore[bad-assignment]
         if self.eos_id is not None and self.eos_id in encoded_empty_str:
             self.hf_adds_eos = True
 
