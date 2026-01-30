@@ -62,11 +62,10 @@ def replace_with_vllm_attention(model, tp_degree=1):
         # Number of KV heads is greater than TP size, so we partition
         # the KV heads across multiple tensor parallel GPUs.
         assert total_num_kv_heads % tp_degree == 0
+        num_kv_heads = total_num_kv_heads // tp_degree
     else:
-        # Number of KV heads is less than TP size, so we replicate
-        # the KV heads across multiple tensor parallel GPUs.
-        assert tp_degree % total_num_kv_heads == 0
-    num_kv_heads = max(1, total_num_kv_heads // tp_degree)
+        # TODO: Handle this branch correctly
+        raise ValueError("num_kv_heads are smaller than tp_degree")
 
     for layer_name, layer in model.layers.items():
         if not hasattr(layer, "attention"):
