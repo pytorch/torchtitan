@@ -19,7 +19,6 @@ python3 torchtitan/experiments/rl/unified/simple_grpo.py \
 """
 import asyncio
 import logging
-import os
 
 import torch
 from monarch.actor import this_host
@@ -27,10 +26,6 @@ from monarch.utils import setup_env_for_distributed
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.trainer import Trainer
-from vllm.model_executor.layers.batch_invariant import (
-    init_batch_invariance,
-    vllm_is_batch_invariant,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -42,32 +37,13 @@ async def main():
     config_manager = ConfigManager()
     job_config = config_manager.parse_args()
 
-    # Set vLLM environment variables from config
-    policy_opt = job_config.policy_optimization
-    if policy_opt.vllm_batch_invariant:
-        os.environ["VLLM_BATCH_INVARIANT"] = "1"
-    os.environ["VLLM_ATTENTION_BACKEND"] = policy_opt.vllm_attention_backend
-
-    # RL Training config
-    num_steps = job_config.training.steps
-
-    # Parallelism sizes
+    # compute world size for trainer and generator
+    # TODO: refine the world size computation and check
     trainer_ddp_size = job_config.parallelism.data_parallel_replicate_degree
     trainer_tp_size = job_config.parallelism.tensor_parallel_degree
 
-    init_batch_invariance()
-    batch_invariant = vllm_is_batch_invariant()
-
-    # Set up batch invariant
-    if batch_invariant:
-        logger.info("Batch invariance detected - using vLLM-compatible model")
-        from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
-            enable_batch_invariant_backward_mode,
-        )
-
-        enable_batch_invariant_backward_mode()
-    else:
-        raise RuntimeError("Batch invariance NOT detected - using standard model")
+    # RL Training config
+    num_steps = job_config.training.steps
 
     # Use fake dataset for test. TODO: Implement real RL dataloader.
     logger.info("Using default prompts")

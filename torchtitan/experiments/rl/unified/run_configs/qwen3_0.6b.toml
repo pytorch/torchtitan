@@ -21,6 +21,13 @@ hf_assets_path = "./assets/hf/Qwen3-0.6B"
 [lr_scheduler]
 warmup_steps = 2  # lr scheduler warm up, 20% total steps
 
+
+[policy_optimization]
+grpo_beta = 0.1
+use_stable_grpo = false
+grpo_group_size = 8
+
+
 [training]
 local_batch_size = 4
 seq_len = 4096
