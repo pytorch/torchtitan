@@ -75,18 +75,28 @@ class VLLMAttention(torch.nn.Module):
             output: [batch, num_heads, seq_len, head_dim]
         """
         # Input is (batch, num_heads, seq_len, head_dim)
+        # TODO: may be good to use einops in future as we can explicitly reshape
+        # with dimension names - see https://github.com/arogozhnikov/einops
         batch_size, num_heads, seq_len, head_dim = q.shape
+        _, num_kv_heads, _, _ = k.shape
 
         # Transpose to (batch, seq_len, num_heads, head_dim) for vLLM
         # vLLM attention expects bfloat16 /  inputs
-        q = q.transpose(1, 2).to(dtype=torch.bfloat16)
-        k = k.transpose(1, 2).to(dtype=torch.bfloat16)
-        v = v.transpose(1, 2).to(dtype=torch.bfloat16)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
 
-        output_varlen = self.vllm_attn(q, k, v)
+        # TODO: reimplement as a 4d tensor once vLLM fix has landed
+        # Then flatten batch and seq_len: (batch * seq_len, num_heads, head_dim)
+        q = q.reshape(batch_size * seq_len, num_heads, head_dim)
+        k = k.reshape(batch_size * seq_len, num_kv_heads, head_dim)
+        v = v.reshape(batch_size * seq_len, num_kv_heads, head_dim)
 
-        # Reshape back to batch format
-        output = output_varlen.view(batch_size, seq_len, num_heads, head_dim)
+        # vLLM attention returns (num_tokens, hidden_size) where hidden_size = num_heads * head_dim
+        output_flat = self.vllm_attn(q, k, v)
+
+        # Output is (batch * seq_len, num_heads * head_dim), reshape to (batch, seq_len, num_heads, head_dim)
+        output = output_flat.view(batch_size, seq_len, num_heads, head_dim)
 
         # Transpose back to TorchTitan format: (batch, num_heads, seq_len, head_dim)
         output = output.transpose(1, 2)

@@ -231,7 +231,6 @@ def apply_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
-            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 
@@ -286,7 +285,7 @@ def apply_fsdp(
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if cpu_offload:
-        # pyrefly: ignore [bad-typed-dict-key]
+        # pyrefly: ignore[bad-typed-dict-key]
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
     match reshard_after_forward_policy:
@@ -312,6 +311,7 @@ def apply_fsdp(
         )
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
+        # pyrefly: ignore[no-matching-overload]
         fully_shard(
             transformer_block,
             **fsdp_config,
@@ -326,6 +326,7 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
+    # pyrefly: ignore[no-matching-overload]
     fully_shard(model, **fsdp_config)
 
 

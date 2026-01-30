@@ -25,7 +25,8 @@ class Episodes:
         policy_version: Version of policy that produced this batch
         completions: List of completion strings
         vllm_token_ids: List of token ID lists for each completion
-        vllm_token_log_probs: List of per-token log prob lists
+        vllm_token_log_probs: List of per-token log prob lists.
+            This is used for checking bit-wise identity between trainer and generator.
         prompt_token_ids: List of prompt token ID lists
         expected_answers: List of expected answers for reward computation
         rewards: Rewards for each completion (initialized to zeros, filled by Grader)

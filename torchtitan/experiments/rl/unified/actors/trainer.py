@@ -9,12 +9,23 @@ import os
 from typing import Any, Optional
 
 import torch
+import torch.distributed.checkpoint as dcp
 
 import torchtitan.protocols.train_spec as train_spec_module
 from monarch.actor import Actor, endpoint
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    set_model_state_dict,
+    StateDictOptions,
+)
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.unified.actors.grader import Episodes
+from torchtitan.experiments.rl.unified.actors.utils import (
+    compute_policy_gradient_loss,
+    compute_token_log_probs,
+    verify_logprob_identity,
+)
 from torchtitan.experiments.rl.unified.job_config import JobConfig
 from torchtitan.experiments.rl.unified.models.utils import (
     replace_with_vllm_compatible_flash_attention,
@@ -22,7 +33,6 @@ from torchtitan.experiments.rl.unified.models.utils import (
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
     compute_grpo_advantages_stable,
-    compute_policy_gradient_loss_vllm,
 )
 from torchtitan.tools import utils
 
@@ -78,22 +88,41 @@ class Trainer(Actor):
         # Build model using train_spec
         model_args = self.train_spec.model_args[job_config.model.flavor]
         model_args.update_from_config(job_config)
+        self.model_args = model_args
+        self.hf_assets_path = job_config.model.hf_assets_path
+
+        # Initialize state dict adapter for HF checkpoint loading
+        if self.train_spec.state_dict_adapter is not None:
+            self.sd_adapter = self.train_spec.state_dict_adapter(
+                model_args, self.hf_assets_path
+            )
+        else:
+            self.sd_adapter = None
 
         # Build model with meta init
         with torch.device("meta"):
             with utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]):
                 model = self.train_spec.model_cls(model_args)
 
+        # Replace attention with vLLM compatible attention for RL training
+        # NOTE: We do this now for attention backward compatibility.
+        # Long-term this will be replaced by pytorch attention supporting paged attention / kv cache
+        replace_with_vllm_compatible_flash_attention(model)
+
         # Apply parallelization using train_spec's parallelize_fn
-        model = self.train_spec.parallelize_fn(model, self.parallel_dims, job_config)
+        # NOTE: Apply a temporary parallel plan for Qwen3, need to replace with the plan from TrainSpec
+        from torchtitan.experiments.rl.unified.infra.parallelize import (
+            parallelize_qwen3,
+        )
+
+        model = parallelize_qwen3(
+            model, self.parallel_dims, job_config, is_trainer=True
+        )
 
         # Initialize model weights on device
         model.to_empty(device=device_type)
         with torch.no_grad():
             model.init_weights(buffer_device=None)
-
-        # Replace attention with vLLM compatible attention for RL training
-        replace_with_vllm_compatible_flash_attention(model)
 
         # Load initial weights from checkpoint if specified
         if job_config.checkpoint.initial_load_path:
@@ -102,6 +131,32 @@ class Trainer(Actor):
         model.train()
         self.model = model
         self.model_parts = [model]
+
+        # Create reference model for KL divergence (frozen copy of initial policy)
+        # Build a separate model instance without DDP since it has no trainable params
+        with torch.device("meta"):
+            with utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]):
+                ref_model = self.train_spec.model_cls(model_args)
+
+        replace_with_vllm_compatible_flash_attention(ref_model)
+
+        # Use parallelize_qwen3 (TP only, no FSDP) for ref_model since it's for inference only
+        ref_model = parallelize_qwen3(
+            ref_model, self.parallel_dims, job_config, is_trainer=True
+        )
+
+        ref_model.to_empty(device=device_type)
+        with torch.no_grad():
+            ref_model.init_weights(buffer_device=None)
+        # Load weights from the trained model (use strict=False for parallelized state dict)
+        if job_config.checkpoint.initial_load_path:
+            self._load_initial_weights(
+                ref_model, job_config.checkpoint.initial_load_path
+            )
+        for p in ref_model.parameters():
+            p.requires_grad = False
+        ref_model.eval()
+        self.ref_model = ref_model
 
         # Build optimizer using train_spec
         self.optimizers = self.train_spec.build_optimizers_fn(
@@ -124,14 +179,29 @@ class Trainer(Actor):
         )
 
     def _load_initial_weights(self, model: torch.nn.Module, model_path: str) -> None:
-        """Load initial weights from HuggingFace checkpoint."""
-        from torchtitan.experiments.rl.vllm_compat.weights.converter import (
-            vllm_to_torchtitan,
-        )
-
+        """Load initial weights from HuggingFace checkpoint using state dict adapter."""
         logger.info(f"Loading initial weights from {model_path}")
-        titan_state_dict = vllm_to_torchtitan(model_path)
-        model.load_state_dict(titan_state_dict, strict=False)
+
+        if self.sd_adapter is None:
+            raise RuntimeError(
+                "Cannot load HF checkpoint: state_dict_adapter is not defined in train_spec"
+            )
+
+        # Get the current model state dict
+        state_dict = get_model_state_dict(model)
+
+        # Convert to HF format, load from checkpoint, then convert back
+        hf_state_dict = self.sd_adapter.to_hf(state_dict)
+        hf_storage_reader = self.sd_adapter.get_hf_storage_reader(model_path)
+
+        dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
+
+        native_state_dict = self.sd_adapter.from_hf(hf_state_dict)
+        set_model_state_dict(
+            model,
+            model_state_dict=native_state_dict,
+            options=StateDictOptions(strict=False),
+        )
         logger.info("Initial weights loaded successfully")
 
     def _compute_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
@@ -175,13 +245,13 @@ class Trainer(Actor):
         return titan_state
 
     @endpoint
-    async def step(self, trajectory: Episodes) -> dict:
+    async def step(self, episode: Episodes) -> dict:
         """Perform one training step.
 
         Computes advantages from rewards, then updates the policy.
 
         Args:
-            trajectory: Trajectory data with rewards filled by Grader
+            episode: Trajectory data with rewards filled by Grader
 
         Returns:
             Training metrics
@@ -191,16 +261,34 @@ class Trainer(Actor):
         )
 
         # Compute advantages from rewards
-        advantages = self._compute_advantages(trajectory.rewards)
+        advantages = self._compute_advantages(episode.rewards)
+
+        # Compute reference log probs using frozen ref_model
+        ref_token_log_probs = []
+        device = next(self.model.parameters()).device
+        with torch.no_grad():
+            for prompt_toks, gen_toks in zip(
+                episode.prompt_token_ids, episode.vllm_token_ids
+            ):
+                token_lps = compute_token_log_probs(
+                    self.ref_model, prompt_toks, gen_toks, device
+                )
+                ref_token_log_probs.append(token_lps)
 
         # Compute loss
-        loss, loss_metrics = compute_policy_gradient_loss_vllm(
+        loss, loss_metrics, batch_token_log_probs = compute_policy_gradient_loss(
             self.model,
-            trajectory.vllm_token_ids,
-            trajectory.vllm_token_log_probs,
-            trajectory.prompt_token_ids,
+            episode.vllm_token_ids,
+            episode.prompt_token_ids,
             advantages,
+            ref_token_log_probs,
             kl_coef=0.1,
+        )
+
+        # Verify bitwise identity between vLLM and computed log probs
+        verification_result = verify_logprob_identity(
+            episode.vllm_token_log_probs,
+            batch_token_log_probs,
         )
 
         # Update weights using torchtitan optimizers
@@ -223,13 +311,14 @@ class Trainer(Actor):
         # Return metrics
         metrics = {
             "loss": loss.item(),
-            "reward_mean": trajectory.rewards.mean().item(),
-            "reward_std": trajectory.rewards.std().item(),
+            "reward_mean": episode.rewards.mean().item(),
+            "reward_std": episode.rewards.std().item(),
             "advantage_mean": advantages.mean().item(),
             "advantage_std": advantages.std().item(),
-            "sample_completion": trajectory.completions[0][:80],
+            "sample_completion": episode.completions[0][:80],
             "policy_version": self.policy_version,
             "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
+            "logprob_bitwise_identical": verification_result["bitwise_identical"],
             **loss_metrics,
         }
         logger.info(f"{os.getpid()=} Trainer finish step {self.policy_version}")

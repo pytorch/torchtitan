@@ -15,11 +15,12 @@ This demonstrates:
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
 Command to run:
-VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_grpo.py \
+python3 torchtitan/experiments/rl/unified/simple_grpo.py \
     --job.config_file torchtitan/experiments/rl/unified/run_configs/qwen3_0.6b.toml
 """
 import asyncio
 import logging
+import os
 
 import torch
 from monarch.actor import this_host
@@ -32,6 +33,7 @@ from vllm.model_executor.layers.batch_invariant import (
     init_batch_invariance,
     vllm_is_batch_invariant,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +45,27 @@ async def main():
     config_manager = ConfigManager()
     job_config = config_manager.parse_args()
 
+    # Set vLLM environment variables from config
+    policy_opt = job_config.policy_optimization
+    if policy_opt.vllm_batch_invariant:
+        os.environ["VLLM_BATCH_INVARIANT"] = "1"
+    os.environ["VLLM_ATTENTION_BACKEND"] = policy_opt.vllm_attention_backend
+    # compute world size for trainer and generator
+    # TODO: refine the world size computation and check
+    trainer_world_size = (
+        job_config.parallelism.data_parallel_replicate_degree
+        * job_config.parallelism.tensor_parallel_degree
+    )
+    generator_world_size = (
+        job_config.generation.parallelism.data_parallel_replicate_degree
+        * job_config.generation.parallelism.tensor_parallel_degree
+    )
+
     # RL Training config
     num_steps = job_config.training.steps
 
-    # Parallelism sizes
-    trainer_ddp_size = job_config.parallelism.data_parallel_replicate_degree
-    trainer_tp_size = job_config.parallelism.tensor_parallel_degree
-
     # TODO: add a flag to enable/disable batch_invariant
-    init_batch_invariance()
+    init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
     batch_invariant = vllm_is_batch_invariant()
 
     # Set up batch invariant
@@ -80,10 +94,9 @@ async def main():
     logger.info(f"Loaded {len(prompt_texts)} prompts")
 
     # Create process meshes
-    trainer_mesh = this_host().spawn_procs(
-        per_host={"gpus": trainer_ddp_size * trainer_tp_size}
-    )
-    gen_mesh = this_host().spawn_procs(per_host={"gpus": 1})
+    # TODO: Make the world size according to parallel degrees
+    trainer_mesh = this_host().spawn_procs(per_host={"gpus": trainer_world_size})
+    gen_mesh = this_host().spawn_procs(per_host={"gpus": generator_world_size})
 
     # Set up distributed env vars so that actors are connected via c10d
     await setup_env_for_distributed(

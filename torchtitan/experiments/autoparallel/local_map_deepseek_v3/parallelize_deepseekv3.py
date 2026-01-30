@@ -48,20 +48,24 @@ def parallelize_deepseekv3(
         job_config.experimental.comms_bucket_reorder_strategy
     )
 
-    world_mesh = parallel_dims.world_mesh
+    # Build the sparse mesh for MoE expert parallelism
+    # Filter to only include enabled mesh dimensions
+    sparse_names = ["dp_replicate", "efsdp", "ep", "etp"]
+    sparse_names = [
+        name
+        for name in sparse_names
+        if parallel_dims.get_optional_mesh(name) is not None
+    ]
+    sparse_mesh = parallel_dims.get_mesh(sparse_names)
 
     # Update me when changing dsv3.py
-    assert world_mesh.ndim == 2, "AP dsv3.py's local_map is specialized on 2 dims"
-    assert world_mesh.mesh_dim_names == (
-        "dp_shard_mod_ep",
-        "dp_shard_in_ep",
-    ), "Current setup assumes these specific meshes"
+    assert sparse_mesh.ndim == 2, "AP dsv3.py's local_map is specialized on 2 dims"
 
     # Provide AP MoE with mesh
     for layer in model.layers.values():
         if layer.moe_enabled:
-            layer.moe.mesh = world_mesh
-            layer.moe.axis_name = "dp_shard_in_ep"
+            layer.moe.mesh = sparse_mesh
+            layer.moe.axis_name = "ep"
 
     def input_fn():
         global_batch_size = job_config.training.global_batch_size
@@ -89,7 +93,7 @@ def parallelize_deepseekv3(
     with AutoParallel(
         model,
         input_fn,
-        world_mesh,
+        sparse_mesh,
         mp_policy=mp_policy,
         compile=should_compile,
         dynamic=True,
@@ -122,7 +126,7 @@ def parallelize_deepseekv3(
         # it would require putting the loss inside the model as well
         def _return_as_dtensor_for_loss_parallel(module, args, output):
             return torch.distributed.tensor.DTensor.from_local(
-                output, world_mesh["tp"], (Shard(2),)
+                output, sparse_mesh["etp"], (Shard(2),)
             )
 
         # not keeping a reference to the hook, don't plan on

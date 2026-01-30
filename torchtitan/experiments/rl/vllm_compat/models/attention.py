@@ -8,7 +8,7 @@
 import math
 
 import torch
-from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
 
 class VLLMCompatibleFlashAttention(torch.nn.Module):
@@ -17,8 +17,8 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.flash_attn_varlen_func = flash_attn_varlen_func
-        from vllm.attention.utils.fa_utils import get_flash_attn_version
         from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+        from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
         self.vllm_is_batch_invariant = vllm_is_batch_invariant
         self.fa_version = get_flash_attn_version()
@@ -36,9 +36,14 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         # We need to transpose to (batch, seq_len, num_heads, head_dim)
 
         # Input is (batch, num_heads, seq_len, head_dim) - need to transpose
-        q = q.transpose(1, 2)  # -> (batch, seq_len, num_heads, head_dim)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        # TODO(jianiw): Explicitly convert to bfloat16 because vllm's Flash attention kernel only supports bfloat16.
+        # Need to handle precision change properly.
+        original_dtype = q.dtype
+        q = q.transpose(1, 2).to(
+            torch.bfloat16
+        )  # -> (batch, seq_len, num_heads, head_dim)
+        k = k.transpose(1, 2).to(torch.bfloat16)
+        v = v.transpose(1, 2).to(torch.bfloat16)
 
         # Get dimensions
         batch_size, seq_len, num_heads, head_dim = q.shape
@@ -196,4 +201,4 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         # Transpose back to TorchTitan format: (batch, num_heads, seq_len, head_dim)
         output = output.transpose(1, 2)
 
-        return output
+        return output.to(original_dtype)

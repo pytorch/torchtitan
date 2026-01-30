@@ -214,7 +214,6 @@ class CheckpointManager:
         )
 
         if self.ft_manager and not self.enable_ft_dataloader_checkpoints:
-            # pyrefly: ignore [deprecated]
             logger.warning(
                 "Fault tolerance is enabled but enable_ft_dataloader_checkpoints is False. "
                 "This means replicas can retrain over the same data multiple times, which can result in overfitting."
@@ -521,6 +520,7 @@ class CheckpointManager:
             if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 if self.stager is None:
+                    # pyrefly: ignore[bad-assignment]
                     self.stager = DefaultStager(StagingOptions(True, True, True, True))
                 result = self.dcp_save(
                     states,
@@ -534,6 +534,7 @@ class CheckpointManager:
                 self.staging = True
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
+                # pyrefly: ignore[bad-assignment]
                 self.save_future = self.dcp_save(
                     states, checkpoint_id=checkpoint_id, async_mode=self.async_mode
                 )
@@ -711,6 +712,7 @@ class CheckpointManager:
         begin = time.monotonic()
         self._async_wait()
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
+        # pyrefly: ignore[bad-assignment]
         self.save_future = self.dcp_save(
             self.ft_states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.ASYNC
         )
@@ -836,7 +838,7 @@ class CheckpointManager:
         ):
             if self.save_future is not None:
                 self.save_future.result()
-                self.save_future = None
+                self.save_future = None  # pyrefly: ignore[bad-assignment]
         elif self.save_future is not None:
             raise RuntimeError(
                 "self.save_future is not None, but self.async_mode is not enabled "

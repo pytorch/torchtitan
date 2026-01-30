@@ -293,6 +293,8 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Convert to DTensor if target is DTensor (when the target model is sharded)
         for name, tensor in titan_state_dict.items():
             if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
+                if isinstance(tensor, DTensor):
+                    continue
                 target_dtensor = model_state_dict[name]
                 device_mesh = target_dtensor.device_mesh
                 titan_state_dict[name] = DTensor.from_local(

@@ -122,7 +122,21 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
                     "--model.name compiler_toolkit.llama3",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--model.flavor debugmodel_flex_attn",
+                    "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
+                    "--compile.joint_passes inductor_decomposition",
+                    "--compile.passes full_inductor_compilation",
+                ],
+            ],
+            "llama3 full_inductor_compilation",
+            "llama3_full_inductor_compilation",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name compiler_toolkit.llama3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.tensor_parallel_degree 2",
                     "--job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config",
                     "--compile.passes transformer_block_bucketing,regional_inductor",
                 ],

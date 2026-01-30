@@ -9,7 +9,7 @@ vLLM plugin for TorchTitan models.
 """
 
 
-def register():
+def register(model_flavor: str):
     """
     Register TorchTitan models with vLLM.
 
@@ -17,6 +17,7 @@ def register():
     It's called automatically when the unified module is imported, or can be called
     explicitly for manual registration.
     """
+    # NOTE: This is a temporary parallel plan patch for Qwen3 model. Will be replace by parallel plan in core torchtitan.
     from torchtitan.experiments.rl.unified.infra.parallelize import parallelize_qwen3
     from torchtitan.experiments.rl.unified.models.vllm_wrapper import (
         TorchTitanVLLMModelWrapper,
@@ -86,5 +87,5 @@ def register():
         # TODO: Remove the model_flavor args when registering model,
         # allow passing model flavor option from config system. Now we have to specify
         # model_flavor during registration because we can not pass torchtitan job_config from LLM() Api
-        model_flavor="0.6B",
+        model_flavor=model_flavor,
     )

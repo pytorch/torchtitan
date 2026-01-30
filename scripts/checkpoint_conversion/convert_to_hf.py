@@ -29,11 +29,11 @@ def convert_to_hf(
     model_args = train_spec.model_args[model_flavor]
 
     with torch.device("cpu"):
+        # pyrefly: ignore[bad-instantiation]
         model = train_spec.model_cls(model_args)
-    # pyrefly: ignore [bad-argument-type]
     model = ModelWrapper(model)
 
-    # pyrefly: ignore [not-callable]
+    # pyrefly: ignore[bad-instantiation, not-callable]
     sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
     assert (
         sd_adapter is not None
