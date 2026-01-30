@@ -41,8 +41,6 @@ class LoRALinear(nn.Module):
     ):
         super().__init__()
         self.linear = linear
-        self.in_dim = linear.in_features
-        self.out_dim = linear.out_features
         self.rank = rank
         self.alpha = alpha
         self.scaling = alpha / rank
@@ -53,8 +51,8 @@ class LoRALinear(nn.Module):
         dtype = linear.weight.dtype if hasattr(linear, 'weight') else None
 
         # LoRA layers on meta device
-        self.lora_a = nn.Linear(self.in_dim, rank, bias=False, device="meta", dtype=dtype)
-        self.lora_b = nn.Linear(rank, self.out_dim, bias=False, device="meta", dtype=dtype)
+        self.lora_a = nn.Linear(linear.in_features, rank, bias=False, device="meta", dtype=dtype)
+        self.lora_b = nn.Linear(rank, linear.out_features, bias=False, device="meta", dtype=dtype)
 
     @property
     def weight(self):
@@ -69,21 +67,15 @@ class LoRALinear(nn.Module):
     @property
     def in_features(self):
         """Expose wrapped linear's in_features for compatibility."""
-        return self.in_dim
+        return self.linear.in_features
 
     @property
     def out_features(self):
         """Expose wrapped linear's out_features for compatibility."""
-        return self.out_dim
-
-    def to_empty(
-        self, *, device: Optional[Union[str, torch.device, int]], recurse: bool = True
-    ):
-        self.lora_a.to_empty(device=device, recurse=recurse)
-        self.lora_b.to_empty(device=device, recurse=recurse)
-        return self
+        return self.linear.out_features
 
     def initialize_parameters(self):
+        """Initialize LoRA parameters after materialization."""
         nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_b.weight)
 
@@ -95,12 +87,13 @@ class LoRALinear(nn.Module):
         # Base linear forward (works with nn.Linear, Float8Linear, etc.)
         out = self.linear(x)
 
-        # LoRA path: out += scale * (x @ A.T @ B.T)
-        x = self.dropout(x)
-        lora_out = self.lora_b(self.lora_a(x))
-        out = out + self.scaling * lora_out
+        # LoRA path - use modules directly to preserve gradient flow through DTensor
+        lora_x = self.dropout(x)
+        lora_hidden = self.lora_a(lora_x)  # [batch, seq, rank]
+        lora_out = self.lora_b(lora_hidden)  # [batch, seq, out_features]
 
-        return out
+        # Both out and lora_out are plain tensors (use_local_output=True in TP layer_plan)
+        return out + self.scaling * lora_out
 
 
 class LoRAConverter:
@@ -110,6 +103,7 @@ class LoRAConverter:
         self.rank = job_config.lora.rank
         self.alpha = job_config.lora.alpha
         self.dropout = job_config.lora.dropout
+        self._lora_modules: list[LoRALinear] = []
 
         logger.info(
             f"LoRA training active with rank={self.rank}, alpha={self.alpha}, "
@@ -118,34 +112,18 @@ class LoRAConverter:
 
     def convert(self, model: nn.Module) -> None:
         """Inplace conversion of the model to use LoRA adapters."""
-        init_weights_fn = model.init_weights
-        lora_count = 0
+        self._apply_lora(model)
+        self._hook_init_weights(model)
 
-        def make_init_wrapper(prev_fn, ll: LoRALinear | None = None, final_log: bool = False):
-            def wrapped(*args, **kwargs):
-                if callable(prev_fn):
-                    prev_fn(*args, **kwargs)
-                if ll is not None:
-                    ll.initialize_parameters()
-                    ll.lora_a.weight.requires_grad = True
-                    ll.lora_b.weight.requires_grad = True
-                if final_log:
-                    trainable_params = sum(
-                        p.numel() for p in model.parameters() if p.requires_grad
-                    )
-                    logger.info(
-                        f"LoRA parameters initialized for {lora_count} layers, "
-                        f"trainable params: {trainable_params:,}"
-                    )
-            return wrapped
+        logger.info(f"Converted {len(self._lora_modules)} linear modules to LoRALinear")
 
+    def _apply_lora(self, model: nn.Module) -> None:
+        """Replace Linear layers with LoRALinear wrappers."""
         for module in list(model.modules()):
-            for param in module._parameters.values():
-                if param is not None:
-                    param.requires_grad_(False)
-
             for name, child in list(module._modules.items()):
                 if isinstance(child, nn.Linear) and not isinstance(child, LoRALinear):
+                    if name == "output":
+                        continue
                     lora_linear = LoRALinear(
                         linear=child,
                         rank=self.rank,
@@ -153,20 +131,42 @@ class LoRAConverter:
                         dropout=self.dropout,
                     )
                     setattr(module, name, lora_linear)
-                    lora_count += 1
-                    init_weights_fn = make_init_wrapper(init_weights_fn, lora_linear)
+                    self._lora_modules.append(lora_linear)
 
-        # Add final logging wrapper
-        init_weights_fn = make_init_wrapper(init_weights_fn, final_log=True)
-        object.__setattr__(model, "init_weights", init_weights_fn)
+    def _hook_init_weights(self, model: nn.Module) -> None:
+        """Hook into init_weights to freeze base params and initialize LoRA."""
+        original_init_weights = model.init_weights
+        lora_modules = self._lora_modules
+        model_ref = [model]
 
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"Converted {lora_count} linear modules to LoRALinear")
-        logger.info(
-            f"Trainable params: {trainable_params:,} / {total_params:,} "
-            f"({100 * trainable_params / total_params:.2f}%)"
-        )
+        def new_init_weights(*args, **kwargs):
+            if callable(original_init_weights):
+                original_init_weights(*args, **kwargs)
+
+            for ll in lora_modules:
+                ll.initialize_parameters()
+
+            m = model_ref[0]
+
+            trainable_count = 0
+            frozen_count = 0
+            for name, param in m.named_parameters():
+                if "lora_a" in name or "lora_b" in name:
+                    param.requires_grad_(True)
+                    trainable_count += 1
+                else:
+                    param.requires_grad_(False)
+                    frozen_count += 1
+
+            total_params = sum(p.numel() for p in m.parameters())
+            trainable_params = sum(p.numel() for p in m.parameters() if p.requires_grad)
+            logger.info(
+                f"LoRA: frozen {frozen_count} params, trainable {trainable_count} params, "
+                f"trainable params: {trainable_params:,} / {total_params:,} "
+                f"({100 * trainable_params / total_params:.2f}%)"
+            )
+
+        object.__setattr__(model, "init_weights", new_init_weights)
 
     def post_optimizer_hook(self, model: Union[nn.Module, list[nn.Module]]) -> None:
         """Post-optimizer hook (no-op for LoRA)."""

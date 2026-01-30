@@ -22,12 +22,35 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
+from torchtitan.components.lora import LoRALinear
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
+
+
+def _get_tp_path(module: nn.Module, path: str) -> str:
+    """Get TP path, redirecting to .linear for LoRALinear wrappers."""
+    parts = path.split(".")
+    target = module
+    for part in parts:
+        target = getattr(target, part, None)
+        if target is None:
+            return path
+    return f"{path}.linear" if isinstance(target, LoRALinear) else path
+
+
+def _is_lora_linear(module: nn.Module, path: str) -> bool:
+    """Check if module at path is LoRALinear."""
+    parts = path.split(".")
+    target = module
+    for part in parts:
+        target = getattr(target, part, None)
+        if target is None:
+            return False
+    return isinstance(target, LoRALinear)
 
 
 # for selective op activation checkpointing
@@ -160,21 +183,27 @@ def apply_tp(
     # transformer block's inputs)
     # 2. Parallelize the root norm layer over the sequence dim
     # 3. Parallelize the final linear output layer
+
+    # Handle output layer - redirect to .linear if wrapped with LoRALinear
+    output_path = _get_tp_path(model, "output")
+
+    # Build plan for top-level modules
+    top_level_plan = {
+        "tok_embeddings": RowwiseParallel(
+            input_layouts=Replicate(),
+            output_layouts=Shard(1),
+        ),
+        "norm": SequenceParallel(),
+        output_path: ColwiseParallel(
+            input_layouts=Shard(1),
+            output_layouts=Shard(-1) if loss_parallel else Replicate(),
+            use_local_output=not loss_parallel,
+        ),
+    }
     parallelize_module(
         model,
         tp_mesh,
-        {
-            "tok_embeddings": RowwiseParallel(
-                input_layouts=Replicate(),
-                output_layouts=Shard(1),
-            ),
-            "norm": SequenceParallel(),
-            "output": ColwiseParallel(
-                input_layouts=Shard(1),
-                output_layouts=Shard(-1) if loss_parallel else Replicate(),
-                use_local_output=not loss_parallel,
-            ),
-        },
+        top_level_plan,
     )
 
     # Parallel styles used for transformer block linear weights and their
@@ -203,8 +232,40 @@ def apply_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+
+    # LoRA parallel styles for colwise and rowwise layers
+    # For colwise: lora_a uses Replicate, lora_b uses colwise_parallel
+    lora_a_colwise = RowwiseParallel(
+        input_layouts=Replicate(),
+        output_layouts=Replicate(),
+        use_local_output=True,
+    )
+    # For rowwise: lora_a takes sharded input, produces Replicate output (DTensor, no use_local_output)
+    # Then lora_b takes Replicate input and produces Shard(1) output
+    lora_a_rowwise = RowwiseParallel(
+        input_layouts=Shard(-1),
+        output_layouts=Replicate(),
+        use_local_output=False,  # Keep as DTensor for lora_b to consume
+    )
+    # lora_b for rowwise: ColwiseParallel with Shard(1) output to match base linear
+    lora_b_rowwise = ColwiseParallel(
+        input_layouts=Replicate(),
+        output_layouts=Shard(1),
+        use_local_output=True,
+    )
+
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
+        # Build TP paths, redirecting to .linear submodule for LoRALinear wrappers
+        # This avoids TP trying to distribute LoRA adapter parameters
+        wq_path = _get_tp_path(transformer_block, "attention.wq")
+        wk_path = _get_tp_path(transformer_block, "attention.wk")
+        wv_path = _get_tp_path(transformer_block, "attention.wv")
+        wo_path = _get_tp_path(transformer_block, "attention.wo")
+        w1_path = _get_tp_path(transformer_block, "feed_forward.w1")
+        w2_path = _get_tp_path(transformer_block, "feed_forward.w2")
+        w3_path = _get_tp_path(transformer_block, "feed_forward.w3")
+
         layer_plan = {
             "attention_norm": SequenceParallel(),
             # NOTE: when the fourth argument (positions) is not None, its input layout
@@ -213,19 +274,45 @@ def apply_tp(
                 input_layouts=(Shard(1), None, None, None),
                 desired_input_layouts=(Replicate(), None, None, None),
             ),
-            "attention.wq": colwise_parallel(),
-            "attention.wk": colwise_parallel(),
-            "attention.wv": colwise_parallel(),
-            "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
+            wq_path: colwise_parallel(),
+            wk_path: colwise_parallel(),
+            wv_path: colwise_parallel(),
+            wo_path: rowwise_parallel(output_layouts=Shard(1)),
             "ffn_norm": SequenceParallel(),
             "feed_forward": prepare_module_input(
                 input_layouts=(Shard(1),),
                 desired_input_layouts=(Replicate(),),
             ),
-            "feed_forward.w1": colwise_parallel(),
-            "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
-            "feed_forward.w3": colwise_parallel(),
+            w1_path: colwise_parallel(),
+            w2_path: rowwise_parallel(output_layouts=Shard(1)),
+            w3_path: colwise_parallel(),
         }
+
+        # Add LoRA parallelism to layer_plan if module is LoRALinear
+        # Colwise layers (wq, wk, wv, w1, w3): lora_b(lora_a(x)) behaves like colwise_parallel()
+        if _is_lora_linear(transformer_block, "attention.wq"):
+            layer_plan["attention.wq.lora_a"] = lora_a_colwise
+            layer_plan["attention.wq.lora_b"] = colwise_parallel()
+        if _is_lora_linear(transformer_block, "attention.wk"):
+            layer_plan["attention.wk.lora_a"] = lora_a_colwise
+            layer_plan["attention.wk.lora_b"] = colwise_parallel()
+        if _is_lora_linear(transformer_block, "attention.wv"):
+            layer_plan["attention.wv.lora_a"] = lora_a_colwise
+            layer_plan["attention.wv.lora_b"] = colwise_parallel()
+        if _is_lora_linear(transformer_block, "feed_forward.w1"):
+            layer_plan["feed_forward.w1.lora_a"] = lora_a_colwise
+            layer_plan["feed_forward.w1.lora_b"] = colwise_parallel()
+        if _is_lora_linear(transformer_block, "feed_forward.w3"):
+            layer_plan["feed_forward.w3.lora_a"] = lora_a_colwise
+            layer_plan["feed_forward.w3.lora_b"] = colwise_parallel()
+
+        # Rowwise layers (wo, w2): lora_b(lora_a(x)) behaves like rowwise_parallel(output_layouts=Shard(1))
+        if _is_lora_linear(transformer_block, "attention.wo"):
+            layer_plan["attention.wo.lora_a"] = lora_a_rowwise
+            layer_plan["attention.wo.lora_b"] = lora_b_rowwise
+        if _is_lora_linear(transformer_block, "feed_forward.w2"):
+            layer_plan["feed_forward.w2.lora_a"] = lora_a_rowwise
+            layer_plan["feed_forward.w2.lora_b"] = lora_b_rowwise
 
         parallelize_module(
             # pyrefly: ignore [bad-argument-type]
