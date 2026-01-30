@@ -107,7 +107,7 @@ class VLLMGenerator:
 
         # First time: create the engine using LLMEngine and EngineArgs
         if self.engine is None:
-            # Load TorchTitan plugin at runtime (like native_sampler does)
+            # Load TorchTitan plugin at runtime
             from torchtitan.experiments.rl.unified.plugin import register
 
             register()
