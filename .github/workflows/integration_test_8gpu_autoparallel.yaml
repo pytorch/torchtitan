@@ -55,9 +55,14 @@ jobs:
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
 
-        # Log CUDA driver version for debugging.
-        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
-        echo "CUDA driver version: ${DRIVER_VERSION}"
+        # Log GPU info / driver version for debugging.
+        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+          DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+          echo "CUDA driver version: ${DRIVER_VERSION}"
+        elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          echo "ROCm info:"
+          rocm-smi || true
+        fi
 
         pip config --user set global.progress_bar off
 
