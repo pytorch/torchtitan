@@ -172,7 +172,7 @@ class FluxTrainer(Trainer):
                 loss = self.loss_fn(latent_noise_pred, target)
             # latent_noise_pred.shape=(bs, seq_len, vocab_size)
             # need to free to before bwd to avoid peaking memory
-            # pyrefly: ignore [unsupported-delete]
+            # pyrefly: ignore[unsupported-delete]
             del (latent_noise_pred, noise, target)
             loss.backward()
 

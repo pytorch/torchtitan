@@ -13,6 +13,7 @@ import torch
 
 from torchtitan.config import Profiling as ProfilingConfig
 from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import device_module
 
 # how much memory allocation/free ops to record in memory snapshots
 MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
@@ -104,7 +105,7 @@ def maybe_enable_memory_snapshot(
 
         class MemoryProfiler:
             def __init__(self, step_num: int, freq: int):
-                torch.cuda.memory._record_memory_history(
+                device_module.memory._record_memory_history(
                     max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES
                 )
                 # when resume training, we start from the last step
@@ -131,7 +132,7 @@ def maybe_enable_memory_snapshot(
                     curr_snapshot_dir, f"rank{rank}_memory_snapshot.pickle"
                 )
                 with open(output_file, "wb") as output:
-                    pickle.dump(torch.cuda.memory._snapshot(), output)
+                    pickle.dump(device_module.memory._snapshot(), output)
                 logger.info(
                     f"Finished dumping memory snapshot in {time.monotonic() - begin:.2f} seconds"
                 )
