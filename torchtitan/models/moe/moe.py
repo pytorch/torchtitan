@@ -1055,7 +1055,7 @@ class MoE(nn.Module):
 
 
 def build_moe(
-    args: MoEArgs, dim: int, hidden_dim: int, moe_impl: str = "standard"
+    args: MoEArgs, dim: int, hidden_dim: int, peft_config: PEFT, moe_impl: str = "standard",
 ) -> nn.Module:
     """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP)."""
     if moe_impl == "deepep":
@@ -1069,4 +1069,4 @@ def build_moe(
     logger.info(
         f"Standard MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
     )
-    return MoE(args, dim=dim, hidden_dim=hidden_dim)
+    return MoE(args, dim=dim, hidden_dim=hidden_dim, peft_config=peft_config)

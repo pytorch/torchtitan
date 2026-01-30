@@ -99,16 +99,6 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        if (
-            job_config.parallelism.context_parallel_degree > 1
-            and self.attn_type != "sdpa"
-        ):
-            raise NotImplementedError(
-                f"Context Parallel only supports SDPA attention. "
-                f"Got attn_type='{self.attn_type}'. "
-                f"FlexAttention and varlen attention are not supported with CP."
-            )
-
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
         )
