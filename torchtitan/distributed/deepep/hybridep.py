@@ -112,13 +112,6 @@ def _apply_scores(
     return hidden, scores
 
 
-def clear_handle_cache() -> None:
-    """Clear cached dispatch handles. Call at end of each training step."""
-    global _handle_cache, _cache_counter
-    _handle_cache.clear()
-    _cache_counter = 0
-
-
 def _require_hybridep() -> Any:
     """Lazily import HybridEPBuffer, raising helpful error if unavailable."""
     global _hybrid_ep_cls
@@ -195,7 +188,12 @@ def _combine_impl(x: torch.Tensor, cache_id: torch.Tensor) -> torch.Tensor:
     if _buffer is None:
         raise RuntimeError("HybridEP buffer not initialized.")
 
-    handle = _get_cached_handle(cache_id.item())
+    # In inference mode, setup_context doesn't run, so we clean up handle_cache here.
+    # NOTE: For inference, use torch.inference_mode() instead of torch.no_grad()
+    if torch.is_inference_mode_enabled():
+        handle = _handle_cache.pop(cache_id.item(), None)
+    else:
+        handle = _get_cached_handle(cache_id.item())
     if handle is None:
         raise RuntimeError(f"Handle not found for cache_id={cache_id.item()}")
 
@@ -416,4 +414,4 @@ def combine_tokens(hidden_states: torch.Tensor, state: DispatchState) -> torch.T
     return torch.ops.hybridep.combine(hidden_states, state.cache_id)
 
 
-__all__ = ["dispatch_tokens", "combine_tokens", "clear_handle_cache", "get_buffer", "DispatchState"]
+__all__ = ["dispatch_tokens", "combine_tokens", "get_buffer", "DispatchState"]

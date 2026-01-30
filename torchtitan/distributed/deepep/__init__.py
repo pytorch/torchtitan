@@ -20,16 +20,6 @@ import torch
 from torch.distributed import ProcessGroup
 
 
-def clear_handle_cache(backend: Literal["deepep", "hybridep"] = "deepep") -> None:
-    """Clear cached dispatch handles. Call at end of each training step."""
-    if backend == "hybridep":
-        from . import hybridep
-        hybridep.clear_handle_cache()
-    else:
-        from . import deepep
-        deepep.clear_handle_cache()
-
-
 def dispatch_tokens(
     hidden_states: torch.Tensor,
     selected_experts_indices: torch.Tensor,
@@ -93,4 +83,4 @@ def combine_tokens(
         return _combine(hidden_states, state)
 
 
-__all__ = ["dispatch_tokens", "combine_tokens", "clear_handle_cache"]
+__all__ = ["dispatch_tokens", "combine_tokens"]

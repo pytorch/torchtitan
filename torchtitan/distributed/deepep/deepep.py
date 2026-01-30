@@ -47,31 +47,6 @@ def _get_next_handle_id() -> torch.Tensor:
     return torch.tensor([_handle_counter], dtype=torch.int64, device="cpu")
 
 
-def clear_handle_cache() -> None:
-    """Clear all cached dispatch handles to release memory.
-    
-    IMPORTANT: Call this at the end of each training step to prevent memory leaks.
-    
-    The handle cache stores routing metadata from dispatch operations that is
-    needed by the corresponding combine operations. After a complete forward-backward
-    pass, these handles are no longer needed and should be cleared.
-    
-    Example usage in training loop:
-        for step in range(num_steps):
-            loss = model(input)
-            loss.backward()
-            optimizer.step()
-            
-            # Clear DeepEP handle cache at end of each step
-            from torchtitan.distributed.deepep import deepep
-            deepep.clear_handle_cache()
-    """
-    global _handle_cache, _cache_counter
-    _handle_cache.clear()
-    # Reset counter to avoid unbounded growth (optional, for cleanliness)
-    _cache_counter = 0
-
-
 # ============================================================================
 # Custom Op Registration for SAC Integration
 # ============================================================================

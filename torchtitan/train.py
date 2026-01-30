@@ -604,13 +604,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.optimizers.step()
         self.lr_schedulers.step()
 
-        # Clear DeepEP/HybridEP handle cache at end of training step to prevent memory leaks.
-        # Handles are only needed during forward-backward; clearing them here is safe.
-        ep_backend = self.job_config.parallelism.expert_parallel_comm_backend
-        if parallel_dims.ep_enabled and ep_backend in ("deepep", "hybridep"):
-            from torchtitan.distributed.deepep import clear_handle_cache
-            clear_handle_cache(backend=ep_backend)
-
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
 
