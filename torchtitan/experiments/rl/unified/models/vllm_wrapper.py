@@ -283,21 +283,21 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         return logits
 
-    def load_weights_from_state_dict(self, titan_state_dict):
+    def load_weights_from_state_dict(self, trainer_state_dict):
         """
-        Load model weights directly from torchtitan state dict.
+        Load model weights directly from a state dict containing DTensor.
         """
 
         model_state_dict = {k: v for k, v in self.model.state_dict().items()}
 
         # Convert to DTensor if target is DTensor (when the target model is sharded)
-        for name, tensor in titan_state_dict.items():
+        for name, tensor in trainer_state_dict.items():
             if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
                 if isinstance(tensor, DTensor):
                     continue
                 target_dtensor = model_state_dict[name]
                 device_mesh = target_dtensor.device_mesh
-                titan_state_dict[name] = DTensor.from_local(
+                trainer_state_dict[name] = DTensor.from_local(
                     tensor.to(device_mesh.device_type),
                     device_mesh=device_mesh,
                     placements=[Replicate()],
@@ -306,11 +306,11 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Load state dict
         set_model_state_dict(
             model=self.model,
-            model_state_dict=titan_state_dict,
+            model_state_dict=trainer_state_dict,
             options=StateDictOptions(strict=False),
         )
 
-        loaded_params = titan_state_dict.keys()
+        loaded_params = trainer_state_dict.keys()
 
         return loaded_params
 

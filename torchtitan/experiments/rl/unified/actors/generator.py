@@ -50,7 +50,7 @@ class VLLMGenerator:
         self.base_model_path = model_path
 
         # Load TorchTitan plugin at runtime
-        from torchtitan.experiments.rl.unified.plugin import register
+        from torchtitan.experiments.rl.unified import register
 
         register(model_flavor=job_config.model.flavor)
         logger.info("Loaded TorchTitan vLLM plugin")
