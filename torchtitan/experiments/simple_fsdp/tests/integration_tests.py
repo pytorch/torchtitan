@@ -317,6 +317,19 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             "fsdp+tp+ep+etp",
             ngpu=4,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name simple_fsdp.deepseek_v3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
+                ],
+            ],
+            "FSDP+CP",
+            "fsdp+cp",
+            ngpu=4,
+        ),
     ]
     return integration_tests_flavors
 
