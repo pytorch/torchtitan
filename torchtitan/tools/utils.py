@@ -9,6 +9,7 @@ import gc
 import subprocess
 import time
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Generator, Optional
 
 import torch
@@ -24,7 +25,15 @@ def has_cuda_capability(major: int, minor: int) -> bool:
     )
 
 
-def get_device_info() -> tuple[str, torch.device]:
+def has_rocm_capability(major: int, minor: int) -> bool:
+    is_rocm = torch.cuda.is_available() and torch.version.hip is not None
+    return is_rocm and torch.cuda.get_device_capability() >= (
+        major,
+        minor,
+    )
+
+
+def get_device_info() -> tuple[str, ModuleType]:
     device_type = _get_available_device_type() or "cuda"
     device_module = _get_device_module(device_type)  # default device_module:torch.cuda
     return device_type, device_module
