@@ -210,6 +210,19 @@ def apply_ac(
     Returns:
         None
     """
+    # Disable dynamo LRU cache to workaround an interaction between SAC, PP, and Flex:
+    #
+    # When forward runs with a second PP microbatch, it triggers recompilation with dynamic
+    # shapes enabled. Now there are two valid compiled graphs. By default, dynamo selects
+    # the latest one (the dynamic shapes version), so the runtime wrapper expects an extra
+    # symint output. When SAC caches the inductor HOP output from the static graph for
+    # batch_idx=0, it would miss that symint and cause an assertion failure. The workaround
+    # here is to disable the LRU cache, and select graphs in insertion order instead.
+    #
+    # Also see: https://github.com/pytorch/pytorch/issues/166926
+    # pyrefly: ignore [missing-attribute]
+    torch._C._dynamo.eval_frame._set_lru_cache(False)
+
     if ac_config.mode == "memory_budget":
         assert model_compile_enabled, "Memory budget mode requires model to be compiled"
         if ac_config.visualize_memory_budget_pareto:

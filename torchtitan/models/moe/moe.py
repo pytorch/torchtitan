@@ -166,7 +166,7 @@ class GroupedExperts(nn.Module):
             #       otherwise, EP will handle the padding.
             if (
                 not isinstance(self.w1, DTensor)
-                # pyrefly: ignore [not-iterable]
+                # pyrefly: ignore[not-iterable]
                 or "ep" not in self.w1.device_mesh.mesh_dim_names
             ):
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
@@ -563,6 +563,7 @@ class MoE(nn.Module):
                 self.experts.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:
+                # pyrefly: ignore[bad-assignment]
                 self.expert_bias = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
                 )

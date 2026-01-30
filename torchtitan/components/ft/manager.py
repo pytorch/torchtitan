@@ -165,5 +165,4 @@ def maybe_semi_sync_training(
             raise ValueError(
                 f"Unknown training method: {semi_sync_method}, only 'diloco' and 'local_sgd' are supported."
             )
-    # pyrefly: ignore [no-matching-overload]
     return nullcontext()
