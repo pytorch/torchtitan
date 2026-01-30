@@ -7,6 +7,7 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import math
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -208,14 +209,13 @@ class Attention(nn.Module):
         )
 
         self.attn_type = model_args.attn_type
+        self.inner_attention: nn.Module
         match self.attn_type:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
             case "varlen":
-                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = VarlenAttentionWrapper()
             case "sdpa":
-                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
@@ -478,8 +478,7 @@ class Transformer(ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                # pyrefly: ignore [not-callable]
-                layer.init_weights()
+                cast(TransformerBlock, layer).init_weights()
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
@@ -571,15 +570,12 @@ class Transformer(ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        # pyrefly: ignore[not-callable, invalid-argument]
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
             h = layer(
                 h, self.freqs_cis, attention_masks=attention_masks, positions=positions
             )
-        # pyrefly: ignore[not-callable, invalid-argument]
-        h = self.norm(h) if self.norm else h
-        # pyrefly: ignore[not-callable, invalid-argument]
-        output = self.output(h) if self.output else h
+        h = self.norm(h) if self.norm is not None else h
+        output = self.output(h) if self.output is not None else h
         return output
