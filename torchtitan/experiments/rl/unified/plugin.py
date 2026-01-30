@@ -14,8 +14,6 @@ def register(model_flavor: str):
     Register TorchTitan models with vLLM.
 
     This function registers TorchTitan models (e.g., Qwen3) with vLLM's ModelRegistry.
-    It's called automatically when the unified module is imported, or can be called
-    explicitly for manual registration.
     """
     # NOTE: This is a temporary parallel plan patch for Qwen3 model. Will be replace by parallel plan in core torchtitan.
     from torchtitan.experiments.rl.unified.infra.parallelize import parallelize_qwen3

@@ -7,9 +7,6 @@
 """
 Unified approach for running TorchTitan models with vLLM inference.
 
-The plugin is loaded at runtime when needed (in generator.py), following
-the pattern used in native_sampler.py.
-
 To manually load the plugin:
     from torchtitan.experiments.rl.unified import plugin
     plugin.register()
