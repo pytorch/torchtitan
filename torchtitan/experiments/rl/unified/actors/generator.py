@@ -134,6 +134,42 @@ class VLLMGenerator:
             f"Updated weights into vLLM engine actor model. Number of parameters: {len(load_weights)}"
         )
 
+        # First time: create the engine using LLMEngine and EngineArgs
+        if self.engine is None:
+            # Load TorchTitan plugin at runtime (like native_sampler does)
+            from torchtitan.experiments.rl.unified.plugin import register
+
+            register()
+            logger.info("Loaded TorchTitan vLLM plugin")
+
+            generation = self.job_config.generation
+
+            engine_args = EngineArgs(
+                # Model configuration
+                model=self.temp_model_dir,
+                trust_remote_code=True,
+                dtype=generation.dtype,
+                # Parallelism configuration
+                tensor_parallel_size=generation.parallelism.tensor_parallel_degree,
+                distributed_executor_backend="external_launcher",
+                # Memory and performance
+                gpu_memory_utilization=generation.gpu_memory_utilization,
+                enforce_eager=generation.enforce_eager,
+                # Seed
+                seed=self.job_config.debug.seed,
+                # HuggingFace overrides to use TorchTitan model.
+                # TODO: make this field configurable and align with model registration
+                hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
+            )
+
+            logger.info("Initializing LLMEngine from EngineArgs...")
+            self.engine = LLMEngine.from_engine_args(engine_args)
+            logger.info("Created new vLLM LLMEngine")
+        else:
+            # Use collective_rpc to call reload_weights on all workers
+            # This reloads weights from temp_model_dir without recreating the engine
+            self.engine.collective_rpc("reload_weights")
+
     @torch.no_grad()
     def generate(
         self,
@@ -283,9 +319,9 @@ class Generator(Actor):
         self.model_path = job_config.checkpoint.initial_load_path
         self.max_new_tokens = job_config.generation.sampling.max_tokens
         self.temperature = job_config.generation.sampling.temperature
-        self.group_size = job_config.rl.grpo_group_size
-        self.grpo_beta = job_config.rl.grpo_beta
-        self.use_stable_grpo = job_config.rl.use_stable_grpo
+        self.group_size = job_config.policy_optimization.grpo_group_size
+        self.grpo_beta = job_config.policy_optimization.grpo_beta
+        self.use_stable_grpo = job_config.policy_optimization.use_stable_grpo
 
         # Initialize distributed environment for SPMD generator
         world_size = dist_utils.init_distributed(

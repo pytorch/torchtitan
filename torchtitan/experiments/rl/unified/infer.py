@@ -15,7 +15,12 @@ Run: torchrun --nproc_per_node=2 \
       torchtitan/experiments/rl/unified/infer.py \
       --job.config_file torchtitan/experiments/rl/unified/run_configs/qwen3_0.6b.toml
 """
+import os
 
+# Must set spawn method before any CUDA operations or vLLM imports
+# CUDA cannot be re-initialized in forked subprocesses
+# See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 from torchtitan.config import ConfigManager
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -53,12 +58,12 @@ def generate():
         dtype=generation.dtype,
         # Parallelism configuration
         tensor_parallel_size=generation.parallelism.tensor_parallel_degree,
-        distributed_executor_backend=generation.distributed_executor_backend,
+        distributed_executor_backend="external_launcher",
         # Memory and performance
         gpu_memory_utilization=generation.gpu_memory_utilization,
         enforce_eager=generation.enforce_eager,
         # Seed
-        seed=generation.seed,
+        seed=job_config.debug.seed,
         # HuggingFace overrides
         hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
     )
