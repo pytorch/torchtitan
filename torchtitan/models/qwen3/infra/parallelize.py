@@ -163,6 +163,7 @@ def parallelize_qwen3(
             ep_degree=parallel_dims.ep,
             edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
+            disable_prefetch=job_config.parallelism.fsdp_disable_prefetch,
         )
 
         if parallel_dims.dp_replicate_enabled:

@@ -215,6 +215,7 @@ def parallelize_llama(
             ep_degree=parallel_dims.ep,
             edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
+            disable_prefetch=job_config.parallelism.fsdp_disable_prefetch,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -343,6 +344,7 @@ def apply_fsdp(
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
     gradient_divide_factor: int | None = None,
+    disable_prefetch: bool = False,
 ):
     """
     Apply data parallelism (via FSDP2) to the model.
@@ -359,6 +361,7 @@ def apply_fsdp(
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
+        disable_prefetch (bool, optional): Whether to disable FSDP forward/backward prefetching. Defaults to False.
 
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
@@ -503,6 +506,11 @@ def apply_fsdp(
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
     # in EP could interfere with implicit prefetching in FSDP
     if ep_degree == 1:
+        return
+
+    # Skip prefetch setup if disabled
+    if disable_prefetch:
+        logger.info("FSDP prefetching is disabled")
         return
 
     # forward
