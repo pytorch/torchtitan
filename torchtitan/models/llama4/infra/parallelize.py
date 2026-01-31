@@ -340,7 +340,7 @@ def apply_fsdp(
     reduce_dtype: torch.dtype,
     pp_enabled: bool,
     cpu_offload: bool = False,
-    reshard_after_forward_policy: str = "default",
+    reshard_after_forward_policy: str | int = "default",
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
     gradient_divide_factor: int | None = None,
@@ -356,11 +356,15 @@ def apply_fsdp(
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
         cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str, optional): The policy to use for resharding after forward pass. Defaults to "default".
-            Other options: "never", "always".
+        reshard_after_forward_policy (str | int, optional): The policy to use for resharding after forward pass. Defaults to "default".
+            String options: "never", "always", "default".
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
             - "never" will disable `reshard_after_forward` for all forward passes.
+            Integer option: N (e.g., 8) for partial resharding to N-GPU groups.
+            - Reduces peak memory by limiting all-gather buffer size to N GPUs instead of full DP world.
+            - Use N=8 for intra-node resharding (fast NVLink communication).
+            - N must be a factor of the FSDP shard world size.
         disable_prefetch (bool, optional): Whether to disable FSDP forward/backward prefetching. Defaults to False.
 
     """
@@ -369,19 +373,26 @@ def apply_fsdp(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    match reshard_after_forward_policy:
-        case "always":
-            reshard_after_forward = True
-        case "never":
-            reshard_after_forward = False
-        case "default":
-            # For PP, by default do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            reshard_after_forward = not pp_enabled
-        case _:
-            raise ValueError(
-                f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
-            )
+    # Handle integer reshard_after_forward (partial resharding to N-GPU groups)
+    if isinstance(reshard_after_forward_policy, int):
+        reshard_after_forward = reshard_after_forward_policy
+        logger.info(
+            f"Using partial reshard_after_forward={reshard_after_forward} (resharding to {reshard_after_forward}-GPU groups)"
+        )
+    else:
+        match reshard_after_forward_policy:
+            case "always":
+                reshard_after_forward = True
+            case "never":
+                reshard_after_forward = False
+            case "default":
+                # For PP, by default do not reshard after forward to avoid per-microbatch
+                # all-gathers, which can be expensive and non-overlapped
+                reshard_after_forward = not pp_enabled
+            case _:
+                raise ValueError(
+                    f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
+                )
 
     if model.tok_embeddings is not None:
         # pyrefly: ignore [no-matching-overload]
