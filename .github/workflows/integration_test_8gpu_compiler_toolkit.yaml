@@ -61,7 +61,7 @@ jobs:
           echo "CUDA driver version: ${DRIVER_VERSION}"
         elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
           echo "ROCm info:"
-          rocm-smi || true
+          rocminfo || true
         fi
 
         pip config --user set global.progress_bar off
