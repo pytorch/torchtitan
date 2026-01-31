@@ -1,0 +1,73 @@
+# Qwen3 30B-A3B with memory tracking features enabled
+# Tests: detailed memory tracking, aggressive memory manager, bf16 optimizer states
+# Reduced settings to fit in memory
+
+[job]
+dump_folder = "./outputs/qwen3_30b_a3b_memory_test"
+description = "Qwen3 30B-A3B - memory tracking test"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 100
+
+[metrics]
+log_freq = 1
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "qwen3"
+flavor = "30B-A3B"
+hf_assets_path = "./tests/assets/tokenizer"
+
+[optimizer]
+name = "AdamW"
+lr = 8e-4
+eps = 1e-8
+# Test BF16 optimizer states (50% memory savings)
+state_dtype = "bfloat16"
+
+[lr_scheduler]
+warmup_steps = 2
+
+[training]
+local_batch_size = 1
+seq_len = 2048
+max_norm = 1.0
+steps = 3
+dataset = "c4"
+enable_cpu_offload = true
+# Enable detailed memory tracking
+enable_detailed_memory_tracking = true
+clear_cache_between_steps = true
+# Enable aggressive memory management
+aggressive_memory_mode = "maximum"
+aggressive_memory_verbose = true
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default"
+tensor_parallel_degree = 1
+context_parallel_degree = 1
+enable_async_tensor_parallel = false
+expert_parallel_degree = 8
+expert_tensor_parallel_degree = 1
+
+[checkpoint]
+enable = false
+folder = "checkpoint"
+interval = 500
+last_save_model_only = false
+export_dtype = "float16"
+async_mode = "disabled"
+
+[activation_checkpoint]
+mode = "full"
+selective_ac_option = "op"
+
+[compile]
+enable = true
+components = ["loss"]

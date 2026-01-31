@@ -30,6 +30,9 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
+from torchtitan.tools.aggressive_memory_manager import create_aggressive_memory_manager
+from torchtitan.tools.cuda_memory_tracker import CUDAMemoryTracker
+from torchtitan.tools.detailed_memory_tracker import DetailedMemoryTracker
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
@@ -105,6 +108,40 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.gc_handler = utils.GarbageCollection(
             gc_freq=job_config.training.gc_freq, debug=job_config.training.gc_debug
         )
+
+        # Initialize detailed memory tracker
+        self.detailed_memory_tracker = DetailedMemoryTracker(
+            enabled=getattr(
+                job_config.training, "enable_detailed_memory_tracking", False
+            ),
+            clear_cache=getattr(
+                job_config.training, "clear_cache_between_steps", False
+            ),
+        )
+
+        # Initialize CUDA memory tracker
+        self.cuda_memory_tracker = CUDAMemoryTracker(
+            enabled=getattr(
+                job_config.training, "enable_detailed_memory_tracking", False
+            ),
+        )
+
+        # Initialize aggressive memory manager to reduce CUDA fragmentation
+        aggressive_mem_mode = getattr(
+            job_config.training, "aggressive_memory_mode", None
+        )
+        if aggressive_mem_mode:
+            self.aggressive_mem_manager = create_aggressive_memory_manager(
+                mode=aggressive_mem_mode,
+                verbose=getattr(
+                    job_config.training, "aggressive_memory_verbose", False
+                ),
+            )
+            logger.info(
+                f"Aggressive memory manager enabled (mode={aggressive_mem_mode})"
+            )
+        else:
+            self.aggressive_mem_manager = None
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
@@ -690,11 +727,30 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 del pred
                 loss.backward()
 
+        # Aggressive memory clearing after backward to reduce fragmentation
+        if self.aggressive_mem_manager is not None:
+            self.aggressive_mem_manager.post_backward()
+
         return loss
 
     def train_step(
         self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
+        # AGGRESSIVE cache clearing before step for accurate memory measurements
+        if self.job_config.training.aggressive_memory_mode:
+            import gc
+
+            torch.cuda.synchronize()
+            gc.collect(0)
+            gc.collect(1)
+            gc.collect(2)
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            gc.collect(2)
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            self.metrics_processor.device_memory_monitor.reset_peak_stats()
+
         self.optimizers.zero_grad()
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
@@ -702,6 +758,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
+
+        # Track memory before forward pass
+        self.detailed_memory_tracker.measure("before_forward", self.step)
+        self.cuda_memory_tracker.measure_all("before_forward", self.step)
 
         accumulated_losses = []
         # If data runs out during gradient accumulation, that
@@ -712,6 +772,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             loss = self.forward_backward_step(input_dict, labels)
             accumulated_losses.append(loss.detach())
 
+        # Track memory after forward/backward
+        self.detailed_memory_tracker.measure("after_forward_backward", self.step)
+        self.cuda_memory_tracker.measure_all("after_forward_backward", self.step)
+
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
@@ -720,8 +784,39 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
-        self.lr_schedulers.step()
+
+        # Skip optimizer step if configured (for memory profiling)
+        if not self.job_config.training.skip_optimizer_step:
+            import datetime
+            import time as _time
+
+            # Log step start with timestamp for correlation
+            if self.device.index == 0:
+                _ts = datetime.datetime.now().strftime("%H:%M:%S")
+                logger.info(f"[STEP {self.step}] optimizer.step() START @ {_ts}")
+
+            _optim_start = _time.time()
+            self.optimizers.step()
+            _optim_elapsed = _time.time() - _optim_start
+
+            # Aggressive memory clearing after optimizer to reduce fragmentation
+            if self.aggressive_mem_manager is not None:
+                self.aggressive_mem_manager.post_optimizer()
+
+            # Log step end with timing
+            if self.device.index == 0:
+                _ts = datetime.datetime.now().strftime("%H:%M:%S")
+                logger.info(
+                    f"[STEP {self.step}] optimizer.step() END @ {_ts} | Duration: {_optim_elapsed:.2f}s"
+                )
+
+            self.lr_schedulers.step()
+        else:
+            logger.info("Skipping optimizer step (skip_optimizer_step=True)")
+
+        # Track memory after optimizer step
+        self.detailed_memory_tracker.measure("after_optimizer", self.step)
+        self.cuda_memory_tracker.measure_all("after_optimizer", self.step)
 
         # Reduce the data collected over gradient accumulation steps.
         loss = torch.sum(torch.stack(accumulated_losses))
@@ -762,11 +857,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             extra_metrics=extra_metrics,
         )
 
+        # Signal step complete to aggressive memory manager (triggers defrag check)
+        if self.aggressive_mem_manager is not None:
+            self.aggressive_mem_manager.step_complete()
+
     @record
     def train(self):
         job_config = self.job_config
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
+
+        # Pre-initialize bf16 optimizer states if configured
+        # This must happen BEFORE training to avoid rank skew during first step
+        if hasattr(self.optimizers, "init_bf16_states"):
+            self.optimizers.init_bf16_states()
+            # Barrier to ensure all ranks finish before training starts
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
+                logger.info("All ranks synchronized after bf16 optimizer state init")
+
         logger.info(f"Training starts at step {self.step + 1}")
 
         leaf_folder = (
@@ -842,6 +951,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 if memory_profiler:
                     memory_profiler.step()
 
+                # Track memory at step end and optionally clear cache
+                self.detailed_memory_tracker.step_complete(self.step)
+                self.cuda_memory_tracker.measure_all("step_end", self.step)
+
                 # reduce timeout after first train step for faster signal
                 # (assuming lazy init and compilation are finished)
                 if self.step == 1:
@@ -855,6 +968,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if torch.distributed.get_rank() == 0:
             logger.info("Sleeping 2 seconds for other ranks to complete")
             time.sleep(2)
+
+        # Log detailed memory tracking summary
+        if torch.distributed.get_rank() == 0:
+            logger.info(self.detailed_memory_tracker.get_summary())
 
         logger.info("Training completed")
 
