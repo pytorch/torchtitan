@@ -286,6 +286,13 @@ class Optimizer:
     use_triton: bool = False
     """Whether to use Triton kernel for Newton-Schulz in Muon optimizer."""
 
+    state_dtype: Literal["float32", "bfloat16"] = "float32"
+    """
+    Dtype for optimizer states (exp_avg, exp_avg_sq for Adam/AdamW).
+    Using bfloat16 reduces memory by ~50% but may affect training stability.
+    Only applies to Adam/AdamW optimizers.
+    """
+
 
 @dataclass
 class LRScheduler:
@@ -437,6 +444,41 @@ class Training:
 
     dataloader: DataLoader = field(default_factory=DataLoader)
     """DataLoader configuration"""
+
+    enable_detailed_memory_tracking: bool = False
+    """
+    Whether to enable detailed memory tracking at every training phase
+    """
+
+    clear_cache_between_steps: bool = False
+    """
+    Whether to clear CUDA cache between training steps to measure minimum memory requirements
+    """
+
+    skip_optimizer_step: bool = False
+    """
+    Whether to skip the optimizer step (for memory profiling purposes only)
+    """
+
+    aggressive_memory_mode: Literal[
+        "minimal", "balanced", "aggressive", "maximum"
+    ] | None = None
+    """
+    Enable aggressive memory management to reduce CUDA memory fragmentation.
+    This clears CUDA cache and Python GC at strategic points (post-backward, post-optimizer).
+    Modes:
+    - None: Disabled (default)
+    - "minimal": Only clear on high fragmentation (<1% overhead)
+    - "balanced": Clear after backward and optimizer (2-3% overhead)
+    - "aggressive": Clear frequently with sync (5-8% overhead)
+    - "maximum": Clear after every operation (10-15% overhead, for debugging)
+    """
+
+    aggressive_memory_verbose: bool = False
+    """
+    Enable verbose logging for aggressive memory manager.
+    Logs detailed memory stats after each clear operation.
+    """
 
 
 @dataclass

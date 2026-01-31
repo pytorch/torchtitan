@@ -1,0 +1,73 @@
+# Kimi K2 - 36 nodes - EP=96, CP=16, HSDP (dp_replicate=3, dp_shard=6), LBS=10
+#
+# Original config: /home/phuc/worklogs/2026-01-30/cp16_sweep_dp/configs/exp1aj_HSDP_r3_s6_lbs10.toml
+# Job ID: 2485
+#
+# Expected Performance:
+#   - TPS: 378
+#   - Memory: 69.45 GiB (87.6%)
+#   - MFU: 16.64%
+#
+# Parallelism: EP=96, CP=16, dp_replicate=3, dp_shard=6
+# HSDP: Shard within 12 nodes, all-reduce between 3 replica groups
+# Nodes: 36 (288 GPUs)
+# Seq Length: 32768
+# Local Batch Size: 10
+#
+
+[job]
+dump_folder = "./outputs/kimi_k2/36n_ep96_cp16_hsdp_replicate3_shard6_lbs10"
+description = "Kimi K2 - 36n HSDP dp_replicate=3 dp_shard=6 LBS=10"
+
+[profiling]
+enable_profiling = false
+
+[metrics]
+log_freq = 1
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "/home/phuc/kimi_1t/torchtitan/assets/hf/DeepSeek-V3-Base"
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+state_dtype = "bfloat16"
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+
+[training]
+dtype = "bfloat16"
+local_batch_size = 10
+seq_len = 32768
+steps = 5
+dataset = "c4_test"
+enable_cpu_offload = true
+clear_cache_between_steps = true
+skip_optimizer_step = false
+# Aggressive memory management to reduce CUDA fragmentation
+aggressive_memory_mode = "maximum"
+aggressive_memory_verbose = true
+
+[parallelism]
+data_parallel_replicate_degree = 3
+data_parallel_shard_degree = 6
+expert_parallel_degree = 96
+context_parallel_degree = 16
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = true
+components = ["loss"]
+
+[debug]
+moe_force_load_balance = true
+
+[comm]
+init_timeout_seconds = 1800
+train_timeout_seconds = 1800
