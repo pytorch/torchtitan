@@ -71,3 +71,8 @@ selective_ac_option = "op"
 [compile]
 enable = true
 components = ["loss"]
+
+[debug]
+# Test NaN tracker
+enable_nan_tracker = true
+nan_tracker_verbose = false

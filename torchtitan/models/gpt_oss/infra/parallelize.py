@@ -147,6 +147,7 @@ def parallelize_gptoss(
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
             edp_mesh=edp_mesh,
+            disable_prefetch=job_config.parallelism.fsdp_disable_prefetch,
         )
 
         if parallel_dims.dp_replicate_enabled:

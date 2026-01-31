@@ -521,6 +521,12 @@ class Parallelism:
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
 
+    fsdp_disable_prefetch: bool = False
+    """
+    Whether to disable FSDP forward/backward prefetching. Disabling prefetch can reduce memory
+    at the cost of performance (less overlap of communication and computation).
+    """
+
     tensor_parallel_degree: int = 1
     """Tensor Parallelism degree. 1 means disabled."""
 
@@ -1336,6 +1342,12 @@ class Debug:
 
     moe_force_load_balance: bool = False
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
+
+    enable_nan_tracker: bool = False
+    """If True, enable lightweight NaN/Inf tracking to find where NaN first appears in the model."""
+
+    nan_tracker_verbose: bool = False
+    """If True, print stats for every layer (very verbose output)."""
 
 
 @dataclass
