@@ -420,7 +420,7 @@ class VLLMTorchTitanBenchmark:
                 dtype="bfloat16",
                 trust_remote_code=True,
                 enforce_eager=enforce_eager,
-                gpu_memory_utilization=0.9,
+                gpu_memory_utilization=0.5,
                 tensor_parallel_size=self.config.tp,
                 distributed_executor_backend=distributed_backend,
                 compilation_config=compilation_config,

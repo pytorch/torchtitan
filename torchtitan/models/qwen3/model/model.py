@@ -78,6 +78,8 @@ def reshape_for_broadcast(
     Returns:
         torch.Tensor: Reshaped frequency tensor.
     """
+    from torch.fx.experimental.symbolic_shapes import guard_or_false
+
     ndim = x.ndim
     assert ndim > 1
     bz, seqlen, _, head_dim = x.shape
@@ -87,8 +89,10 @@ def reshape_for_broadcast(
         assert rope_cache.shape == (seqlen, head_dim * 2)
         shape = [-1, seqlen, 1, head_dim * 2]
         return rope_cache.view(*shape)
-    elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
+    elif guard_or_false(positions.size(0) == 1):
+        # assert positions.shape == (1, seqlen)
+        torch._check(positions.size(1) == seqlen)
+        torch._check(positions.size(0) == 1)
         rope_cache = rope_cache[positions.squeeze(0)]
         # The shape of rope_cache is (seqlen, head_dim * 2)
         assert rope_cache.shape == (seqlen, head_dim * 2)
