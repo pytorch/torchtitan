@@ -13,10 +13,6 @@
 # Note: Performance
 # The quantization modules are intended to be ran under `torch.compile`` for competitive performance
 
-# Module level global constants
-FP8_GROUP_ALIGNMENT_SIZE = 16
-MXFP8_GROUP_ALIGNMENT_SIZE = 32
-
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 

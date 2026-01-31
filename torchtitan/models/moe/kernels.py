@@ -145,7 +145,7 @@ def generate_permute_indices(
     experts_per_rank: int,
     num_ranks: int,
     max_len: int,
-    alignment: int,
+    alignment: int = 1,
     use_cpu: bool = False,
 ):
     """
@@ -157,6 +157,7 @@ def generate_permute_indices(
         num_ranks: number of ranks.
         max_len: maximum length of the output index vector.
         alignment: alignment for each returned element in `m_sizes` and padding min for zero token experts.
+            By default (alignment = 1), no padding.
         use_cpu: whether to use CPU implementation.
 
 

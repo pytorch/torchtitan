@@ -5,13 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from typing import Callable
-
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torchtitan.models.moe.moe import MoE
-from torchtitan.models.moe.utils import _permute, _unpermute, need_indices_padding
 
 from .args import GptOssModelArgs
 
@@ -37,49 +34,6 @@ class ScaleBiasForward(torch.autograd.Function):
     def backward(ctx, grad_output):
         # Don't scale the gradient - pass it through as-is
         return grad_output, None
-
-
-def indices_padding_wrapper(func: Callable) -> Callable:
-    """
-    In order to use torch._grouped_mm, we need to make sure the number of
-    tokens each expert gets is a multiple of TOKEN_GROUP_ALIGN_SIZE_M. The
-    generate_permute_indices kernel also helps achieve this via padding,
-    without incurring synchronization between device and host.
-    """
-
-    def wrapper(
-        mlp1_weight: torch.Tensor,
-        mlp1_bias: torch.Tensor,
-        mlp2_weight: torch.Tensor,
-        mlp2_bias: torch.Tensor,
-        swiglu_limit: float,
-        x: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
-        tp_degree: int = 1,
-    ) -> torch.Tensor:
-        num_local_experts = mlp1_weight.shape[0]
-        ep_degree = num_tokens_per_expert.shape[0] // num_local_experts
-
-        input_shape, x, permuted_indices, num_tokens_per_expert = _permute(
-            x, num_tokens_per_expert, ep_degree, num_local_experts
-        )
-
-        out = func(
-            mlp1_weight,
-            mlp1_bias,
-            mlp2_weight,
-            mlp2_bias,
-            swiglu_limit,
-            x,
-            num_tokens_per_expert,
-            tp_degree,
-        )
-
-        out = _unpermute(out, input_shape, permuted_indices)
-
-        return out
-
-    return wrapper
 
 
 def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
@@ -230,15 +184,7 @@ class GptOssGroupedExperts(nn.Module):
                 tp_degree = self.mlp1_weight.device_mesh.size(tp_dim_idx)
 
         if self.use_grouped_mm:
-            if need_indices_padding() and (
-                not isinstance(self.mlp1_weight, DTensor)
-                # pyrefly: ignore[unsupported-operation]
-                or "ep" not in self.mlp1_weight.device_mesh.mesh_dim_names
-            ):
-                run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
-            else:
-                run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(
+            return _run_experts_grouped_mm(
                 mlp1_weight,
                 mlp1_bias,
                 mlp2_weight,

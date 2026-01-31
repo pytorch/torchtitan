@@ -13,7 +13,6 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 
 from torchtitan.tools.logging import logger
-from .utils import indices_padding_wrapper, need_indices_padding
 
 
 @dataclass
@@ -161,18 +160,7 @@ class GroupedExperts(nn.Module):
             w3 = self.w3
 
         if self.use_grouped_mm:
-            # NOTE: If EP is not used, we need to pad the indices
-            #       to prepare for grouped_mm;
-            #       otherwise, EP will handle the padding.
-            if need_indices_padding() and (
-                not isinstance(self.w1, DTensor)
-                # pyrefly: ignore[unsupported-operation]
-                or "ep" not in self.w1.device_mesh.mesh_dim_names
-            ):
-                run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
-            else:
-                run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+            return _run_experts_grouped_mm(w1, w2, w3, x, num_tokens_per_expert)
         else:
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 

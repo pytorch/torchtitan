@@ -149,8 +149,6 @@ class ExpertParallel(BaseExpertParallel):
         # [#tokens for local expert 0 from EP rank 0, #tokens for local expert 1 from EP rank 0, ...,
         #  #tokens for local expert 0 from EP rank 1, #tokens for local expert 1 from EP rank 1, ...]
         # We need to perform another shuffle to get the correct layout, via the _permute function
-        # below, which also does padding to make sure the number of tokens each expert gets locally
-        # is a multiple of TOKEN_GROUP_ALIGN_SIZE_M.
         # Note that this will create side effects when wrapping the for-loop implementation
         # of GroupedExperts, as it does not need padding.
 

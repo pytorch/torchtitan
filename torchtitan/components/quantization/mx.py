@@ -9,14 +9,10 @@ from importlib.util import find_spec
 from typing import Any, List
 
 import torch.nn as nn
-from torchtitan.components.quantization import (
-    MXFP8_GROUP_ALIGNMENT_SIZE,
-    QuantizationConverter,
-)
+from torchtitan.components.quantization import QuantizationConverter
 
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.moe.utils import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
@@ -129,11 +125,8 @@ class MXGroupedMMConverter(QuantizationConverter):
 
         # For MoE training with mxfp8, token group sizes must be multiples of 32
         self.moe_fqns = job_config.quantize.grouped_mm.mx.fqns
-        if self.moe_fqns:
-            logger.info(
-                f"Setting token group alignment size to {MXFP8_GROUP_ALIGNMENT_SIZE}"
-            )
-            set_token_group_alignment_size_m(MXFP8_GROUP_ALIGNMENT_SIZE)
+        # For mxfp8 grouped GEMM, token group sizes must be multiples of 32
+        # and this should be done in actual mxfp8 gemm kernel
 
         self.recipe_name = job_config.quantize.grouped_mm.mx.recipe_name
         self.enabled = True
