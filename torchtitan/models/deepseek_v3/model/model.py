@@ -465,6 +465,7 @@ class DeepSeekV3Model(ModelProtocol):
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
+                assert tokenizer.eos_id is not None
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
