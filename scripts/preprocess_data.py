@@ -936,7 +936,7 @@ def main(args):
             dataset.save_to_disk(args.save_to_disk)
         if args.push_to_hub:
             print(f"Pushing to Hugging Face repo {args.push_to_hub}")
-            dataset.push_to_hub(args.save_to_disk, private=True)
+            dataset.push_to_hub(args.push_to_hub, private=True)
 
         example = dataset[0]
 
