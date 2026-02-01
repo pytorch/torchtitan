@@ -709,7 +709,29 @@ def main(args):
                 return len(x["messages"])
             return 0
 
+        len_before = len(dataset)
         dataset = dataset.filter(lambda x: _get_conversation_len(x) > 3)
+        print(f"Filtered by multiturn: {len_before} -> {len(dataset)} samples")
+    if args.required_text:
+        def _contains_required_text(x):
+            if args.chat:
+                if "conversations" in x:
+                    messages = x["conversations"]
+                elif "messages" in x:
+                    messages = x["messages"]
+                else:
+                    return False
+                for message in messages:
+                    content = message.get("content") or message.get("value") or ""
+                    if args.required_text in content:
+                        return True
+                return False
+            else:
+                return args.required_text in x.get("text", "")
+
+        len_before = len(dataset)
+        dataset = dataset.filter(_contains_required_text)
+        print(f"Filtered by required_text '{args.required_text}': {len_before} -> {len(dataset)} samples")
 
     original_column_names = list(dataset.features.keys())
     dataset = dataset.map(
@@ -960,6 +982,7 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int)
     parser.add_argument("--chat", action="store_true")
     parser.add_argument("--multiturn-only", action="store_true")
+    parser.add_argument("--required-text", type=str)
     parser.add_argument("--pack-to-sequence-length", type=int)
     parser.add_argument(
         "--epochs",
