@@ -139,7 +139,7 @@ class SelfAttention(nn.Module):
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         q, k = apply_rope(q, k, pe)
-        x = self.inner_attention(q, k, v)
+        x = self.inner_attention(q, k, v, is_causal=False)
         x = rearrange(x, "B H L D -> B L (H D)")
         x = self.proj(x)
         return x
