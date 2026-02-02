@@ -109,7 +109,8 @@ def get_peak_flops(device_name: str) -> float:
         # NVIDIA's official global website, we refer to technical reports from
         # Tom's Hardware. The peak BF16/FP16 Tensor performance is reported as
         # 148 TFLOPS.
-        # Ref: https://www.tomshardware.com/news/nvidias-latest-regulation-compliant-gpu-for-china-has-been-delayed-to-early-next-year
+        # Ref: https://www.tomshardware.com/news/
+        # nvidias-latest-regulation-compliant-gpu-for-china-has-been-delayed-to-early-next-year
         return 148e12
     elif "B200" in device_name:
         # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
