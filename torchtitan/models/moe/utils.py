@@ -8,7 +8,6 @@
 import torch
 
 
-@torch.no_grad()
 def generate_permute_indices(
     tokens_per_expert_group: torch.Tensor,  # shape [num_ranks * experts_per_rank]
     experts_per_rank: int,
@@ -65,7 +64,10 @@ def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
     max_len = x.shape[0]
 
     with torch.no_grad():
-        (permuted_indices, num_tokens_per_expert,) = generate_permute_indices(
+        (
+            permuted_indices,
+            num_tokens_per_expert,
+        ) = generate_permute_indices(
             num_tokens_per_expert,
             num_local_experts,
             ep_degree,
