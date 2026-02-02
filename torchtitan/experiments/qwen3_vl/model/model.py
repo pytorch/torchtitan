@@ -68,23 +68,34 @@ class Qwen3VLModel(Qwen3Model):
         """Extract image features from the vision encoder.
 
         Args:
-            pixel_values: Flattened image patches (total_patches, patch_dim)
+            pixel_values: Padded image patches (num_images, max_seq_len, patch_dim)
             image_grid_thw: Grid dimensions (num_images, 3) for [t, h, w]
 
         Returns:
-            image_embeds: List of image embeddings per image
+            image_embeds: List of image embeddings per image (only valid tokens)
             deepstack_embeds: List of DeepStack features from intermediate layers
         """
         pixel_values = pixel_values.type(self.visual.patch_embed.proj.weight.dtype)
         merged_embeds, deepstack_features = self.visual(pixel_values, grid_thw=image_grid_thw)
 
-        # Split by image
-        split_sizes = (
-            image_grid_thw.prod(-1) // self.visual.spatial_merge_unit
-        ).tolist()
-        image_embeds = torch.split(merged_embeds, split_sizes)
+        # Compute valid sequence lengths per image (after merging)
+        merge_unit = self.visual.spatial_merge_unit
+        seq_lens = (image_grid_thw.prod(-1) // merge_unit).tolist()
 
-        return list(image_embeds), deepstack_features
+        # Extract only valid tokens (remove padding) per image
+        image_embeds = []
+        for i, seq_len in enumerate(seq_lens):
+            image_embeds.append(merged_embeds[i, :seq_len])
+
+        # Extract valid tokens from DeepStack features
+        deepstack_embeds_extracted = []
+        for ds_feat in deepstack_features:
+            ds_list = []
+            for i, seq_len in enumerate(seq_lens):
+                ds_list.append(ds_feat[i, :seq_len])
+            deepstack_embeds_extracted.append(torch.cat(ds_list, dim=0))
+
+        return image_embeds, deepstack_embeds_extracted
 
     def get_video_features(
         self,
