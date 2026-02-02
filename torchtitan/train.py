@@ -94,6 +94,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
 
+        # Logging needs to happen after distributed initialized
+        job_config.maybe_log()
+
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
             batch_degree, batch_rank = batch_mesh.size(), batch_mesh.get_local_rank()
