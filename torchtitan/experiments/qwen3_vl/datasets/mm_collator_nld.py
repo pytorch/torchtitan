@@ -48,13 +48,13 @@ class MultiModalCollatorNLD:
     def collate_images(
         self, all_images: list[torch.Tensor]
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Process a list of image tensors into patches with grid dimensions.
+        """Process a list of image tensors into padded patches with grid dimensions.
 
         Args:
             all_images: list of image tensors, each of shape (T, H, W, C)
 
         Returns:
-            pixel_values: Flattened patches (total_patches, patch_dim) or None
+            pixel_values: Padded patches (num_images, max_seq_len, patch_dim) or None
             grid_thw: Grid dimensions (num_images, 3) with [T, H_patches, W_patches] or None
         """
         if not all_images:
@@ -81,8 +81,6 @@ class MultiModalCollatorNLD:
             W_patches = W // ps
 
             # Convert to patches in block-order (matching position embedding order)
-            # The vision encoder expects patches arranged so that 2x2 spatial blocks
-            # are contiguous for the merger to work correctly
             patches = E.rearrange(
                 img,
                 "(t pt) (bh m ph) (bw n pw) c -> (t bh bw m n) (pt ph pw c)",
@@ -99,11 +97,22 @@ class MultiModalCollatorNLD:
         if not all_patches:
             return None, None
 
-        # Concatenate all patches into a single tensor
-        pixel_values = torch.cat(all_patches, dim=0)  # (total_patches, patch_dim)
+        # Pad to same length for batched processing
+        # Ensure max_seq_len is divisible by spatial_merge_size^2 for merger
+        merge_unit = merge_size ** 2
+        max_seq_len = max(p.shape[0] for p in all_patches)
+        if max_seq_len % merge_unit != 0:
+            max_seq_len = ((max_seq_len // merge_unit) + 1) * merge_unit
+
+        patch_dim = all_patches[0].shape[1]
+
+        padded_patches = torch.zeros(len(all_patches), max_seq_len, patch_dim)
+        for i, patches in enumerate(all_patches):
+            padded_patches[i, :patches.shape[0]] = patches
+
         grid_thw = torch.stack(grid_thw_list, dim=0)  # (num_images, 3)
 
-        return pixel_values, grid_thw
+        return padded_patches, grid_thw
 
     def collate_text(
         self,
