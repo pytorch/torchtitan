@@ -364,8 +364,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
 
     def _token_dispatch(self, mod, inputs, device_mesh):
         """Dispatch tokens via DeepEP or HybridEP based on configured backend."""
-        from torchtitan.distributed.deepep import dispatch_tokens
-
         hidden_states, _, selected_experts_indices, top_scores, num_experts = inputs
         if isinstance(mod.w1, DTensor):
             num_local_experts = mod.w1.to_local().shape[0]
@@ -403,10 +401,15 @@ class DeepEPExpertParallel(BaseExpertParallel):
 
     def _token_combine(self, mod, routed_output, device_mesh):
         """Combine tokens via DeepEP or HybridEP based on configured backend."""
-        from torchtitan.distributed.deepep import combine_tokens
+        if self.comm_backend == "hybridep":
+            from torchtitan.distributed.deepep import hybridep
 
-        # pyrefly: ignore [bad-argument-type]
-        routed_output = combine_tokens(routed_output, self._state, backend=self.comm_backend)
+            routed_output = hybridep.combine_tokens(routed_output, self._state)
+        else:
+            from torchtitan.distributed.deepep import deepep
+
+            routed_output = deepep.combine_tokens(routed_output, self._state)
+
         self._state = None
         return routed_output
 

@@ -11,7 +11,10 @@ Provides efficient token dispatch/combine for MoE training via TMA-optimized all
 
 Configuration (via job_config.parallelism.hybridep):
     capacity_factor: Buffer multiplier (must be >= top_k, upper bound is EP group size)
-    num_permuted_tokens: Output buffer size for CPU-free non-blocking mode
+    num_permuted_tokens: Output buffer size for CPU-free non-blocking mode. This must be
+        large enough to hold all tokens that may be received after dispatch. If the buffer
+        is too small, tokens will be silently dropped and handle.overflow_flag will be True.
+        (Older HybridEP versions would cause illegal memory access errors instead.)
     pad_multiple: Alignment for MXFP8 (typically 32)
 
 Reference: https://github.com/deepseek-ai/DeepEP
@@ -43,6 +46,11 @@ class DispatchState:
         permuted_scores: Scores for score_before_experts=False mode.
         num_permuted_tokens: Buffer size for grouped_mm. When set, enables
             CPU-free non-blocking mode for CUDA graph compatibility.
+            
+    Note:
+        The dispatch handle (cached internally) contains an overflow_flag that
+        indicates if num_permuted_tokens was too small and tokens were dropped.
+        Current HybridEP silently drops excess tokens; older versions caused IMA errors.
     """
     cache_id: torch.Tensor
     num_recv_tokens: int
@@ -352,6 +360,14 @@ def dispatch_tokens(
         score_before_experts: Apply scores before expert computation
         num_permuted_tokens: Pre-allocated output buffer size for grouped_mm.
             When set, enables CPU-free non-blocking mode for CUDA graphs.
+            
+            IMPORTANT: This buffer must be large enough to hold all tokens that may
+            be received after the all-to-all dispatch. If the buffer is too small:
+            - Current HybridEP: Silently drops excess tokens, sets handle.overflow_flag=True
+            - Older HybridEP: Causes illegal memory access (IMA) errors
+            
+            To size correctly, consider: num_tokens * top_k * capacity_factor / ep_degree,
+            accounting for potential load imbalance across experts.
         capacity_factor: Buffer multiplier (>= top_k, <= EP group size)
         pad_multiple: Pad output for MXFP8 alignment (e.g., 32)
     
