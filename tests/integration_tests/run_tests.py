@@ -107,9 +107,7 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
             ran_any_test = True
 
     if not ran_any_test:
-        available_tests = [
-            t.test_name for t in test_list if not t.disabled if not t.skip_rocm_test
-        ]
+        available_tests = [t.test_name for t in test_list if not t.disabled]
         if hasattr(args, "test_suite"):
             logger.warning(
                 f"No tests were run for --test_name '{args.test_name}' in test suite '{args.test_suite}'.\n"
