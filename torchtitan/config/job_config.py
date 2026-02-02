@@ -301,6 +301,40 @@ class Training:
 
 
 @dataclass
+class HybridEPConfig:
+    """
+    HybridEP configuration for GB200/NVLink72 systems.
+    Only effective when expert_parallel_comm_backend="hybridep".
+    """
+
+    capacity_factor: float = 1.0
+    """
+    Buffer capacity multiplier: buffer_size = num_tokens × capacity_factor.
+    
+    Bounds:
+    - Lower: 1.0 (minimum for balanced routing)
+    - Upper: EP group size (maximum useful value)
+    
+    Example: use 1.0 (balanced) to 1.25 (25% headroom).
+    """
+
+    num_permuted_tokens: int | None = None
+    """
+    Determines output buffer size for grouped_mm. When set, enables CPU-free non-blocking
+    mode required for CUDA graph compatibility.
+    
+    Typical value: num_recevied_tokens × min(top_k, num_local_experts) (for balanced routing).
+    If None, uses blocking mode with D2H for sizing.
+    """
+
+    pad_multiple: int | None = None
+    """
+    Pad dispatch output to this multiple for MXFP8 alignment.
+    Use 32 for MXFP8 quantization, None to disable.
+    """
+
+
+@dataclass
 class Parallelism:
     data_parallel_replicate_degree: int = 1
     """
@@ -463,16 +497,22 @@ class Parallelism:
     Note that this is still an experimental feature.
     """
 
-    expert_parallel_comm_backend: Literal["standard", "deepep"] = "standard"
+    expert_parallel_comm_backend: Literal["standard", "deepep", "hybridep"] = "standard"
     """
     Expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
 
     - "standard": Uses PyTorch all-to-all collectives (default)
-    - "deepep": Uses DeepEP custom kernels for more efficient communication
+    - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
+    - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
 
-    DeepEP requires installation:
-    https://github.com/deepseek-ai/DeepEP.
+    DeepEP/HybridEP requires installation:
+    https://github.com/deepseek-ai/DeepEP (checkout to hybrid_ep branch if using HybridEP)
+
+    For HybridEP-specific configuration, see the `hybridep` section below.
     """
+
+    hybridep: HybridEPConfig = field(default_factory=HybridEPConfig)
+    """HybridEP-specific configuration. Only effective when expert_parallel_comm_backend="hybridep"."""
 
 
 @dataclass
