@@ -347,3 +347,22 @@ def data_parallel(
             ),
         )
     return model
+
+
+def _register_placement_as_opaque():
+    from torch._library.opaque_object import MemberType, register_opaque_type
+
+    allowed_members = {
+        "reduce_op": MemberType.USE_REAL,
+        "is_shard": MemberType.USE_REAL,
+        "is_partial": MemberType.USE_REAL,
+        "is_replicate": MemberType.USE_REAL,
+        "__eq__": MemberType.USE_REAL,
+    }
+    register_opaque_type(
+        _ScaledPartial,
+        typ="value",
+        members=allowed_members,
+    )
+
+_register_placement_as_opaque()
