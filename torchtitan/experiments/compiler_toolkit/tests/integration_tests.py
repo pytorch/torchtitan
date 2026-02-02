@@ -71,6 +71,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
             "llama3 FSDP+TP+cudagraph",
             "llama3_fsdp_tp_cudagraph",
             ngpu=4,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -193,6 +194,12 @@ def main():
         "--config_path",
         default="./tests/integration_tests/base_config.toml",
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
+    )
+    parser.add_argument(
+        "--gpu_arch_type",
+        default="cuda",
+        choices=["cuda", "rocm"],
+        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
     )
     parser.add_argument(
         "--test_name",
