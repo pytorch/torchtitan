@@ -431,7 +431,7 @@ class Transformer(ModelProtocol):
         vocab_size (int): Vocabulary size.
         n_layers (int): Number of layers in the model.
         tok_embeddings (ParallelEmbedding): Token embeddings.
-        layers (torch.nn.ModuleList): List of Transformer blocks.
+        layers (torch.nn.ModuleDict): Dict of Transformer blocks.
         norm (RMSNorm): Layer normalization for the model output.
         output (Linear): Linear layer for final output.
         freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
