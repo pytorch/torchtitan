@@ -56,8 +56,9 @@ Example usages:
 9. Run baseline only and export the losses (no comparison):
    loss_compare.py . . --export-result=baseline_losses.txt
 
-10. Run baseline with specific commit and export the losses:
-    loss_compare.py my_branch my_branch --export-result=my_branch_losses.txt
+10. Run baseline with specific options and export the losses:
+    loss_compare.py . . --baseline-options='--parallelism.dp=2' \
+        --export-result=my_config_losses.txt
 """
 
 import argparse
@@ -202,39 +203,35 @@ def validate_arguments(
         commits_differ or configs_differ or train_files_differ or options_differ
     )
 
-    # Allow identical settings for baseline-only mode:
+    # Determine baseline-only mode:
+    # - With --export-result: always run baseline only (export the losses)
     # - With --import-result and --assert-equal: run baseline, compare against imported
-    # - With --export-result: run baseline, export the losses
-    if all_identical:
-        if import_result and assert_equal:
-            log_print("Baseline-only mode: all settings identical with --import-result")
-            log_print("Will run baseline only and compare against imported losses")
-        elif export_result:
-            log_print("Baseline-only mode: all settings identical with --export-result")
-            log_print("Will run baseline only and export the losses")
-        else:
-            log_print("Error: All settings are identical")
-            log_print("       Cannot compare identical configurations")
-            log_print(
-                "       Please provide different commits, configs, train files, "
-                "or options"
-            )
-            log_print(
-                "       Or use --import-result with --assert-equal "
-                "or --export-result to run baseline-only mode"
-            )
-            sys.exit(1)
+    baseline_only = export_result is not None or (
+        all_identical and import_result is not None and assert_equal
+    )
+
+    if export_result:
+        log_print("Baseline-only mode: --export-result specified")
+        log_print("Will run baseline only and export the losses")
+    elif all_identical and import_result and assert_equal:
+        log_print("Baseline-only mode: all settings identical with --import-result")
+        log_print("Will run baseline only and compare against imported losses")
+    elif all_identical:
+        log_print("Error: All settings are identical")
+        log_print("       Cannot compare identical configurations")
+        log_print(
+            "       Please provide different commits, configs, train files, "
+            "or options"
+        )
+        log_print(
+            "       Or use --import-result with --assert-equal "
+            "or --export-result to run baseline-only mode"
+        )
+        sys.exit(1)
 
     # Validate steps is a positive integer
     if steps <= 0:
         log_print(f"Error: --steps must be a positive integer, got: {steps}")
-        sys.exit(1)
-
-    # Validate export-result requires assert-equal (only when not in baseline-only mode)
-    # In baseline-only mode with export, there's nothing to assert against
-    if export_result and not assert_equal and not all_identical:
-        log_print("Error: --export-result requires --assert-equal")
-        log_print("       Export only happens when losses are verified to match")
         sys.exit(1)
 
     # Validate import-result requires assert-equal
@@ -260,8 +257,7 @@ def validate_arguments(
         sys.exit(1)
 
     # Return whether we're in baseline-only mode
-    # Baseline-only when all settings identical AND (import_result OR export_result)
-    return all_identical and (import_result is not None or export_result is not None)
+    return baseline_only
 
 
 # =============================================================================
