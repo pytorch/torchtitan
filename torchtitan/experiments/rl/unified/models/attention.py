@@ -61,6 +61,7 @@ class VLLMAttention(torch.nn.Module):
         v: torch.Tensor,
         *,
         scale: float | None = None,
+        enable_gqa: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass using vLLM's Attention layer for inference.
@@ -70,6 +71,7 @@ class VLLMAttention(torch.nn.Module):
             k: Key tensor [batch, num_kv_heads, seq_len, head_dim]
             v: Value tensor [batch, num_kv_heads, seq_len, head_dim]
             scale: Optional attention scale override (unused, vLLM uses internal scale)
+            enable_gqa: Whether GQA is enabled (unused, vLLM handles GQA internally)
 
         Returns:
             output: [batch, num_heads, seq_len, head_dim]
