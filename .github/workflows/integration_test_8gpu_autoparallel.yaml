@@ -75,7 +75,9 @@ jobs:
           fi
           echo "Found hipcc at: $HIPCC"
           # Compile and run the checked-in C++ program
-          "$HIPCC" -O2 torchtitan/experiments/autoparallel/debug_ci_script/debug_hip_device_name_ci.cpp -o "$RUNNER_TEMP/hip_device_name"
+          OUTDIR="./hip_tmp"
+          mkdir -p "$OUTDIR"
+          "$HIPCC" -O2 torchtitan/experiments/autoparallel/debug_ci_script/debug_hip_device_name_ci.cpp -o "$OUTDIR/hip_device_name"
           "$RUNNER_TEMP/hip_device_name"
           echo "::endgroup::"
         fi
