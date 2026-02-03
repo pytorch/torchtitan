@@ -409,7 +409,7 @@ class MetricsProcessor:
             global_avg_loss: Global average loss across all valid tokens on all ranks
                 Defined as global_loss_sum / global_valid_tokens
             global_max_loss: Maximum local loss across all ranks
-                Defined as max(local_loss_sum / global_valid_tokens)
+                Defined as max(local_loss_sum / local_valid_tokens)
             grad_norm: Gradient norm after clipping
             extra_metrics: Optional additional metrics to log
 
