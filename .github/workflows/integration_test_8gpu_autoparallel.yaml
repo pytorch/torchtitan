@@ -68,7 +68,7 @@ jobs:
         if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
           echo "::group::DEBUG HIP device-name"
           # Search for hipcc
-          HIPCC="$(find / -type f -name hipcc -perm -111 2>/dev/null | head -n 1)"
+          HIPCC="$(find / -type f -name hipcc -perm -111 -print -quit 2>/dev/null || true)"
           if [[ -z "$HIPCC" ]]; then
             echo "ERROR: hipcc not found on filesystem"
             exit 1
