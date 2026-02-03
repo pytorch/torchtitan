@@ -616,12 +616,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ft_pg = self.ft_manager.loss_sync_pg
             loss_mesh = parallel_dims.get_optional_mesh("loss")
 
+            # For global_avg_loss, we want the average loss across all ranks:
             # loss = local_loss_sum / global_valid_tokens
-            # summing across ranks will have result:
-            # global_avg_loss = sum(local_loss_sum) / global_valid_tokens = global_loss_sum / global_valid_tokens
+            # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
+            #                 = sum(loss)
+            #
+            # For global_max_loss, we want the max of local average losses across ranks:
+            # local_avg_loss = local_loss_sum / local_valid_tokens
+            #                = (loss * global_valid_tokens) / local_valid_tokens
+            # global_max_loss = max(local_avg_loss)
+            local_avg_loss = loss * global_valid_tokens / local_valid_tokens
             global_avg_loss, global_max_loss, global_ntokens_seen = (
                 dist_utils.dist_sum(loss, loss_mesh, ft_pg),
-                dist_utils.dist_max(loss, loss_mesh, ft_pg),
+                dist_utils.dist_max(local_avg_loss, loss_mesh, ft_pg),
                 dist_utils.dist_sum(
                     torch.tensor(
                         self.ntokens_seen, dtype=torch.int64, device=self.device
