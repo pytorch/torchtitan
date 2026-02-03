@@ -25,6 +25,7 @@ class MoEArgs:
     score_func: Literal["softmax", "sigmoid"] = "sigmoid"
     route_norm: bool = False
     route_scale: float = 1.0
+    gate_bias: bool = False
     score_before_experts: bool = True
 
     # token-choice with optional node limited routing
@@ -201,6 +202,7 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func (Literal["softmax", "sigmoid"]): Whether to use sigmoid or softmax for router scores.
         route_norm (bool): Whether to normalize the routing scores when using sigmoid.
         route_scale (float): Scaling factor applied to the routing scores.
+        gate_bias (bool): Whether to include a bias term in the router's linear gate.
     """
 
     def __init__(
@@ -213,10 +215,11 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid"],
         route_norm: bool,
         route_scale: float,
+        gate_bias: bool,
         _debug_force_load_balance: bool = False,
     ):
         super().__init__()
-        self.gate = nn.Linear(dim, num_experts, bias=False)
+        self.gate = nn.Linear(dim, num_experts, bias=gate_bias)
         self.num_experts = num_experts
         self.num_expert_groups = num_expert_groups
         self.num_limited_groups = num_limited_groups
@@ -433,6 +436,7 @@ class MoE(nn.Module):
             score_func=moe_args.score_func,
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
+            gate_bias=moe_args.gate_bias,
             _debug_force_load_balance=moe_args._debug_force_load_balance,
         )
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
