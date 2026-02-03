@@ -64,6 +64,22 @@ jobs:
           rocminfo || true
         fi
 
+        # DEBUG: HIP Device name
+        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          echo "::group::DEBUG HIP device-name"
+          # Search for hipcc
+          HIPCC="$(find / -type f -name hipcc -perm -111 2>/dev/null | head -n 1)"
+          if [[ -z "$HIPCC" ]]; then
+            echo "ERROR: hipcc not found on filesystem"
+            exit 1
+          fi
+          echo "Found hipcc at: $HIPCC"
+          # Compile and run the checked-in C++ program
+          "$HIPCC" -O2 torchtitan/experiments/autoparallel/debug_ci_script/debug_hip_device_name_ci.cpp -o "$RUNNER_TEMP/hip_device_name"
+          "$RUNNER_TEMP/hip_device_name"
+          echo "::endgroup::"
+        fi
+
         pip config --user set global.progress_bar off
 
         python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
