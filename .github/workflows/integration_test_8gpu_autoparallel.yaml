@@ -87,12 +87,15 @@ jobs:
 
         python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
 
-        curl -L -o /usr/share/libdrm/amdgpu.ids   https://gitlab.freedesktop.org/mesa/libdrm/-/raw/main/data/amdgpu.ids
-        sudo mkdir -p /opt/amdgpu/share/libdrm
-        ln -sf /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids
+        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          curl -L -o /usr/share/libdrm/amdgpu.ids   https://gitlab.freedesktop.org/mesa/libdrm/-/raw/main/data/amdgpu.ids
+          sudo mkdir -p "/opt/amdgpu/share/libdrm"
+          sudo chown -R $(id -u):$(id -g) "/opt/amdgpu/share/libdrm"
+          ln -sf /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids
 
-        echo "Getting device name:"
-        python -c "import torch; print(torch.cuda.get_device_name(None))"
+          echo "Getting device name:"
+          python -c "import torch; print(torch.cuda.get_device_name(None))"
+        fi
 
         # Install autoparallel - required dependency for autoparallel experiment
         python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
