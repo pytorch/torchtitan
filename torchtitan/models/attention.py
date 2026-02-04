@@ -68,13 +68,10 @@ class VarlenAttentionWrapper(torch.nn.Module):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        # pyrefly: ignore [no-matching-overload]
         xq_packed = xq.transpose(1, 2).flatten(0, 1)  # (bs * seqlen, n_heads, head_dim)
-        # pyrefly: ignore [no-matching-overload]
         xk_packed = xk.transpose(1, 2).flatten(
             0, 1
         )  # (bs * seqlen, n_kv_heads, head_dim)
-        # pyrefly: ignore [no-matching-overload]
         xv_packed = xv.transpose(1, 2).flatten(
             0, 1
         )  # (bs * seqlen, n_kv_heads, head_dim)
@@ -188,10 +185,11 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
         *,
         scale: float | None = None,
         enable_gqa: bool = False,
+        is_casual: bool = True,
     ) -> torch.Tensor:
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
             return F.scaled_dot_product_attention(
-                q, k, v, scale=scale, is_causal=True, enable_gqa=enable_gqa
+                q, k, v, scale=scale, is_causal=is_casual, enable_gqa=enable_gqa
             )
 
 

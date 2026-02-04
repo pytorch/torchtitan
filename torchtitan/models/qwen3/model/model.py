@@ -6,6 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -187,14 +188,13 @@ class Attention(nn.Module):
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
+        self.inner_attention: nn.Module
         match self.attn_type:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
             case "varlen":
-                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = VarlenAttentionWrapper()
             case "sdpa":
-                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
@@ -241,9 +241,9 @@ class Attention(nn.Module):
 
         # Adding the q_norm and k_norm here
         # Last layer of adding q-k norm
-        if self.q_norm:  # pyrefly: ignore[invalid-argument]
+        if self.q_norm:
             xq = self.q_norm(xq)
-        if self.k_norm:  # pyrefly: ignore[invalid-argument]
+        if self.k_norm:
             xk = self.k_norm(xk)
 
         # Apply rotary embedding
@@ -433,7 +433,7 @@ class Qwen3Model(ModelProtocol):
         vocab_size (int): Vocabulary size.
         n_layers (int): Number of layers in the model.
         tok_embeddings (ParallelEmbedding): Token embeddings.
-        layers (torch.nn.ModuleList): List of Transformer blocks.
+        layers (torch.nn.ModuleDict): Dict of Transformer blocks.
         norm (RMSNorm): Layer normalization for the model output.
         output (ColumnParallelLinear): Linear layer for final output.
         freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
@@ -486,8 +486,7 @@ class Qwen3Model(ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                # pyrefly: ignore [not-callable]
-                layer.init_weights(buffer_device)
+                cast(TransformerBlock, layer).init_weights(buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
@@ -529,6 +528,7 @@ class Qwen3Model(ModelProtocol):
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
+                assert tokenizer.eos_id is not None
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
@@ -555,6 +555,7 @@ class Qwen3Model(ModelProtocol):
                         f"varlen attention is only supported with block_causal \
                         attention mask type, got {self.model_args.attn_mask_type}"
                     )
+                assert tokenizer.eos_id is not None
                 return create_varlen_metadata_for_document(
                     input_batch, tokenizer.eos_id
                 )
@@ -583,14 +584,11 @@ class Qwen3Model(ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        # pyrefly: ignore[not-callable, invalid-argument]
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.rope_cache, attention_masks, positions)
 
-        # pyrefly: ignore[not-callable, invalid-argument]
-        h = self.norm(h) if self.norm else h
-        # pyrefly: ignore[not-callable, invalid-argument]
-        output = self.output(h) if self.output else h
+        h = self.norm(h) if self.norm is not None else h
+        output = self.output(h) if self.output is not None else h
         return output
