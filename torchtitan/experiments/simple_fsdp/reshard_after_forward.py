@@ -65,6 +65,29 @@ def annotate_fsdp_all_gather(
         # nearby ac_graph_id values
         node.meta["ac_graph_id"] = 100000
 
+    def tag_view_recompute_nodes(start_node, seen=None):
+        """
+        Recursively walk only *single‑user* paths from start_node,
+        tagging view nodes for recompute.
+        """
+        if seen is None:
+            seen = set()
+        if start_node in seen:
+            return
+        seen.add(start_node)
+
+        # If current node has multiple users, stop descending
+        if len(start_node.users) != 1:
+            return
+
+        user = next(iter(start_node.users))
+
+        # Only continue if this user is a view op
+        if user.op == "call_function" and user.target.is_view:
+            force_recompute_node(user)
+            # Recurse deeper only on this one user
+            tag_view_recompute_nodes(user, seen)
+
     # Make all-gather nodes (and related nodes) recomputable, to circumvent
     # https://github.com/pytorch/pytorch/issues/136433
     for node in graph.nodes:
@@ -72,13 +95,10 @@ def annotate_fsdp_all_gather(
             ag_node = node.args[0]
             force_recompute_node(ag_node)  # all_gather
             force_recompute_node(node)  # wait_tensor
-            # Force-recompute slice that comes after wait
-            for user in node.users:
-                if (
-                    user.op == "call_function"
-                    and user.target == torch.ops.aten.slice.Tensor
-                ):
-                    force_recompute_node(user)
+
+            # Recursively tag view ops from all_gather_wait
+            tag_view_recompute_nodes(node)
+
             # Force-recompute potential dtype casts from all_gather
             if (
                 ag_node.all_input_nodes[0].op == "call_function"
