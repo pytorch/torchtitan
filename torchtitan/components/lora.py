@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import Any, Union
+from typing import Any, cast, Union
 
 import torch
 import torch.nn as nn
@@ -35,15 +35,10 @@ def create_lora_linear(parent_cls: type) -> type:
         return _lora_class_cache[parent_cls]
 
     class LoRALinear(parent_cls):  # type: ignore[valid-type, misc]
-        def __init__(
-            self,
-            *args: Any,
-            rank: int = 8,
-            alpha: float = 16.0,
-            **kwargs: Any,
-        ) -> None:
-            super().__init__(*args, **kwargs)
-            self._init_lora(rank, alpha)
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError(
+                "LoRALinear should not be instantiated directly. "
+            )
 
         def _init_lora(
             self,
@@ -52,11 +47,12 @@ def create_lora_linear(parent_cls: type) -> type:
             device: torch.device | None = None,
             dtype: torch.dtype | None = None,
         ) -> None:
+            base = cast(nn.Linear, self)
             self._lora_scaling = alpha / rank
-            device = device if device is not None else self.weight.device
-            dtype = dtype if dtype is not None else self.weight.dtype
+            device = device if device is not None else base.weight.device
+            dtype = dtype if dtype is not None else base.weight.dtype
             self.lora_a = nn.Linear(
-                self.in_features,
+                base.in_features,
                 rank,
                 bias=False,
                 device=device,
@@ -64,7 +60,7 @@ def create_lora_linear(parent_cls: type) -> type:
             )
             self.lora_b = nn.Linear(
                 rank,
-                self.out_features,
+                base.out_features,
                 bias=False,
                 device=device,
                 dtype=dtype,
@@ -113,27 +109,13 @@ class LoRAConverter:
                 param.requires_grad_(False)
             if isinstance(child, nn.Linear):
                 lora_cls = create_lora_linear(type(child))
-                # Build kwargs, handling special cases like Float8Linear
-                kwargs: dict[str, Any] = {
-                    "bias": child.bias is not None,
-                    "device": child.weight.device,
-                    "dtype": child.weight.dtype,
-                    "rank": self.rank,
-                    "alpha": self.alpha,
-                }
-                # Pass through config for Float8Linear and similar classes
-                if hasattr(child, "config"):
-                    kwargs["config"] = child.config
-                lora_layer = lora_cls(
-                    child.in_features,
-                    child.out_features,
-                    **kwargs,
-                )
-                lora_layer.weight = child.weight
-                if child.bias is not None:
-                    lora_layer.bias = child.bias
-                setattr(module, name, lora_layer)
-                self._lora_modules.append(lora_layer)
+                # Change class in-place to avoid re-initializing the Linear
+                child.__class__ = lora_cls
+                # Initialize LoRA adapters as post-init
+                _init_lora = getattr(child, "_init_lora", None)
+                if callable(_init_lora):
+                    _init_lora(self.rank, self.alpha)
+                self._lora_modules.append(child)
             else:
                 self._replace_linears_with_lora(child)
 
