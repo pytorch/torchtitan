@@ -27,6 +27,10 @@ def create_lora_linear(parent_cls: type) -> type:
     Returns:
         A new class with LoRA adapters that inherits from parent_cls.
     """
+    assert issubclass(
+        parent_cls, nn.Linear
+    ), f"parent_cls must be a subclass of nn.Linear, got {parent_cls}"
+
     if parent_cls in _lora_class_cache:
         return _lora_class_cache[parent_cls]
 
@@ -36,35 +40,45 @@ def create_lora_linear(parent_cls: type) -> type:
             *args: Any,
             rank: int = 8,
             alpha: float = 16.0,
-            dropout: float = 0.0,
             **kwargs: Any,
         ) -> None:
             super().__init__(*args, **kwargs)
-            self._init_lora(rank, alpha, dropout)
+            self._init_lora(rank, alpha)
 
-        def _init_lora(self, rank: int, alpha: float, dropout: float) -> None:
+        def _init_lora(
+            self,
+            rank: int,
+            alpha: float,
+            device: torch.device | None = None,
+            dtype: torch.dtype | None = None,
+        ) -> None:
             self._lora_scaling = alpha / rank
-            self._lora_dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+            device = device if device is not None else self.weight.device
+            dtype = dtype if dtype is not None else self.weight.dtype
             self.lora_a = nn.Linear(
                 self.in_features,
                 rank,
                 bias=False,
-                device=self.weight.device,
-                dtype=self.weight.dtype,
+                device=device,
+                dtype=dtype,
             )
             self.lora_b = nn.Linear(
                 rank,
                 self.out_features,
                 bias=False,
-                device=self.weight.device,
-                dtype=self.weight.dtype,
+                device=device,
+                dtype=dtype,
             )
+            self._init_lora_weights()
+
+        def _init_lora_weights(self) -> None:
             nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
             nn.init.zeros_(self.lora_b.weight)
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            base_out = super().forward(x)
-            lora_out = self.lora_b(self.lora_a(self._lora_dropout(x)))
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            base_out = super().forward(input)
+            # Compute LoRA in weight dtype, cast output to match base_out
+            lora_out = self.lora_b(self.lora_a(input))
             return base_out + self._lora_scaling * lora_out
 
     LoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
@@ -79,18 +93,15 @@ class LoRAConverter:
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.rank = job_config.lora.rank
         self.alpha = job_config.lora.alpha
-        self.dropout = job_config.lora.dropout
         self._lora_modules: list[nn.Module] = []
 
     def convert(self, model: nn.Module) -> None:
         """Apply LoRA to all Linear layers, freezing base model weights."""
-        self._apply_lora(model)
+        self._replace_linears_with_lora(model)
+        self._override_model_init_weights(model)
 
-        if self._is_meta_device(model):
-            self._hook_init_weights(model)
-
-    def _apply_lora(self, module: nn.Module) -> None:
-        """Recursively freeze params and wrap Linear layers with LoRA."""
+    def _replace_linears_with_lora(self, module: nn.Module) -> None:
+        """Recursively freeze params and replace Linear layers with LoRA equivalents."""
         for name, child in list(module._modules.items()):
             if name in ("lora_a", "lora_b") or child is None:
                 continue
@@ -98,52 +109,33 @@ class LoRAConverter:
             for param in child.parameters(recurse=False):
                 param.requires_grad_(False)
             if isinstance(child, nn.Linear):
-                setattr(module, name, self._wrap_linear(child))
-                self._lora_modules.append(getattr(module, name))
+                lora_cls = create_lora_linear(type(child))
+                # Build kwargs, handling special cases like Float8Linear
+                kwargs: dict[str, Any] = {
+                    "bias": child.bias is not None,
+                    "device": child.weight.device,
+                    "dtype": child.weight.dtype,
+                    "rank": self.rank,
+                    "alpha": self.alpha,
+                }
+                # Pass through config for Float8Linear and similar classes
+                if hasattr(child, "config"):
+                    kwargs["config"] = child.config
+                lora_layer = lora_cls(
+                    child.in_features,
+                    child.out_features,
+                    **kwargs,
+                )
+                lora_layer.weight = child.weight
+                if child.bias is not None:
+                    lora_layer.bias = child.bias
+                setattr(module, name, lora_layer)
+                self._lora_modules.append(lora_layer)
             else:
-                self._apply_lora(child)
+                self._replace_linears_with_lora(child)
 
-    def _wrap_linear(self, linear: nn.Linear) -> nn.Module:
-        """Wrap a Linear layer with LoRA adapters."""
-        lora_cls = create_lora_linear(linear.__class__)
-        linear.__class__ = lora_cls
-
-        linear._lora_scaling = self.alpha / self.rank  # type: ignore[attr-defined]
-        linear._lora_dropout = (  # type: ignore[attr-defined]
-            nn.Dropout(self.dropout) if self.dropout > 0 else nn.Identity()
-        )
-        linear.lora_a = nn.Linear(  # type: ignore[attr-defined]
-            linear.in_features,
-            self.rank,
-            bias=False,
-            device=linear.weight.device,
-            dtype=linear.weight.dtype,
-        )
-        linear.lora_b = nn.Linear(  # type: ignore[attr-defined]
-            self.rank,
-            linear.out_features,
-            bias=False,
-            device=linear.weight.device,
-            dtype=linear.weight.dtype,
-        )
-
-        if linear.weight.device.type != "meta":
-            self._init_lora_weights(linear)
-
-        return linear
-
-    def _init_lora_weights(self, module: nn.Module) -> None:
-        """Initialize LoRA weights and enable gradients."""
-        nn.init.kaiming_uniform_(module.lora_a.weight, a=math.sqrt(5))  # type: ignore[union-attr]
-        nn.init.zeros_(module.lora_b.weight)  # type: ignore[union-attr]
-        module.lora_a.weight.requires_grad_(True)  # type: ignore[union-attr]
-        module.lora_b.weight.requires_grad_(True)  # type: ignore[union-attr]
-
-    def _is_meta_device(self, model: nn.Module) -> bool:
-        return any(p.device.type == "meta" for p in model.parameters())
-
-    def _hook_init_weights(self, model: nn.Module) -> None:
-        """Hook into init_weights to initialize LoRA after materialization."""
+    def _override_model_init_weights(self, model: nn.Module) -> None:
+        """Override model's init_weights to also initialize LoRA adapters."""
         original_init_weights = getattr(model, "init_weights", None)
 
         def new_init_weights(*args: Any, **kwargs: Any) -> None:
@@ -154,9 +146,12 @@ class LoRAConverter:
                 module.weight.requires_grad_(False)
                 if module.bias is not None:
                     module.bias.requires_grad_(False)
-                module.lora_a.to_empty(device=device, recurse=True)  # type: ignore[union-attr]
-                module.lora_b.to_empty(device=device, recurse=True)  # type: ignore[union-attr]
-                self._init_lora_weights(module)
+                # Reinitialize LoRA adapters with correct device/dtype
+                lora_cls = type(module)
+                assert hasattr(
+                    lora_cls, "_init_lora_weights"
+                ), f"LoRA class {lora_cls} must have _init_lora_weights method"
+                lora_cls._init_lora_weights(module)
 
         object.__setattr__(model, "init_weights", new_init_weights)
 
