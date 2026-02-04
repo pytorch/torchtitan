@@ -12,7 +12,6 @@ from typing import List
 
 import torch
 
-# pyrefly: ignore[import-error]
 from transformers import CLIPTokenizer, T5Tokenizer
 
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
@@ -137,7 +136,7 @@ class FluxTokenizer(BaseTokenizer):
         """
         Decode function. This function will not be called.
         """
-        return self._tokenizer.decode(t)  # pyrefly: ignore[bad-return]
+        return self._tokenizer.decode(t)
 
 
 def build_flux_tokenizer(job_config: JobConfig) -> tuple[BaseTokenizer, BaseTokenizer]:

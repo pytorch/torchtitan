@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from typing import cast
 
 import torch
 from torch import nn
@@ -17,7 +18,7 @@ from torchtitan.models.attention import (
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
 )
-from torchtitan.models.moe import build_moe, FeedForward
+from torchtitan.models.moe import build_moe, FeedForward, MoE
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -234,11 +235,11 @@ class Attention(nn.Module):
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
         self.attn_type = model_args.attn_type
+        self.inner_attention: nn.Module
         match self.attn_type:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
             case "sdpa":
-                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
             case "varlen":
                 raise ValueError("Varlen attention is not supported with Deepseek V3.")
@@ -398,8 +399,7 @@ class TransformerBlock(nn.Module):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            # pyrefly: ignore [not-callable, missing-attribute]
-            self.moe.init_weights(self.weight_init_std, buffer_device)
+            cast(MoE, self.moe).init_weights(self.weight_init_std, buffer_device)
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 
@@ -438,8 +438,7 @@ class DeepSeekV3Model(ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                # pyrefly: ignore [not-callable]
-                layer.init_weights(buffer_device=buffer_device)
+                cast(TransformerBlock, layer).init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
@@ -465,6 +464,7 @@ class DeepSeekV3Model(ModelProtocol):
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
+                assert tokenizer.eos_id is not None
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
