@@ -30,7 +30,7 @@ def build_autoparallel_test_list() -> list[OverrideDefinitions]:
             "llama3 AutoParallel FSDP+TP",
             "llama3_autoparallel_fsdp_tp",
             ngpu=4,
-            skip_rocm_test=True,
+            skip_rocm_test=False,
         ),
         # TODO: Re-enable this once we fix the test
         # deepseek_v3 tests
