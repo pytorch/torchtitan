@@ -350,16 +350,17 @@ def data_parallel(
 
 
 def _maybe_register_placement_as_opaque():
-    # The PyTorch PR https://github.com/pytorch/pytorch/pull/171482
-    # has removed PlacementVariable, so now TorchDynamo requires an opaque type
-    # registration for placements and derived objects like `_ScaledPartial`.
-    # According to https://github.com/pytorch/pytorch/blob/main/torch/_library/opaque_object.py
+    # The `PlacementVariable` was removed from TorchDynamo in
+    # https://github.com/pytorch/pytorch/pull/171482, so now TorchDynamo
+    # requires an opaque type, registration for placements. That includes
+    # derived classes like `_ScaledPartial`. According to the notes in:
+    # https://github.com/pytorch/pytorch/blob/main/torch/_library/opaque_object.py
     # Opaque objects are the way TorchDynamo allows custom operators to accept
-    # a user-defined "black box" object as an input. Users can register a custom class as:
-    #    register_opaque_type(MyClass, typ=..., members=...)
-    # where `typ` is either "reference" or "value", and `members` is a dictionary mapping
-    # member names (attributes, properties, or methods) to their MemberType, which controls
-    # how they are handled during torch.compile tracing
+    # a user-defined "black box" object as an input. Users can register their
+    # custom classes as `register_opaque_type(MyClass, typ=..., members=...)`,
+    # where `typ` is either "reference" or "value", and `members` is a dictionary
+    # mapping member names (attributes, properties, or methods) to their MemberType,
+    # which controls how they are handled during torch.compile tracing.
 
     from torch._dynamo import variables
 
