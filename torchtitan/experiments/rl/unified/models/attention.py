@@ -5,7 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-from vllm.attention.layer import Attention
+
+try:
+    from vllm.attention.layer import Attention
+except ModuleNotFoundError:
+    from vllm.model_executor.layers.attention import Attention
 
 
 class VLLMAttention(torch.nn.Module):
