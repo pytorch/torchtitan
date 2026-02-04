@@ -110,8 +110,9 @@ class FlexAttentionWrapper(torch.nn.Module):
     2) Being a wrapper allows us to apply _ContextParallel to it.
 
     Note:
-        The forward function must have q, k, v as the first three arguments, and
-        block_mask as a keyword argument to be compatible with _ContextParallel.
+        The forward function accepts q, k, v as the first three arguments, followed by
+        optional arguments (score_mod, block_mask, scale, return_lse) that can be passed
+        either positionally or as keywords to be compatible with _ContextParallel.
     """
 
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
@@ -130,7 +131,6 @@ class FlexAttentionWrapper(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        *,
         score_mod: _score_mod_signature | None = None,
         block_mask: BlockMask | None = None,
         scale: float | None = None,
