@@ -69,9 +69,12 @@ def create_lora_linear(parent_cls: type) -> type:
                 device=device,
                 dtype=dtype,
             )
-            self._init_lora_weights()
+            self._init_weight()
 
-        def _init_lora_weights(self) -> None:
+        def _init_weight(self) -> None:
+            _super_init_weight = getattr(super(), "_init_weight", None)
+            if callable(_super_init_weight):
+                _super_init_weight()
             nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
             nn.init.zeros_(self.lora_b.weight)
 
@@ -141,17 +144,14 @@ class LoRAConverter:
         def new_init_weights(*args: Any, **kwargs: Any) -> None:
             if callable(original_init_weights):
                 original_init_weights(*args, **kwargs)
-            device = args[0] if args else kwargs.get("buffer_device", "cuda")
             for module in self._lora_modules:
                 module.weight.requires_grad_(False)
                 if module.bias is not None:
                     module.bias.requires_grad_(False)
-                # Reinitialize LoRA adapters with correct device/dtype
-                lora_cls = type(module)
-                assert hasattr(
-                    lora_cls, "_init_lora_weights"
-                ), f"LoRA class {lora_cls} must have _init_lora_weights method"
-                lora_cls._init_lora_weights(module)
+                # Reinitialize LoRA weights
+                _init_weight = getattr(module, "_init_weight", None)
+                if callable(_init_weight):
+                    _init_weight()
 
         object.__setattr__(model, "init_weights", new_init_weights)
 
