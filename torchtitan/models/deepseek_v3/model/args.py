@@ -17,6 +17,8 @@ from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
+from .dsa_indexer import DSAConfig
+
 
 # Reference: https://github.com/deepseek-ai/DeepSeek-V3/blob/main/inference/model.py
 @dataclass
@@ -43,6 +45,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         v_head_dim (int): Dimension for value projections.
         attn_type (str): Attention type.
         attn_mask_type (str): Type of attention mask.
+        dsa_config (DSAConfig): DeepSeek Sparse Attention configuration.
         original_seq_len (int): Original sequence length.
         rope_theta (float): Base for rotary positional encoding.
         rope_factor (float): Scaling factor for extended sequence lengths.
@@ -75,6 +78,9 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     v_head_dim: int = 128
     attn_type: str = "sdpa"
     attn_mask_type: str = "causal"
+
+    # DeepSeek Sparse Attention (DSA)
+    dsa_config: DSAConfig = field(default_factory=DSAConfig)
 
     # yarn
     original_seq_len: int = 4096

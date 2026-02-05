@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import cast
 
 import torch
 from torch import nn
@@ -18,11 +17,16 @@ from torchtitan.models.attention import (
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
 )
-from torchtitan.models.moe import build_moe, FeedForward, MoE
+from torchtitan.models.moe import build_moe, FeedForward
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
+from torch.distributed.device_mesh import DeviceMesh
+
 from .args import DeepSeekV3ModelArgs
+from .dsa_attention import DSASparseAttentionWrapper
+from .dsa_cp_attention import DSAContextParallelWrapper
+from .dsa_indexer import DSALightIndexer
 
 
 # Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
@@ -196,10 +200,13 @@ def apply_rotary_emb(
 
 class Attention(nn.Module):
     """
-    Multi-head attention (MLA) module.
+    Multi-head attention (MLA) module with optional DSA (DeepSeek Sparse Attention).
+
+    When DSA is enabled, uses a light indexer to select top-k positions for
+    sparse attention, reducing complexity from O(L²) to O(L × topk).
     """
 
-    def __init__(self, model_args: DeepSeekV3ModelArgs):
+    def __init__(self, model_args: DeepSeekV3ModelArgs, layer_id: int = 0):
         super().__init__()
         self.dim = model_args.dim
         self.n_heads = model_args.n_heads
@@ -234,17 +241,65 @@ class Attention(nn.Module):
             mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
+        # DSA (DeepSeek Sparse Attention) components
+        dsa_config = model_args.dsa_config
+        self.dsa_enabled = (
+            dsa_config.enabled and layer_id >= dsa_config.start_layer
+        )
+
+        if self.dsa_enabled:
+            # Determine Q dimension for indexer
+            q_dim_for_indexer = (
+                self.q_lora_rank if self.q_lora_rank > 0 else self.dim
+            )
+
+            self.dsa_indexer = DSALightIndexer(
+                q_dim=q_dim_for_indexer,
+                kv_lora_rank=self.kv_lora_rank,
+                indexer_dim=dsa_config.indexer_dim,
+                n_heads=self.n_heads,
+                topk=dsa_config.topk,
+                use_fp8=dsa_config.use_fp8,
+                hadamard_transform=dsa_config.hadamard_transform,
+                temperature=dsa_config.temperature,
+                norm_eps=model_args.norm_eps,
+            )
+            self.dsa_sparse_attn = DSASparseAttentionWrapper()
+            self.dsa_combine_scores = dsa_config.combine_with_indexer_scores
+
+            # DSA with CP support
+            self.dsa_cp_wrapper = DSAContextParallelWrapper(
+                indexer=self.dsa_indexer,
+                combine_with_indexer_scores=dsa_config.combine_with_indexer_scores,
+            )
+            # CP mesh will be set during parallelization if CP is enabled
+            self._cp_mesh: DeviceMesh | None = None
+
+        # Standard attention (used when DSA is disabled)
         self.attn_type = model_args.attn_type
-        self.inner_attention: nn.Module
-        match self.attn_type:
-            case "flex":
-                self.inner_attention = FlexAttentionWrapper()
-            case "sdpa":
-                self.inner_attention = ScaledDotProductAttentionWrapper()
-            case "varlen":
-                raise ValueError("Varlen attention is not supported with Deepseek V3.")
-            case _:
-                raise ValueError(f"Unknown attention type: {self.attn_type}")
+        if not self.dsa_enabled:
+            match self.attn_type:
+                case "flex":
+                    self.inner_attention = FlexAttentionWrapper()
+                case "sdpa":
+                    # pyrefly: ignore [bad-assignment]
+                    self.inner_attention = ScaledDotProductAttentionWrapper()
+                case "varlen":
+                    raise ValueError("Varlen attention is not supported with Deepseek V3.")
+                case _:
+                    raise ValueError(f"Unknown attention type: {self.attn_type}")
+
+    def set_cp_mesh(self, cp_mesh: DeviceMesh) -> None:
+        """
+        Set the CP mesh for DSA with Context Parallelism.
+
+        This method should be called during parallelization when CP is enabled.
+
+        Args:
+            cp_mesh: Device mesh for context parallel dimension.
+        """
+        if self.dsa_enabled:
+            self._cp_mesh = cp_mesh
 
     def forward(
         self,
@@ -267,12 +322,14 @@ class Attention(nn.Module):
         """
         bsz, seqlen, _ = x.size()
 
-        # Query projection
+        # Query projection - save compressed Q for DSA indexer
         if self.q_lora_rank == 0:
             q = self.wq(x)  # (bsz, seqlen, n_heads * qk_head_dim)
+            q_compressed = x  # Use input directly for indexer when no LoRA
         else:
-            q = self.wq_a(x)
-            q = self.wq_b(self.q_norm(q))
+            q_compressed = self.wq_a(x)  # Save compressed Q for indexer
+            q = self.wq_b(self.q_norm(q_compressed))
+
         # Use -1 instead of `n_heads` (or `n_kv_heads`) to infer the actual
         # local heads from sizes of q and kv as TP may have sharded them after
         # the above linear ops.
@@ -283,36 +340,70 @@ class Attention(nn.Module):
         q_pe = apply_rotary_emb(q_pe, freqs_cis, positions)
         q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
 
-        # Key-value projection
-        kv = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
-        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        # Key-value projection - save compressed KV for DSA indexer
+        kv_full = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
+        kv_compressed, k_pe = torch.split(
+            kv_full, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
 
         k_pe = apply_rotary_emb(
             k_pe.unsqueeze(2), freqs_cis, positions
         )  # (bsz, seqlen, 1, qk_rope_head_dim)
 
         kv = self.wkv_b(
-            self.kv_norm(kv)
+            self.kv_norm(kv_compressed)
         )  # (bsz, seqlen, n_heads * (qk_nope_head_dim + v_head_dim))
         kv = kv.view(bsz, seqlen, -1, self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = torch.cat(
-            [k_nope, k_pe.expand(-1, -1, self.n_heads, -1)], dim=-1
+            [k_nope, k_pe.expand(-1, -1, k_nope.shape[2], -1)], dim=-1
         )  # (bsz, seqlen, n_heads, qk_head_dim)
 
         q = q.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         k = k.transpose(1, 2)  # (bsz, n_heads, seqlen, qk_head_dim)
         v = v.transpose(1, 2)  # (bsz, n_heads, seqlen, v_head_dim)
 
-        match self.attn_type:
-            case "flex":
-                assert isinstance(attention_masks, BlockMask)
-                output = self.inner_attention(
-                    q, k, v, block_mask=attention_masks, scale=self.softmax_scale
+        if self.dsa_enabled:
+            # Check if CP is enabled (cp_mesh is set during parallelization)
+            if self._cp_mesh is not None:
+                # DSA with Context Parallelism: use ring communication
+                output = self.dsa_cp_wrapper(
+                    q=q,
+                    k=k,
+                    v=v,
+                    q_compressed=q_compressed,
+                    kv_compressed=kv_compressed,
+                    cp_mesh=self._cp_mesh,
+                    scale=self.softmax_scale,
                 )
-            case _:
-                assert attention_masks is None
-                output = self.inner_attention(q, k, v, scale=self.softmax_scale)
+            else:
+                # DSA without CP: use local indexer and sparse attention
+                topk_indices, topk_scores = self.dsa_indexer(
+                    q_compressed=q_compressed,
+                    kv_compressed=kv_compressed,
+                    attention_mask=None,  # Indexer handles causal masking internally
+                )
+
+                # Sparse attention on selected positions
+                output = self.dsa_sparse_attn(
+                    q=q,
+                    k=k,
+                    v=v,
+                    topk_indices=topk_indices,
+                    topk_scores=topk_scores if self.dsa_combine_scores else None,
+                    scale=self.softmax_scale,
+                )
+        else:
+            # Standard Attention Path
+            match self.attn_type:
+                case "flex":
+                    assert isinstance(attention_masks, BlockMask)
+                    output = self.inner_attention(
+                        q, k, v, block_mask=attention_masks, scale=self.softmax_scale
+                    )
+                case _:
+                    assert attention_masks is None
+                    output = self.inner_attention(q, k, v, scale=self.softmax_scale)
 
         # Reshape and project output
         output = output.transpose(
@@ -339,6 +430,10 @@ class Attention(nn.Module):
         if self.q_lora_rank > 0:
             self.q_norm.reset_parameters()
 
+        # Initialize DSA components
+        if self.dsa_enabled:
+            self.dsa_indexer.init_weights(0.02)
+
 
 class TransformerBlock(nn.Module):
     """
@@ -348,7 +443,7 @@ class TransformerBlock(nn.Module):
     def __init__(self, layer_id: int, model_args: DeepSeekV3ModelArgs):
 
         super().__init__()
-        self.attention = Attention(model_args)
+        self.attention = Attention(model_args, layer_id=layer_id)
         self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
@@ -399,7 +494,8 @@ class TransformerBlock(nn.Module):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            cast(MoE, self.moe).init_weights(self.weight_init_std, buffer_device)
+            # pyrefly: ignore [not-callable, missing-attribute]
+            self.moe.init_weights(self.weight_init_std, buffer_device)
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 
@@ -438,7 +534,8 @@ class DeepSeekV3Model(ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                cast(TransformerBlock, layer).init_weights(buffer_device=buffer_device)
+                # pyrefly: ignore [not-callable]
+                layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5

@@ -15,6 +15,7 @@ from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_deepseekv3
 from .model.args import DeepSeekV3ModelArgs
+from .model.dsa_indexer import DSAConfig
 from .model.model import DeepSeekV3Model
 from .model.state_dict_adapter import DeepSeekV3StateDictAdapter
 
@@ -153,6 +154,73 @@ deepseekv3_args = {
         v_head_dim=128,
         attn_type="flex",
         attn_mask_type="block_causal",
+    ),
+    # DSA (DeepSeek Sparse Attention) enabled models
+    "debugmodel_dsa": DeepSeekV3ModelArgs(
+        vocab_size=2048,
+        dim=256,
+        inter_dim=1024,
+        moe_inter_dim=256,
+        n_layers=6,
+        n_dense_layers=1,
+        n_heads=16,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=2,
+            top_k=3,
+            score_func="softmax",
+            route_norm=False,
+            score_before_experts=False,
+        ),
+        q_lora_rank=0,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        mscale=0.70,
+        dsa_config=DSAConfig(
+            enabled=True,
+            indexer_dim=128,
+            topk=256,
+            use_fp8=True,
+            hadamard_transform=True,
+            start_layer=0,
+        ),
+    ),
+    "671B_dsa": DeepSeekV3ModelArgs(
+        vocab_size=129280,
+        dim=7168,
+        inter_dim=18432,
+        moe_inter_dim=2048,
+        n_layers=61,
+        n_dense_layers=3,
+        n_heads=128,
+        moe_args=MoEArgs(
+            num_experts=256,
+            num_shared_experts=1,
+            top_k=8,
+            num_expert_groups=8,
+            num_limited_groups=4,
+            score_func="sigmoid",
+            route_norm=True,
+            route_scale=2.5,
+            score_before_experts=False,
+        ),
+        q_lora_rank=1536,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        attn_type="flex",
+        attn_mask_type="block_causal",
+        dsa_config=DSAConfig(
+            enabled=True,
+            indexer_dim=128,
+            topk=2048,
+            use_fp8=True,
+            hadamard_transform=True,
+            start_layer=3,  # Skip first 3 dense layers
+        ),
     ),
 }
 

@@ -134,12 +134,32 @@ def parallelize_deepseekv3(
         )
 
     if parallel_dims.cp_enabled:
-        apply_cp_to_attention_module(
-            # pyrefly: ignore [missing-attribute, not-callable]
-            [block.attention.inner_attention for block in model.layers.values()],
-            parallel_dims.get_mesh("cp"),
-            attn_type,
-        )
+        cp_mesh = parallel_dims.get_mesh("cp")
+
+        # Collect attention modules that support standard CP (those without DSA)
+        # These modules use the built-in _ContextParallel mechanism
+        cp_attention_modules = [
+            block.attention.inner_attention
+            for block in model.layers.values()
+            # pyrefly: ignore [missing-attribute]
+            if hasattr(block.attention, "inner_attention")
+        ]
+        if cp_attention_modules:
+            apply_cp_to_attention_module(
+                cp_attention_modules,
+                cp_mesh,
+                attn_type,
+            )
+
+        # Set CP mesh on DSA-enabled attention modules
+        # DSA handles its own ring communication for CP
+        for block in model.layers.values():
+            # pyrefly: ignore [missing-attribute]
+            if hasattr(block.attention, "dsa_enabled") and block.attention.dsa_enabled:
+                # pyrefly: ignore [missing-attribute]
+                block.attention.set_cp_mesh(cp_mesh)
+
+        logger.info("Applied Context Parallel to the model")
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -306,6 +326,25 @@ def apply_non_moe_tp(
                     "feed_forward.w1": colwise_parallel(),
                     "feed_forward.w2": rowwise_parallel(output_layouts=Shard(1)),
                     "feed_forward.w3": colwise_parallel(),
+                }
+            )
+
+        # DSA (DeepSeek Sparse Attention) parallelization
+        # pyrefly: ignore [missing-attribute]
+        if hasattr(transformer_block.attention, "dsa_enabled") and transformer_block.attention.dsa_enabled:
+            # When DSA is enabled, there's no inner_attention, so remove it from plan
+            if "attention.inner_attention" in layer_plan:
+                del layer_plan["attention.inner_attention"]
+
+            # Add DSA indexer parallelization
+            layer_plan.update(
+                {
+                    # Indexer Q projection: no parallelization needed
+                    "attention.dsa_indexer.wq_indexer": NoParallel(use_local_output=False),
+                    # Indexer K projection: replicated (operates on compressed KV)
+                    "attention.dsa_indexer.wk_indexer": NoParallel(use_local_output=False),
+                    # K norm: no parallelization needed
+                    "attention.dsa_indexer.k_norm": NoParallel(use_local_output=False),
                 }
             )
 
