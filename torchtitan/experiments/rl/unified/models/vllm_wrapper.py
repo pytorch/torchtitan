@@ -238,9 +238,10 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         for layer in self.model.layers.values():
             h = layer(h, rope_cache, attention_masks=None, positions=positions)
 
+        h = self.model.norm(h)
         # When parallelism is applied, get full tensor before return to vLLM Engine
         # The original placement is Shard(1) (shard on sequence dimension, as it will prepare for sequence parallel in `self.norm`).
-        # vLLM’s engine expects plain, non-distributed tensors to slice the last token for each request.
+        # vLLM's engine expects plain, non-distributed tensors to slice the last token for each request.
         if isinstance(h, DTensor):
             h = h.full_tensor()
 
@@ -257,7 +258,6 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         sampling_metadata=None,
     ) -> torch.Tensor | None:
         """Compute logits from hidden states."""
-
         # When TP is applied, we return the full tensor (plain tensor) to vLLM engine
         # at the end of TorchTitanVLLMModelWrapper.forward().
         # We need to wrap the input from vLLM engine back to DTensor with Replicate() placement.
@@ -270,8 +270,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
                 ],
             )
 
-        h = self.model.norm(hidden_states)
-        logits = self.model.output(h)
+        logits = self.model.output(hidden_states)
 
         return logits
 

@@ -66,6 +66,9 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
+        sudo mkdir -p "comm_traces"
+        sudo chown -R $(id -u):$(id -g) "comm_traces"
+
         # Verify the accuracy first.
         echo "Checking FSDP8 v.s. HSDP (4, 2) accuracy parity"
         export baseline_options="--parallelism.data_parallel_replicate_degree=1"
