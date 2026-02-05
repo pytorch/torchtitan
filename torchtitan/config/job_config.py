@@ -720,9 +720,6 @@ class LoRA:
     The LoRA output is scaled by (alpha / rank), so higher alpha means stronger LoRA effect.
     """
 
-    dropout: float = 0.0
-    """Dropout probability applied to the LoRA layers. 0.0 means no dropout."""
-
 
 @dataclass
 class Compile:
