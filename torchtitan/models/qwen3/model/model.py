@@ -9,6 +9,7 @@
 from typing import cast
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
@@ -20,6 +21,7 @@ from torchtitan.models.attention import (
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
+    get_document_mask_mod_from_positions,
     ScaledDotProductAttentionWrapper,
     VarlenAttentionWrapper,
     VarlenMetadata,
@@ -252,7 +254,15 @@ class Attention(nn.Module):
         xq = xq.transpose(1, 2)  # (bs, n_heads, seqlen, head_dim)
         xk = xk.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
         xv = xv.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        # self.enable_gqa = False
+        # if not self.enable_gqa:
+        #     keys = repeat_kv(xk, self.n_rep)
+        #     values = repeat_kv(xv, self.n_rep)
+        # xq = xq.transpose(1, 2)
+        # xk = keys.transpose(1, 2)
+        # xv = values.transpose(1, 2)
 
+        
         match self.attn_type:
             case "flex":
                 assert isinstance(attention_masks, BlockMask), attention_masks
@@ -278,23 +288,56 @@ class Attention(nn.Module):
                     scale=self.scaling,
                 )
             case "sdpa":
-                assert attention_masks is None
-                output = (
-                    self.inner_attention(
-                        xq,  # (bs, n_heads, seqlen, head_dim)
-                        xk,  # (bs, n_kv_heads, seqlen, head_dim)
-                        xv,  # (bs, n_kv_heads, seqlen, head_dim)
-                        scale=self.scaling,
-                        enable_gqa=self.enable_gqa,
-                    )
-                    .transpose(1, 2)
-                    .contiguous()
-                )  # (bs, seqlen, n_local_heads, head_dim)
+                # assert attention_masks is None
+                # output = (
+                #     self.inner_attention(
+                #         xq,  # (bs, n_heads, seqlen, head_dim)
+                #         xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                #         xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                #         scale=self.scaling,
+                #         enable_gqa=self.enable_gqa,
+                #     )
+                #     .transpose(1, 2)
+                #     .contiguous()
+                # )  # (bs, seqlen, n_local_heads, head_dim)
+                # Create document-aware causal mask from positions (like HuggingFace)
+                attn_mask = None
+                if positions is not None:
+                    # Detect packed sequences from position_ids
+                    # HuggingFace logic: find where position_ids reset (diff != 1)
+                    first_dummy_value = positions[:, :1] - 1
+                    position_diff = torch.diff(positions, prepend=first_dummy_value, dim=-1)
+                    packed_sequence_mask = (position_diff != 1).cumsum(-1)  # [batch, seq]
+
+                    # Create document-aware mask: tokens can only attend to same document
+                    # Shape: [batch, 1, q_len, kv_len]
+                    doc_mask = packed_sequence_mask.unsqueeze(2) == packed_sequence_mask.unsqueeze(1)  # [batch, seq, seq]
+                    doc_mask = doc_mask.unsqueeze(1)  # [batch, 1, seq, seq]
+
+                    # Create causal mask
+                    causal_mask = torch.tril(torch.ones(seqlen, seqlen, device=x.device, dtype=torch.bool))
+
+                    # Combine: document mask AND causal mask
+                    attn_mask = doc_mask & causal_mask.unsqueeze(0).unsqueeze(0)
+
+                    # if dist.is_initialized() and dist.get_rank() == 0:
+                    #     print(f"DEBUG TITAN SDPA attn_mask: shape={attn_mask.shape}, attn_mask={attn_mask}")
+
+                output = self.inner_attention(xq, xk, xv, scale=self.scaling, enable_gqa=self.enable_gqa, attn_mask=attn_mask)
+                output = output.transpose(
+                    1, 2
+                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
         output = output.view(bs, seqlen, -1)
-        return self.wo(output)
+
+        if dist.is_initialized() and dist.get_rank() == 0:
+            print(f"DEBUG TITAN model.py attention output: shape={output.shape}, dtype={output.dtype}, min={output.min().item():.4f}, max={output.max().item():.4f}, mean={output.mean().item():.4f}")
+        output = self.wo(output)
+        if dist.is_initialized() and dist.get_rank() == 0:
+            print(f"DEBUG TITAN model.py attention output after wo: shape={output.shape}, dtype={output.dtype}, min={output.min().item():.4f}, max={output.max().item():.4f}, mean={output.mean().item():.4f}")
+        return output
 
 
 class FeedForward(nn.Module):
@@ -530,6 +573,11 @@ class Qwen3Model(ModelProtocol):
                 B = input_batch.shape[0]
                 assert tokenizer.eos_id is not None
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+            case "document_mask":
+                assert extra_inputs is not None and "positions" in extra_inputs
+                positions = extra_inputs["positions"]
+                B = input_batch.shape[0]
+                mask_mods.append(get_document_mask_mod_from_positions(positions))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"

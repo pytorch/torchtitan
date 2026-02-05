@@ -293,6 +293,10 @@ def init_distributed(
     base_folder: str = "",
     ranks: list[int] | None = None,
 ) -> int:
+    # Skip initialization if already initialized
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
+
     if comm_config.mode in ("fake_backend", "local_tensor"):
         ngpu_str = os.environ.get("NGPU")
         if ngpu_str is None:

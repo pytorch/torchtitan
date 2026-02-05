@@ -185,12 +185,25 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
         *,
         scale: float | None = None,
         enable_gqa: bool = False,
+<<<<<<< HEAD
         is_casual: bool = True,
+=======
+        attn_mask: torch.Tensor | None = None,
+>>>>>>> 87b7210b (verl integration changes)
     ) -> torch.Tensor:
+        import torch.distributed as dist
+        # Use is_causal=True only if no explicit mask is provided
+        is_causal = attn_mask is None
+        if dist.is_initialized() and dist.get_rank() == 0:
+            print(f"DEBUG TITAN SDPA wrapper: scale={scale}, is_causal={is_causal}, enable_gqa={enable_gqa}, attn_mask={attn_mask}, backends={self.sdpa_backends}")
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
+<<<<<<< HEAD
             return F.scaled_dot_product_attention(
                 q, k, v, scale=scale, is_causal=is_casual, enable_gqa=enable_gqa
             )
+=======
+            return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal, enable_gqa=enable_gqa)
+>>>>>>> 87b7210b (verl integration changes)
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:
@@ -225,6 +238,30 @@ def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signatu
     cumulative_mask = torch.cumsum(torch.where(eos_mask, 1, 0), dim=1)
     sequence_indices = torch.zeros_like(cumulative_mask, dtype=torch.int32)
     sequence_indices[:, 1:] = cumulative_mask[:, :-1]
+
+    def document_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        return sequence_indices[b, q_idx] == sequence_indices[b, kv_idx]
+
+    return document_mask
+
+
+def get_document_mask_mod_from_positions(positions: torch.Tensor) -> _mask_mod_signature:
+    """Creates a document mask from position_ids (like HuggingFace).
+
+    Detects document boundaries where position_ids reset (diff != 1).
+
+    Args:
+        positions: Position IDs tensor with shape [batch, seq]
+
+    Returns:
+        A mask modifier function that implements document-level masking.
+    """
+    # HuggingFace logic: find where position_ids reset (diff != 1)
+    first_dummy_value = positions[:, :1] - 1
+    position_diff = torch.diff(positions, prepend=first_dummy_value, dim=-1)
+    sequence_indices = (position_diff != 1).cumsum(-1)  # [batch, seq]
 
     def document_mask(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor

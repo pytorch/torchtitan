@@ -128,11 +128,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else None
         )
 
-        self.dataloader = self.train_spec.build_dataloader_fn(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
-            tokenizer=self.tokenizer,
-            job_config=job_config,
+        self.dataloader = (
+            self.train_spec.build_dataloader_fn(
+                dp_world_size=batch_degree,
+                dp_rank=batch_rank,
+                tokenizer=self.tokenizer,
+                job_config=job_config,
+            )
+            if self.train_spec.build_dataloader_fn is not None
+            else None
         )
 
         # build model (using meta init)
@@ -459,16 +463,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         extra_kwargs: dict[str, Any] = {}
 
         attn_type = getattr(self.model_args, "attn_type", "sdpa")
-        if attn_type in ["flex", "varlen"]:
-            assert (
-                self.tokenizer is not None
-            ), "tokenizer is required for flex/varlen attention"
-            model = cast(ModelProtocol, self.model_parts[0])
-            extra_kwargs["attention_masks"] = model.get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
-            )
+        if "attention_masks" not in extra_inputs.keys() or extra_inputs["attention_masks"] is None:
+            if attn_type in ["flex", "varlen"]:
+                assert (
+                    self.tokenizer is not None
+                ), "tokenizer is required for flex/varlen attention"
+                model = cast(ModelProtocol, self.model_parts[0])
+                extra_inputs.pop("attention_masks")
+                extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
+                    input_batch=inputs,
+                    tokenizer=self.tokenizer,
+                    extra_inputs=extra_inputs,
+                )
+        else:
+            extra_kwargs["attention_masks"] = extra_inputs.pop("attention_masks")
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
@@ -533,6 +541,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             assert len(model_parts) == 1
             with self.train_context():
                 with self.maybe_enable_amp:
+                    print(f"jessica: {extra_inputs=} {extra_kwargs=}")
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     # Compute loss sum (reduction='sum')
                     loss_sum = self.loss_fn(pred, labels)
@@ -542,11 +551,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     loss = loss_sum / global_valid_tokens
 
                 # need to free pred before bwd to avoid peaking memory
-                del pred
-                loss.backward()
+                # del pred
+                # loss.backward()
 
+<<<<<<< HEAD
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
+=======
+        return loss, pred
+>>>>>>> 87b7210b (verl integration changes)
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
