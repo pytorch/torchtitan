@@ -987,6 +987,12 @@ class Debug:
     moe_force_load_balance: bool = False
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
 
+    log_sharding_info: bool = False
+    """If True, logs DTensor sharding/mesh info for module inputs, params, outputs during one fwd/bwd pass."""
+
+    collapse_identical_layers: bool = True
+    """If True, collapse repeated layer modules with identical sharding patterns in the output."""
+
 
 @dataclass
 class JobConfig:
