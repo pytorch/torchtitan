@@ -130,7 +130,7 @@ def _distribute_dtensor(
     # HSDP case needs 2 placements for 2D outer_mesh
     current_placements = (Replicate(),) * len(dp_placements)
     target_placements = tuple(dp_placements)
-    
+
     current_spec = DTensorSpec(
         mesh=outer_mesh,
         placements=current_placements,
