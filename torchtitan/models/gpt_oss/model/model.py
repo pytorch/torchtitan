@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
+
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
@@ -23,22 +25,78 @@ from .moe import GptOssMoE
 
 
 def precompute_rope_cache(
-    dim: int, max_seq_len: int, base: float = 1_000_000.0
+    dim: int,
+    max_seq_len: int,
+    base: float = 1_000_000.0,
+    rope_factor: float = 1.0,
+    ntk_alpha: float = 1.0,
+    ntk_beta: float = 32.0,
+    original_seq_len: int = 4096,
 ) -> torch.Tensor:
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    # Create position indexes `[0, 1, ..., max_seq_len - 1]`
-    t = torch.arange(max_seq_len, dtype=freqs.dtype, device=freqs.device)
+    """
+    Precompute RoPE cache with optional YaRN scaling for extended context.
 
-    # Outer product of theta and position index; output tensor has
-    # a shape of [max_seq_len, dim // 2]
-    idx_theta = torch.outer(t, freqs).float()
+    YaRN (Yet another RoPE extensioN) allows extending context length beyond
+    the original training length by applying frequency scaling corrections
+    and mscale (concentration) for attention magnitude preservation.
 
-    # We cache the cos and sin embeddings instead of the IDs. This helps
-    # ensure we have correct behavior when training with bf16
-    # Size: [max_seq_len, (dim * 2)]
-    freqs = torch.cat([idx_theta, idx_theta], dim=-1)
-    rope_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
-    return rope_cache
+    Args:
+        dim: Embedding dimension (head_dim)
+        max_seq_len: Maximum sequence length to precompute
+        base: RoPE theta base frequency
+        rope_factor: YaRN scaling factor (1.0 = no scaling)
+        ntk_alpha: NTK-by-parts alpha (slow correction, used for high freq bound)
+        ntk_beta: NTK-by-parts beta (fast correction, used for low freq bound)
+        original_seq_len: Original pretrained context length
+
+    Returns:
+        Precomputed RoPE cache: [max_seq_len, dim * 2] (cos and sin concatenated)
+    """
+    freq = base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
+    mscale = 1.0
+
+    # YaRN scaling applies when rope_factor > 1.0
+    if rope_factor > 1.0:
+        # YaRN mscale (concentration) for attention magnitude preservation
+        mscale = 0.1 * math.log(rope_factor) + 1.0
+
+        # Compute correction range (NTK by parts)
+        d_half = dim / 2
+        low = (
+            d_half
+            * math.log(original_seq_len / (ntk_beta * 2 * math.pi))
+            / math.log(base)
+        )
+        high = (
+            d_half
+            * math.log(original_seq_len / (ntk_alpha * 2 * math.pi))
+            / math.log(base)
+        )
+        assert (
+            0 < low < high < d_half - 1
+        ), f"Invalid YaRN params: 0 < {low} < {high} < {d_half - 1}"
+
+        # Linear ramp for smooth interpolation between low and high
+        ramp = (torch.arange(d_half, dtype=torch.float32) - low) / (high - low)
+        mask = 1 - ramp.clamp(0, 1)
+
+        # Blend interpolated and extrapolated frequencies
+        interpolation = 1.0 / (rope_factor * freq)
+        extrapolation = 1.0 / freq
+        inv_freq = interpolation * (1 - mask) + extrapolation * mask
+    else:
+        inv_freq = 1.0 / freq
+
+    # Compute position embeddings
+    t = torch.arange(max_seq_len, dtype=inv_freq.dtype, device=inv_freq.device)
+    freqs = torch.outer(t, inv_freq).float()
+    theta = torch.cat([freqs, freqs], dim=-1)
+
+    # Apply mscale to cos/sin. Both Q and K are rotated with scaled
+    # cos/sin, so attention logits are scaled by mscale².
+    cos = theta.cos() * mscale
+    sin = theta.sin() * mscale
+    return torch.cat([cos, sin], dim=-1)
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -108,6 +166,9 @@ class Attention(nn.Module):
         self.enable_gqa = self.n_heads > self.n_kv_heads
 
         self.n_rep = self.n_heads // self.n_kv_heads
+
+        # Standard attention softmax scale (1/sqrt(head_dim))
+        self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
         self.wq = nn.Linear(
             model_args.dim,
@@ -181,7 +242,7 @@ class Attention(nn.Module):
             xk,
             xv,
             block_mask=attention_masks,
-            scale=None,
+            scale=self.softmax_scale,
             return_lse=True,
             enable_gqa=self.enable_gqa,
         )
@@ -317,6 +378,10 @@ class GptOssModel(ModelProtocol):
             self.model_args.head_dim,
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
+            self.model_args.rope_factor,
+            self.model_args.ntk_alpha,
+            self.model_args.ntk_beta,
+            self.model_args.original_seq_len,
         )
 
     def get_attention_masks(
