@@ -127,14 +127,18 @@ def _distribute_dtensor(
             f"Unsupported placement {dp_placements} for distributing DTensor {tensor}"
         )
 
+    # HSDP case needs 2 placements for 2D outer_mesh
+    current_placements = (Replicate(),) * len(dp_placements)
+    target_placements = tuple(dp_placements)
+
     current_spec = DTensorSpec(
         mesh=outer_mesh,
-        placements=(Replicate(),),
+        placements=current_placements,
         tensor_meta=inner_spec.tensor_meta,
     )
     target_spec = DTensorSpec(
         mesh=outer_mesh,
-        placements=(dp_placements[-1],),
+        placements=target_placements,
         tensor_meta=inner_spec.tensor_meta,
     )
     result_tensor = redistribute_local_tensor(
