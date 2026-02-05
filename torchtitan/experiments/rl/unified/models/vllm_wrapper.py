@@ -187,7 +187,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
     @torch._dynamo.disable
     def _embed_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
-        """Embed tokens with dynamo disabled to avoid index errors during warmup."""
+        """Embed tokens."""
         return self.model.tok_embeddings(tokens)
 
     def _run_layers(self, h, rope_cache, positions):
@@ -223,8 +223,11 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Convert vLLM interface to TorchTitan interface
         # vLLM: [total_tokens] → TorchTitan: [batch_size, seq_len]
         tokens_2d = input_ids.unsqueeze(0)
+        torch._dynamo.decorators.mark_dynamic(tokens_2d, 1)
 
-        # Get embeddings (disabled from dynamo to avoid index errors during warmup)
+        # Get embeddings
+        # fn = torch.compile(self._embed_tokens, backend="aot_eager", fullgraph=True)
+        # h = fn(tokens_2d)
         h = self._embed_tokens(tokens_2d)
 
         # Get RoPE cache (handle model-specific attribute names)
@@ -257,7 +260,8 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         torch._dynamo.decorators.mark_unbacked(h, 1)
         torch._dynamo.decorators.mark_unbacked(positions, 1)
         
-        fn = torch.compile(self._run_layers, backend="aot_eager", fullgraph=True)
+        # fn = torch.compile(self._run_layers, backend="aot_eager", fullgraph=True)
+        fn = self._run_layers
         h = fn(h, rope_cache, positions)
 
         # When parallelism is applied, get full tensor before return to vLLM Engine
