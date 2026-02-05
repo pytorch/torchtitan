@@ -20,14 +20,14 @@ from torchtitan.models.attention import (
     create_varlen_metadata_for_document,
     create_varlen_metadata_from_sequence_lengths,
     FlexAttentionWrapper,
+    get_block_causal_mask_mod_by_seq_lens,
     get_causal_mask_mod,
     get_document_mask_mod,
-    get_block_causal_mask_mod_by_seq_lens,
     ScaledDotProductAttentionWrapper,
     VarlenAttentionWrapper,
     VarlenMetadata,
 )
-from torchtitan.models.moe import MoE
+from torchtitan.models.moe import build_moe
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -411,11 +411,13 @@ class TransformerBlock(nn.Module):
 
         self.moe_enabled = model_args.moe_enabled
         if self.moe_enabled:
-            self.moe = MoE(
+            moe_impl = "deepep" if model_args.moe_args.use_deepep else "standard"
+            self.moe = build_moe(
                 model_args.moe_args,
                 dim=model_args.dim,
                 hidden_dim=model_args.moe_inter_dim,
                 peft_config=peft_config,
+                moe_impl=moe_impl,
             )
         else:
             self.feed_forward = FeedForward(

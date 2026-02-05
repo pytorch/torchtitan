@@ -100,8 +100,55 @@ def parallelize_qwen3(
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
-            positions_enabled=parallel_dims.cp_enabled or job_config.training.dataset_type == "preprocessed",
+            positions_enabled=parallel_dims.cp_enabled
+            or job_config.training.dataset_type == "preprocessed",
         )
+
+    # Check if using DeepEP for MoE communication
+    use_deepep = False
+    if job_config.parallelism.expert_parallel_comm_backend == "deepep":
+        if not parallel_dims.ep_enabled:
+            raise ValueError(
+                "DeepEP requires expert parallelism (ep_degree > 1). "
+                "Please set expert_parallel_degree > 1 or use standard communication backend."
+            )
+
+        use_deepep = True
+
+        # Import deepep module to register custom ops
+        import torchtitan.distributed.deepep  # noqa: F401
+
+        _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
+        _op_sac_save_list.add(torch.ops.deepep.combine.default)
+
+        # Run DeepEP autotune if enabled
+        from torchtitan.distributed.deepep import run_deepep_autotune_if_enabled
+
+        ep_mesh = parallel_dims.get_optional_mesh("ep")
+        if ep_mesh is not None:
+            # pyrefly: ignore [missing-attribute]
+            model_args = model.model_args
+            num_tokens = (
+                job_config.training.local_batch_size * job_config.training.seq_len
+            )
+            hidden = getattr(model_args, "dim", 2048)
+            # moe_args is a dataclass, not a dict
+            moe_args = getattr(model_args, "moe_args", None)
+            if moe_args is not None:
+                num_experts = getattr(moe_args, "num_experts", 128)
+                num_topk = getattr(moe_args, "top_k", 8)
+            else:
+                num_experts = getattr(model_args, "num_experts", 128)
+                num_topk = getattr(model_args, "num_experts_per_tok", 8)
+
+            run_deepep_autotune_if_enabled(
+                deepep_config=job_config.deepep,
+                ep_group=ep_mesh.get_group(),
+                num_tokens=num_tokens,
+                hidden=hidden,
+                num_experts=num_experts,
+                num_topk=num_topk,
+            )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
@@ -113,6 +160,7 @@ def parallelize_qwen3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
+            use_deepep=use_deepep,
         )
 
     if parallel_dims.cp_enabled:

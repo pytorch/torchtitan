@@ -9,9 +9,98 @@ import torch
 from deep_ep import Config
 
 from torchtitan.distributed.deepep.kernels import fused_weighted_scatter_add
+from torchtitan.tools.logging import logger
 
-from .fused_a2a import fused_combine, fused_dispatch, set_deepep_num_sms
+from .fused_a2a import (
+    autotune_deepep,
+    fused_combine,
+    fused_dispatch,
+    set_deepep_num_sms,
+    set_tuned_configs,
+)
 from .fused_indices_converter import ALIGNMENT_M, fused_indices_to_multihot
+
+
+def run_deepep_autotune_if_enabled(
+    deepep_config,
+    ep_group: torch.distributed.ProcessGroup,
+    num_tokens: int,
+    hidden: int,
+    num_experts: int,
+    num_topk: int,
+):
+    """
+    Run DeepEP autotune if enabled in config.
+
+    Should be called after EP process group is created and before training begins.
+    Typically called from parallelize_model() or train.py.
+
+    Args:
+        deepep_config: The deepep config from job_config.deepep
+        ep_group: Expert parallelism process group
+        num_tokens: Number of tokens per micro-batch (batch_size * seq_len)
+        hidden: Model hidden dimension
+        num_experts: Total number of MoE experts
+        num_topk: Top-k experts per token
+    """
+    if deepep_config is None or not getattr(deepep_config, "autotune", False):
+        # Autotune not enabled, optionally set manual configs from deepep_config
+        num_sms = getattr(deepep_config, "num_sms", 24) if deepep_config else 24
+        nvl_buffer = (
+            getattr(deepep_config, "nvl_buffer_size", 256) if deepep_config else 256
+        )
+
+        # Use default tuned configs if not autotuning
+        # These are optimized for H100 EP=8 (from DeepEP library defaults)
+        # H100 has ~132 SMs, optimal num_sms=24 for most configs
+        default_dispatch = (6, nvl_buffer)
+        default_combine = (4, nvl_buffer)
+
+        set_deepep_num_sms(num_sms)
+        set_tuned_configs(
+            dispatch_config=Config(num_sms, *default_dispatch),
+            combine_config=Config(num_sms, *default_combine),
+        )
+
+        rank = torch.distributed.get_rank(ep_group) if ep_group else 0
+        if rank == 0:
+            logger.info(
+                f"DeepEP using default configs: num_sms={num_sms}, "
+                f"dispatch={default_dispatch}, combine={default_combine}"
+            )
+        return
+
+    # Run autotune (always thorough, always tune num_sms)
+    nvl_buffer = getattr(deepep_config, "nvl_buffer_size", 512)
+    rdma_buffer = getattr(deepep_config, "rdma_buffer_size", 128)
+    warmup = getattr(deepep_config, "autotune_warmup", 5)
+    repeat = getattr(deepep_config, "autotune_repeat", 10)
+    verbose = getattr(deepep_config, "autotune_verbose", False)
+
+    rank = torch.distributed.get_rank(ep_group)
+    if rank == 0:
+        logger.info(
+            f"Running DeepEP autotune: tokens={num_tokens}, hidden={hidden}, "
+            f"experts={num_experts}, topk={num_topk}"
+        )
+
+    result = autotune_deepep(
+        group=ep_group,
+        num_tokens=num_tokens,
+        hidden=hidden,
+        num_experts=num_experts,
+        num_topk=num_topk,
+        nvl_buffer_size=nvl_buffer,
+        rdma_buffer_size=rdma_buffer,
+        warmup=warmup,
+        repeat=repeat,
+        verbose=verbose,
+    )
+
+    # Barrier to ensure all ranks complete autotune before training
+    torch.distributed.barrier(ep_group)
+
+    return result
 
 
 def permute(
@@ -525,27 +614,22 @@ class DeepEPTokenDispatcher:
     turbo_deepep_num_worst_tokens: int = 0
     use_turbo_grouped_mlp: bool = False
 
-    # === EP=8 Config (optimized for 8 GPUs) ===
-    # Optimal configs from comprehensive num_sms grid tuning for B200 single-node EP=8
-    # source: scripts/deepep/torchtitan_deepep_tune/summary/num_sms_tuning_summary.json (timestamp: 2025-11-13T17:06:53)
-    # Tuned for: Qwen3-30B-A3B (128 experts, topk=8, hidden=2048, 8 GPUs, B200 ~600 SMs)
-    # Comprehensive tuning tested num_sms: [8, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 128]
-    # Key differences from EP=4: Smaller dispatch chunk (18 vs 32) and buffer (512 vs 1024) due to 8-way communication
-    turbo_deepep_num_cus: int = (
-        128  # 41.2% faster dispatch, 48.3% faster combine vs num_sms=24
-    )
+    # === EP=8 Config (optimized for H100 8 GPUs) ===
+    # Default configs from DeepEP library for H100 (~132 SMs)
+    # These are fallback values; use autotune for optimal performance
+    turbo_deepep_num_cus: int = 24  # H100 optimal
     turbo_deepep_dispatch_tuned_config: Optional[tuple] = (
-        18,
-        512,
-        8,
-        128,
-    )  # 516.71 GB/s, 76.8% improvement vs worst
-    turbo_deepep_combine_tuned_config: Optional[tuple] = (
-        16,
+        6,
         256,
-        8,
+        6,
         128,
-    )  # 485.75 GB/s, 79.2% improvement vs worst
+    )  # H100 EP=8 default
+    turbo_deepep_combine_tuned_config: Optional[tuple] = (
+        4,
+        256,
+        6,
+        128,
+    )  # H100 EP=8 default
 
     def __init__(
         self,

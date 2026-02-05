@@ -711,6 +711,50 @@ class DeepEP:
     due to different operation ordering (prob applied before w2 matmul vs after).
     """
 
+    autotune: bool = False
+    """
+    Run autotuning for DeepEP dispatch/combine configs before training.
+
+    Searches over all tunable parameters (num_sms, nvl_chunk, rdma_chunk) to find
+    optimal configs for current hardware and workload. SM range auto-detected from GPU.
+
+    Adds ~30-60s to startup but can improve throughput 2-6x over worst configs.
+    """
+
+    autotune_warmup: int = 5
+    """Warmup iterations for benchmarks (default: 5)."""
+
+    autotune_repeat: int = 10
+    """Repeat iterations for benchmarks (default: 10)."""
+
+    autotune_verbose: bool = False
+    """Print bandwidth for each config tested."""
+
+    num_sms: int = 24
+    """
+    Number of SMs (Streaming Multiprocessors) to use for DeepEP kernels.
+
+    Default is 24, which works well for H100. For B200 with EP=8,
+    128 SMs may provide better performance.
+    """
+
+    nvl_buffer_size: int = 256
+    """
+    NVLink buffer size for DeepEP communication.
+
+    Larger buffers can improve throughput but use more memory.
+    Default 256 works well for H100 single-node EP<=8.
+    """
+
+    rdma_buffer_size: int = 128
+    """
+    RDMA buffer size for DeepEP internode communication.
+
+    Only used for multi-node (internode) EP where RDMA is required.
+    Larger buffers can improve throughput but use more memory.
+    Default 128 works well for most multi-node configurations.
+    """
+
 
 @dataclass
 class Checkpoint:
@@ -967,6 +1011,28 @@ class Compile:
 
     """Use fullgraph when compiling"""
     fullgraph: bool = True
+
+    max_autotune: bool = True
+    """
+    Whether to enable max_autotune in torch inductor. When True (default), inductor
+    aggressively fuses kernels which can improve performance but may cause OOM errors
+    on some models due to exceeding GPU shared memory limits. Set to False to disable
+    aggressive fusion and avoid triton kernel OOM errors.
+    """
+
+    prune_configs_by_shared_mem: bool = True
+    """
+    When True (default), automatically prune Triton kernel configurations that exceed
+    the hardware's shared memory limit. This helps avoid 'No valid triton configs' OOM
+    errors without fully disabling max_autotune.
+    Maps to torch._inductor.config.max_autotune_prune_choices_based_on_shared_mem
+    """
+
+    triton_cudagraphs: bool = True
+    """
+    Whether to enable CUDA graphs for Triton kernels. Disabling (False) may help with
+    some OOM issues. Maps to torch._inductor.config.triton.cudagraphs
+    """
 
 
 @dataclass

@@ -142,6 +142,30 @@ def parallelize_llama(
 
         _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
         _op_sac_save_list.add(torch.ops.deepep.combine.default)
+
+        # Run DeepEP autotune if enabled
+        from torchtitan.distributed.deepep import run_deepep_autotune_if_enabled
+
+        ep_mesh = parallel_dims.get_optional_mesh("ep")
+        if ep_mesh is not None:
+            # Get model parameters for autotune
+            # pyrefly: ignore [missing-attribute]
+            model_args = model.model_args
+            num_tokens = (
+                job_config.training.local_batch_size * job_config.training.seq_len
+            )
+            hidden = getattr(model_args, "dim", getattr(model_args, "hidden_dim", 2048))
+            num_experts = getattr(model_args, "num_experts", 8)
+            num_topk = getattr(model_args, "num_experts_per_tok", 2)
+
+            run_deepep_autotune_if_enabled(
+                deepep_config=job_config.deepep,
+                ep_group=ep_mesh.get_group(),
+                num_tokens=num_tokens,
+                hidden=hidden,
+                num_experts=num_experts,
+                num_topk=num_topk,
+            )
     else:
         use_deepep = False
 
@@ -356,7 +380,8 @@ def apply_fsdp(
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
         cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str | int, optional): The policy to use for resharding after forward pass. Defaults to "default".
+        reshard_after_forward_policy (str | int, optional): The policy to use for
+            resharding after forward pass. Defaults to "default".
             String options: "never", "always", "default".
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
@@ -693,6 +718,19 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
     # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
     # but it is experimental.
     torch._dynamo.config.capture_scalar_outputs = True
+
+    # Inductor config for max_autotune - when False, disables aggressive kernel fusion
+    # which can cause OOM errors due to exceeding GPU shared memory limits
+    torch._inductor.config.max_autotune = compile_config.max_autotune
+
+    # Prune Triton kernel configs that exceed hardware shared memory limits
+    # This helps avoid 'No valid triton configs' OOM errors
+    torch._inductor.config.max_autotune_prune_choices_based_on_shared_mem = (
+        compile_config.prune_configs_by_shared_mem
+    )
+
+    # Control CUDA graphs for Triton kernels - disabling may help with some OOM issues
+    torch._inductor.config.triton.cudagraphs = compile_config.triton_cudagraphs
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         # pyrefly: ignore[missing-attribute]
@@ -727,7 +765,9 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                             moe,
                             attr_name,
                             torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=compile_config.fullgraph
+                                submod,
+                                backend=compile_config.backend,
+                                fullgraph=compile_config.fullgraph,
                             ),
                         )
                 else:
@@ -735,7 +775,9 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                         block,
                         attr_name,
                         torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=compile_config.fullgraph
+                            submod,
+                            backend=compile_config.backend,
+                            fullgraph=compile_config.fullgraph,
                         ),
                     )
 

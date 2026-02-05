@@ -259,10 +259,25 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    # Inductor config for max_autotune - when False, disables aggressive kernel fusion
+    # which can cause OOM errors due to exceeding GPU shared memory limits
+    torch._inductor.config.max_autotune = compile_config.max_autotune
+
+    # Prune Triton kernel configs that exceed hardware shared memory limits
+    # This helps avoid 'No valid triton configs' OOM errors
+    torch._inductor.config.max_autotune_prune_choices_based_on_shared_mem = (
+        compile_config.prune_configs_by_shared_mem
+    )
+
+    # Control CUDA graphs for Triton kernels - disabling may help with some OOM issues
+    torch._inductor.config.triton.cudagraphs = compile_config.triton_cudagraphs
+
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
         transformer_block = torch.compile(
-            transformer_block, backend=compile_config.backend, fullgraph=compile_config.fullgraph
+            transformer_block,
+            backend=compile_config.backend,
+            fullgraph=compile_config.fullgraph,
         )
         # pyrefly: ignore [missing-attribute]
         model.layers.register_module(layer_id, transformer_block)

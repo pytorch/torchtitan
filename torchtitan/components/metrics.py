@@ -538,8 +538,10 @@ class MetricsProcessor:
             f"{color.red}step: {step:2}  "
             f"{color.green}loss: {global_avg_loss:7.4f}  "
             f"{color.orange}grad_norm: {grad_norm:7.4f}  "
-            f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
-            f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+            f"{color.turquoise}memory(active/reserved): "
+            f"{device_mem_stats.max_active_gib:5.2f}/{device_mem_stats.max_reserved_gib:5.2f}GiB"
+            f"({device_mem_stats.max_active_pct:.2f}/"
+            f"{device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
             f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
@@ -580,8 +582,10 @@ class MetricsProcessor:
         logger.info(
             f"{color.yellow}validate step: {step:2}  "
             f"{color.green}loss: {loss:7.4f}  "
-            f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
-            f"({device_mem_stats.max_reserved_pct:.2f}%)  "
+            f"{color.turquoise}memory(active/reserved): "
+            f"{device_mem_stats.max_active_gib:5.2f}/{device_mem_stats.max_reserved_gib:5.2f}GiB"
+            f"({device_mem_stats.max_active_pct:.2f}/"
+            f"{device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}{color.reset}"
         )
 

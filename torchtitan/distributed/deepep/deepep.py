@@ -18,7 +18,7 @@ import torch
 from torch.distributed import ProcessGroup
 
 try:
-    from deep_ep import Buffer  # pyrefly: ignore[missing-import]
+    from deep_ep import Buffer  # pyrefly: ignore[missing-import]  # noqa: F401
     from deep_ep.utils import (  # pyrefly: ignore[missing-import]
         EventHandle,
         EventOverlap,
@@ -29,9 +29,12 @@ except ImportError as e:
         "Install from: https://github.com/deepseek-ai/deepep"
     ) from e
 
-
-# Global buffer (single buffer per process, recreated if group changes)
-_buffer: Buffer = None
+# Import shared utilities
+# - buffer.py: SINGLE buffer instance shared by autotune and training
+# - fused_a2a.py: tuned configs set by autotune
+from . import buffer as _buffer_module
+from .buffer import get_buffer, get_hidden_bytes
+from .fused_a2a import get_tuned_configs
 
 # Global cache for dispatch handles, keyed by cache_id
 # SAC saves the cache_id tensor; we use it to retrieve the non-tensor handle
@@ -75,12 +78,28 @@ def _dispatch_op_impl(
     num_tokens_per_expert: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Execute DeepEP dispatch."""
-    global _buffer
-
-    buffer = _buffer
+    buffer = _buffer_module._buffer
     assert buffer is not None, "Buffer must be initialized before dispatch"
 
     previous_event = _create_event_if_async(True)
+
+    # Get tuned config if available
+    dispatch_config, _ = get_tuned_configs()
+
+    dispatch_kwargs = {
+        "x": x,
+        "topk_idx": topk_idx,
+        "topk_weights": topk_weights.to(torch.float32),
+        "num_tokens_per_rank": num_tokens_per_rank,
+        "num_tokens_per_rdma_rank": num_tokens_per_rdma_rank,
+        "is_token_in_rank": is_token_in_rank,
+        "num_tokens_per_expert": num_tokens_per_expert,
+        "previous_event": previous_event,
+        "async_finish": True,
+        "allocate_on_comm_stream": True,
+    }
+    if dispatch_config is not None:
+        dispatch_kwargs["config"] = dispatch_config
 
     (
         recv_x,
@@ -89,18 +108,7 @@ def _dispatch_op_impl(
         num_recv_list,
         handle,
         after_event,
-    ) = buffer.dispatch(
-        x=x,
-        topk_idx=topk_idx,
-        topk_weights=topk_weights.to(torch.float32),
-        num_tokens_per_rank=num_tokens_per_rank,
-        num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-        is_token_in_rank=is_token_in_rank,
-        num_tokens_per_expert=num_tokens_per_expert,
-        previous_event=previous_event,
-        async_finish=True,
-        allocate_on_comm_stream=True,
-    )
+    ) = buffer.dispatch(**dispatch_kwargs)
 
     _sync_stream_if_async(True, after_event)
 
@@ -114,9 +122,7 @@ def _dispatch_op_impl(
 @torch.library.impl(_lib, "combine", "CUDA")
 def _combine_op_impl(x: torch.Tensor, cache_id: torch.Tensor) -> torch.Tensor:
     """Execute DeepEP combine."""
-    global _buffer
-
-    buffer = _buffer
+    buffer = _buffer_module._buffer
     assert buffer is not None, "Buffer must be initialized before combine"
 
     handle = _handle_cache.get(cache_id.item())
@@ -124,13 +130,20 @@ def _combine_op_impl(x: torch.Tensor, cache_id: torch.Tensor) -> torch.Tensor:
 
     previous_event = _create_event_if_async(True)
 
-    combined, _, after_event = buffer.combine(
-        x=x,
-        handle=handle,
-        previous_event=previous_event,
-        async_finish=True,
-        allocate_on_comm_stream=True,
-    )
+    # Get tuned config if available
+    _, combine_config = get_tuned_configs()
+
+    combine_kwargs = {
+        "x": x,
+        "handle": handle,
+        "previous_event": previous_event,
+        "async_finish": True,
+        "allocate_on_comm_stream": True,
+    }
+    if combine_config is not None:
+        combine_kwargs["config"] = combine_config
+
+    combined, _, after_event = buffer.combine(**combine_kwargs)
 
     _sync_stream_if_async(True, after_event)
 
@@ -141,8 +154,6 @@ def _dispatch_backward(
     ctx, grad_recv_x, grad_recv_indices, grad_recv_scores, grad_num_recv, grad_cache_id
 ):
     """Backward for dispatch: performs combine on gradients."""
-    global _buffer
-
     if grad_recv_x is None:
         return None, None, None, None, None, None, None
 
@@ -151,14 +162,24 @@ def _dispatch_backward(
 
     previous_event = _create_event_if_async(True)
 
-    grad_x, grad_scores, after_event = _buffer.combine(
-        x=grad_recv_x,
-        handle=handle,
-        topk_weights=grad_recv_scores.float() if grad_recv_scores is not None else None,
-        previous_event=previous_event,
-        async_finish=True,
-        allocate_on_comm_stream=True,
-    )
+    # Get tuned config if available
+    _, combine_config = get_tuned_configs()
+
+    combine_kwargs = {
+        "x": grad_recv_x,
+        "handle": handle,
+        "topk_weights": grad_recv_scores.float()
+        if grad_recv_scores is not None
+        else None,
+        "previous_event": previous_event,
+        "async_finish": True,
+        "allocate_on_comm_stream": True,
+    }
+    if combine_config is not None:
+        combine_kwargs["config"] = combine_config
+
+    buffer = _buffer_module._buffer
+    grad_x, grad_scores, after_event = buffer.combine(**combine_kwargs)
 
     _sync_stream_if_async(True, after_event)
     _handle_cache.pop(ctx.cache_id_int, None)
@@ -180,24 +201,30 @@ def _dispatch_setup_context(ctx, inputs, output):
 
 def _combine_backward(ctx, grad_combined):
     """Backward for combine: performs dispatch on gradients."""
-    global _buffer
-
     handle = ctx.saved_handle
     previous_event = _create_event_if_async(True)
 
-    grad_x, _, _, _, _, after_event = _buffer.dispatch(
-        x=grad_combined,
-        topk_idx=None,
-        topk_weights=None,
-        num_tokens_per_rank=None,
-        num_tokens_per_rdma_rank=None,
-        is_token_in_rank=None,
-        num_tokens_per_expert=None,
-        handle=handle,
-        previous_event=previous_event,
-        async_finish=True,
-        allocate_on_comm_stream=True,
-    )
+    # Get tuned config if available
+    dispatch_config, _ = get_tuned_configs()
+
+    dispatch_kwargs = {
+        "x": grad_combined,
+        "topk_idx": None,
+        "topk_weights": None,
+        "num_tokens_per_rank": None,
+        "num_tokens_per_rdma_rank": None,
+        "is_token_in_rank": None,
+        "num_tokens_per_expert": None,
+        "handle": handle,
+        "previous_event": previous_event,
+        "async_finish": True,
+        "allocate_on_comm_stream": True,
+    }
+    if dispatch_config is not None:
+        dispatch_kwargs["config"] = dispatch_config
+
+    buffer = _buffer_module._buffer
+    grad_x, _, _, _, _, after_event = buffer.dispatch(**dispatch_kwargs)
 
     _sync_stream_if_async(True, after_event)
 
@@ -227,37 +254,6 @@ def _sync_stream_if_async(async_finish: bool, after_event):
     """Synchronize current stream with communication stream if async mode is enabled."""
     if async_finish and after_event is not None:
         after_event.current_stream_wait()
-
-
-def get_hidden_bytes(x: torch.Tensor) -> int:
-    """Calculate the number of hidden bytes for a tensor."""
-    return x.size(1) * max(x.element_size(), 2)
-
-
-def get_buffer(group: ProcessGroup, hidden_bytes: int) -> Buffer:
-    """Get or create a buffer for all-to-all communication."""
-    global _buffer
-    num_nvl_bytes, num_rdma_bytes = 0, 0
-    for config in (
-        Buffer.get_dispatch_config(group.size()),
-        Buffer.get_combine_config(group.size()),
-    ):
-        num_nvl_bytes = max(
-            config.get_nvl_buffer_size_hint(hidden_bytes, group.size()), num_nvl_bytes
-        )
-        num_rdma_bytes = max(
-            config.get_rdma_buffer_size_hint(hidden_bytes, group.size()), num_rdma_bytes
-        )
-
-    if (
-        _buffer is None
-        or _buffer.group != group
-        or _buffer.num_nvl_bytes < num_nvl_bytes
-        or _buffer.num_rdma_bytes < num_rdma_bytes
-    ):
-        _buffer = Buffer(group, num_nvl_bytes, num_rdma_bytes)
-
-    return _buffer
 
 
 def _indices_to_multihot(
