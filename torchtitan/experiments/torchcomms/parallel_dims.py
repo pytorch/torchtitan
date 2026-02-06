@@ -270,13 +270,3 @@ class TorchCommsParallelDims(ParallelDims):
         )
 
         return device_mesh
-
-    def finalize_comms(self) -> None:
-        """Finalize all communicators.
-
-        Call this after training but before destroying the process group
-        to release sub-communicators before the root communicator.
-        """
-        for comm in self.comms:
-            comm.finalize()
-        self.comms.clear()
