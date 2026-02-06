@@ -39,15 +39,12 @@ def apply_rotary_pos_emb_vision_batched(
         cos: (batch, seq, head_dim)
         sin: (batch, seq, head_dim)
     """
-    orig_q_dtype = q.dtype
-    orig_k_dtype = k.dtype
-    q, k = q.float(), k.float()
-    # Expand cos/sin for heads dimension
-    cos = cos.unsqueeze(2).float()  # (batch, seq, 1, head_dim)
-    sin = sin.unsqueeze(2).float()
+    # Expand cos/sin for heads dimension, keep in original dtype
+    cos = cos.unsqueeze(2)  # (batch, seq, 1, head_dim)
+    sin = sin.unsqueeze(2)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed.to(orig_q_dtype), k_embed.to(orig_k_dtype)
+    return q_embed, k_embed
 
 
 class VisionRotaryEmbedding(nn.Module):
@@ -68,7 +65,14 @@ class VisionRotaryEmbedding(nn.Module):
 
 
 class PatchEmbed(nn.Module):
-    """3D Patch Embedding for images and videos."""
+    """Patch Embedding using Linear projection.
+
+    Since patches are already extracted by the collator, we use Linear instead of Conv3d.
+    This is mathematically equivalent when Conv3d kernel_size equals input size:
+    - Conv3d: (B, C, D, H, W) with kernel=(D,H,W) → (B, dim, 1, 1, 1)
+    - Linear: (B, C*D*H*W) → (B, dim)
+    Same weighted sum, but Linear uses efficient batched matrix multiplication.
+    """
 
     def __init__(
         self,
@@ -83,14 +87,9 @@ class PatchEmbed(nn.Module):
         self.in_channels = in_channels
         self.embed_dim = embed_dim
 
-        kernel_size = [temporal_patch_size, patch_size, patch_size]
-        self.proj = nn.Conv3d(
-            in_channels=in_channels,
-            out_channels=embed_dim,
-            kernel_size=kernel_size,
-            stride=kernel_size,
-            bias=True,
-        )
+        # patch_dim matches the flattened patch from collator: (pt * ph * pw * c)
+        self.patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
+        self.proj = nn.Linear(self.patch_dim, embed_dim, bias=True)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
@@ -99,16 +98,8 @@ class PatchEmbed(nn.Module):
         Returns:
             (batch, seq_len, embed_dim)
         """
-        batch_size, seq_len, _ = hidden_states.shape
-        target_dtype = self.proj.weight.dtype
-        # Reshape each patch to 3D
-        hidden_states = hidden_states.view(
-            batch_size * seq_len, self.in_channels, self.temporal_patch_size,
-            self.patch_size, self.patch_size
-        )
-        hidden_states = self.proj(hidden_states.to(dtype=target_dtype))
-        hidden_states = hidden_states.view(batch_size, seq_len, self.embed_dim)
-        return hidden_states
+        # Input is already (batch, seq_len, patch_dim), apply linear projection
+        return self.proj(hidden_states.to(dtype=self.proj.weight.dtype))
 
     def init_weights(self):
         nn.init.trunc_normal_(self.proj.weight, mean=0.0, std=0.02)
@@ -367,6 +358,7 @@ class Qwen3VLVisionEncoder(nn.Module):
         """
         num_images = grid_thw.shape[0]
         device = grid_thw.device
+        dtype = self.pos_embed.weight.dtype
         merge_size = self.spatial_merge_size
         head_dim = self.args.dim // self.args.n_heads
 
@@ -374,30 +366,41 @@ class Qwen3VLVisionEncoder(nn.Module):
         max_hw = int(grid_thw[:, 1:].max().item())
         freq_table = self.rotary_pos_emb(max_hw)
 
+        # Get pos_embed weights for direct indexing (avoid nn.Embedding forward overhead)
+        pos_embed_weight = self.pos_embed.weight
+
         # Pre-allocate output tensors
-        pos_embeds = torch.zeros(num_images, max_seq_len, self.args.dim, device=device)
-        rope_embeds = torch.zeros(num_images, max_seq_len, head_dim // 2, device=device)
+        pos_embeds = torch.zeros(num_images, max_seq_len, self.args.dim, device=device, dtype=dtype)
+        rope_embeds = torch.zeros(num_images, max_seq_len, head_dim // 2, device=device, dtype=dtype)
 
+        # Group images by (h, w) to batch compute position embeddings
+        # Most images in a batch often share dimensions, so this helps
+        hw_to_indices: dict[tuple[int, int], list[int]] = {}
         for i in range(num_images):
-            t, h, w = int(grid_thw[i, 0].item()), int(grid_thw[i, 1].item()), int(grid_thw[i, 2].item())
-            seq_len = t * h * w
+            h, w = int(grid_thw[i, 1].item()), int(grid_thw[i, 2].item())
+            key = (h, w)
+            if key not in hw_to_indices:
+                hw_to_indices[key] = []
+            hw_to_indices[key].append(i)
 
-            # Compute bilinear interpolated position embeddings
+        for (h, w), indices in hw_to_indices.items():
+            # Compute bilinear interpolated position embeddings once per unique (h, w)
             h_idxs = torch.linspace(0, self.num_grid_per_side - 1, h, device=device)
             w_idxs = torch.linspace(0, self.num_grid_per_side - 1, w, device=device)
 
-            h_floor, w_floor = h_idxs.int(), w_idxs.int()
-            h_ceil = (h_floor + 1).clip(max=self.num_grid_per_side - 1)
-            w_ceil = (w_floor + 1).clip(max=self.num_grid_per_side - 1)
+            h_floor, w_floor = h_idxs.long(), w_idxs.long()
+            h_ceil = (h_floor + 1).clamp(max=self.num_grid_per_side - 1)
+            w_ceil = (w_floor + 1).clamp(max=self.num_grid_per_side - 1)
 
-            dh, dw = h_idxs - h_floor, w_idxs - w_floor
+            dh, dw = h_idxs - h_floor.float(), w_idxs - w_floor.float()
 
-            # Compute indices for 4 corners
-            base_h, base_h_ceil = h_floor * self.num_grid_per_side, h_ceil * self.num_grid_per_side
-            idx_00 = (base_h[:, None] + w_floor[None, :]).flatten().long()
-            idx_01 = (base_h[:, None] + w_ceil[None, :]).flatten().long()
-            idx_10 = (base_h_ceil[:, None] + w_floor[None, :]).flatten().long()
-            idx_11 = (base_h_ceil[:, None] + w_ceil[None, :]).flatten().long()
+            # Compute indices for 4 corners - use long() directly
+            base_h = h_floor * self.num_grid_per_side
+            base_h_ceil = h_ceil * self.num_grid_per_side
+            idx_00 = (base_h[:, None] + w_floor[None, :]).flatten()
+            idx_01 = (base_h[:, None] + w_ceil[None, :]).flatten()
+            idx_10 = (base_h_ceil[:, None] + w_floor[None, :]).flatten()
+            idx_11 = (base_h_ceil[:, None] + w_ceil[None, :]).flatten()
 
             # Bilinear weights
             w_00 = ((1 - dh)[:, None] * (1 - dw)[None, :]).flatten()
@@ -405,43 +408,54 @@ class Qwen3VLVisionEncoder(nn.Module):
             w_10 = (dh[:, None] * (1 - dw)[None, :]).flatten()
             w_11 = (dh[:, None] * dw[None, :]).flatten()
 
-            # Interpolated position embeddings
-            pos_hw = (
-                self.pos_embed(idx_00) * w_00[:, None] +
-                self.pos_embed(idx_01) * w_01[:, None] +
-                self.pos_embed(idx_10) * w_10[:, None] +
-                self.pos_embed(idx_11) * w_11[:, None]
-            )  # (h*w, dim)
+            # Stack indices and gather in one operation (instead of 4 separate lookups)
+            all_indices = torch.stack([idx_00, idx_01, idx_10, idx_11], dim=0)  # (4, h*w)
+            all_embeds = pos_embed_weight[all_indices]  # (4, h*w, dim)
 
-            # Repeat for temporal and permute to block order
-            if t > 1:
-                pos_hw = pos_hw.repeat(t, 1)
-            pos_hw = (
-                pos_hw.view(t, h // merge_size, merge_size, w // merge_size, merge_size, -1)
-                .permute(0, 1, 3, 2, 4, 5)
-                .flatten(0, 4)
-            )
-            pos_embeds[i, :seq_len] = pos_hw
+            # Weighted sum
+            weights = torch.stack([w_00, w_01, w_10, w_11], dim=0)  # (4, h*w)
+            pos_hw = (all_embeds * weights[:, :, None]).sum(dim=0)  # (h*w, dim)
 
-            # Compute RoPE position ids in block order
+            # Compute RoPE position ids in block order (once per unique h, w)
             merged_h, merged_w = h // merge_size, w // merge_size
-            block_rows = torch.arange(merged_h, device=device)
-            block_cols = torch.arange(merged_w, device=device)
+
+            # Create block order indices using einops-style reshaping
+            row_base = torch.arange(merged_h, device=device) * merge_size
+            col_base = torch.arange(merged_w, device=device) * merge_size
             intra_row = torch.arange(merge_size, device=device)
             intra_col = torch.arange(merge_size, device=device)
 
-            row_idx = block_rows[:, None, None, None] * merge_size + intra_row[None, None, :, None]
-            col_idx = block_cols[None, :, None, None] * merge_size + intra_col[None, None, None, :]
+            # Build row and col indices in block order
+            row_idx = (row_base[:, None, None, None] + intra_row[None, None, :, None]).expand(
+                merged_h, merged_w, merge_size, merge_size
+            ).reshape(-1)
+            col_idx = (col_base[None, :, None, None] + intra_col[None, None, None, :]).expand(
+                merged_h, merged_w, merge_size, merge_size
+            ).reshape(-1)
 
-            row_idx = row_idx.expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
-            col_idx = col_idx.expand(merged_h, merged_w, merge_size, merge_size).reshape(-1)
+            # Get RoPE embeddings for this (h, w) - freq_table is (max_hw, head_dim//4)
+            rope_row = freq_table[row_idx]  # (h*w, head_dim//4)
+            rope_col = freq_table[col_idx]  # (h*w, head_dim//4)
+            rope_2d = torch.cat([rope_row, rope_col], dim=-1)  # (h*w, head_dim//2)
 
-            coords = torch.stack((row_idx, col_idx), dim=-1)
-            if t > 1:
-                coords = coords.repeat(t, 1)
+            # Permute pos_hw to block order
+            pos_hw_block = (
+                pos_hw.view(h // merge_size, merge_size, w // merge_size, merge_size, -1)
+                .permute(0, 2, 1, 3, 4)
+                .flatten(0, 3)
+            )  # (h*w, dim)
 
-            rope_2d = freq_table[coords]  # (seq_len, 2, head_dim//4)
-            rope_embeds[i, :seq_len] = rope_2d.flatten(1)  # (seq_len, head_dim//2)
+            # Apply to all images with this (h, w)
+            for i in indices:
+                t = int(grid_thw[i, 0].item())
+                seq_len = t * h * w
+
+                if t > 1:
+                    pos_embeds[i, :seq_len] = pos_hw_block.repeat(t, 1)
+                    rope_embeds[i, :seq_len] = rope_2d.repeat(t, 1)
+                else:
+                    pos_embeds[i, :seq_len] = pos_hw_block
+                    rope_embeds[i, :seq_len] = rope_2d
 
         # Compute cos/sin from RoPE embeddings
         rope_embeds = torch.cat((rope_embeds, rope_embeds), dim=-1)  # (N, L, head_dim)
