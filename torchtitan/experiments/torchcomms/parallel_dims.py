@@ -250,5 +250,4 @@ class TorchCommsParallelDims(ParallelDims):
         # Call .finalize() in train.py after training but before destroying the process group
         # to release sub-communicators before the root communicator.
         self.comms = [*comm_per_dim.values(), comm]
-
         return device_mesh
