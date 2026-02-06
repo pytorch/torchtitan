@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
-
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
@@ -199,6 +198,40 @@ class LRScheduler:
 
 
 @dataclass
+class DataLoader:
+    """
+    Configuration for PyTorch DataLoader settings.
+
+    These settings are passed directly to StatefulDataLoader.
+
+    Note:
+        persistent_workers and prefetch_factor are only valid if num_workers > 0.
+
+    Example (TOML config file):
+        [training.dataloader]
+        num_workers = 4
+        pin_memory = true
+        persistent_workers = true
+        prefetch_factor = 2
+    """
+
+    num_workers: int = 0
+    """Number of worker processes for data loading."""
+
+    persistent_workers: bool = False
+    """Keep workers alive between epochs. Only valid when num_workers > 0."""
+
+    pin_memory: bool = False
+    """Copy tensors to CUDA pinned memory before returning them."""
+
+    prefetch_factor: int | None = None
+    """
+    Number of batches loaded in advance by each worker. Only valid when num_workers > 0.
+    Default is 2 when num_workers > 0, otherwise None.
+    """
+
+
+@dataclass
 class Training:
     dataset: str = "c4_test"
     """Dataset to use"""
@@ -262,6 +295,9 @@ class Training:
     Note that you may want to lower the training steps to avoid generating too
     many temporary files.
     """
+
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
 
 
 @dataclass
@@ -373,8 +409,31 @@ class Parallelism:
     The global training batch size must be evenly divisible by pipeline_parallel_microbatch_size.
     """
 
+    pipeline_parallel_expert_parallel_overlap: bool = True
+    """Whether to turn on the optimization to overlap expert parallel and pipeline parallel
+    communication. This is only effective when the pipeline parallel schedule is DualPipeV and
+    pipeline_parallel_degree > 1 and expert_parallel_degree > 1.
+
+    TODO: Does not support activation_checkpoint, set mode="none"
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
+
+    context_parallel_load_balancer: str | None = "headtail"
+    """
+    Load balancer type for context parallelism. Options:
+    - "headtail": Use HeadTailLoadBalancer for SDPA
+    - "ptrr": Use PTRRLoadBalancer for FlexAttention
+    - None: Disable load balancing
+    """
+
+    def __post_init__(self):
+        if self.context_parallel_load_balancer == "":
+            raise ValueError(
+                "context_parallel_load_balancer cannot be an empty string. "
+                "Use None to disable load balancing."
+            )
 
     context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"
     """
@@ -388,19 +447,7 @@ class Parallelism:
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
 
-    Currently, it is supported with the following constraints:
-
-    - when etp = tp:
-
-      - cp <= ep <= dp_shard * cp
-      - ep % cp == 0
-      - dp_shard * cp % ep == 0
-
-    - when etp = 1:
-
-      - cp * tp <= ep <= dp_shard * cp * tp
-      - ep % (cp * tp) == 0
-      - dp_shard * cp * tp % ep == 0
+    Currently, etp is either 1 or is the same as tp.
 
     Note that this is still an experimental feature. Some constraints will be
     relaxed soon when we have more flexible DeviceMesh support.
@@ -414,6 +461,17 @@ class Parallelism:
     - [partial dp -> ep] etp = tp
     - [partial dp + all tp -> ep] etp = 1
     Note that this is still an experimental feature.
+    """
+
+    expert_parallel_comm_backend: Literal["standard", "deepep"] = "standard"
+    """
+    Expert-parallel communication backend. No effect for non-MoE models or when ep = 1.
+
+    - "standard": Uses PyTorch all-to-all collectives (default)
+    - "deepep": Uses DeepEP custom kernels for more efficient communication
+
+    DeepEP requires installation:
+    https://github.com/deepseek-ai/DeepEP.
     """
 
 
@@ -656,9 +714,7 @@ class Compile:
     enable: bool = False
     """Whether to apply torch.compile"""
 
-    components: list[Literal["model", "loss"]] = field(
-        default_factory=lambda: ["model", "loss"]
-    )
+    components: list[str] = field(default_factory=lambda: ["model", "loss"])
     """Which components to compile"""
     backend: str = "inductor"
 
@@ -791,6 +847,22 @@ class Comm:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
+    mode: Literal["default", "fake_backend", "local_tensor"] = "default"
+    """
+    Communication mode for distributed training.
+
+    Options:
+    - "default": Normal distributed training with real communication
+    - "fake_backend": Fake comm backend for dry run mode only (configuration validation without GPU)
+    - "local_tensor": Local tensor mode for debugging purposes. There will be only one process
+      regardless of the number of GPUs. LocalTensor will simulate the computation by running one
+      rank after another. While the performance will be slow, the numerics should be the same.
+      This enables us to verify numerics with fewer GPUs. For example, we can directly run 5D
+      parallelisms within a single node to reduce the combinations we need to use in integration tests.
+
+    NOTE: local_tensor is an experimental feature and automatically uses fake_backend internally.
+    """
+
 
 @dataclass
 class MemoryEstimation:
@@ -892,6 +964,9 @@ class Validation:
     WARNING: When setting to -1 there could be hangs due to mismatch among ranks
     """
 
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
+
     def __post_init__(self):
         assert (
             self.steps > 0 or self.steps == -1
@@ -945,7 +1020,9 @@ class JobConfig:
 
     def maybe_log(self) -> None:
         if self.job.print_config:
-            logger.info(f"Running with configs: {self.to_dict()}")
+            logger.info(
+                f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
+            )
 
         if self.job.save_config_file is not None:
             config_file = os.path.join(self.job.dump_folder, self.job.save_config_file)

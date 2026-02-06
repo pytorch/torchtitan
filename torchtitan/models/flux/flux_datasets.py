@@ -6,10 +6,11 @@
 
 import itertools
 import math
+from dataclasses import asdict
 from typing import Any, Callable, Optional
 
 import numpy as np
-import PIL
+import PIL.Image
 
 import torch
 from datasets import Dataset, load_dataset
@@ -271,6 +272,7 @@ class FluxDataset(IterableDataset, Stateful):
 
             # skip low quality image or image with color channel = 1
             if sample_dict["image"] is None:
+                # pyrefly: ignore [missing-attribute]
                 sample = sample.get("__key__", "unknown")
                 logger.warning(
                     f"Low quality image {sample} is skipped in Flux Dataloader."
@@ -279,6 +281,7 @@ class FluxDataset(IterableDataset, Stateful):
 
             # Classifier-free guidance: Replace some of the strings with empty strings.
             # Distinct random seed is initialized at the beginning of training for each FSDP rank.
+            # pyrefly: ignore [missing-attribute]
             dropout_prob = self.job_config.training.classifier_free_guidance_prob
             if dropout_prob > 0.0:
                 if torch.rand(1).item() < dropout_prob:
@@ -314,7 +317,15 @@ def build_flux_dataloader(
     tokenizer: FluxTokenizer | None,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
-    """Build a data loader for HuggingFace datasets."""
+    """Build a data loader for HuggingFace datasets.
+
+    Args:
+        dp_world_size: Data parallelism world size.
+        dp_rank: Data parallelism rank.
+        job_config: Job configuration containing dataset and DataLoader settings.
+        tokenizer: Tokenizer (kept for compatibility, not used).
+        infinite: Whether to loop the dataset infinitely.
+    """
     dataset_name = job_config.training.dataset
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.local_batch_size
@@ -332,11 +343,16 @@ def build_flux_dataloader(
         infinite=infinite,
     )
 
+    dataloader_kwargs = {
+        **asdict(job_config.training.dataloader),
+        "batch_size": batch_size,
+    }
+
     return ParallelAwareDataloader(
         dataset=ds,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        batch_size=batch_size,
+        **dataloader_kwargs,
     )
 
 
@@ -400,7 +416,16 @@ def build_flux_validation_dataloader(
     generate_timestamps: bool = True,
     infinite: bool = False,
 ) -> ParallelAwareDataloader:
-    """Build a data loader for HuggingFace datasets."""
+    """Build a validation data loader for HuggingFace datasets.
+
+    Args:
+        dp_world_size: Data parallelism world size.
+        dp_rank: Data parallelism rank.
+        job_config: Job configuration containing dataset and DataLoader settings.
+        tokenizer: Tokenizer (kept for compatibility, not used).
+        generate_timestamps: Whether to generate timesteps for validation.
+        infinite: Whether to loop the dataset infinitely.
+    """
     dataset_name = job_config.validation.dataset
     dataset_path = job_config.validation.dataset_path
     batch_size = job_config.validation.local_batch_size
@@ -419,9 +444,14 @@ def build_flux_validation_dataloader(
         infinite=infinite,
     )
 
+    dataloader_kwargs = {
+        **asdict(job_config.validation.dataloader),
+        "batch_size": batch_size,
+    }
+
     return ParallelAwareDataloader(
-        dataset=ds,
+        ds,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        batch_size=batch_size,
+        **dataloader_kwargs,
     )

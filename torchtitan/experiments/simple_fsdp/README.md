@@ -3,10 +3,12 @@
 [![integration and numerics tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_simple_fsdp.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_simple_fsdp.yaml?query=branch%3Amain)
 [![arXiv](https://img.shields.io/badge/arXiv-2411.00284-b31b1b.svg)](https://arxiv.org/abs/2411.00284)
 
-💡 **Note**: SimpleFSDP's composability with Mixed Precision Training and Tensor Parallel requires updates from latest PyTorch, which can be installed (e.g., for CUDA 12.6) via
+💡 **Note 1**: SimpleFSDP's composability with Mixed Precision Training and Tensor Parallel requires updates from latest PyTorch, which can be installed (e.g., for CUDA 12.6) via
 ```bash
 pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
 ```
+
+💡 **Note 2**: Some of SimpleFSDP's functionalities (e.g., reshard_after_forward) is implemented with torch.compile. It is always recommended to open compile (`--compile.enable`) to see desired correct functionality.
 
 This folder includes an experimental frontend implementation for [SimpleFSDP: Simpler Fully Sharded Data Parallel with torch.compile](https://arxiv.org/abs/2411.00284). SimpleFSDP is a compiler-based Fully Sharded Data Parallel (FSDP) framework, which has a simple implementation for maintenance and composability, allows full computation-communication graph tracing, and brings performance enhancement via compiler backend optimizations.
 
@@ -50,14 +52,16 @@ SimpleFSDP relies on compiler backend to perform optimizations (i.e., bucketing 
 1. no optimization: default torch.compile backends (e.g., "inductor", "aot_eager", "eager")
 
 2. auto optimization: perform auto-bucketing & reordering without user inputs. **Note: it is not guaranteed that users will get the most optimized training performance**
-    - "aot_eager_autobucketing": perform autobucketing at aten fx-level, and perform code execution with aot_eager backend.
+    - "auto_bucketing": perform autobucketing at aten fx-level, and perform code execution with aot_eager backend. (We also support `inductor` backend).
+      ```bash
+      --compile.backend "aot_eager" --compile.graph_passes "auto_bucketing"
+      ```
 
-
-users can specify the pass (e.g., "aot_eager_autobucketing") via additional configs:
-
-```bash
---compile.model_backend_override "aot_eager_autobucketing"
-```
+3. manual optimization: perform manual bucketing & reordering with user FQN inputs.
+    - "transformer_block_bucketing": perform bucketing by transformer blocks at aten fx-level, and perform code execution with aot_eager backend. (We also support `inductor` backend).
+      ```bash
+      --compile.backend "aot_eager" --compile.graph_passes "transformer_block_bucketing"
+      ```
 
 ### Citation
 

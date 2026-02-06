@@ -8,7 +8,7 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Dict
 
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
@@ -26,6 +26,9 @@ class BaseStateDictAdapter(ABC):
         model_args: for initializing the model's memory space
         hf_assets_path: path to HF assets folder containing tokenizer, model weights, etc.
     """
+
+    fqn_to_index_mapping: Dict[Any, int] | None
+    hf_assets_path: str | None
 
     @abstractmethod
     def __init__(
@@ -83,6 +86,7 @@ class StateDictAdapter(BaseStateDictAdapter):
         model_args: BaseModelArgs,
         hf_assets_path: str | None,
     ):
+        self.hf_assets_path = hf_assets_path
         if hf_assets_path:
             mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
             try:
@@ -98,10 +102,13 @@ class StateDictAdapter(BaseStateDictAdapter):
             if hf_safetensors_indx:
                 self.fqn_to_index_mapping = {}
                 for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
+                    # pyrefly: ignore [missing-attribute]
                     indx = re.search(r"\d+", raw_indx).group(0)
                     self.fqn_to_index_mapping[hf_key] = int(indx)
             else:
                 self.fqn_to_index_mapping = None
+        else:
+            self.fqn_to_index_mapping = None
 
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False

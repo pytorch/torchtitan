@@ -176,6 +176,8 @@ def build_lr_schedulers(
                 curr_adjustment = 1 - math.sqrt(progress)
             elif lr_decay_type == "cosine":
                 curr_adjustment = 0.5 * (1.0 + math.cos(math.pi * progress))
+            else:
+                raise ValueError(f"Unknown lr_decay_type: {lr_decay_type}")
             curr_adjustment = min_lr_factor + (1 - min_lr_factor) * curr_adjustment
         return curr_adjustment
 

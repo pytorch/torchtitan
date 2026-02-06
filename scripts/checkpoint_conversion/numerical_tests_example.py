@@ -14,6 +14,7 @@ from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import ConfigManager
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools.logging import logger
+
 from transformers import AutoModelForCausalLM
 
 device_type = "cuda" if torch.cuda.is_available() else "cpu"
@@ -25,7 +26,7 @@ def loss_fn(logits1, logits2):
     probs2 = F.softmax(logits2, dim=-1)
 
     # Calculate KL Divergence
-    kl_loss = F.kl_div(probs1, probs2, "mean")
+    kl_loss = F.kl_div(probs1, probs2, reduction="mean")
     return kl_loss
 
 
@@ -120,6 +121,7 @@ if __name__ == "__main__":
     config_manager = ConfigManager()
     config = config_manager.parse_args([f"--job.config_file={config_path}"])
     train_spec = get_train_spec(config.model.name)
+    # pyrefly: ignore [not-callable]
     tokenizer = train_spec.build_tokenizer_fn(config)
 
     # Build test set of randomly generated token ids
@@ -150,10 +152,11 @@ if __name__ == "__main__":
     avg_losses = {}
 
     for test_name, (baseline_outputs, conversion_outputs) in test_configs.items():
-        total_loss = 0
+        total_loss: int | torch.Tensor = 0
         for baseline, outputs in zip(baseline_outputs, conversion_outputs):
             total_loss += loss_fn(baseline, outputs)
         avg_loss = total_loss / len(test_set)
+        # pyrefly: ignore [missing-attribute]
         avg_losses[test_name] = avg_loss.item()
 
     for test_name, avg_loss in avg_losses.items():

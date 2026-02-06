@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from contextlib import contextmanager
+from typing import Callable
 
 import torch
 from torch.distributed.tensor import DTensor, Replicate
@@ -24,10 +25,12 @@ def disable_compile(job_config: JobConfig):
         job_config.compile.enable = original_value
 
 
-def parallelize_inputs(world_mesh, args, kwargs):
+def parallelize_inputs(parallel_dims, args, kwargs):
     def to_dtensor(tensor):
         if isinstance(tensor, torch.Tensor):
-            return DTensor.from_local(tensor, world_mesh["tp"], [Replicate()])
+            return DTensor.from_local(
+                tensor, parallel_dims.get_mesh("tp"), [Replicate()]
+            )
         return tensor
 
     dt_args = tree_map(to_dtensor, args)
@@ -53,3 +56,11 @@ def register_blockmask_pytree_node():
             flatten_with_keys_fn=BlockMask._flatten_with_keys,
             serialized_type_name="torch.nn.attention.flex_attention.BlockMask",
         )
+
+
+def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
+    return (
+        len(passes) > 0
+        and (last_pass_name := getattr(passes[-1], "__name__", None))
+        and (last_pass_name in names)
+    )

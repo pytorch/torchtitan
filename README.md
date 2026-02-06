@@ -20,12 +20,11 @@
 
 
 ## Latest News
-- [2025/10] SkyPilot now supports TorchTitan! See the tutorial [here](https://docs.skypilot.co/en/latest/examples/training/torchtitan.html).
+- [2025/11] AMD released an [optimized fork](https://github.com/AMD-AGI/torchtitan-amd/tree/main) of `torchtitan` for AMD GPUs.
+- [2025/10] We released `torchtitan` [v0.2.0](https://github.com/pytorch/torchtitan/releases).
+- [2025/10] SkyPilot now supports `torchtitan`! See the tutorial [here](https://docs.skypilot.co/en/latest/examples/training/torchtitan.html).
 - [2025/07] We published [instructions](/torchtitan/models/README.md) on how to add a model to `torchtitan`.
-- [2025/07] We released `torchtitan` [v0.1.0](https://github.com/pytorch/torchtitan/releases), and also set up nightly builds.
 - [2025/04] Our paper was accepted by [ICLR 2025](https://iclr.cc/virtual/2025/poster/29620).
-- [2025/04] Training the diffusion model [FLUX](torchtitan/models/flux/) with FSDP/HSDP is available as an experiment.
-- [2025/04] The frontend implementation of [SimpleFSDP](torchtitan/experiments/simple_fsdp/), a compiler-based FSDP framework, is available as an experiment.
 - [2024/12] GPU MODE [lecture](https://www.youtube.com/watch?v=VYWRjcUqW6w) on torchtitan.
 - [2024/07] [Presentation](https://pytorch2024.sched.com/event/1fHn3) at PyTorch Conference 2024.
 
@@ -41,9 +40,14 @@ The Guiding Principles when building `torchtitan`
 * Minimal changes to the model code when applying multi-dimensional parallelism.
 * Bias towards a clean, minimal codebase while providing basic reusable / swappable components.
 
-`torchtitan` has been showcasing PyTorch's latest distributed training features, via pretraining Llama 3.1 LLMs of various sizes.
-To accelerate contributions to and innovations around torchtitan, we host an [`experiments`](torchtitan/experiments) folder. We look forward to your contributions!
+`torchtitan` has been showcasing PyTorch's latest distributed training features, via support for pretraining Llama 3.1 LLMs of various sizes.
 
+## Contributing
+
+We look forward to your contributions!
+
+* To accelerate contributions to and innovations around torchtitan, we host an [`experiments`](torchtitan/experiments) folder. New ideas should start there. To contribute, follow the [`experiments guidelines`](torchtitan/experiments/README.md).
+* For fixes and contributions to core, follow these [`guidelines`](CONTRIBUTING.md).
 
 ## Llama 3.1 training
 
@@ -60,6 +64,7 @@ To accelerate contributions to and innovations around torchtitan, we host an [`e
    - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
 5. `torch.compile` support
 6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](docs/float8.md))
+7. [MXFP8 training for dense and MoE models](docs/mxfp8.md) on Blackwell GPUs.
 7. DDP and HSDP
 8. [TorchFT](https://github.com/pytorch/torchft) integration
 9. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)

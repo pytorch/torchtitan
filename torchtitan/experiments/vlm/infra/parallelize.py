@@ -9,18 +9,16 @@
 
 import torch
 import torch.nn as nn
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-
 from torchtitan.models.llama3.infra.parallelize import (
     _op_sac_save_list,
     apply_compile,
     apply_replicate,
+    disable_fsdp_gradient_division,
 )
 from torchtitan.tools.logging import logger
 
@@ -38,7 +36,6 @@ def parallelize_vlm(
     the model must fit on GPU or CPU memory.
     """
     assert isinstance(model.encoder, nn.Module)
-    world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
@@ -48,9 +45,9 @@ def parallelize_vlm(
         Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-    use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
-    if job_config.parallelism.context_parallel_degree > 1 and use_flex_attn:
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+    attn_type = getattr(model.model_args, "attn_type", "sdpa")
+    if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
+        raise NotImplementedError("CP support is only supported for SDPA.")
 
     if parallel_dims.tp_enabled:
         raise NotImplementedError("TP support for VLM training is still in progress.")
@@ -63,7 +60,6 @@ def parallelize_vlm(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
         )
         apply_ac(model.encoder, job_config.activation_checkpoint)
@@ -75,14 +71,13 @@ def parallelize_vlm(
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
-        if parallel_dims.dp_replicate_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
-        else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+        names = (
+            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
+        )
 
         apply_fsdp(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            parallel_dims.get_mesh(names),
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
@@ -101,10 +96,11 @@ def parallelize_vlm(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh_dim_names = ("dp_replicate",)
+        dp_mesh_names = ["dp_replicate"]
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
         apply_replicate(
             model,
-            world_mesh[tuple(dp_mesh_dim_names)],
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
@@ -184,3 +180,6 @@ def apply_fsdp(
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
     fully_shard(model, **fsdp_config)
+
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)

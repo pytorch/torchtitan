@@ -111,7 +111,10 @@ def estimate_memory(job_config: JobConfig):
         # build optimizer after applying parallelisms to the model
         optimizers = build_optimizers([model], job_config.optimizer, parallel_dims)
         lr_schedulers = build_lr_schedulers(
-            optimizers.optimizers, job_config.lr_scheduler, job_config.training.steps
+            # pyrefly: ignore [bad-argument-type]
+            optimizers.optimizers,
+            job_config.lr_scheduler,
+            job_config.training.steps,
         )
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
@@ -120,18 +123,23 @@ def estimate_memory(job_config: JobConfig):
             lambda *args, **kwargs: model_converters.post_optimizer_hook(model)
         )
 
+        # pyrefly: ignore [missing-attribute]
         logger.info(f"Vocab size: {model_args.vocab_size}")
         # Create a dummy batch instead of loading from a dataset
         batch = (
             torch.randint(
                 0,
+                # pyrefly: ignore [missing-attribute]
                 model_args.vocab_size,
+                # pyrefly: ignore [missing-attribute]
                 (job_config.training.local_batch_size, model_args.max_seq_len),
                 device="cuda",
             ),
             torch.randint(
                 0,
+                # pyrefly: ignore [missing-attribute]
                 model_args.vocab_size,
+                # pyrefly: ignore [missing-attribute]
                 (job_config.training.local_batch_size, model_args.max_seq_len),
                 device="cuda",
             ),
@@ -152,7 +160,9 @@ def estimate_memory(job_config: JobConfig):
 
                 # clip gradients
                 torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), job_config.training.max_norm, foreach=True
+                    model.parameters(),
+                    job_config.training.max_norm,
+                    foreach=True,
                 )
                 # optimizer step
                 optimizers.step()

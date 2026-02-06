@@ -7,25 +7,28 @@
 import importlib
 import time
 from datetime import timedelta
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.dataloader import DataloaderExhaustedError
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.metrics import build_metrics_processor
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
-from torchtitan.config import ConfigManager, JobConfig
+from torchtitan.config import JobConfig
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.tools import utils
-from torchtitan.tools.logging import init_logger, logger
+from torchtitan.tools.logging import logger
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
+from torchtitan.train import main
 
 from .engine import ForgeEngine
 
@@ -151,42 +154,62 @@ class Trainer(ForgeEngine):
 
             yield input_dict, labels
 
-    def forward_backward_step(
+    def post_dataloading_process(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
+        inputs = input_dict["input"]
+        extra_inputs = {k: v for k, v in input_dict.items() if k != "input"}
+        # For arguments, like attention_masks, we have to put them in a separate
+        # dict as extra_inputs are not forwarded to other stages in PP, but
+        # extra_kwargs are.
+        extra_kwargs: dict[str, Any] = {}
+
+        try:
+            # pyrefly: ignore [not-callable]
+            extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
+                extra_inputs=extra_inputs,
+            )
+        except TypeError:
+            pass
+
+        if self.parallel_dims.cp_enabled:
+            inputs, labels, extra_kwargs = prepare_context_parallel_input(
+                inputs,
+                labels,
+                extra_kwargs,
+                self.parallel_dims.get_mesh("cp"),
+                self.device,
+                self.job_config.parallelism.context_parallel_load_balancer,
+            )
+
+        return inputs, labels, extra_inputs, extra_kwargs
+
+    def forward_backward_step(
+        self,
+        *,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
 
-        inputs = input_dict["input"]
-        extra_kwargs = {}
-
-        if getattr(self.model_args, "use_flex_attn", False):
-            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-            )
-
-        optional_context_parallel_ctx = (
-            dist_utils.create_context_parallel_ctx(
-                cp_mesh=parallel_dims.world_mesh["cp"],
-                cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
-                cp_seq_dims=[1, 1] + [0 for _ in model_parts],
-                cp_no_restore_buffers={inputs, labels},
-                cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
-            )
-            if parallel_dims.cp_enabled
-            else None
+        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
+            input_dict, labels
         )
 
         if parallel_dims.pp_enabled:
             # Pipeline Parallel forward / backward inside step() call
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context():
                 targets, losses = (
                     (labels, []) if self.pp_has_last_stage else (None, None)
                 )
                 if self.pp_has_first_stage:
                     self.pp_schedule.step(
                         inputs,
+                        **extra_inputs,
                         **extra_kwargs,
                         target=targets,
                         losses=losses,
@@ -201,24 +224,30 @@ class Trainer(ForgeEngine):
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             loss = (
-                # using sum instead of mean because we already rescale the
-                # loss_fn down by a factor of n_microbatches in
-                # torchtitan/distributed/pipeline_parallel.py
-                torch.sum(torch.stack(losses)).to(self.device)
+                # Rescale PP loss to be "local loss sum / global valid tokens"
+                # because each microbatch could have different number of valid tokens
+                (torch.sum(torch.stack(losses)) / global_valid_tokens).to(self.device)
                 if self.pp_has_last_stage
                 else torch.tensor([-1.0], device=self.device)
             )
         else:
             # Non-PP forward / backward
-            with self.train_context(optional_context_parallel_ctx):
+            with self.train_context():
                 assert len(model_parts) == 1
                 with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_kwargs)
-                    loss = self.loss_fn(pred, labels)
-                # need to free to before bwd to avoid peaking memory
+                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    # Compute loss sum (reduction='sum')
+                    loss_sum = self.loss_fn(pred, labels)
+
+                    # Scale the loss by the inverse of the total weight denominator before backward
+                    # This ensures gradients are properly normalized across all microbatches
+                    loss = loss_sum / global_valid_tokens
+
+                # need to free pred before bwd to avoid peaking memory
                 del pred
                 loss.backward()
 
+        # The returned loss here is local SUM loss / global_valid_tokens
         return loss
 
     def train_step(
@@ -230,21 +259,45 @@ class Trainer(ForgeEngine):
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
 
-        accumulated_losses = []
-        # If data runs out during gradient accumulation, that
-        # entire step will not be executed.
-        for microbatch in range(self.gradient_accumulation_steps):
+        # Collect all microbatches on CPU and count total valid tokens
+        # Here we assume the inputs/labels are on GPU
+        microbatches = []
+        local_valid_tokens = torch.tensor(0, dtype=torch.int64)
+        for _microbatch in range(self.gradient_accumulation_steps):
             input_dict, labels = next(data_iterator)
-            loss = self.forward_backward_step(input_dict, labels)
+            local_valid_tokens += (labels != IGNORE_INDEX).sum()
+            microbatches.append((input_dict, labels))
+
+        # All-reduce to get global token count across DP ranks
+        # Move to GPU for distributed communication
+        local_valid_tokens = local_valid_tokens.to(self.device)
+        if parallel_dims.dp_enabled:
+            batch_mesh = parallel_dims.get_mesh("batch")
+            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
+        else:
+            global_valid_tokens = local_valid_tokens.float()
+
+        # Process each microbatch: move to GPU, forward/backward, then free
+        accumulated_losses = []
+        for input_dict, labels in microbatches:
+            # Move tensors to GPU
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(self.device)
+            labels = labels.to(self.device)
+
+            loss = self.forward_backward_step(
+                input_dict=input_dict,
+                labels=labels,
+                global_valid_tokens=global_valid_tokens,
+            )
             accumulated_losses.append(loss.detach())
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
             foreach=True,
-            pp_mesh=(
-                parallel_dims.world_mesh["pp"] if parallel_dims.pp_enabled else None
-            ),
+            pp_mesh=parallel_dims.get_optional_mesh("pp"),
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
@@ -261,8 +314,8 @@ class Trainer(ForgeEngine):
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
             global_avg_loss, global_max_loss = (
-                dist_utils.dist_mean(loss, parallel_dims.world_mesh["dp_cp"]),
-                dist_utils.dist_max(loss, parallel_dims.world_mesh["dp_cp"]),
+                dist_utils.dist_sum(loss, parallel_dims.get_optional_mesh("loss")),
+                dist_utils.dist_max(loss, parallel_dims.get_optional_mesh("loss")),
             )
         else:
             global_avg_loss = global_max_loss = loss.detach().item()
@@ -328,7 +381,7 @@ class Trainer(ForgeEngine):
                         timeout=timedelta(
                             seconds=job_config.comm.train_timeout_seconds
                         ),
-                        world_mesh=self.parallel_dims.world_mesh,
+                        parallel_dims=self.parallel_dims,
                     )
 
         if torch.distributed.get_rank() == 0:
@@ -350,19 +403,4 @@ class Trainer(ForgeEngine):
 
 
 if __name__ == "__main__":
-    init_logger()
-    config_manager = ConfigManager()
-    config = config_manager.parse_args()
-    trainer: Optional[Trainer] = None
-
-    try:
-        trainer = Trainer(config)
-        trainer.train()
-    except Exception:
-        if trainer:
-            trainer.close()
-        raise
-    else:
-        trainer.close()
-        torch.distributed.destroy_process_group()
-        logger.info("Process group destroyed.")
+    main(Trainer)

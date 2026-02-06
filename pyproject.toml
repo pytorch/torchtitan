@@ -24,6 +24,8 @@ dependencies = [
     "fsspec",
     "tyro",
     "tensorboard",
+    "einops",
+    "pillow",
 ]
 dynamic = ["version"]
 
@@ -61,3 +63,8 @@ include = ["torchtitan*"]
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks
 testpaths = ["tests"]
+
+[tool.pyrefly]
+project-excludes = ["torchtitan/experiments", "**/tests/**"]
+ignore-missing-imports = ["torchao.*", "torchft"]  # optional dependencies
+search-path = ["../pytorch"]  # local built pytorch

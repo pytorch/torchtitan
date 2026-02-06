@@ -6,7 +6,6 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Protocol
 
 import torch
 import torch.nn as nn
@@ -16,9 +15,10 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
 
 from torchtitan.config import JobConfig
+from torchtitan.models.attention import VarlenMetadata
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask
+AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
 
 
 @dataclass
@@ -36,21 +36,22 @@ class BaseModelArgs:
         pass
 
     @abstractmethod
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         pass
 
 
-class ModelProtocol(Protocol):
+class ModelProtocol(nn.Module):
     """Defines the interface for a model class.
 
     This is used to enforce that all model classes have some methods that are
     required by the trainer.
+
+    NOTE: We keep protocol name for backward compatibility even though it is
+          not a Protocol anymore.
     """
 
     def __init__(self, model_args: BaseModelArgs) -> None:
-        pass
+        super().__init__()
 
     @abstractmethod
     def init_weights(self, buffer_device: torch.device | None = None) -> None:

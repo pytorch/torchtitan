@@ -43,6 +43,7 @@ install_pip_dependencies() {
   pip_install -r /opt/conda/requirements.txt
   pip_install -r /opt/conda/requirements-flux.txt
   pip_install -r /opt/conda/requirements-vlm.txt
+  pip_install -r /opt/conda/requirements-transformers-modeling-backend.txt
   popd
 }
 

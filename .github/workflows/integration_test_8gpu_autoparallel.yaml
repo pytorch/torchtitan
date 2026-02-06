@@ -1,0 +1,77 @@
+name: Auto Parallel 8 GPU Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - ciflow/8gpu/*
+    paths:
+      - 'torchtitan/experiments/autoparallel/**'
+      - '.github/workflows/integration_test_8gpu_autoparallel.yaml'
+  pull_request:
+    paths:
+      - 'torchtitan/experiments/autoparallel/**'
+      - '.github/workflows/integration_test_8gpu_autoparallel.yaml'
+  schedule:
+    # Runs every 12 hours
+    - cron: '0 */12 * * *'
+
+concurrency:
+  group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+permissions:
+      id-token: write
+      contents: read
+
+jobs:
+  # Step 1: Dynamically compute the matrix based on conditions
+  set-matrix:
+    uses: ./.github/workflows/set-matrix.yaml
+
+  # Step 2: Use the dynamic matrix in the build-test job
+  build-test:
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 45
+      script: |
+        set -eux
+
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        # Log GPU info / driver version for debugging.
+        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+          DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+          echo "CUDA driver version: ${DRIVER_VERSION}"
+        elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          echo "ROCm info:"
+          rocminfo || true
+        fi
+
+        pip config --user set global.progress_bar off
+
+        python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
+
+        # Install autoparallel - required dependency for autoparallel experiment
+        python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
+
+        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        python -m torchtitan.experiments.autoparallel.tests.integration_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
