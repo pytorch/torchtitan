@@ -20,7 +20,6 @@ import torch.distributed.tensor.parallel
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-
 from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
@@ -126,7 +125,6 @@ def set_determinism(
         # Ensure flex_attention is compiled without max-autotune. This is needed to ensure
         # reproducibility, since the autotune results may not be deterministic.
         from torch.nn.attention.flex_attention import flex_attention
-
         from torchtitan.models.attention import FlexAttentionWrapper
 
         FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
@@ -243,14 +241,14 @@ def get_train_context(enable_loss_parallel: bool) -> TrainContext:
 def maybe_enable_amp(
     parallel_dims: ParallelDims, mixed_precision_param: str, device_type: str
 ) -> contextlib.AbstractContextManager[None] | torch.autocast:
-    if parallel_dims.fsdp_enabled:
+    if parallel_dims.fsdp_enabled or parallel_dims.dp_replicate_enabled:
         # FSDP handles mixed precision internally
-        logger.info("Mixed precision training is handled by fully_shard")
+        logger.info("Mixed precision training is handled by fully_shard or replicate")
         return contextlib.nullcontext()
     else:
         if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
             logger.warning(
-                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP is enabled."
+                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP/replicate is enabled."
             )
             logger.info("Mixed precision training is disabled")
             return contextlib.nullcontext()
@@ -517,9 +515,7 @@ def _clip_grad_norm_with_ep(
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
+        total_norm = ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:
