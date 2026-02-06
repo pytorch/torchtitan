@@ -218,9 +218,6 @@ class TorchCommsParallelDims(ParallelDims):
             comm_per_dim,
         )
 
-        # Store communicators for cleanup (sub-comms first, root comm last)
-        self.comms = [*comm_per_dim.values(), comm]
-
         # Store world mesh
         self._world_mesh = device_mesh
 
@@ -249,5 +246,9 @@ class TorchCommsParallelDims(ParallelDims):
             f"Successfully created torchcomms meshes with dimensions: "
             f"{list(comm_per_dim.keys())}"
         )
+
+        # Call .finalize() in train.py after training but before destroying the process group
+        # to release sub-communicators before the root communicator.
+        self.comms = [*comm_per_dim.values(), comm]
 
         return device_mesh

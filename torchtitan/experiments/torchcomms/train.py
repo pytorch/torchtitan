@@ -25,6 +25,7 @@ class TorchCommsTrainer(Trainer):
 
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
+
         return TorchCommsParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
