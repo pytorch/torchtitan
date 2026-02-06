@@ -134,12 +134,16 @@ class TorchCommsParallelDims(ParallelDims):
         # Log active dimensions
         active_dims = [d for d in mesh_shape if d > 1]
         active_names = [name for d, name in zip(mesh_shape, mesh_dim_names) if d > 1]
-        logger.info(f"Building {len(active_dims)}-D device mesh with {active_names}, {active_dims}")
+        logger.info(
+            f"Building {len(active_dims)}-D device mesh with {active_names}, {active_dims}"
+        )
 
         # Initialize torchcomms communicators
         backend = os.environ["TEST_BACKEND"]
         device = torch.device("cuda")
-        mesh = torch.arange(self.world_size, dtype=torch.int, device="cpu").view(mesh_shape)
+        mesh = torch.arange(self.world_size, dtype=torch.int, device="cpu").view(
+            mesh_shape
+        )
 
         comm = torchcomms.new_comm(
             backend,
@@ -173,7 +177,9 @@ class TorchCommsParallelDims(ParallelDims):
                 for sub_comm in comm_per_dim.values():
                     sub_comm.finalize()
                 comm.finalize()
-                raise RuntimeError("Failed to init device mesh due to torchcomms API mismatch") from e
+                raise RuntimeError(
+                    "Failed to init device mesh due to torchcomms API mismatch"
+                ) from e
             raise
 
         # Create flattened mesh dimensions for compatibility with ParallelDims API
@@ -189,7 +195,9 @@ class TorchCommsParallelDims(ParallelDims):
                 "batch": ["dp_replicate", "dp_shard_mod_ep", "dp_shard_in_ep"],
                 "fsdp": ["dp_shard_mod_ep", "dp_shard_in_ep", "cp"],
                 "loss": ["dp_replicate", "dp_shard_mod_ep", "dp_shard_in_ep", "cp"],
-                "ep": ["dp_shard_in_ep", "cp"] if self.etp == self.tp else ["dp_shard_in_ep", "cp", "tp"],
+                "ep": ["dp_shard_in_ep", "cp"]
+                if self.etp == self.tp
+                else ["dp_shard_in_ep", "cp", "tp"],
             }
             reshape_sizes = [batch, fsdp, batch * self.cp, self.ep]
         else:
@@ -234,8 +242,16 @@ class TorchCommsParallelDims(ParallelDims):
 
         if self.ep > 1:
             self._meshes["ep"] = device_mesh["ep"]
-            self._meshes["efsdp"] = device_mesh["efsdp"] if "efsdp" in device_mesh.mesh_dim_names else device_mesh["dp_shard_mod_ep"]
-            self._meshes["etp"] = device_mesh["etp"] if "etp" in device_mesh.mesh_dim_names else device_mesh["tp"]
+            self._meshes["efsdp"] = (
+                device_mesh["efsdp"]
+                if "efsdp" in device_mesh.mesh_dim_names
+                else device_mesh["dp_shard_mod_ep"]
+            )
+            self._meshes["etp"] = (
+                device_mesh["etp"]
+                if "etp" in device_mesh.mesh_dim_names
+                else device_mesh["tp"]
+            )
         else:
             # Create fake meshes for EP-related dimensions when EP is not enabled
             self._meshes["ep"] = device_mesh["pp"]  # placeholder
