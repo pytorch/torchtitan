@@ -6,10 +6,7 @@
 
 import torch
 
-try:
-    from vllm.attention.layer import Attention
-except ModuleNotFoundError:
-    from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention
 
 
 class VLLMAttention(torch.nn.Module):
