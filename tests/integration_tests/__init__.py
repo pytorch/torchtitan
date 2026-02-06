@@ -24,6 +24,7 @@ class OverrideDefinitions:
     ngpu: int = 4
     disabled: bool = False
     skip_rocm_test: bool = False
+    determinism_test: bool = False  # Run twice and verify losses are identical
 
     def __repr__(self):
         return self.test_descr

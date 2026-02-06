@@ -55,6 +55,8 @@ import sys
 import unittest
 from typing import Any
 
+from torchtitan.tools.loss_utils import extract_losses_from_log
+
 # =============================================================================
 # GLOBAL CONFIGURATION
 # =============================================================================
@@ -172,21 +174,29 @@ def validate_arguments(
     assert_equal: bool,
     export_result: str | None,
     import_result: str | None,
+    run_to_run_determinism: bool = False,
 ) -> None:
     """Validate command line arguments."""
-    # Validate that we are comparing different settings
-    commits_differ = baseline_commit != test_commit
-    configs_differ = baseline_config != test_config
-    train_files_differ = baseline_train_file != test_train_file
-    options_differ = baseline_options != test_options
+    # Skip identical settings check for run-to-run determinism testing
+    if not run_to_run_determinism:
+        # Validate that we are comparing different settings
+        commits_differ = baseline_commit != test_commit
+        configs_differ = baseline_config != test_config
+        train_files_differ = baseline_train_file != test_train_file
+        options_differ = baseline_options != test_options
 
-    if not (commits_differ or configs_differ or train_files_differ or options_differ):
-        log_print("Error: All settings are identical")
-        log_print("       Cannot compare identical configurations")
-        log_print(
-            "       Please provide different commits, configs, train files, or options"
-        )
-        sys.exit(1)
+        if not (
+            commits_differ or configs_differ or train_files_differ or options_differ
+        ):
+            log_print("Error: All settings are identical")
+            log_print("       Cannot compare identical configurations")
+            log_print(
+                "       Please provide different commits, configs, train files, or options"
+            )
+            log_print(
+                "       Use --run-to-run-determinism to test identical config determinism"
+            )
+            sys.exit(1)
 
     # Validate steps is a positive integer
     if steps <= 0:
@@ -465,24 +475,6 @@ def run_training(
 # =============================================================================
 # LOG PROCESSING AND ANALYSIS
 # =============================================================================
-
-
-def extract_losses_from_log(log_file: str) -> dict[int, float]:
-    """Extract step and loss pairs from a log file."""
-    losses = {}
-    step_loss_pattern = re.compile(r"step:\s*(\d+)\s*loss:\s*(\d+\.\d+)")
-    ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
-
-    with open(log_file, "r") as f:
-        for line in f:
-            # Strip ANSI codes before matching
-            clean_line = ansi_escape.sub("", line)
-            match = step_loss_pattern.search(clean_line)
-            if match:
-                step, loss = match.groups()
-                losses[int(step)] = float(loss)
-
-    return losses
 
 
 def read_losses_from_file(loss_file: str) -> dict[int, float]:
@@ -925,6 +917,14 @@ Examples:
         default=8,
         help="Number of GPUs for test run (default: 8)",
     )
+    parser.add_argument(
+        "--run-to-run-determinism",
+        action="store_true",
+        help=(
+            "Test run-to-run determinism by running the same configuration twice. "
+            "Implies --assert-equal and skips validation that requires different settings."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -946,6 +946,16 @@ Examples:
     # Convert empty import_result to None
     if not args.import_result:
         args.import_result = None
+
+    # Handle run-to-run determinism mode
+    if args.run_to_run_determinism:
+        # Force assert_equal for determinism testing
+        args.assert_equal = True
+        # Use identical settings for both runs
+        args.test_options = args.baseline_options
+        args.test_config = args.baseline_config
+        args.test_train_file = args.baseline_train_file
+        args.test_ngpus = args.baseline_ngpus
 
     return args
 
@@ -1013,6 +1023,7 @@ def main() -> None:
         args.assert_equal,
         args.export_result,
         args.import_result,
+        args.run_to_run_determinism,
     )
 
     # Setup environment
