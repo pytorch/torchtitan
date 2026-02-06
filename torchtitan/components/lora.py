@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import Any, cast, Union
+from typing import Any, Callable, cast, Union
 
 import torch
 import torch.nn as nn
@@ -66,9 +66,6 @@ def create_lora_linear(parent_cls: type) -> type:
             self._init_weight()
 
         def _init_weight(self) -> None:
-            _super_init_weight = getattr(super(), "_init_weight", None)
-            if callable(_super_init_weight):
-                _super_init_weight()
             nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
             nn.init.zeros_(self.lora_b.weight)
 
@@ -104,6 +101,15 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
     return linear
 
 
+def _chain_fns(prev: Callable[[], None], curr: Callable[[], None]) -> Callable[[], None]:
+    """Chain two functions together."""
+    def combined() -> None:
+        prev()
+        curr()
+
+    return combined
+
+
 class LoRAConverter:
     """Converts a model to use LoRA adapters on all Linear layers."""
 
@@ -117,8 +123,7 @@ class LoRAConverter:
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
         """Recursively freeze params and replace Linear layers with LoRA equivalents."""
-        # Track parents that have LoRA children and need init_weights override
-        parents_with_lora: set[str] = set()
+        chained_init: Callable[[], None] = lambda: None
 
         # Freeze params and apply LoRA to all Linear layers
         for fqn, child in module.named_modules():
@@ -128,45 +133,26 @@ class LoRAConverter:
                 param.requires_grad_(False)
             if isinstance(child, nn.Linear):
                 apply_lora(child, self.rank, self.alpha)
-                # nn.linear may not call 'init_weights' to init, store their parents to
-                # set `init_weights`` later
-                if "." in fqn:
-                    parent_fqn = fqn.rsplit(".", 1)[0]
-                    parents_with_lora.add(parent_fqn)
-
-        for parent_fqn in parents_with_lora:
-            parent = module.get_submodule(parent_fqn)
-            self._override_parent_init_weights(parent)
-
-    def _override_parent_init_weights(self, module: nn.Module) -> None:
-        """Override init_weights on a parent module to reinit LoRA adapters after base init."""
-        original_init_weights = getattr(module, "init_weights", None)
-
-        def new_init_weights(*args: Any, **kwargs: Any) -> None:
-            # First, call original init_weights (inits base weights like wq, wk, wv, wo)
-            assert original_init_weights is not None and callable(original_init_weights)
-            original_init_weights(*args, **kwargs)
-
-            # Then, reinit LoRA adapters for all LoRA children
-            for name, child in module._modules.items():
-                if name in ("lora_a", "lora_b") or child is None:
-                    continue
                 _init_weight = getattr(child, "_init_weight", None)
                 if callable(_init_weight):
-                    _init_weight()
-                # Freeze base weights, keep LoRA trainable
-                if hasattr(child, "weight"):
-                    child.weight.requires_grad_(False)
-                if hasattr(child, "bias") and child.bias is not None:
-                    child.bias.requires_grad_(False)
-                lora_a = getattr(child, "lora_a", None)
-                lora_b = getattr(child, "lora_b", None)
-                if lora_a is not None:
-                    lora_a.weight.requires_grad_(True)
-                if lora_b is not None:
-                    lora_b.weight.requires_grad_(True)
+                    prev = chained_init
+                    curr = cast(Callable[[], None], _init_weight)
 
-        object.__setattr__(module, "init_weights", new_init_weights)
+                    def _chain(p: Callable[[], None] = prev, c: Callable[[], None] = curr) -> None:
+                        p()
+                        c()
+
+                    chained_init = _chain
+
+        # Override the main model's init_weights to also init LoRA weights
+        original_init_weights = getattr(module, "init_weights", None)
+
+        def new_model_init_weights(*args: Any, **kwargs: Any) -> None:
+            if original_init_weights is not None and callable(original_init_weights):
+                original_init_weights(*args, **kwargs)
+            chained_init()
+
+        object.__setattr__(module, "init_weights", new_model_init_weights)
 
     def post_optimizer_hook(self, model: Union[nn.Module, list[nn.Module]]) -> None:
         pass
