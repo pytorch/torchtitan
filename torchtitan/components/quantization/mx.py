@@ -57,7 +57,7 @@ class MXLinearConverter(QuantizationConverter):
             MXLinearConfig as TorchAOMXLinearConfig,
         )
 
-        mx_job_config: TorchAOMXLinearConfig = job_config.quantize.linear.mx
+        mx_job_config = job_config.quantize.linear.mx
         config = TorchAOMXLinearConfig.from_recipe_name(mx_job_config.recipe_name)
         config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             mx_job_config.mxfp8_dim1_cast_kernel_choice.upper()

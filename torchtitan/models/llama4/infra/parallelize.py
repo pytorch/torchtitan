@@ -36,6 +36,7 @@ from torchtitan.distributed.expert_parallel import (
     DeepEPExpertParallel,
     ExpertParallel,
     ExpertTensorParallel,
+    MXFP8ExpertParallel,
     ReordererSequenceParallel,
     TensorParallel,
 )
@@ -134,6 +135,10 @@ def parallelize_llama(
     else:
         use_deepep = False
 
+    use_mxfp8_a2a = (
+        "quantize.grouped_mm.mx" in job_config.model.converters
+        and job_config.quantize.grouped_mm.mx.recipe_name == "mxfp8_wgrad_with_hp"
+    )
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
 
@@ -145,6 +150,7 @@ def parallelize_llama(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
             use_deepep=use_deepep,
+            use_mxfp8_a2a=use_mxfp8_a2a,
         )
 
     attn_type = getattr(model.model_args, "attn_type", "sdpa")
@@ -505,8 +511,13 @@ def apply_moe_ep_tp(
     ep_etp_mesh: DeviceMesh | None,
     dual_pipe_v: bool = False,
     use_deepep: bool = False,
+    use_mxfp8_a2a: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
+    assert (use_deepep and not use_mxfp8_a2a) or (not use_deepep and use_mxfp8_a2a), (
+        'DeepEP and MXFP8 all-to-all (part of quantize.grouped_mm.mx.recipe_name="mxfp8_wgrad_with_hp") are not compatible. '
+        "Please choose one of them."
+    )
 
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
@@ -574,7 +585,12 @@ def apply_moe_ep_tp(
                 logger.info("Applying DeepEP to MoE layer")
             else:
                 # input / output sharding on the batch / tokens dim
-                experts_plan = ExpertParallel()
+                if use_mxfp8_a2a:
+                    logger.info("Applying MXFP8 Expert Parallelism to MoE")
+                    experts_plan = MXFP8ExpertParallel()
+                else:
+                    logger.info("Applying Expert Parallelism to MoE layer")
+                    experts_plan = ExpertParallel()
         else:
             experts_mesh = ep_etp_mesh
             experts_plan = ExpertTensorParallel()
