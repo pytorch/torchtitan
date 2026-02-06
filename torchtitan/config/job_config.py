@@ -988,10 +988,18 @@ class Debug:
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
 
     log_sharding_info: bool = False
-    """If True, logs DTensor sharding/mesh info for module inputs, params, outputs during one fwd/bwd pass."""
+    """
+    If True, logs DTensor sharding/mesh info for module inputs, params,
+    outputs during one fwd/bwd pass. Only the first step will recorded and
+    this flag should only be used for debugging purpose and should not
+    be enabled during the real training.
+    """
 
-    collapse_identical_layers: bool = True
-    """If True, collapse repeated layer modules with identical sharding patterns in the output."""
+    collapse_identical_layers: bool = False
+    """
+    If True, and log_sharding_info is True, collapse repeated layer modules with
+    with identical sharding patterns in the sharding log.
+    """
 
 
 @dataclass
