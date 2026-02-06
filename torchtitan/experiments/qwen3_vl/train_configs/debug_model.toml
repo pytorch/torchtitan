@@ -39,7 +39,7 @@ decay_type = "linear"
 min_lr_factor = 0.0
 
 [training]
-local_batch_size = 8
+local_batch_size = 32
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
 steps = 10
@@ -54,7 +54,7 @@ max_images_per_batch = 64
 packing_buffer_size = 100
 
 [compile]
-enable = false
+enable = true
 
 [parallelism]
 data_parallel_replicate_degree = 1
@@ -74,5 +74,4 @@ export_dtype = "float32"
 async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [activation_checkpoint]
-mode = "selective"  # ["none", "selective", "full"]
-selective_ac_option = '2'  # 'int' = ac every positive int layer or 'op', ac based on ops policy
+mode = "full"
