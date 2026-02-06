@@ -331,11 +331,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
         User-configurable HybridEP settings (from job_config.parallelism.hybridep):
         hybridep_capacity_factor: Buffer capacity multiplier for load imbalance (default: 1.0).
         hybridep_num_permuted_tokens: Pre-specified output size for non-blocking mode (default: None).
-        hybridep_pad_multiple: Pad output to a multiple of this value for MXFP8 (default: None).
-        
-        Model-specific HybridEP settings (set by model, not exposed to users):
-        hybridep_num_sms_dispatch: Number of SMs for dispatch kernel (default: 16).
-        hybridep_num_sms_combine: Number of SMs for combine kernel (default: 16).
     """
 
     def __init__(
@@ -345,10 +340,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
         # User-configurable HybridEP settings (from job_config.parallelism.hybridep)
         hybridep_capacity_factor: float = 1.0,
         hybridep_num_permuted_tokens: int | None = None,
-        hybridep_pad_multiple: int | None = None,
-        # Model-specific HybridEP settings (not exposed to users)
-        hybridep_num_sms_dispatch: int = 16,
-        hybridep_num_sms_combine: int = 16,
     ):
         super().__init__()
         self._state = None  # State preserved between dispatch and combine
@@ -358,9 +349,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
         # HybridEP-specific configuration
         self.hybridep_capacity_factor = hybridep_capacity_factor
         self.hybridep_num_permuted_tokens = hybridep_num_permuted_tokens
-        self.hybridep_pad_multiple = hybridep_pad_multiple
-        self.hybridep_num_sms_dispatch = hybridep_num_sms_dispatch
-        self.hybridep_num_sms_combine = hybridep_num_sms_combine
 
     def _token_dispatch(self, mod, inputs, device_mesh):
         """Dispatch tokens via DeepEP or HybridEP based on configured backend."""
@@ -371,22 +359,33 @@ class DeepEPExpertParallel(BaseExpertParallel):
             num_local_experts = mod.w1.shape[0]
         ep_group = device_mesh.get_group()
 
-        hidden_states, tokens_per_expert, self._state = dispatch_tokens(
-            hidden_states,
-            selected_experts_indices,
-            top_scores,
-            num_local_experts,
-            num_experts,
-            ep_group,
-            score_before_experts=self.score_before_experts,
-            backend=self.comm_backend,
-            # HybridEP-specific parameters (ignored for DeepEP)
-            num_permuted_tokens=self.hybridep_num_permuted_tokens,
-            capacity_factor=self.hybridep_capacity_factor,
-            num_sms_dispatch=self.hybridep_num_sms_dispatch,
-            num_sms_combine=self.hybridep_num_sms_combine,
-            pad_multiple=self.hybridep_pad_multiple,
-        )
+        # Dispatch tokens based on backend
+        if self.comm_backend == "hybridep":
+            from torchtitan.distributed.deepep import hybridep
+
+            hidden_states, tokens_per_expert, self._state = hybridep.dispatch_tokens(
+                hidden_states,
+                selected_experts_indices,
+                top_scores,
+                num_local_experts,
+                num_experts,
+                ep_group,
+                score_before_experts=self.score_before_experts,
+                num_permuted_tokens=self.hybridep_num_permuted_tokens,
+                capacity_factor=self.hybridep_capacity_factor,
+            )
+        else:
+            from torchtitan.distributed.deepep import deepep
+
+            hidden_states, tokens_per_expert, self._state = deepep.dispatch_tokens(
+                hidden_states,
+                selected_experts_indices,
+                top_scores,
+                num_local_experts,
+                num_experts,
+                ep_group,
+                score_before_experts=self.score_before_experts,
+            )
 
         return hidden_states, tokens_per_expert
 

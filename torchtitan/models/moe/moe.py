@@ -522,27 +522,25 @@ class MoE(nn.Module):
         # to "implicitly" overlap the shared expert compute with token combine communication
         out = self.shared_experts(x) if self.shared_experts is not None else None
 
-        # Unsort routed outputs
-        routed_output_unsorted = torch.zeros(
-            (bs * slen * self.router.top_k, dim),
-            dtype=routed_output.dtype,
-            device=routed_output.device,
-        )
-        routed_output_unsorted[token_indices_experts_sorted] = routed_output
-        routed_output_unsorted = routed_output_unsorted.reshape(
-            -1, self.router.top_k, dim
-        )
+        # Unsort routed outputs without materializing a dense (bs*slen*top_k, dim)
+        # buffer to reduce peak memory.
+        token_indices = token_indices_experts_sorted // self.router.top_k
         if not self.score_before_experts:
-            out_experts = (
-                torch.bmm(
-                    top_scores.reshape(-1, 1, self.router.top_k),
-                    routed_output_unsorted.float(),
-                )
-                .to(x.dtype)
-                .squeeze(1)
+            weighted = routed_output.float() * top_scores_experts_sorted.reshape(-1, 1)
+            out_experts = torch.zeros(
+                (bs * slen, dim),
+                dtype=weighted.dtype,
+                device=weighted.device,
             )
+            out_experts.index_add_(0, token_indices, weighted)
+            out_experts = out_experts.to(x.dtype)
         else:
-            out_experts = routed_output_unsorted.sum(dim=1)
+            out_experts = torch.zeros(
+                (bs * slen, dim),
+                dtype=routed_output.dtype,
+                device=routed_output.device,
+            )
+            out_experts.index_add_(0, token_indices, routed_output)
 
         if out is None:
             return out_experts.reshape(bs, slen, dim)

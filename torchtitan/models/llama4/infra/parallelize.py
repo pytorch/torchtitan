@@ -144,10 +144,8 @@ def parallelize_llama(
             dual_pipe_v=dual_pipe_v,
             comm_backend=comm_backend,
             # HybridEP configuration from job_config (only used when comm_backend="hybridep")
-            hybridep_capacity_factor=job_config.parallelism.hybridep.capacity_factor,
+            hybridep_capacity_factor=job_config.parallelism.hybridep.receive_tokens_ratio,
             hybridep_num_permuted_tokens=job_config.parallelism.hybridep.num_permuted_tokens,
-            hybridep_pad_multiple=job_config.parallelism.hybridep.pad_multiple,
-            # Model-specific SM settings (defaults are suitable for Llama4)
         )
 
     attn_type = getattr(model.model_args, "attn_type", "sdpa")
@@ -513,10 +511,6 @@ def apply_moe_ep_tp(
     # User-configurable (from job_config.parallelism.hybridep):
     hybridep_capacity_factor: float = 1.0,
     hybridep_num_permuted_tokens: int | None = None,
-    hybridep_pad_multiple: int | None = None,
-    # Model-specific (not exposed to users):
-    hybridep_num_sms_dispatch: int = 16,
-    hybridep_num_sms_combine: int = 16,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -586,10 +580,6 @@ def apply_moe_ep_tp(
                     # User-configurable settings (from job_config)
                     hybridep_capacity_factor=hybridep_capacity_factor,
                     hybridep_num_permuted_tokens=hybridep_num_permuted_tokens,
-                    hybridep_pad_multiple=hybridep_pad_multiple,
-                    # Model-specific settings (set by caller)
-                    hybridep_num_sms_dispatch=hybridep_num_sms_dispatch,
-                    hybridep_num_sms_combine=hybridep_num_sms_combine,
                 )
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
             else:
@@ -698,6 +688,12 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                 x: torch.Tensor,
                 num_tokens_per_expert: torch.Tensor,
             ) -> torch.Tensor:
+                # CUTLASS grouped_mm handles 0-token experts fine at runtime,
+                # but torch.compile's meta registration doesn't handle zero-size
+                # tensors (strides (0,0) error). Skip compilation in that case.
+                # TODO: remove once PyTorch fixes _meta_grouped_mm_common.
+                if x.shape[0] == 0:
+                    return x
                 # dynamic number of tokens in expert parallel
                 torch._dynamo.mark_dynamic(x, 0)
                 return compiled_fn(w1, w2, w3, x, num_tokens_per_expert)

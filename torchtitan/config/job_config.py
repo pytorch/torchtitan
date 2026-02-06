@@ -307,15 +307,23 @@ class HybridEPConfig:
     Only effective when expert_parallel_comm_backend="hybridep".
     """
 
-    capacity_factor: float = 1.0
+    receive_tokens_ratio: float = 1.0
     """
-    Buffer capacity multiplier: buffer_size = num_tokens × capacity_factor.
+    Ratio of max received tokens to local tokens per rank.
+    Reserves all-to-all communication buffers. The buffer must be large enough
+    to hold the maximum number of tokens any single EP rank may receive after
+    dispatch. If the buffer is too small, it causes illegal memory access (IMA).
+    
+    In balanced routing each rank receives num_tokens × top_k tokens
+    (the EP_degree cancels out), so the minimum safe value equals top_k.
     
     Bounds:
-    - Lower: 1.0 (minimum for balanced routing)
-    - Upper: EP group size (maximum useful value)
+    - Lower: 1.0 (balanced routing, no headroom)
+    - Upper: EP_degree (absolute worst case: all tokens to one rank)
     
-    Example: use 1.0 (balanced) to 1.25 (25% headroom).
+    Recommendation: 1.5 (50% headroom for load imbalance).
+    With auxiliary-loss-free load balancing, routing stabilizes quickly
+    and top_k × 1.0-1.5 is typically sufficient.
     """
 
     num_permuted_tokens: int | None = None
@@ -327,11 +335,6 @@ class HybridEPConfig:
     If None, uses blocking mode with D2H for sizing.
     """
 
-    pad_multiple: int | None = None
-    """
-    Pad dispatch output to this multiple for MXFP8 alignment.
-    Use 32 for MXFP8 quantization, None to disable.
-    """
 
 
 @dataclass

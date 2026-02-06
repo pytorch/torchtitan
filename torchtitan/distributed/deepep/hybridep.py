@@ -10,12 +10,11 @@ HybridEP: Expert Parallel Communication for GB200 NVLink72 Systems.
 Provides efficient token dispatch/combine for MoE training via TMA-optimized all-to-all.
 
 Configuration (via job_config.parallelism.hybridep):
-    capacity_factor: Buffer multiplier (must be >= top_k, upper bound is EP group size)
+    receive_tokens_ratio: Buffer multiplier (must be >= 1.0, upper bound is EP group size)
     num_permuted_tokens: Output buffer size for CPU-free non-blocking mode. This must be
         large enough to hold all tokens that may be received after dispatch. If the buffer
         is too small, tokens will be silently dropped and handle.overflow_flag will be True.
         (Older HybridEP versions would cause illegal memory access errors instead.)
-    pad_multiple: Alignment for MXFP8 (typically 32)
 
 Reference: https://github.com/deepseek-ai/DeepEP
 """
@@ -24,60 +23,62 @@ from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from torch.distributed import ProcessGroup
+from torch._library.opaque_object import (
+    OpaqueBase,
+    register_opaque_type,
+    get_opaque_type_name,
+)
 
 
-# Module state
 _hybrid_ep_cls: Any = None  # Lazily-loaded HybridEPBuffer class
 _buffer: Any = None  # Global buffer instance
-_buffer_config: dict = {}  # Config for reinit detection
-_handle_cache: dict = {}  # cache_id → dispatch handle
-_cache_counter: int = 0  # Unique ID generator
+
+
+class DispatchHandle(OpaqueBase):
+    """Opaque wrapper for HybridEP dispatch handle.
+
+    Wraps the deep_ep dispatch handle as an opaque type so it can be returned
+    from custom ops and flow through the torch.compile graph, eliminating
+    the need for a global handle cache.
+    """
+
+    def __init__(self, value=None):
+        self.value = value
+
+    def __eq__(self, other):
+        if not isinstance(other, DispatchHandle):
+            return False
+        return self.value is other.value
+
+    def __hash__(self):
+        if self.value is None:
+            return 0
+        try:
+            return hash(self.value)
+        except TypeError:
+            return id(self.value)
+
+    def __fx_repr__(self):
+        return "DispatchHandle()", {"DispatchHandle": DispatchHandle}
+
+
+register_opaque_type(DispatchHandle, typ="value")
 
 
 @dataclass
 class DispatchState:
     """State from dispatch needed for combine.
-    
+
     Attributes:
-        cache_id: CPU tensor cache key (avoids GPU-CPU sync).
-        num_recv_tokens: Actual tokens received (before padding).
+        handle: Opaque dispatch handle wrapping the deep_ep handle.
         permuted_scores: Scores for score_before_experts=False mode.
-        num_permuted_tokens: Buffer size for grouped_mm. When set, enables
-            CPU-free non-blocking mode for CUDA graph compatibility.
-            
-    Note:
-        The dispatch handle (cached internally) contains an overflow_flag that
-        indicates if num_permuted_tokens was too small and tokens were dropped.
-        Current HybridEP silently drops excess tokens; older versions caused IMA errors.
+        num_tokens: Original input token count (for combine fake shape inference).
     """
-    cache_id: torch.Tensor
-    num_recv_tokens: int
+
+    handle: DispatchHandle
     permuted_scores: Optional[torch.Tensor] = None
-    num_permuted_tokens: Optional[int] = None
-
-
-def _get_next_cache_id() -> torch.Tensor:
-    """Generate unique cache_id as CPU tensor (avoids GPU-CPU sync)."""
-    global _cache_counter
-    _cache_counter += 1
-    return torch.tensor([_cache_counter], dtype=torch.int64, device="cpu")
-
-
-def _cache_handle(cache_id: torch.Tensor, handle: Any) -> None:
-    """Store dispatch handle in cache."""
-    _handle_cache[cache_id.item()] = handle
-
-
-def _get_cached_handle(cache_id_int: int) -> Any:
-    """Retrieve dispatch handle from cache."""
-    return _handle_cache.get(cache_id_int)
-
-
-def _pop_cached_handle(cache_id_int: int) -> None:
-    """Remove dispatch handle from cache (lenient if missing)."""
-    _handle_cache.pop(cache_id_int, None)
+    num_tokens: int = 0
 
 
 def _preprocess_inputs(
@@ -86,7 +87,7 @@ def _preprocess_inputs(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Normalize inputs: ensure 2D, contiguous, float32 scores, mask invalid."""
     top_k = indices.shape[1] if indices.dim() == 2 else 1
-    
+
     if indices.dim() != 2:
         indices = indices.view(-1, top_k).contiguous()
         scores = scores.view(-1, top_k).contiguous()
@@ -97,16 +98,6 @@ def _preprocess_inputs(
     indices = indices.masked_fill(scores == 0, -1)
     scores = scores.float() if scores.dtype != torch.float32 else scores
     return indices, scores
-
-
-def _pad_to_multiple(tensor: torch.Tensor, multiple: int) -> torch.Tensor:
-    """Pad tensor's first dimension to nearest multiple using F.pad (memory efficient)."""
-    size = tensor.shape[0]
-    if size % multiple == 0:
-        return tensor
-    pad_size = multiple - (size % multiple)
-    # F.pad pads from last dim backwards; for [N, H], pad format is (0, 0, 0, pad_size)
-    return F.pad(tensor, (0, 0, 0, pad_size))
 
 
 def _apply_scores(
@@ -137,28 +128,34 @@ def _require_hybridep() -> Any:
 
 
 # Custom op registration for torch.compile and SAC compatibility
-_lib = torch.library.Library("hybridep", "DEF")
+_handle_type = get_opaque_type_name(DispatchHandle)
 
-_lib.define(
-    "dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, int num_experts, "
-    "int? num_permuted_tokens) -> (Tensor, Tensor, Tensor, Tensor)"
+torch.library.define(
+    "hybridep::dispatch",
+    f"(Tensor x, Tensor topk_idx, Tensor topk_weights, int num_experts, "
+    f"int? num_permuted_tokens) -> (Tensor, Tensor, Tensor, {_handle_type})",
 )
 
-_lib.define("combine(Tensor x, Tensor cache_id) -> Tensor")
+torch.library.define(
+    "hybridep::combine",
+    f"(Tensor x, {_handle_type} handle, int num_tokens) -> Tensor",
+)
 
 
-@torch.library.impl(_lib, "dispatch", "CUDA")
+@torch.library.impl("hybridep::dispatch", "CUDA")
 def _dispatch_impl(
     x: torch.Tensor,
     topk_idx: torch.Tensor,
     topk_weights: torch.Tensor,
     num_experts: int,
     num_permuted_tokens: Optional[int] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
     """CUDA dispatch: convert sparse routing to dense, call TMA-optimized all-to-all."""
     global _buffer
     if _buffer is None:
-        raise RuntimeError("HybridEP buffer not initialized. Call dispatch_tokens() first.")
+        raise RuntimeError(
+            "HybridEP buffer not initialized. Call dispatch_tokens() first."
+        )
 
     num_local_experts = num_experts // _buffer.group_size
     from deep_ep.hybrid_ep_buffer import indices_to_map
@@ -167,107 +164,171 @@ def _dispatch_impl(
         topk_idx, topk_weights.float(), x.shape[0], num_experts
     )
 
+    # MXFP8 requires per-expert-group padding to multiples of 32 (scaling block size).
+    # HybridEP's kernel handles this natively via pad_multiple.
+    from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
+    from torchtitan.models.moe.utils import TOKEN_GROUP_ALIGN_SIZE_M
+
+    pad_multiple = (
+        MXFP8_GROUP_ALIGNMENT_SIZE
+        if TOKEN_GROUP_ALIGN_SIZE_M == MXFP8_GROUP_ALIGNMENT_SIZE
+        else None
+    )
+
     hidden, scores, _, tokens_per_expert, handle = _buffer.dispatch_with_permute(
         hidden=x,
         routing_map=routing_map,
         probs=probs,
         scaling_factor=None,
         num_of_experts_per_rank=num_local_experts,
-        pad_multiple=None,
+        pad_multiple=pad_multiple,
         num_permuted_tokens=num_permuted_tokens,
         non_blocking=num_permuted_tokens is not None,
     )
 
-    cache_id = _get_next_cache_id()
-    _cache_handle(cache_id, handle)
+    if num_permuted_tokens is not None:
+        overflow_detected = False
+
+        if hasattr(handle, "overflow_flag"):
+            overflow_flag = handle.overflow_flag
+            if isinstance(overflow_flag, torch.Tensor):
+                overflow_detected = overflow_flag.item()
+            else:
+                overflow_detected = bool(overflow_flag)
+      
+        elif hidden.shape[0] == num_permuted_tokens:
+            expected_tokens = tokens_per_expert.sum().item()
+            overflow_detected = expected_tokens > hidden.shape[0]
+
+        if overflow_detected:
+            num_tokens = x.shape[0]  # = local_batch_size × seq_len
+            top_k = topk_idx.shape[1] if topk_idx.dim() == 2 else 1
+            expected_tokens = tokens_per_expert.sum().item()
+            actual_tokens = hidden.shape[0]
+            recommended = int(num_tokens * top_k * 1.5)
+            raise RuntimeError(
+                f"HybridEP buffer overflow: num_permuted_tokens={num_permuted_tokens} is too small.\n"
+                f"Tokens were silently dropped, which would cause incorrect training.\n\n"
+                f"Details:\n"
+                f"  - Input tokens per rank (local_batch_size × seq_len): {num_tokens}\n"
+                f"  - top_k: {top_k}\n"
+                f"  - Expected tokens after dispatch: {expected_tokens}\n"
+                f"  - Buffer size (num_permuted_tokens): {num_permuted_tokens}\n"
+                f"  - Tokens dropped: {expected_tokens - actual_tokens}\n\n"
+                f"Fix: Increase num_permuted_tokens in your config:\n"
+                f"  --parallelism.hybridep.num_permuted_tokens={recommended}\n\n"
+                f"Formula: (local_batch_size × seq_len) × top_k × receive_tokens_ratio\n"
+                f"         {num_tokens} × {top_k} × 1.5 = {recommended}\n\n"
+                f"Note: The ep_degree cancels out in the math, so the formula is independent of EP size.\n"
+                f"Alternatively, set to None for dynamic sizing."
+            )
 
     if scores is None:
         scores = torch.empty(0, device=x.device, dtype=torch.float32)
     if tokens_per_expert.device != x.device:
         tokens_per_expert = tokens_per_expert.to(x.device)
 
-    return hidden, scores, tokens_per_expert, cache_id
+    return hidden, scores, tokens_per_expert, DispatchHandle(value=handle)
 
 
-@torch.library.impl(_lib, "combine", "CUDA")
-def _combine_impl(x: torch.Tensor, cache_id: torch.Tensor) -> torch.Tensor:
-    """CUDA combine: reverse dispatch permutation via cached handle."""
+@torch.library.register_fake("hybridep::dispatch")
+def _dispatch_fake(
+    x: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    num_experts: int,
+    num_permuted_tokens: Optional[int] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
+    """Fake dispatch for torch.compile tracing."""
+    if num_permuted_tokens is not None:
+        out_tokens = num_permuted_tokens
+    else:
+        out_tokens = x.shape[0]
+    hidden = x.new_empty(out_tokens, x.shape[1])
+    scores = x.new_empty(0, dtype=torch.float32)
+    # _buffer is guaranteed initialized: get_buffer() runs before this op is called.
+    num_local_experts = num_experts // _buffer.group_size
+    tpe = x.new_empty(num_local_experts, dtype=torch.int64)
+    return hidden, scores, tpe, DispatchHandle()
+
+
+@torch.library.impl("hybridep::combine", "CUDA")
+def _combine_impl(
+    x: torch.Tensor, handle: DispatchHandle, num_tokens: int
+) -> torch.Tensor:
+    """CUDA combine: reverse dispatch permutation via opaque handle."""
     global _buffer
     if _buffer is None:
         raise RuntimeError("HybridEP buffer not initialized.")
 
-    # In inference mode, setup_context doesn't run, so we clean up handle_cache here.
-    # NOTE: For inference, use torch.inference_mode() instead of torch.no_grad()
-    if torch.is_inference_mode_enabled():
-        handle = _handle_cache.pop(cache_id.item(), None)
-    else:
-        handle = _get_cached_handle(cache_id.item())
-    if handle is None:
-        raise RuntimeError(f"Handle not found for cache_id={cache_id.item()}")
-
-    combined, _ = _buffer.combine_with_unpermute(hidden=x, handle=handle)
+    combined, _ = _buffer.combine_with_unpermute(hidden=x, handle=handle.value)
     return combined
 
 
-def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_cid):
+@torch.library.register_fake("hybridep::combine")
+def _combine_fake(
+    x: torch.Tensor, handle: DispatchHandle, num_tokens: int
+) -> torch.Tensor:
+    """Fake combine for torch.compile tracing."""
+    return x.new_empty(num_tokens, x.shape[1])
+
+
+def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
     """Backward: gather gradients via combine."""
     if grad_hidden is None:
         return None, None, None, None, None
 
-    handle = ctx.saved_handle
-    if handle is None:
-        raise RuntimeError(f"Handle not found in dispatch backward")
+    dispatch_handle = ctx.dispatch_handle
+    if dispatch_handle is None or dispatch_handle.value is None:
+        raise RuntimeError("DispatchHandle not found in dispatch backward")
 
     (topk_idx,) = ctx.saved_tensors
-    grad_x, grad_s = _buffer.combine_with_unpermute(
+    grad_x, grad_probs_dense = _buffer.combine_with_unpermute(
         hidden=grad_hidden,
         probs=grad_scores if grad_scores is not None and grad_scores.numel() > 0 else None,
-        handle=handle,
-        pad_multiple=ctx.pad_multiple,
+        handle=dispatch_handle.value,
     )
-    _pop_cached_handle(ctx.cache_id_int)
     grad_x = grad_x.to(ctx.input_dtype)
 
-    grad_weights = grad_s.gather(dim=1, index=topk_idx) if grad_s is not None else None
+    # grad_probs_dense is [num_tokens, num_experts]; gather back to sparse [num_tokens, top_k]
+    grad_weights = (
+        grad_probs_dense.gather(dim=1, index=topk_idx)
+        if grad_probs_dense is not None
+        else None
+    )
     return grad_x, None, grad_weights, None, None
 
 
 def _dispatch_setup_context(ctx, inputs, output):
     """Save context for dispatch backward."""
     x, topk_idx, _, _, _ = inputs
-    recv_x, _, _, cache_id = output
-    ctx.cache_id_int = cache_id.item()
+    _, _, _, dispatch_handle = output
+    ctx.dispatch_handle = dispatch_handle
     ctx.input_dtype = x.dtype
-    ctx.pad_multiple = None
-    ctx.num_permuted_tokens = recv_x.shape[0]
     ctx.save_for_backward(topk_idx)
-    ctx.saved_handle = _get_cached_handle(ctx.cache_id_int)
 
 
 def _combine_backward(ctx, grad_combined):
     """Backward: scatter gradients via dispatch."""
-    handle = ctx.saved_handle
-    if handle is None:
-        raise RuntimeError(f"Handle not found in combine backward")
+    dispatch_handle = ctx.dispatch_handle
+    if dispatch_handle is None or dispatch_handle.value is None:
+        raise RuntimeError("DispatchHandle not found in combine backward")
 
     grad_x, _, _, _, _ = _buffer.dispatch_with_permute(
         hidden=grad_combined,
         scaling_factor=None,
-        handle=handle,
-        pad_multiple=ctx.pad_multiple,
+        handle=dispatch_handle.value,
         num_permuted_tokens=ctx.num_permuted_tokens,
     )
-    _pop_cached_handle(ctx.cache_id_int)
-    return grad_x, None
+    # Gradients: x, handle, num_tokens
+    return grad_x, None, None
 
 
 def _combine_setup_context(ctx, inputs, output):
     """Save context for combine backward."""
-    x, cache_id = inputs
-    ctx.cache_id_int = cache_id.item()
-    ctx.pad_multiple = None
+    x, dispatch_handle, _num_tokens = inputs
+    ctx.dispatch_handle = dispatch_handle
     ctx.num_permuted_tokens = x.shape[0]
-    ctx.saved_handle = _get_cached_handle(ctx.cache_id_int)
 
 
 torch.library.register_autograd(
@@ -278,30 +339,31 @@ torch.library.register_autograd(
 )
 
 
+_NUM_SMS_DISPATCH = 16
+_NUM_SMS_COMBINE = 16
+
+
 def get_buffer(
     group: ProcessGroup,
     hidden_dim: int,
     num_tokens: int,
     num_local_experts: int,
-    top_k: int = 1,
     capacity_factor: float = 1.0,
-    num_sms_dispatch: int = 16,
-    num_sms_combine: int = 16,
     fp8_dispatch: bool = False,
-) -> Any:
-    """Get or create HybridEP buffer, reinitializing if config changed.
-    
+) -> None:
+    """Ensure the global HybridEP buffer is initialized, reinitializing if config changed.
+
     Buffer is sized as: max_tokens = num_tokens × capacity_factor
-    
+
     Args:
         capacity_factor: Must be >= top_k (lower bound) for balanced routing.
             Upper bound is EP group size. Higher values handle load imbalance.
     """
-    global _buffer, _buffer_config
+    global _buffer
 
     if fp8_dispatch:
         raise AssertionError("HybridEP FP8 dispatch not yet supported")
-        
+
     HybridEPBuffer = _require_hybridep()
     max_tokens = int(num_tokens * capacity_factor)
 
@@ -311,27 +373,18 @@ def get_buffer(
         or _buffer.config.hidden_dim < hidden_dim
         or _buffer.config.max_num_of_tokens_per_rank < max_tokens
         or _buffer.config.num_of_experts_per_rank < num_local_experts
-        or _buffer_config.get("num_sms_dispatch") != num_sms_dispatch
-        or _buffer_config.get("num_sms_combine") != num_sms_combine
     )
 
     if needs_reinit:
-        _handle_cache.clear()
         _buffer = HybridEPBuffer(
             group=group,
             hidden_dim=hidden_dim,
             max_num_of_tokens_per_rank=max_tokens,
             num_local_experts=num_local_experts,
             use_fp8=fp8_dispatch,
-            num_sms_dispatch_api=num_sms_dispatch,
-            num_sms_combine_api=num_sms_combine,
+            num_sms_dispatch_api=_NUM_SMS_DISPATCH,
+            num_sms_combine_api=_NUM_SMS_COMBINE,
         )
-        _buffer_config = {
-            "num_sms_dispatch": num_sms_dispatch,
-            "num_sms_combine": num_sms_combine,
-        }
-
-    return _buffer
 
 
 def dispatch_tokens(
@@ -344,12 +397,9 @@ def dispatch_tokens(
     score_before_experts: bool = True,
     num_permuted_tokens: Optional[int] = None,
     capacity_factor: float = 1.0,
-    num_sms_dispatch: int = 16,
-    num_sms_combine: int = 16,
-    pad_multiple: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via HybridEP all-to-all.
-    
+
     Args:
         hidden_states: [num_tokens, hidden_dim]
         selected_experts_indices: [num_tokens, top_k]
@@ -360,17 +410,16 @@ def dispatch_tokens(
         score_before_experts: Apply scores before expert computation
         num_permuted_tokens: Pre-allocated output buffer size for grouped_mm.
             When set, enables CPU-free non-blocking mode for CUDA graphs.
-            
+
             IMPORTANT: This buffer must be large enough to hold all tokens that may
             be received after the all-to-all dispatch. If the buffer is too small:
             - Current HybridEP: Silently drops excess tokens, sets handle.overflow_flag=True
             - Older HybridEP: Causes illegal memory access (IMA) errors
-            
+
             To size correctly, consider: num_tokens * top_k * capacity_factor / ep_degree,
             accounting for potential load imbalance across experts.
         capacity_factor: Buffer multiplier (>= top_k, <= EP group size)
-        pad_multiple: Pad output for MXFP8 alignment (e.g., 32)
-    
+
     Returns:
         (permuted_hidden, tokens_per_expert, state)
     """
@@ -382,52 +431,43 @@ def dispatch_tokens(
         hidden_dim=hidden_states.shape[1],
         num_tokens=hidden_states.shape[0],
         num_local_experts=num_local_experts,
-        top_k=top_k,
         capacity_factor=capacity_factor,
-        num_sms_dispatch=num_sms_dispatch,
-        num_sms_combine=num_sms_combine,
     )
 
-    hidden, permuted_scores, tokens_per_expert, cache_id = torch.ops.hybridep.dispatch(
-        hidden_states, indices, scores, num_experts, num_permuted_tokens
+    hidden, permuted_scores, tokens_per_expert, dispatch_handle = (
+        torch.ops.hybridep.dispatch(
+            hidden_states, indices, scores, num_experts, num_permuted_tokens
+        )
     )
 
     hidden, permuted_scores = _apply_scores(hidden, permuted_scores, score_before_experts)
-    num_recv = hidden.shape[0]
-    num_padded = None
-
-    if pad_multiple is not None and pad_multiple > 1:
-        hidden = _pad_to_multiple(hidden, pad_multiple)
-        num_padded = hidden.shape[0]
-        if permuted_scores is not None:
-            permuted_scores = _pad_to_multiple(permuted_scores, pad_multiple)
+    if permuted_scores is not None and permuted_scores.dtype != hidden.dtype:
+        # Avoid extra cast allocation during combine.
+        permuted_scores = permuted_scores.to(hidden.dtype)
 
     state = DispatchState(
-        cache_id=cache_id,
-        num_recv_tokens=num_recv,
+        handle=dispatch_handle,
         permuted_scores=permuted_scores,
-        num_permuted_tokens=num_padded,
+        num_tokens=hidden_states.shape[0],
     )
     return hidden, tokens_per_expert, state
 
 
 def combine_tokens(hidden_states: torch.Tensor, state: DispatchState) -> torch.Tensor:
     """Combine expert outputs back to original token order.
-    
-    Removes padding if applied, applies deferred scores, then unpermutes.
+
+    Applies deferred scores (if any), then unpermutes via the opaque dispatch handle.
     """
-    # Remove padding
-    if state.num_permuted_tokens is not None:
-        hidden_states = hidden_states[:state.num_recv_tokens]
-        scores = state.permuted_scores[:state.num_recv_tokens] if state.permuted_scores is not None else None
-    else:
-        scores = state.permuted_scores
+    if state.permuted_scores is not None:
+        # In-place to reduce peak memory during recompute.
+        hidden_states.mul_(state.permuted_scores.reshape(-1, 1))
 
-    # Apply deferred scores
-    if scores is not None:
-        hidden_states = hidden_states * scores.to(hidden_states.dtype).reshape(-1, 1)
-
-    return torch.ops.hybridep.combine(hidden_states, state.cache_id)
+    return torch.ops.hybridep.combine(hidden_states, state.handle, state.num_tokens)
 
 
-__all__ = ["dispatch_tokens", "combine_tokens", "get_buffer", "DispatchState"]
+__all__ = [
+    "dispatch_tokens",
+    "combine_tokens",
+    "DispatchState",
+    "DispatchHandle",
+]

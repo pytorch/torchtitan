@@ -131,12 +131,8 @@ def parallelize_deepseekv3(
             dual_pipe_v=dual_pipe_v,
             comm_backend=comm_backend,
             # HybridEP configuration from job_config (only used when comm_backend="hybridep")
-            hybridep_capacity_factor=job_config.parallelism.hybridep.capacity_factor,
+            hybridep_capacity_factor=job_config.parallelism.hybridep.receive_tokens_ratio,
             hybridep_num_permuted_tokens=job_config.parallelism.hybridep.num_permuted_tokens,
-            hybridep_pad_multiple=job_config.parallelism.hybridep.pad_multiple,
-            # Model-specific SM settings for DeepSeek V3
-            hybridep_num_sms_dispatch=16,
-            hybridep_num_sms_combine=16,
         )
 
     if parallel_dims.cp_enabled:
