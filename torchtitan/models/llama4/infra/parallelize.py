@@ -639,10 +639,6 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                     # by wrapping each submod's forward instead of their __call__
                     moe = submod
                     for attr_name, submod in moe.named_children():
-                        if attr_name == "experts":
-                            # NOTE: We don't compile token dispatch and token combine due to an issue on B200:
-                            # https://github.com/pytorch/torchtitan/issues/1940
-                            continue
                         setattr(
                             moe,
                             attr_name,

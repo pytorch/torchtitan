@@ -757,7 +757,17 @@ class Float8GroupedMM:
 
 @dataclass
 class MXLinear:
-    mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
+    mxfp8_dim0_cast_kernel_choice: Literal["triton", "torch"] = "triton"
+    """
+    Temp work around for inductor performance gap.
+
+    * triton is recommended for best performance for recipe "mxfp8_cublas_rceil" (rceil scale rounding mode)
+    * torch is recommended for best performance for recipe "mxfp8_cublas" (floor scale rounding mode)
+
+    Example: --quantize.linear.mx.mxfp8_dim0_cast_kernel_choice="torch"
+    """
+
+    mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "cuda"
     """
     Temp work around for inductor performance gap.
 
