@@ -91,14 +91,14 @@ jobs:
           exit 1
         fi
 
-        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --export-result="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs/result.txt" --steps=100
+        python -m scripts.loss_compare . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --export-result="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs/result.txt" --steps=100
 
          echo "Checking FSDP8 the first tep loss is the same as FSDP2HSDP4"
-        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal --steps=1
+        python -m scripts.loss_compare . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal --steps=1
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
          echo "Checking FSDP8 loss from a new run v.s. FSDP8 loss from text file parity"
-        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --import-result="${LOSS_FILE}" --assert-equal --steps=100
+        python -m scripts.loss_compare . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --import-result="${LOSS_FILE}" --assert-equal --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8

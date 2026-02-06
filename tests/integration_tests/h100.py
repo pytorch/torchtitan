@@ -42,6 +42,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ],
             "Float8 test",
             "float8",
+            determinism_test=True,
         ),
         # TODO: re-enable this test once the async TP issue is fixed
         OverrideDefinitions(
@@ -77,6 +78,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "HSDP+CP+torch.compile+Float8",
             "hsdp+cp+compile+float8",
             ngpu=8,
+            determinism_test=True,
         ),
     ]
     return integration_tests_flavors
