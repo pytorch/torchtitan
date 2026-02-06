@@ -25,7 +25,6 @@ class TorchCommsTrainer(Trainer):
 
         world_size = int(os.environ["WORLD_SIZE"])
         parallelism_config = job_config.parallelism
-
         return TorchCommsParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
@@ -40,8 +39,7 @@ class TorchCommsTrainer(Trainer):
     def close(self) -> None:
         # Call finalize on all comms after training and before destroying process group.
         if hasattr(self, "parallel_dims"):
-            for comm in self.parallel_dims.comms:
-                comm.finalize()
+            self.parallel_dims.finalize_comms()
         super().close()
 
 
