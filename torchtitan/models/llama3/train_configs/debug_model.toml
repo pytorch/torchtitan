@@ -20,7 +20,7 @@ enable_wandb = false
 [model]
 name = "llama3"
 flavor = "debugmodel"
-# test folder with tokenizer.json, for debug purpose only
+# test folder with tokenizer.json, for debug purpose onl
 hf_assets_path = "./tests/assets/tokenizer"
 # converters = ["float8"]
 
