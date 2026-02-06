@@ -159,13 +159,13 @@ def build_lr_schedulers(
             assert (
                 warmup_steps != 0
             ), "warmup_steps must not be zero to reach this branch"
-            curr_adjustment = float(current_step) / float(warmup_steps)
+            curr_adjustment = float(current_step / warmup_steps)
         elif current_step < warmup_stable_steps:
             curr_adjustment = 1.0
         else:
             # Decay phase (0-indexed to match FSDP/HuggingFace)
             assert decay_steps != 0, "decay_steps must not be zero to reach this branch"
-            progress = float(current_step - warmup_stable_steps) / float(decay_steps)
+            progress = float(current_step - warmup_stable_steps) / decay_steps
 
             if lr_decay_type == "linear":
                 curr_adjustment = 1 - progress

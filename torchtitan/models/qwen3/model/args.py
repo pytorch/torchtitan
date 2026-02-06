@@ -36,8 +36,8 @@ class Qwen3ModelArgs(BaseModelArgs):
     max_seq_len: int = 4096
     depth_init: bool = True
 
-    attn_type: str = "flex"
-    attn_mask_type: str = "document_mask"
+    attn_type: str = "sdpa"
+    attn_mask_type: str = "causal"
     eos_id: int = 151645
 
     enable_weight_tying: bool = False

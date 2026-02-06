@@ -295,6 +295,10 @@ def init_distributed(
 ) -> int:
     # Skip initialization if already initialized
     if torch.distributed.is_initialized():
+        logger.warning(
+            "torch.distributed is already initialized. Skipping init_distributed. "
+            "The provided comm_config and other settings will not take effect."
+        )
         return torch.distributed.get_world_size()
 
     if comm_config.mode in ("fake_backend", "local_tensor"):

@@ -31,9 +31,11 @@ __all__ = [
     "VarlenMetadata",
     "get_causal_mask_mod",
     "get_document_mask_mod",
+    "get_document_mask_mod_from_positions",
     "get_sliding_window_mask_mod",
     "get_fixed_block_mask_mod",
     "create_attention_mask",
+    "create_sdpa_document_causal_mask",
 ]
 
 
@@ -185,25 +187,19 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
         *,
         scale: float | None = None,
         enable_gqa: bool = False,
-<<<<<<< HEAD
-        is_casual: bool = True,
-=======
+        is_causal: bool = True,
         attn_mask: torch.Tensor | None = None,
->>>>>>> 87b7210b (verl integration changes)
     ) -> torch.Tensor:
-        import torch.distributed as dist
-        # Use is_causal=True only if no explicit mask is provided
-        is_causal = attn_mask is None
-        if dist.is_initialized() and dist.get_rank() == 0:
-            print(f"DEBUG TITAN SDPA wrapper: scale={scale}, is_causal={is_causal}, enable_gqa={enable_gqa}, attn_mask={attn_mask}, backends={self.sdpa_backends}")
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
-<<<<<<< HEAD
             return F.scaled_dot_product_attention(
-                q, k, v, scale=scale, is_causal=is_casual, enable_gqa=enable_gqa
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                scale=scale,
+                is_causal=is_causal,
+                enable_gqa=enable_gqa,
             )
-=======
-            return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal, enable_gqa=enable_gqa)
->>>>>>> 87b7210b (verl integration changes)
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:
@@ -247,8 +243,27 @@ def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signatu
     return document_mask
 
 
-def get_document_mask_mod_from_positions(positions: torch.Tensor) -> _mask_mod_signature:
-    """Creates a document mask from position_ids (like HuggingFace).
+def find_packed_sequence_indices(positions: torch.Tensor) -> torch.Tensor:
+    """Compute sequence/document indices from position_ids.
+
+    Detects document boundaries where position_ids reset (diff != 1).
+
+    Args:
+        positions: Position IDs tensor with shape [batch, seq]
+
+    Returns:
+        A tensor of shape [batch, seq] where each unique integer indicates
+        tokens belonging to the same document/sequence.
+    """
+    first_dummy_value = positions[:, :1] - 1
+    position_diff = torch.diff(positions, prepend=first_dummy_value, dim=-1)
+    return (position_diff != 1).cumsum(-1)  # [batch, seq]
+
+
+def get_document_mask_mod_from_positions(
+    positions: torch.Tensor,
+) -> _mask_mod_signature:
+    """Creates a document mask from position_ids for flex attention.
 
     Detects document boundaries where position_ids reset (diff != 1).
 
@@ -258,10 +273,7 @@ def get_document_mask_mod_from_positions(positions: torch.Tensor) -> _mask_mod_s
     Returns:
         A mask modifier function that implements document-level masking.
     """
-    # HuggingFace logic: find where position_ids reset (diff != 1)
-    first_dummy_value = positions[:, :1] - 1
-    position_diff = torch.diff(positions, prepend=first_dummy_value, dim=-1)
-    sequence_indices = (position_diff != 1).cumsum(-1)  # [batch, seq]
+    sequence_indices = find_packed_sequence_indices(positions)
 
     def document_mask(
         b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
@@ -269,6 +281,37 @@ def get_document_mask_mod_from_positions(positions: torch.Tensor) -> _mask_mod_s
         return sequence_indices[b, q_idx] == sequence_indices[b, kv_idx]
 
     return document_mask
+
+
+def create_sdpa_document_causal_mask(positions: torch.Tensor) -> torch.Tensor:
+    """Creates a 4D document-aware causal mask for SDPA from position_ids.
+
+    Detects document boundaries where position_ids reset (diff != 1) and creates
+    a combined mask that enforces both causal attention and document isolation.
+
+    Args:
+        positions: Position IDs tensor with shape [batch, seq]
+
+    Returns:
+        A boolean tensor of shape [batch, 1, seq, seq] where True means "can attend".
+    """
+    seqlen = positions.shape[1]
+    device = positions.device
+
+    sequence_indices = find_packed_sequence_indices(positions)
+
+    # Create document-aware mask: tokens can only attend to same document
+    # Shape: [batch, 1, seq, seq]
+    doc_mask = sequence_indices.unsqueeze(2) == sequence_indices.unsqueeze(1)
+    doc_mask = doc_mask.unsqueeze(1)  # [batch, 1, seq, seq]
+
+    # Create causal mask
+    causal_mask = torch.tril(
+        torch.ones(seqlen, seqlen, device=device, dtype=torch.bool)
+    )
+
+    # Combine: document mask AND causal mask
+    return doc_mask & causal_mask.unsqueeze(0).unsqueeze(0)
 
 
 def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:

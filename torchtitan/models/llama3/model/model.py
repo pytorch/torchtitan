@@ -17,6 +17,7 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
+    create_sdpa_document_causal_mask,
     create_varlen_metadata_for_document,
     FlexAttentionWrapper,
     get_causal_mask_mod,
@@ -531,6 +532,9 @@ class Transformer(ModelProtocol):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         match self.model_args.attn_type:
+            case "sdpa":
+                assert extra_inputs is not None and "positions" in extra_inputs
+                return create_sdpa_document_causal_mask(extra_inputs["positions"])
             case "flex":
                 return self._get_flex_attention_masks(
                     input_batch, tokenizer, extra_inputs
@@ -546,7 +550,7 @@ class Transformer(ModelProtocol):
                     input_batch, tokenizer.eos_id
                 )
             case _:
-                raise TypeError("Only varlen and flex attn masks are supported")
+                raise TypeError("Only sdpa, varlen, and flex attn masks are supported")
 
     def forward(
         self,

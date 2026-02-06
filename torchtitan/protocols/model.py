@@ -18,7 +18,7 @@ from torchtitan.config import JobConfig
 from torchtitan.models.attention import VarlenMetadata
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata | torch.Tensor
 
 
 @dataclass

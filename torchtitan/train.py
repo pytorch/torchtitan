@@ -463,18 +463,34 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         extra_kwargs: dict[str, Any] = {}
 
         attn_type = getattr(self.model_args, "attn_type", "sdpa")
-        if "attention_masks" not in extra_inputs.keys() or extra_inputs["attention_masks"] is None:
+        if (
+            "attention_masks" not in extra_inputs.keys()
+            or extra_inputs["attention_masks"] is None
+        ):
             if attn_type in ["flex", "varlen"]:
                 assert (
                     self.tokenizer is not None
                 ), "tokenizer is required for flex/varlen attention"
-                model = cast(ModelProtocol, self.model_parts[0])
                 extra_inputs.pop("attention_masks")
-                extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
+                extra_kwargs["attention_masks"] = self.model_parts[
+                    0
+                ].get_attention_masks(
                     input_batch=inputs,
                     tokenizer=self.tokenizer,
                     extra_inputs=extra_inputs,
                 )
+            elif attn_type == "sdpa":
+                extra_inputs.pop("attention_masks")
+                if "positions" in extra_inputs.keys():
+                    extra_kwargs["attention_masks"] = self.model_parts[
+                        0
+                    ].get_attention_masks(
+                        input_batch=inputs,
+                        tokenizer=self.tokenizer,
+                        extra_inputs=extra_inputs,
+                    )
+            else:
+                raise ValueError(f"Unknown attention type: {attn_type}")
         else:
             extra_kwargs["attention_masks"] = extra_inputs.pop("attention_masks")
 
@@ -541,7 +557,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             assert len(model_parts) == 1
             with self.train_context():
                 with self.maybe_enable_amp:
-                    print(f"jessica: {extra_inputs=} {extra_kwargs=}")
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     # Compute loss sum (reduction='sum')
                     loss_sum = self.loss_fn(pred, labels)
@@ -551,15 +566,79 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     loss = loss_sum / global_valid_tokens
 
                 # need to free pred before bwd to avoid peaking memory
-                # del pred
-                # loss.backward()
+                del pred
+                loss.backward()
 
-<<<<<<< HEAD
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
-=======
-        return loss, pred
->>>>>>> 87b7210b (verl integration changes)
+
+    def forward_step(
+        self,
+        *,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor,
+        return_outputs: bool = False,
+    ) -> torch.Tensor:
+        model_parts = self.model_parts
+        parallel_dims = self.parallel_dims
+
+        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
+            input_dict, labels
+        )
+
+        if parallel_dims.pp_enabled:
+            # Pipeline Parallel forward inside step() call
+            with self.train_context():
+                targets, losses = (
+                    (labels, []) if self.pp_has_last_stage else (None, None)
+                )
+                if self.pp_has_first_stage:
+                    outputs = self.pp_schedule.eval(
+                        inputs,
+                        **extra_inputs,
+                        **extra_kwargs,
+                        target=targets,
+                        losses=losses,
+                        return_outputs=return_outputs,
+                    )
+                else:
+                    outputs = self.pp_schedule.eval(
+                        **extra_kwargs,
+                        target=targets,
+                        losses=losses,
+                        return_outputs=return_outputs,
+                    )
+
+                pred = outputs if self.pp_has_last_stage else None
+            # accumulate losses across pipeline microbatches
+            # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
+            loss = (
+                # Rescale PP loss to be "local loss sum / global valid tokens)
+                # because each microbathes could have different number of valid tokens
+                (torch.sum(torch.stack(losses)) / global_valid_tokens).to(self.device)
+                if self.pp_has_last_stage
+                else torch.tensor([-1.0], device=self.device)
+            )
+        else:
+            # Non-PP forward / backward
+            assert len(model_parts) == 1
+            with self.train_context():
+                with self.maybe_enable_amp:
+                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    loss_sum = self.loss_fn(pred, labels)
+
+                    # Scale the loss by the inverse of the total weight denominator before backward
+                    # This ensures gradients are properly normalized across all microbatches
+                    loss = loss_sum / global_valid_tokens
+
+        # The returned loss here is local SUM loss / global_valid_tokens
+        if return_outputs:
+            return loss, pred
+        else:
+            # need to free pred before bwd to avoid peaking memory
+            del pred
+            return loss, None
 
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
