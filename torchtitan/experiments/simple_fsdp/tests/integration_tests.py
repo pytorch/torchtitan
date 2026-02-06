@@ -35,11 +35,25 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
                     "--model.name simple_fsdp.llama3",
                     "--compile.enable",
                     "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
-                    "--compile.model_backend_override aot_eager_autobucketing",
+                    "--compile.backend aot_eager",
+                    "--compile.graph_passes auto_bucketing",
                 ],
             ],
-            "1D+aot_eager_autobucketing",
-            "1d_aot_eager_autobucketing",
+            "1D+autobucketing",
+            "1d_autobucketing",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name simple_fsdp.llama3",
+                    "--compile.enable",
+                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
+                    "--compile.backend aot_eager",
+                    "--compile.graph_passes transformer_block_bucketing",
+                ],
+            ],
+            "1D+transformer_block_bucketing",
+            "1d_transformer_block_bucketing",
         ),
         OverrideDefinitions(
             [
@@ -301,6 +315,19 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
             ],
             "FSDP+TP+EP+ETP",
             "fsdp+tp+ep+etp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--model.name simple_fsdp.deepseek_v3",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.context_parallel_degree 2",
+                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
+                ],
+            ],
+            "FSDP+CP",
+            "fsdp+cp",
             ngpu=4,
         ),
     ]

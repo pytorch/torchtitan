@@ -19,8 +19,10 @@ from typing_extensions import override
 
 class BaseTokenizer(ABC):
     # base tokenizer interface, for typing purpose mainly
+    eos_id: int | None
+
     def __init__(self):
-        self.eos_id = 0
+        self.eos_id = None
 
     @abstractmethod
     def encode(self, *args, **kwargs) -> list[int]:

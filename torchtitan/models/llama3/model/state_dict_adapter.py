@@ -81,6 +81,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
         for key, value in state_dict.items():
             if "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = to_hf_map[abstract_key]
                 # We need to permute the weights in wq and wk layer in order to account for the difference between
@@ -115,6 +116,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
         for key, value in hf_state_dict.items():
             if "layers" in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", key).group(0)
                 new_key = self.from_hf_map[abstract_key]
 
@@ -132,5 +134,6 @@ class Llama3StateDictAdapter(StateDictAdapter):
             else:
                 new_key = self.from_hf_map[key]
 
+            # pyrefly: ignore [unsupported-operation]
             state_dict[new_key] = value
         return state_dict

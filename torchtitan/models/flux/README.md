@@ -1,10 +1,4 @@
-<div align="center">
-
 # FLUX model in torchtitan
-
-[![integration tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_flux.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_flux.yaml/badge.svg?branch=main)
-
-</div>
 
 ## Overview
 This directory contains the implementation of the [FLUX](https://github.com/black-forest-labs/flux/tree/main) model in torchtitan. In torchtitan, we showcase the pre-training process of text-to-image part of the FLUX model.
@@ -25,7 +19,7 @@ This step will download the autoencoder model from HuggingFace and save it to th
 
 Run the following command to train the model on a single GPU:
 ```bash
-./torchtitan/experiments/flux/run_train.sh
+./torchtitan/models/flux/run_train.sh
 
 ```
 

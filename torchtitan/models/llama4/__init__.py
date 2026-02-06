@@ -67,7 +67,7 @@ llama4_args = {
         rope_scaling_args=RoPEScalingArgs(),
         every_n_layers_nope=4,
         fixed_attn_block_size=256,
-        use_flex_attn=True,
+        attn_type="flex",
         attn_mask_type="block_causal",
     ),
     "17bx16e_irope": TransformerModelArgs(
@@ -83,7 +83,7 @@ llama4_args = {
         moe_args=MoEArgs(num_experts=16),
         interleave_moe_layer_step=1,
         every_n_layers_nope=4,
-        use_flex_attn=True,
+        attn_type="flex",
         attn_mask_type="block_causal",
     ),
     "17bx128e_irope": TransformerModelArgs(
@@ -96,7 +96,7 @@ llama4_args = {
         rope_theta=500000,
         moe_args=MoEArgs(num_experts=128),
         every_n_layers_nope=4,
-        use_flex_attn=True,
+        attn_type="flex",
         attn_mask_type="block_causal",
     ),
 }

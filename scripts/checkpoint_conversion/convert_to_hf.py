@@ -12,12 +12,18 @@ import torch.distributed.checkpoint as dcp
 import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpoint import ModelWrapper
+from torchtitan.config import TORCH_DTYPE_MAP
 
 
 @torch.inference_mode()
-def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_path):
-    if model_name == "flux":
-        import torchtitan.experiments.flux  # noqa: F401
+def convert_to_hf(
+    input_dir,
+    output_dir,
+    model_name,
+    model_flavor,
+    hf_assets_path,
+    export_dtype,
+):
     # load model and model args so that we can get the state dict shape
     train_spec = train_spec_module.get_train_spec(model_name)
     model_args = train_spec.model_args[model_flavor]
@@ -26,6 +32,7 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_pat
         model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
+    # pyrefly: ignore[bad-instantiation, not-callable]
     sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
     assert (
         sd_adapter is not None
@@ -49,6 +56,11 @@ def convert_to_hf(input_dir, output_dir, model_name, model_flavor, hf_assets_pat
         thread_count_consolidation=5,
     )
 
+    # map and apply export dtype if needed
+    target_dtype = TORCH_DTYPE_MAP[export_dtype]
+    if target_dtype != torch.float32:
+        hf_state_dict = {k: v.to(target_dtype) for k, v in hf_state_dict.items()}
+
     dcp.save(
         hf_state_dict,
         storage_writer=storage_writer,
@@ -71,6 +83,14 @@ if __name__ == "__main__":
     )
     parser.add_argument("--model_name", type=str, nargs="?", default="llama3")
     parser.add_argument("--model_flavor", type=str, nargs="?", default="8B")
+    parser.add_argument(
+        "--export_dtype",
+        type=str,
+        nargs="?",
+        choices=["float16", "bfloat16", "float32"],
+        default="float32",
+        help="Export dtype for HF checkpoint (default: float32)",
+    )
     args = parser.parse_args()
 
     convert_to_hf(
@@ -79,4 +99,5 @@ if __name__ == "__main__":
         args.model_name,
         args.model_flavor,
         args.hf_assets_path,
+        args.export_dtype,
     )

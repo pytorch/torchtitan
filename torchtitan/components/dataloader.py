@@ -6,15 +6,18 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+import inspect
 import pickle
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from typing import Any
+from typing import Any, Iterator
+
+import torch
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
 from torchtitan.tools.logging import logger
+
 
 # NOTE: This class deliberately inherits from `Exception` and not `StopIteration`.
 # According to PEP 479, raising a `StopIteration` or its subclass from within a
@@ -37,7 +40,7 @@ class BaseDataLoader(Stateful, ABC):
     """
 
     @abstractmethod
-    def __iter__(self):
+    def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         ...
 
 
@@ -52,27 +55,62 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         dataset (IterableDataset): The dataset to iterate over.
         dp_rank: Data parallelism rank for this dataloader.
         dp_world_size: The world size of the data parallelism.
-        batch_size: The batch size to use for each iteration.
-        collate_fn: Optional function to collate samples in a batch.
+        **kwargs: Additional keyword arguments passed to StatefulDataLoader (e.g.,
+            batch_size, collate_fn, num_workers, persistent_workers, prefetch_factor,
+            pin_memory).
     """
 
     dp_rank: int
     dp_world_size: int
-    batch_size: int
 
     def __init__(
         self,
         dataset: IterableDataset,
         dp_rank: int,
         dp_world_size: int,
-        batch_size: int,
-        collate_fn: Callable | None = None,
+        **kwargs,
     ):
+        self._validate_kwargs(kwargs)
+
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
-        self.batch_size = batch_size
-        super().__init__(dataset, batch_size, collate_fn=collate_fn)
         self._rank_id = f"dp_rank_{dp_rank}"
+
+        super().__init__(dataset, **kwargs)
+
+    @staticmethod
+    def _validate_kwargs(kwargs: dict[str, Any]) -> None:
+        """Validate and sanitize kwargs passed to the dataloader.
+
+        Args:
+            kwargs: Dictionary of keyword arguments to validate. This dict is
+                modified in-place to remove invalid combinations.
+
+        Raises:
+            ValueError: If 'dataset' is in kwargs or if any invalid kwargs are passed.
+        """
+        if "dataset" in kwargs:
+            raise ValueError(
+                "'dataset' should not be passed in kwargs; "
+                "it must be provided as the first positional argument."
+            )
+
+        sig = inspect.signature(StatefulDataLoader.__init__)
+        valid_kwargs = frozenset(
+            name for name in sig.parameters.keys() if name not in ("self", "dataset")
+        )
+        invalid_kwargs = set(kwargs.keys()) - valid_kwargs
+        if invalid_kwargs:
+            raise ValueError(
+                f"Invalid dataloader kwargs: {invalid_kwargs}. "
+                f"Valid kwargs are: {sorted(valid_kwargs)}"
+            )
+
+        # persistent_workers and prefetch_factor are only valid when num_workers > 0.
+        # Removing them here if num_workers is 0 to avoid StatefulDataLoader errors
+        if kwargs.get("num_workers", 0) == 0:
+            kwargs.pop("persistent_workers", None)
+            kwargs.pop("prefetch_factor", None)
 
     def state_dict(self) -> dict[str, Any]:
         # Store state only for dp rank to avoid replicating the same state across other dimensions.

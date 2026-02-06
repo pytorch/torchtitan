@@ -33,6 +33,7 @@ COPY requirements-dev.txt /opt/conda/
 COPY requirements.txt /opt/conda/
 COPY requirements-flux.txt /opt/conda/
 COPY requirements-vlm.txt /opt/conda/
+COPY requirements-transformers-modeling-backend.txt /opt/conda/
 COPY conda-env-ci.txt /opt/conda/
 COPY ./common/install_conda.sh install_conda.sh
 COPY ./common/utils.sh utils.sh

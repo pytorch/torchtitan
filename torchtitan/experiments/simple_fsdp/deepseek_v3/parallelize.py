@@ -10,15 +10,42 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
+
+from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.deepseek_v3.infra.parallelize import (
-    apply_ac,
     apply_moe_ep_tp,
     apply_non_moe_tp,
 )
 from torchtitan.tools.logging import logger
 
+from ..backend import get_compile_backend_with_passes
+
 from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
+
+
+def get_transformer_block_buckets(model) -> list[list[str] | str]:
+    module_list = [
+        model.tok_embeddings,
+        [model.norm, model.output],
+    ]
+    for layer_id, transformer_block in model.layers.items():
+        # [TODO](ruisizhang123) add EP support for transformer block bucketing
+        module_list.append(transformer_block)
+
+    def convert_modules_to_fqns(modules, module_to_fqn_mapping):
+        """Convert a (possibly nested) list of modules to FQN strings."""
+        result = []
+        for m in modules:
+            if isinstance(m, list):
+                result.append(convert_modules_to_fqns(m, module_to_fqn_mapping))
+            else:
+                result.append(module_to_fqn_mapping.get(m, None))
+        return result
+
+    module_to_name = {m: n for n, m in model.named_modules()}
+    module_fqns = convert_modules_to_fqns(module_list, module_to_name)
+    return module_fqns
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -27,7 +54,6 @@ def parallelize_deepseekv3(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    world_mesh = parallel_dims.world_mesh
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
@@ -40,9 +66,9 @@ def parallelize_deepseekv3(
 
     if (
         job_config.parallelism.context_parallel_degree > 1
-        and model.model_args.use_flex_attn
+        and model.model_args.attn_type != "sdpa"
     ):
-        raise NotImplementedError("CP support for FlexAttention is still in progress.")
+        raise NotImplementedError("CP support is only supported for SDPA.")
 
     if parallel_dims.tp_enabled:
         enable_float8_linear = "float8" in job_config.model.converters
@@ -58,29 +84,22 @@ def parallelize_deepseekv3(
                 "Currently, float8 tensorwise TP is not tested for deepseekv3"
             )
 
-        use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
         apply_non_moe_tp(
             model,
-            world_mesh["tp"],
+            parallel_dims.get_mesh("tp"),
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            use_flex_attn=use_flex_attn,
+            cp_enabled=parallel_dims.cp_enabled,
         )
-        maybe_enable_async_tp(job_config, world_mesh["tp"])
+        maybe_enable_async_tp(job_config, parallel_dims.get_mesh("tp"))
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
             model,
-            tp_mesh=world_mesh["tp"] if parallel_dims.tp_enabled else None,
-            ep_mesh=world_mesh["ep"] if parallel_dims.ep_enabled else None,
-            ep_tp_mesh=(
-                world_mesh["ep", "tp"]
-                if parallel_dims.tp_enabled
-                and parallel_dims.ep_enabled
-                and parallel_dims.etp_enabled
-                else None
-            ),
-            etp_enabled=parallel_dims.etp_enabled,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -91,20 +110,6 @@ def parallelize_deepseekv3(
         reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
     )
 
-    match job_config.parallelism.fsdp_reshard_after_forward:
-        case "always":
-            reshard_after_forward = True
-        case "never":
-            reshard_after_forward = False
-        case "default":
-            # For PP, by default do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            reshard_after_forward = not parallel_dims.pp_enabled
-        case _:
-            raise ValueError(
-                f"Invalid reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
-            )
-
     # apply data parallel
     dp_mesh: DeviceMesh | None = None
     if (
@@ -114,38 +119,38 @@ def parallelize_deepseekv3(
     ):
         if parallel_dims.dp_replicate_enabled:
             if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+                dp_mesh_dim_names = ["dp_replicate", "fsdp"]
                 dp_mode = "hybrid_shard"
             else:
-                dp_mesh_dim_names = ("dp_replicate",)
+                dp_mesh_dim_names = ["dp_replicate"]
                 dp_mode = "replicate"
         else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+            dp_mesh_dim_names = ["fsdp"]
             dp_mode = "fully_shard"
 
-        dp_mesh = world_mesh[tuple(dp_mesh_dim_names)]
-        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
-        dp_mod_ep_mesh_dim_names = []
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
 
-        if parallel_dims.ep_enabled:
-            if parallel_dims.dp_replicate_enabled:
-                dp_mod_ep_mesh_dim_names.append("dp_replicate")
-            dp_mod_ep_mesh_dim_names.append("dp_shard_mod_ep")
-        dp_mod_ep_mesh = world_mesh[tuple(dp_mod_ep_mesh_dim_names)]
+        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
 
         for _, transformer_block in model.layers.items():
             if transformer_block.moe_enabled and parallel_dims.ep_enabled:
                 experts_shard_dim = 0
-                assert dp_mod_ep_mesh is not None
+                assert edp_mesh is not None
                 assert hasattr(transformer_block, "moe")
                 if (
-                    dp_mod_ep_mesh.size() * parallel_dims.ep
+                    edp_mesh["efsdp"].size() * parallel_dims.ep
                     > transformer_block.moe.experts.num_experts
                 ):
                     experts_shard_dim = 1
 
                 # when EP is enable, the routed experts' gradient reduction is done over
-                # dp_mod_ep_mesh instead of whole dp_mesh.
+                # edp_mesh instead of whole dp_mesh.
                 # we add a `fsdp_gradient_divide_factor` to scale gradient over dp_mesh
                 # to be consistent with data.
                 # TODO (ruisizhang123): update the logic following the link below instead
@@ -153,11 +158,9 @@ def parallelize_deepseekv3(
                 # https://github.com/pytorch/torchtitan/pull/1803#discussion_r2415190883
                 transformer_block.moe.experts = data_parallel(
                     transformer_block.moe.experts,
-                    dp_mod_ep_mesh,
+                    edp_mesh,
                     dp_mode,
-                    ac_mode=job_config.activation_checkpoint.mode,
                     mp_policy=mp_policy,
-                    reshard_after_forward=reshard_after_forward,
                     shard_dim=experts_shard_dim,
                     reduction_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
                 )
@@ -166,9 +169,7 @@ def parallelize_deepseekv3(
             model,
             dp_mesh,
             dp_mode,
-            ac_mode=job_config.activation_checkpoint.mode,
             mp_policy=mp_policy,
-            reshard_after_forward=reshard_after_forward,
         )
 
         logger.info(
@@ -178,6 +179,30 @@ def parallelize_deepseekv3(
     if job_config.compile.enable:
         torch._inductor.config.reorder_for_peak_memory = False
         torch._dynamo.config.capture_scalar_outputs = True
-        model = torch.compile(model, backend=job_config.compile.backend, fullgraph=True)
+
+        match job_config.parallelism.fsdp_reshard_after_forward:
+            case "always":
+                fsdp_reshard_after_forward = True
+            case "never":
+                fsdp_reshard_after_forward = False
+            case "default":
+                # For PP, by default do not reshard after forward to avoid per-microbatch
+                # all-gathers, which can be expensive and non-overlapped
+                fsdp_reshard_after_forward = not parallel_dims.pp_enabled
+            case _:
+                raise ValueError(
+                    f"Invalid reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+                )
+
+        backend = get_compile_backend_with_passes(
+            job_config.compile,
+            fsdp_reshard_after_forward,
+            get_transformer_block_buckets(model),
+        )
+        model = torch.compile(
+            model,
+            backend=backend,
+            fullgraph=True,
+        )
 
     return model
