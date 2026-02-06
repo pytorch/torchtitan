@@ -91,29 +91,10 @@ class TorchCommsParallelDims(ParallelDims):
     comms: list[Any] = field(default_factory=list)
 
     def build_mesh(self) -> DeviceMesh:
-        """Build the device mesh using torchcomms.
-
+        """
         This method follows the same mesh structure as the base ParallelDims but uses
         torchcomms for communicator initialization instead of torch.distributed.
-
-        The following mesh dimensions will be created:
-            pp:      Pipeline Parallelism (PP).
-            batch:   Used by data loading (dp_replicate * dp_shard).
-            loss:    Used by all-reduce when computing the loss (dp_replicate * dp_shard * cp).
-            dp_replicate: For DDP or HSDP replicate dimension.
-            fsdp:    For FSDP dimension (dp_shard * cp).
-            cp:      Context Parallelism (CP).
-            tp:      Tensor Parallelism (TP).
-            ep:      Expert Parallelism (EP).
-            efsdp:   FSDP in the EP region.
-            etp:     TP in the EP region.
         """
-        logger.info(
-            f"Building torchcomms device mesh with parallelism: "
-            f"pp={self.pp}, dp_replicate={self.dp_replicate}, dp_shard={self.dp_shard}, "
-            f"cp={self.cp}, tp={self.tp}, ep={self.ep}, etp={self.etp}"
-        )
-
         # Calculate derived dimensions
         batch = self.dp_replicate * self.dp_shard
         fsdp = self.dp_shard * self.cp
