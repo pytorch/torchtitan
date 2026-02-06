@@ -156,6 +156,7 @@ def parallelize_deepseekv3(
         )
 
     if model_compile_enabled:
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
         apply_compile(model, job_config.compile, parallel_dims.ep_enabled)
 
     dp_mesh: DeviceMesh | None = None
