@@ -1,0 +1,434 @@
+<!--
+  Sharding Info HTML Template
+
+  Template conventions:
+  - This file uses Python's string.Template for variable substitution.
+  - Python template variables use the dollar sign + NAME syntax.
+  - JavaScript template literals use double dollar signs to escape.
+
+  Design:
+  - All layer collapsing logic is done server-side in Python (sharding_utils.py).
+  - This template receives pre-computed collapsed and uncollapsed views.
+  - JavaScript just toggles between rendering the two views.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sharding Info - Rank $RANK</title>
+  <style>
+    :root {
+      --bg-color: #1e1e1e;
+      --text-color: #d4d4d4;
+      --header-bg: #252526;
+      --border-color: #3c3c3c;
+      --replicated-color: #4ec9b0;
+      --sharded-color: #569cd6;
+      --partial-color: #ce9178;
+      --hover-bg: #2a2d2e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      margin: 0;
+      padding: 20px;
+      line-height: 1.5;
+    }
+    h1 {
+      color: #fff;
+      border-bottom: 2px solid var(--border-color);
+      padding-bottom: 10px;
+    }
+    .filters {
+      background-color: var(--header-bg);
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    .filters label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+    }
+    .filters input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
+    }
+    .filters input[type="text"] {
+      padding: 8px 12px;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      font-size: 14px;
+      min-width: 250px;
+    }
+    .btn {
+      padding: 8px 16px;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      background-color: var(--header-bg);
+      color: var(--text-color);
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .btn:hover {
+      background-color: var(--hover-bg);
+    }
+    .summary {
+      background-color: var(--header-bg);
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 10px;
+    }
+    .summary-item {
+      padding: 10px;
+      border-left: 3px solid var(--sharded-color);
+    }
+    .summary-item .label {
+      font-size: 12px;
+      color: #888;
+      text-transform: uppercase;
+    }
+    .summary-item .value {
+      font-size: 24px;
+      font-weight: bold;
+    }
+    .phase-section {
+      margin-bottom: 30px;
+    }
+    .phase-header {
+      background-color: var(--header-bg);
+      padding: 10px 15px;
+      border-radius: 6px 6px 0 0;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .phase-header:hover {
+      background-color: var(--hover-bg);
+    }
+    .phase-content {
+      border: 1px solid var(--border-color);
+      border-top: none;
+      border-radius: 0 0 6px 6px;
+      padding: 10px;
+    }
+    .module {
+      margin: 5px 0;
+    }
+    .module-header {
+      padding: 8px;
+      cursor: pointer;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .module-header:hover {
+      background-color: var(--hover-bg);
+    }
+    .module-name {
+      font-weight: bold;
+    }
+    .toggle-icon {
+      font-size: 10px;
+      width: 16px;
+      transition: transform 0.2s;
+    }
+    .module.collapsed .toggle-icon {
+      transform: rotate(-90deg);
+    }
+    .tensor-list {
+      margin-left: 24px;
+      border-left: 1px solid var(--border-color);
+      padding-left: 15px;
+    }
+    .module.collapsed .tensor-list {
+      display: none;
+    }
+    .tensor {
+      padding: 4px 8px;
+      display: flex;
+      gap: 15px;
+      font-size: 13px;
+    }
+    .tensor:hover {
+      background-color: var(--hover-bg);
+    }
+    .tensor-type {
+      min-width: 120px;
+      color: #9cdcfe;
+    }
+    .placement {
+      min-width: 100px;
+      font-weight: bold;
+    }
+    .placement.replicated { color: var(--replicated-color); }
+    .placement.sharded { color: var(--sharded-color); }
+    .placement.partial { color: var(--partial-color); }
+    .mesh {
+      color: #b5cea8;
+      min-width: 140px;
+    }
+    .shape {
+      color: #d7ba7d;
+      min-width: 180px;
+    }
+    .legend {
+      background-color: var(--header-bg);
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+    }
+    .legend h3 {
+      margin-top: 0;
+      margin-bottom: 10px;
+    }
+    .legend-item {
+      display: flex;
+      gap: 10px;
+      margin: 5px 0;
+    }
+    .legend-color {
+      min-width: 100px;
+      font-weight: bold;
+    }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <h1>Sharding Info - Rank $RANK</h1>
+
+  <div class="filters">
+    <label><input type="checkbox" id="filter-forward" checked> Forward</label>
+    <label><input type="checkbox" id="filter-backward" checked> Backward</label>
+    <label><input type="checkbox" id="collapse-layers" $COLLAPSE_LAYERS_CHECKED> Collapse Layers</label>
+    <span style="margin-left: 20px;">|</span>
+    <input type="text" id="search" placeholder="Search modules..." oninput="applyFilters()">
+    <button class="btn" onclick="expandAll()">Expand All</button>
+    <button class="btn" onclick="collapseAll()">Collapse All</button>
+  </div>
+
+  <div class="summary">
+    <div class="summary-item">
+      <div class="label">Modules Traced</div>
+      <div class="value">$NUM_MODULES_TRACED</div>
+    </div>
+    <div class="summary-item">
+      <div class="label">Forward Entries</div>
+      <div class="value">$FORWARD_ENTRIES</div>
+    </div>
+    <div class="summary-item">
+      <div class="label">Recompute Entries</div>
+      <div class="value">$RECOMPUTE_ENTRIES</div>
+    </div>
+    <div class="summary-item">
+      <div class="label">Backward Entries</div>
+      <div class="value">$BACKWARD_ENTRIES</div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <h3>Legend</h3>
+    <div class="legend-item">
+      <span class="legend-color replicated" style="color: var(--replicated-color);">R</span>
+      <span>Replicated across all devices</span>
+    </div>
+    <div class="legend-item">
+      <span class="legend-color sharded" style="color: var(--sharded-color);">S(n)</span>
+      <span>Sharded along dimension n</span>
+    </div>
+    <div class="legend-item">
+      <span class="legend-color partial" style="color: var(--partial-color);">P(op)</span>
+      <span>Partial with reduction operation (e.g., P(sum))</span>
+    </div>
+    <div class="legend-item">
+      <span class="legend-color" style="color: #9cdcfe;">Local</span>
+      <span>Local tensor (not distributed)</span>
+    </div>
+    <div class="legend-item">
+      <span class="legend-color" style="color: #dcdcaa;">[recompute]</span>
+      <span>Module recomputed during backward (activation checkpointing)</span>
+    </div>
+    <div class="legend-item">
+      <span class="legend-color" style="color: #888;">[0-N]</span>
+      <span>Layers 0 through N with identical sharding pattern</span>
+    </div>
+  </div>
+
+  <div id="content"></div>
+
+  <script>
+    // Pre-computed module views from Python (collapsed and uncollapsed)
+    const moduleViews = $MODULE_VIEWS_JSON;
+
+    // Escape HTML special characters to prevent XSS
+    function escapeHtml(text) {
+      if (text == null) return '';
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function getPlacementClass(placement) {
+      if (placement.includes('Replicate') || placement === 'R') return 'replicated';
+      if (placement.includes('Shard') || placement.startsWith('S(')) return 'sharded';
+      if (placement.includes('Partial') || placement.startsWith('P(')) return 'partial';
+      return '';
+    }
+
+    function renderModuleEntry(module) {
+      const recomputeTag = module.isRecompute
+        ? '<span style="color: #dcdcaa; margin-right: 8px;">[recompute]</span>'
+        : '';
+
+      const escapedOriginalNames = escapeHtml(module.originalNames.join(','));
+      const escapedDisplayName = escapeHtml(module.displayName);
+
+      let html = `<div class="module" data-module="$${escapedOriginalNames}" data-display="$${escapedDisplayName}">`;
+      html += `<div class="module-header" onclick="toggleModule(this.parentElement)">`;
+      html += `<span class="toggle-icon">\u25BC</span>`;
+      html += `$${recomputeTag}<span class="module-name">$${escapedDisplayName}</span>`;
+      html += `</div>`;
+      html += `<div class="tensor-list">`;
+
+      module.tensors.forEach(t => {
+        const placementClass = getPlacementClass(t.placement);
+        const meshValue = (t.mesh && t.mesh !== null) ? t.mesh : 'None';
+        const escapedTensorType = escapeHtml(t.tensorType);
+        const escapedPlacement = escapeHtml(t.placement);
+        const escapedMesh = escapeHtml(meshValue);
+        const escapedShape = escapeHtml(t.shape);
+        html += `<div class="tensor">`;
+        html += `<span class="tensor-type">$${escapedTensorType}</span>`;
+        html += `<span class="placement $${placementClass}">$${escapedPlacement}</span>`;
+        html += `<span class="mesh">mesh=$${escapedMesh}</span>`;
+        html += `<span class="shape">shape=$${escapedShape}</span>`;
+        html += `</div>`;
+      });
+
+      html += `</div></div>`;
+      return html;
+    }
+
+    function renderContent() {
+      const shouldCollapse = document.getElementById('collapse-layers').checked;
+      const viewKey = shouldCollapse ? 'collapsed' : 'uncollapsed';
+
+      let html = '';
+
+      // Forward Pass
+      const forwardModules = moduleViews.forward[viewKey];
+      if (forwardModules.length > 0) {
+        html += `<div class="phase-section" data-phase="forward">`;
+        html += `<div class="phase-header" onclick="togglePhase(this)">`;
+        html += `<span>Forward Pass</span><span class="toggle-icon">\u25BC</span></div>`;
+        html += `<div class="phase-content">`;
+        forwardModules.forEach(module => {
+          html += renderModuleEntry(module);
+        });
+        html += `</div></div>`;
+      }
+
+      // Backward Pass
+      const backwardModules = moduleViews.backward[viewKey];
+      if (backwardModules.length > 0) {
+        html += `<div class="phase-section" data-phase="backward">`;
+        html += `<div class="phase-header" onclick="togglePhase(this)">`;
+        html += `<span>Backward Pass</span><span class="toggle-icon">\u25BC</span></div>`;
+        html += `<div class="phase-content">`;
+        backwardModules.forEach(module => {
+          html += renderModuleEntry(module);
+        });
+        html += `</div></div>`;
+      }
+
+      document.getElementById('content').innerHTML = html;
+      applyFilters();
+    }
+
+    function togglePhase(header) {
+      const content = header.nextElementSibling;
+      const icon = header.querySelector('.toggle-icon');
+      if (content.style.display === 'none') {
+        content.style.display = 'block';
+        icon.textContent = '\u25BC';
+      } else {
+        content.style.display = 'none';
+        icon.textContent = '\u25B6';
+      }
+    }
+
+    function toggleModule(module) {
+      module.classList.toggle('collapsed');
+    }
+
+    function expandAll() {
+      document.querySelectorAll('.module').forEach(m => m.classList.remove('collapsed'));
+      document.querySelectorAll('.phase-content').forEach(c => c.style.display = 'block');
+      document.querySelectorAll('.phase-header .toggle-icon').forEach(i => i.textContent = '\u25BC');
+    }
+
+    function collapseAll() {
+      document.querySelectorAll('.module').forEach(m => m.classList.add('collapsed'));
+    }
+
+    function applyFilters() {
+      const showForward = document.getElementById('filter-forward').checked;
+      const showBackward = document.getElementById('filter-backward').checked;
+      const searchTerm = document.getElementById('search').value.toLowerCase();
+
+      document.querySelectorAll('.phase-section').forEach(section => {
+        const phase = section.dataset.phase;
+        let showPhase = false;
+        if (phase === 'forward' && showForward) showPhase = true;
+        if (phase === 'backward' && showBackward) showPhase = true;
+
+        if (showPhase) {
+          section.classList.remove('hidden');
+        } else {
+          section.classList.add('hidden');
+        }
+      });
+
+      document.querySelectorAll('.module').forEach(module => {
+        const displayName = (module.dataset.display || '').toLowerCase();
+        const originalNames = (module.dataset.module || '').toLowerCase();
+        const matchesSearch = !searchTerm ||
+          displayName.includes(searchTerm) ||
+          originalNames.includes(searchTerm);
+
+        if (matchesSearch) {
+          module.classList.remove('hidden');
+        } else {
+          module.classList.add('hidden');
+        }
+      });
+    }
+
+    // Event listeners for filter checkboxes
+    document.getElementById('filter-forward').addEventListener('change', applyFilters);
+    document.getElementById('filter-backward').addEventListener('change', applyFilters);
+    document.getElementById('collapse-layers').addEventListener('change', renderContent);
+
+    // Initial render
+    renderContent();
+  </script>
+</body>
+</html>
