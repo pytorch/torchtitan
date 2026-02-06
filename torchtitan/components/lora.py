@@ -74,7 +74,6 @@ def create_lora_linear(parent_cls: type) -> type:
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             base_out = super().forward(input)
-            # Compute LoRA in weight dtype, cast output to match base_out
             lora_out = self.lora_b(self.lora_a(input))
             return base_out + self._lora_scaling * lora_out
 
@@ -100,8 +99,8 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
     linear.__class__ = lora_cls
     # Initialize LoRA adapters as post-init
     _init_lora = getattr(linear, "_init_lora", None)
-    if callable(_init_lora):
-        _init_lora(rank, alpha)
+    assert _init_lora is not None and callable(_init_lora)
+    _init_lora(rank, alpha)
     return linear
 
 
@@ -118,23 +117,26 @@ class LoRAConverter:
 
     def _replace_linears_with_lora(self, module: nn.Module) -> None:
         """Recursively freeze params and replace Linear layers with LoRA equivalents."""
-        has_lora_children = False
+        # Track parents that have LoRA children and need init_weights override
+        parents_with_lora: set[str] = set()
 
-        for name, child in list(module._modules.items()):
-            if name in ("lora_a", "lora_b") or child is None:
+        # Freeze params and apply LoRA to all Linear layers
+        for fqn, child in module.named_modules():
+            if fqn.endswith("lora_a") or fqn.endswith("lora_b") or child is None:
                 continue
-            # Freeze direct parameters of this module
             for param in child.parameters(recurse=False):
                 param.requires_grad_(False)
             if isinstance(child, nn.Linear):
                 apply_lora(child, self.rank, self.alpha)
-                has_lora_children = True
-            else:
-                self._replace_linears_with_lora(child)
+                # nn.linear may not call 'init_weights' to init, store their parents to
+                # set `init_weights`` later
+                if "." in fqn:
+                    parent_fqn = fqn.rsplit(".", 1)[0]
+                    parents_with_lora.add(parent_fqn)
 
-        # If this module has LoRA children AND has init_weights, override it
-        if has_lora_children and hasattr(module, "init_weights"):
-            self._override_parent_init_weights(module)
+        for parent_fqn in parents_with_lora:
+            parent = module.get_submodule(parent_fqn)
+            self._override_parent_init_weights(parent)
 
     def _override_parent_init_weights(self, module: nn.Module) -> None:
         """Override init_weights on a parent module to reinit LoRA adapters after base init."""
@@ -142,8 +144,8 @@ class LoRAConverter:
 
         def new_init_weights(*args: Any, **kwargs: Any) -> None:
             # First, call original init_weights (inits base weights like wq, wk, wv, wo)
-            if callable(original_init_weights):
-                original_init_weights(*args, **kwargs)
+            assert original_init_weights is not None and callable(original_init_weights)
+            original_init_weights(*args, **kwargs)
 
             # Then, reinit LoRA adapters for all LoRA children
             for name, child in module._modules.items():
