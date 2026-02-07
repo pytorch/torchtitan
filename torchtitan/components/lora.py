@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from typing import Any, Callable, Union
+from typing import Any, Union
 
 import torch
 import torch.nn as nn
@@ -111,7 +111,9 @@ class LoRAConverter:
             # Reinitialize LoRA weights for all LoRALinear modules
             for sub_module in module.modules():
                 if type(sub_module) in _lora_class_cache.values():
-                    getattr(sub_module, "_init_weight")()
+                    _init_weight = getattr(sub_module, "_init_weight", None)
+                    assert _init_weight is not None and callable(_init_weight)
+                    _init_weight()
 
         object.__setattr__(module, "init_weights", new_model_init_weights)
 
