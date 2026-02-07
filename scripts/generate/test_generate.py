@@ -115,6 +115,7 @@ def test_generate(
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
         logger.info(f"Init model on init_device: {init_device}")
+        # pyrefly: ignore[bad-instantiation]
         model = train_spec.model_cls(model_args)
 
     parallel_dims = None
@@ -229,7 +230,7 @@ def test_generate(
                 "input_text": input_text,
                 "output_text": output_text,
             }
-            output_data["responses"].append(_data)
+            output_data["responses"].append(_data)  # pyrefly: ignore[missing-attribute]
 
             logger.info(f"{r}\n{input_text}{b}{output_text}\n{color.reset}")
 

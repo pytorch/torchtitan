@@ -9,9 +9,7 @@
 import inspect
 import pickle
 from abc import ABC, abstractmethod
-from typing import Any, Iterator
-
-import torch
+from typing import Any
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
@@ -40,10 +38,11 @@ class BaseDataLoader(Stateful, ABC):
     """
 
     @abstractmethod
-    def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+    def __iter__(self):
         ...
 
 
+# pyrefly: ignore [inconsistent-inheritance]
 class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
     """Dataloader that is aware of distributed data parallelism.
 

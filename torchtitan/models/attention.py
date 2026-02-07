@@ -14,7 +14,6 @@ import torch.nn.functional as F
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
-    _score_mod_signature,
     BlockMask,
     create_block_mask,
     flex_attention,
@@ -59,22 +58,22 @@ class VarlenAttentionWrapper(torch.nn.Module):
         xq: torch.Tensor,
         xk: torch.Tensor,
         xv: torch.Tensor,
+        head_dim: torch.Tensor,
         attention_masks: VarlenMetadata,
         scale: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-
         cu_seq_q = attention_masks.cu_seq_q
         cu_seq_k = attention_masks.cu_seq_k
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
-        xq_packed = xq.transpose(1, 2).flatten(0, 1)  # (bs * seqlen, n_heads, head_dim)
-        xk_packed = xk.transpose(1, 2).flatten(
-            0, 1
-        )  # (bs * seqlen, n_kv_heads, head_dim)
-        xv_packed = xv.transpose(1, 2).flatten(
-            0, 1
-        )  # (bs * seqlen, n_kv_heads, head_dim)
+        n_local_heads = xq.shape[1]
+        # pyrefly: ignore [no-matching-overload]
+        xq_packed = xq.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        # pyrefly: ignore [no-matching-overload]
+        xk_packed = xk.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
+        # pyrefly: ignore [no-matching-overload]
+        xv_packed = xv.transpose(1, 2).reshape(-1, n_local_heads, head_dim)
 
         return VarlenAttentionWrapper._compiled_varlen_attn(
             xq_packed,
@@ -84,18 +83,8 @@ class VarlenAttentionWrapper(torch.nn.Module):
             cu_seq_k,
             max_q,
             max_k,
+            is_causal=True,
             scale=scale,
-            # window_size=(left, right) controls the attention window relative to each
-            # query position. 'left' is how many tokens before the query to attend to,
-            # and 'right' is how many tokens after. A value of -1 means unlimited.
-            #
-            # This replaces the is_causal flag:
-            #   - (-1, 0): Causal attention - each token attends to all previous tokens
-            #              and itself, but no future tokens. Equivalent to is_causal=True.
-            #   - (-1, -1): Full bidirectional attention (no masking). Equivalent to
-            #               is_causal=False.
-            #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
-            window_size=(-1, 0),
         )
 
 
@@ -129,11 +118,9 @@ class FlexAttentionWrapper(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
-        score_mod: _score_mod_signature | None = None,
-        block_mask: BlockMask | None = None,
+        block_mask: BlockMask,
         scale: float | None = None,
         return_lse: bool = False,
-        enable_gqa: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
@@ -148,7 +135,6 @@ class FlexAttentionWrapper(torch.nn.Module):
             v,
             block_mask=block_mask,
             scale=scale,
-            enable_gqa=enable_gqa,
             return_lse=return_lse,
         )
 
@@ -174,6 +160,7 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
             self.sdpa_backends = [
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.FLASH_ATTENTION,
+                SDPBackend.EFFICIENT_ATTENTION,
                 SDPBackend.MATH,
             ]
 
@@ -184,13 +171,9 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
         v: torch.Tensor,
         *,
         scale: float | None = None,
-        enable_gqa: bool = False,
-        is_casual: bool = True,
     ) -> torch.Tensor:
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            return F.scaled_dot_product_attention(
-                q, k, v, scale=scale, is_causal=is_casual, enable_gqa=enable_gqa
-            )
+            return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:

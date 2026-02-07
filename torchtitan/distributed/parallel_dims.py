@@ -74,7 +74,8 @@ class ParallelDims:
             pp:      Pipeline Parallelism (PP).
             batch:   Used by data loading to determine the global batch size and which
                      part of the data each rank should read. This dimension includes both
-                     ``dp_replicate`` and ``dp_shard``.
+                     ``dp_replicate`` and ``dp_shard``. The backend is set to ``fake`` for
+                     this dimension to avoid unnecessary process group creation.
             loss:    Used by all-reduce when computing the loss. Includes ``dp_replicate``,
                      ``dp_shard``, and ``cp`` degrees, as all of them parallelize the data,
                      essentially require the weight gradients reduction.
@@ -117,7 +118,7 @@ class ParallelDims:
             """
             backend_override = {}
             for name, degree in zip(dim_names, dim_degrees, strict=True):
-                if not self._mesh_exist(name, degree):
+                if (not self._mesh_exist(name, degree)) or name == "batch":
                     backend_override[name] = "fake"
 
             return world_mesh._unflatten(

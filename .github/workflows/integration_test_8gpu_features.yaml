@@ -59,17 +59,12 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        #python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
-        python -m pip install --force-reinstall torch==2.11.0.dev20260125+cu126 --index-url ${{ matrix.index-url }}
-      python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+        python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
-
-        sudo mkdir -p "comm_traces"
-        sudo chown -R $(id -u):$(id -g) "comm_traces"
 
         # Verify the accuracy first.
         echo "Checking FSDP8 v.s. HSDP (4, 2) accuracy parity"

@@ -127,6 +127,7 @@ class FluxValidator(Validator):
         device_type = dist_utils.device_type
         num_steps = 0
 
+        # pyrefly: ignore [not-iterable]
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
@@ -138,7 +139,6 @@ class FluxValidator(Validator):
             if not isinstance(prompt, list):
                 prompt = [prompt]
             for p in prompt:
-                assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if save_img_count != -1 and save_img_count <= 0:
                     break
                 image = generate_image(
@@ -147,7 +147,7 @@ class FluxValidator(Validator):
                     job_config=self.job_config,
                     # pyrefly: ignore [bad-argument-type]
                     model=model,
-                    prompt=p,
+                    prompt=p,  # pyrefly: ignore[bad-argument-type]
                     autoencoder=self.autoencoder,
                     t5_tokenizer=self.t5_tokenizer,
                     clip_tokenizer=self.clip_tokenizer,
@@ -164,7 +164,7 @@ class FluxValidator(Validator):
                     ),
                     x=image,
                     add_sampling_metadata=True,
-                    prompt=p,
+                    prompt=p,  # pyrefly: ignore[bad-argument-type]
                 )
                 save_img_count -= 1
 
@@ -235,7 +235,7 @@ class FluxValidator(Validator):
                     parallel_dims.get_mesh("cp"),
                     (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                     None,  # No attention masks for Flux
-                    load_balancer_type=None,
+                    disable_load_balancer=True,
                 )
 
             with self.validation_context():
