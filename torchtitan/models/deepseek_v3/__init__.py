@@ -106,7 +106,7 @@ deepseekv3_configs = {
     "16B": DeepSeekV3Model.Config(
         vocab_size=102400,
         dim=2048,
-        n_layers=8,
+        n_layers=27,
         tok_embeddings=Embedding.Config(),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=1,
