@@ -33,8 +33,10 @@ else:
 class FTManager:
     def __init__(
         self,
-        ft_config: FTConfig,
     ) -> None:
+        return
+
+    def setup(self, ft_config: FTConfig):
         if not ft_config.enable:
             self._manager = None
             return
@@ -168,3 +170,6 @@ def maybe_semi_sync_training(
                 f"Unknown training method: {semi_sync_method}, only 'diloco' and 'local_sgd' are supported."
             )
     return nullcontext()
+
+
+_FT_MANAGER: FTManager = FTManager()
