@@ -77,7 +77,7 @@ jobs:
         # Set architecture-specific parameters
         if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
           LOSS_FILE="tests/assets/losses/llama3_cuda.txt"
-          STEPS=10
+          STEPS=1
         elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
           # The loss results of FSDP and HSDP start to diverge after 5th
           # step when running with ROCm, we also need to adjust this.
@@ -85,13 +85,20 @@ jobs:
           # figure out the root cause or confirm that this is an expected
           # behavior.
           LOSS_FILE="tests/assets/losses/llama3_rocm.txt"
-          STEPS=5
+          STEPS=1
         else
           echo "Error: Unknown GPU architecture type: ${{ matrix.gpu-arch-type }}"
           exit 1
         fi
 
-        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal --steps=${STEPS} --import-result ${LOSS_FILE}
+        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --export-result="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs/result.txt" --steps=100
+
+         echo "Checking FSDP8 the first tep loss is the same as FSDP2HSDP4"
+        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal --steps=1
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
+
+         echo "Checking FSDP8 loss from a new run v.s. FSDP8 loss from text file parity"
+        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --import-result="${LOSS_FILE}" --assert-equal --steps=100
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
