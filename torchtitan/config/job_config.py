@@ -792,10 +792,15 @@ class MXLinear:
 
 @dataclass
 class MXGroupedMM:
-    recipe_name: Literal["mxfp8"] = "mxfp8"
+    recipe_name: Literal["mxfp8", "mxfp8_wgrad_with_hp"] = "mxfp8"
     """
-    Quantization recipe name for grouped GEMMs. Options: ["mxfp8"]
+    Quantization recipe name for grouped GEMMs. Options: ["mxfp8", "mxfp8_wgrad_with_hp"]
 
+    Recipes:
+        - "mxfp8": Use MXFP8 for all 3 grouped GEMMs in the forward and backward pass (output, dgrad, wgrad).
+        - "mxfp8_wgrad_with_hp": Use MXFP8 for forward output and dgrad, but keep wgrad in high-precision.
+             This can be used to trade-off some performance for improved accuracy. For some smaller expert shapes,
+             it is also better for performance.
     Example: --quantize.grouped_mm.mx.recipe_name="mxfp8"
     """
 

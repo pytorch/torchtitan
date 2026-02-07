@@ -132,7 +132,7 @@ class MXGroupedMMConverter(QuantizationConverter):
 
         self.recipe_name = job_config.quantize.grouped_mm.mx.recipe_name
         self.enabled = True
-        logger.info("MXFP8 MoE training enabled")
+        logger.info(f"MXFP8 MoE training enabled with recipe: {self.recipe_name}")
 
     def convert(self, model: nn.Module):
         """
@@ -154,7 +154,7 @@ class MXGroupedMMConverter(QuantizationConverter):
                     return True
             return False
 
-        config = MoETrainingConfig(scaling_type=MoEScalingType.MXFP8)
+        config = MoETrainingConfig(scaling_type=MoEScalingType(self.recipe_name))
         quantize_(model, config=config, filter_fn=moe_module_filter_fn)
         logger.info(
             f"Converted MoE layers matching FQNS {self.moe_fqns} "
