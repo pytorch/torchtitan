@@ -278,13 +278,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.optimizers = self.train_spec.build_optimizers_fn(
             self.model_parts, job_config.optimizer, parallel_dims, self.ft_manager
         )
-        lr_schedule_steps = (
-            job_config.lr_scheduler.schedule_steps
-            if job_config.lr_scheduler.schedule_steps is not None
-            else job_config.training.steps
-        )
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
-            self.optimizers, job_config.lr_scheduler, lr_schedule_steps
+            self.optimizers, job_config.lr_scheduler, job_config.training.steps
         )
         # Post optimizer step model converters hook.
         # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2

@@ -172,7 +172,7 @@ class LRScheduler:
     Steps for lr scheduler warmup, normally 1/5 of --training.steps
     """
 
-    schedule_steps: int | None = None
+    total_steps: int | None = None
     """
     Total steps for LR schedule calculation. If None, defaults to training.steps.
     This allows decoupling the LR schedule from the actual training steps,
