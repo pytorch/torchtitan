@@ -301,8 +301,7 @@ class Attention(nn.Module):
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
         output = output.view(bs, seqlen, -1)
-        output = self.wo(output)
-        return output
+        return self.wo(output)
 
 
 class FeedForward(nn.Module):
@@ -539,8 +538,8 @@ class Qwen3Model(ModelProtocol):
                 assert tokenizer.eos_id is not None
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case "document_mask":
-                assert extra_inputs is not None and "position_ids" in extra_inputs
-                positions = extra_inputs["position_ids"]
+                assert extra_inputs is not None and "positions" in extra_inputs
+                positions = extra_inputs["positions"]
                 B = input_batch.shape[0]
                 mask_mods.append(get_document_mask_mod_from_positions(positions))
             case _:

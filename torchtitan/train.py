@@ -467,24 +467,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "attention_masks" not in extra_inputs.keys()
             or extra_inputs["attention_masks"] is None
         ):
+            model = cast(ModelProtocol, self.model_parts[0])
+            extra_inputs.pop("attention_masks")
+            assert (
+                self.tokenizer is not None
+            ), "tokenizer is required for sdpa/flex/varlen attention"
             if attn_type in ["flex", "varlen"]:
-                assert (
-                    self.tokenizer is not None
-                ), "tokenizer is required for flex/varlen attention"
-                extra_inputs.pop("attention_masks")
-                extra_kwargs["attention_masks"] = self.model_parts[
-                    0
-                ].get_attention_masks(
+                extra_kwargs["attention_masks"] = model.get_attention_masks(
                     input_batch=inputs,
                     tokenizer=self.tokenizer,
                     extra_inputs=extra_inputs,
                 )
             elif attn_type == "sdpa":
-                extra_inputs.pop("attention_masks")
                 if "positions" in extra_inputs.keys():
-                    extra_kwargs["attention_masks"] = self.model_parts[
-                        0
-                    ].get_attention_masks(
+                    extra_kwargs["attention_masks"] = model.get_attention_masks(
                         input_batch=inputs,
                         tokenizer=self.tokenizer,
                         extra_inputs=extra_inputs,
@@ -586,29 +582,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         if parallel_dims.pp_enabled:
-            # Pipeline Parallel forward inside step() call
-            with self.train_context():
-                targets, losses = (
-                    (labels, []) if self.pp_has_last_stage else (None, None)
-                )
-                if self.pp_has_first_stage:
-                    outputs = self.pp_schedule.eval(
-                        inputs,
-                        **extra_inputs,
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                        return_outputs=True,
-                    )
-                else:
-                    outputs = self.pp_schedule.eval(
-                        **extra_kwargs,
-                        target=targets,
-                        losses=losses,
-                        return_outputs=True,
-                    )
-
-                pred = outputs if self.pp_has_last_stage else None
+            raise NotImplementedError(
+                "Pipeline parallelism is not yet supported in forward_step. "
+                "This will be implemented in a follow-up PR."
+            )
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1

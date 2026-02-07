@@ -260,29 +260,6 @@ def find_packed_sequence_indices(positions: torch.Tensor) -> torch.Tensor:
     return (position_diff != 1).cumsum(-1)  # [batch, seq]
 
 
-def get_document_mask_mod_from_positions(
-    positions: torch.Tensor,
-) -> _mask_mod_signature:
-    """Creates a document mask from position_ids for flex attention.
-
-    Detects document boundaries where position_ids reset (diff != 1).
-
-    Args:
-        positions: Position IDs tensor with shape [batch, seq]
-
-    Returns:
-        A mask modifier function that implements document-level masking.
-    """
-    sequence_indices = find_packed_sequence_indices(positions)
-
-    def document_mask(
-        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
-    ) -> torch.Tensor:
-        return sequence_indices[b, q_idx] == sequence_indices[b, kv_idx]
-
-    return document_mask
-
-
 def create_sdpa_document_causal_mask(positions: torch.Tensor) -> torch.Tensor:
     """Creates a 4D document-aware causal mask for SDPA from position_ids.
 
@@ -312,6 +289,29 @@ def create_sdpa_document_causal_mask(positions: torch.Tensor) -> torch.Tensor:
 
     # Combine: document mask AND causal mask
     return doc_mask & causal_mask.unsqueeze(0).unsqueeze(0)
+
+
+def get_document_mask_mod_from_positions(
+    positions: torch.Tensor,
+) -> _mask_mod_signature:
+    """Creates a document mask from position_ids for flex attention.
+
+    Detects document boundaries where position_ids reset (diff != 1).
+
+    Args:
+        positions: Position IDs tensor with shape [batch, seq]
+
+    Returns:
+        A mask modifier function that implements document-level masking.
+    """
+    sequence_indices = find_packed_sequence_indices(positions)
+
+    def document_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        return sequence_indices[b, q_idx] == sequence_indices[b, kv_idx]
+
+    return document_mask
 
 
 def get_fixed_block_mask_mod(fixed_block_size: int) -> _mask_mod_signature:
