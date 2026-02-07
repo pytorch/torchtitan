@@ -105,7 +105,7 @@ def build_lr_schedulers(
         training_steps (int): The total number of training steps.
     """
     # Use total_steps from config if set, otherwise fall back to training_steps
-    schedule_steps = (
+    total_steps = (
         lr_scheduler_config.total_steps
         if lr_scheduler_config.total_steps is not None
         else training_steps
@@ -113,26 +113,26 @@ def build_lr_schedulers(
 
     warmup_steps = int(lr_scheduler_config.warmup_steps)
 
-    if warmup_steps > schedule_steps:
+    if warmup_steps > total_steps:
         logger.warning(
-            f"Warmup steps ({warmup_steps}) exceed total schedule steps ({schedule_steps}). "
-            f"Adjusting warmup steps to {schedule_steps}."
+            f"Warmup steps ({warmup_steps}) exceed total steps ({total_steps}). "
+            f"Adjusting warmup steps to {total_steps}."
         )
-        warmup_steps = schedule_steps
+        warmup_steps = total_steps
 
     if lr_scheduler_config.decay_ratio is not None:
-        decay_steps = round(schedule_steps * lr_scheduler_config.decay_ratio)
-        if warmup_steps + decay_steps > schedule_steps:
+        decay_steps = round(total_steps * lr_scheduler_config.decay_ratio)
+        if warmup_steps + decay_steps > total_steps:
             logger.warning(
                 f"Warmup ({warmup_steps}) + decay ({decay_steps}) steps exceed "
-                f"total schedule steps ({schedule_steps}). "
-                f"Adjusting decay steps to {schedule_steps - warmup_steps}."
+                f"total steps ({total_steps}). "
+                f"Adjusting decay steps to {total_steps - warmup_steps}."
             )
-            decay_steps = schedule_steps - warmup_steps
+            decay_steps = total_steps - warmup_steps
     else:
-        decay_steps = schedule_steps - warmup_steps
+        decay_steps = total_steps - warmup_steps
     # Add a virtual last step to prevent the learning rate from dropping to 0
-    stable_steps = schedule_steps + 1 - warmup_steps - decay_steps
+    stable_steps = total_steps + 1 - warmup_steps - decay_steps
     lr_decay_type = lr_scheduler_config.decay_type
     min_lr_factor = lr_scheduler_config.min_lr_factor
 
