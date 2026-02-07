@@ -496,3 +496,32 @@ def get_moe_model_nparams_and_flops(
         nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token
+
+def trunc_normal_(
+    tensor: torch.Tensor,
+    mean: float = 0.0,
+    std: float = 1.0,
+    a: float = -2.0,
+    b: float = 2.0,
+):
+    """
+    Fills the input Tensor with values drawn from a truncated normal distribution.
+    The values are effectively drawn from the normal distribution
+    :math:`\mathcal{N}(\text{mean}, \text{std}^2)` with values outside
+    :math:`[a, b]` redrawn until they are within the bounds.
+    To avoid numerical instabilities in torch.nn.init.trunc_normal_, 
+    the intialization is always performed in float32, and the result is cast back to the dtype of the input tensor.
+
+    Args:
+        tensor: an n-dimensional `torch.Tensor`
+        mean: the mean of the normal distribution
+        std: the standard deviation of the normal distribution
+        a: the minimum cutoff value
+        b: the maximum cutoff value
+
+    Returns:
+        The input tensor filled with values drawn from the truncated normal distribution.
+    """
+    tmp = tensor.float()
+    nn.init.trunc_normal_(tmp, mean=mean, std=std, a=a, b=b)
+    tensor.copy_(tmp)
