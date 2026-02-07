@@ -18,7 +18,7 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import Color, device_module, device_type
+from torchtitan.tools.utils import Color, device_module, device_type, NoColor
 
 if TYPE_CHECKING:
     from torchtitan.protocols import BaseModelArgs
@@ -195,7 +195,7 @@ class LoggerContainer(BaseLogger):
 
 
 def ensure_pp_loss_visible(
-    parallel_dims: ParallelDims, job_config: JobConfig, color: Color
+    parallel_dims: ParallelDims, job_config: JobConfig, color: Color | NoColor
 ) -> None:
     """
     Ensures that the loss is visible on the console for pipeline-parallel training.
@@ -401,6 +401,19 @@ class MetricsProcessor:
         grad_norm: float,
         extra_metrics: dict[str, Any] | None = None,
     ):
+        """
+        Log training metrics including loss, throughput, and memory statistics.
+
+        Args:
+            step: Current training step
+            global_avg_loss: Global average loss across all valid tokens on all ranks
+                Defined as global_loss_sum / global_valid_tokens
+            global_max_loss: Maximum local loss across all ranks
+                Defined as max(local_loss_sum / local_valid_tokens)
+            grad_norm: Gradient norm after clipping
+            extra_metrics: Optional additional metrics to log
+
+        """
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
 
         time_delta = time.perf_counter() - self.time_last_log

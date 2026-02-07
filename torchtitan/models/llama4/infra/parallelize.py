@@ -40,7 +40,10 @@ from torchtitan.distributed.expert_parallel import (
     TensorParallel,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.llama3.infra.parallelize import (
+    apply_ddp,
+    disable_fsdp_gradient_division,
+)
 from torchtitan.models.moe import moe as moe_module
 from torchtitan.tools.logging import logger
 
@@ -405,13 +408,6 @@ def apply_fsdp(
                 shard_placement_fn=_experts_shard_placement_fn,
             )
 
-            # NOTE: # Although the FSDP sharding of experts is done on a mesh of
-            #       a different size than other parameters, the gradient division
-            #       factor should be consistent with data.
-            transformer_block.moe.experts.set_gradient_divide_factor(
-                gradient_divide_factor,
-            )
-
         fully_shard(
             transformer_block,
             **fsdp_config,
@@ -429,6 +425,9 @@ def apply_fsdp(
         )
 
     fully_shard(model, **fsdp_config)
+
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
     # in EP could interfere with implicit prefetching in FSDP
@@ -601,7 +600,6 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
     torch._dynamo.config.capture_scalar_outputs = True
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
-        # pyrefly: ignore[missing-attribute]
         if transformer_block.moe_enabled:
             # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
             # So we must weave compile wrappers around those FSDP hooks to

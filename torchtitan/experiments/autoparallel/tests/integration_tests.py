@@ -30,6 +30,7 @@ def build_autoparallel_test_list() -> list[OverrideDefinitions]:
             "llama3 AutoParallel FSDP+TP",
             "llama3_autoparallel_fsdp_tp",
             ngpu=4,
+            skip_rocm_test=True,
         ),
         # TODO: Re-enable this once we fix the test
         # deepseek_v3 tests
@@ -59,6 +60,12 @@ _TEST_SUITES_FUNCTION = {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
+    parser.add_argument(
+        "--gpu_arch_type",
+        default="cuda",
+        choices=["cuda", "rocm"],
+        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+    )
     parser.add_argument(
         "--config_path",
         default="./tests/integration_tests/base_config.toml",

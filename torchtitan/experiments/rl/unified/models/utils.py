@@ -54,15 +54,28 @@ def replace_with_vllm_attention(model, tp_degree=1):
         )
 
     model_args = model.model_args
+
+    # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3.py#L80
+    # Calculate num_kv_heads based on TP size
+    total_num_kv_heads = model_args.n_kv_heads
+    if total_num_kv_heads >= tp_degree:
+        # Number of KV heads is greater than TP size, so we partition
+        # the KV heads across multiple tensor parallel GPUs.
+        assert total_num_kv_heads % tp_degree == 0
+        num_kv_heads = total_num_kv_heads // tp_degree
+    else:
+        # TODO: Handle this branch correctly
+        raise ValueError("num_kv_heads are smaller than tp_degree")
+
     for layer_name, layer in model.layers.items():
         if not hasattr(layer, "attention"):
             raise ValueError(f"Layer {layer_name} must have .attention attribute")
 
+        # GQA
         vllm_attn = VLLMAttention(
             hidden_size=model_args.dim,
             num_heads=model_args.n_heads // tp_degree,
-            num_kv_heads=model_args.n_heads
-            // tp_degree,  # Use n_heads (already replicated)
+            num_kv_heads=num_kv_heads,
             head_dim=model_args.head_dim,
             layer_name=layer_name,
             scale=model_args.head_dim**-0.5,

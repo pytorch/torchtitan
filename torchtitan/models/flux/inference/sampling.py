@@ -36,7 +36,6 @@ from torchtitan.tools.logging import logger
 
 
 def time_shift(mu: float, sigma: float, t: Tensor):
-    # pyrefly: ignore[unsupported-operation]
     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 

@@ -21,7 +21,6 @@ def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
     model_args = train_spec.model_args[model_flavor]
 
     with torch.device("cpu"):
-        # pyrefly: ignore[bad-instantiation]
         model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
