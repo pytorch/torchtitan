@@ -3,6 +3,8 @@ name: Compiler Toolkit 8 GPU Integration Tests
 on:
   push:
     branches: [ main ]
+    tags:
+      - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/compiler_toolkit/**'
       - '.github/workflows/integration_test_8gpu_compiler_toolkit.yaml'
@@ -22,18 +24,30 @@ defaults:
   run:
     shell: bash -l -eo pipefail {0}
 
+permissions:
+      id-token: write
+      contents: read
+
 jobs:
+  # Step 1: Dynamically compute the matrix based on conditions
+  set-matrix:
+    uses: ./.github/workflows/set-matrix.yaml
+
+  # Step 2: Use the dynamic matrix in the build-test job
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job.yml@main
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
     with:
-      runner: linux.g5.48xlarge.nvidia.gpu
-      gpu-arch-type: cuda
-      gpu-arch-version: "12.6"
-      # This image is faster to clone than the default, but it lacks CC needed by triton
-      # (1m25s vs 2m37s).
-      docker-image: torchtitan-ubuntu-20.04-clang12
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
+      timeout: 45
       script: |
         set -eux
 
@@ -41,13 +55,20 @@ jobs:
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
 
-        # Log CUDA driver version for debugging.
-        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
-        echo "CUDA driver version: ${DRIVER_VERSION}"
+        # Log GPU info / driver version for debugging.
+        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+          DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+          echo "CUDA driver version: ${DRIVER_VERSION}"
+        elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          echo "ROCm info:"
+          rocminfo || true
+        fi
 
         pip config --user set global.progress_bar off
 
-        python -m pip install --force-reinstall --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+        python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
 
-        mkdir artifacts-to-be-uploaded
-        TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train python -m torchtitan.experiments.compiler_toolkit.tests.integration_tests artifacts-to-be-uploaded --ngpu 4
+        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train python -m torchtitan.experiments.compiler_toolkit.tests.integration_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4

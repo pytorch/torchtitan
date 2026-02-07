@@ -420,6 +420,21 @@ class Parallelism:
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
+    context_parallel_load_balancer: str | None = "headtail"
+    """
+    Load balancer type for context parallelism. Options:
+    - "headtail": Use HeadTailLoadBalancer for SDPA
+    - "ptrr": Use PTRRLoadBalancer for FlexAttention
+    - None: Disable load balancing
+    """
+
+    def __post_init__(self):
+        if self.context_parallel_load_balancer == "":
+            raise ValueError(
+                "context_parallel_load_balancer cannot be an empty string. "
+                "Use None to disable load balancing."
+            )
+
     context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"
     """
     The collective to use in context parallel SDPA for kv shards exchange.
