@@ -172,6 +172,14 @@ class LRScheduler:
     Steps for lr scheduler warmup, normally 1/5 of --training.steps
     """
 
+    total_steps: int | None = None
+    """
+    Total steps for LR schedule calculation. If None, defaults to training.steps.
+    This allows decoupling the LR schedule from the actual training steps,
+    which is useful for debugging with fewer steps while maintaining the same LR curve,
+    or for early stopping scenarios.
+    """
+
     decay_ratio: float | None = None
     """
     Controls the proportion of the training steps allocated to the learning rate decay phase.
