@@ -338,8 +338,15 @@ class GptOssModel(ModelProtocol):
                 B = input_batch.shape[0]
                 assert tokenizer.eos_id is not None
                 basic_mask_mods.append(
-                    get_document_mask_mod(input_batch, tokenizer.eos_id)
+                    get_document_mask_mod(
+                        input_ids=input_batch, eos_id=tokenizer.eos_id
+                    )
                 )
+            case "position_block_causal":
+                assert extra_inputs is not None and "positions" in extra_inputs
+                positions = extra_inputs["positions"]
+                B = input_batch.shape[0]
+                basic_mask_mods.append(get_document_mask_mod(positions=positions))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"

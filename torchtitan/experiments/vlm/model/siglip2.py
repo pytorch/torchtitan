@@ -227,7 +227,16 @@ class VisionTransformer(nn.Module):
                 B = 1
             case "block_causal":
                 B = pixel_masks.shape[0]
-                mask_mods.append(get_document_mask_mod(pixel_masks, tokenizer.eos_id))
+                mask_mods.append(
+                    get_document_mask_mod(
+                        input_ids=pixel_masks, eos_id=tokenizer.eos_id
+                    )
+                )
+            case "position_block_causal":
+                assert extra_inputs is not None and "positions" in extra_inputs
+                positions = extra_inputs["positions"]
+                B = input_batch.shape[0]
+                mask_mods.append(get_document_mask_mod(positions=positions))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.args.attn_mask_type}"

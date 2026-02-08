@@ -568,33 +568,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
 
-    def forward_step(
-        self,
-        *,
-        input_dict: dict[str, torch.Tensor],
-        labels: torch.Tensor,
-    ) -> torch.Tensor:
-        model_parts = self.model_parts
-        parallel_dims = self.parallel_dims
-
-        inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
-            input_dict, labels
-        )
-
-        if parallel_dims.pp_enabled:
-            raise NotImplementedError(
-                "Pipeline parallelism is not yet supported in forward_step. "
-                "This will be implemented in a follow-up PR."
-            )
-        else:
-            # Non-PP forward / backward
-            assert len(model_parts) == 1
-            with self.train_context():
-                with self.maybe_enable_amp:
-                    pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-
-        return pred
-
     def train_step(
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):

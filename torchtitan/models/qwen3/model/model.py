@@ -16,12 +16,10 @@ from torch.nn.attention.flex_attention import and_masks, BlockMask
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.attention import (
     create_attention_mask,
-    create_sdpa_document_causal_mask,
     create_varlen_metadata_for_document,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
-    get_document_mask_mod_from_positions,
     ScaledDotProductAttentionWrapper,
     VarlenAttentionWrapper,
     VarlenMetadata,
@@ -280,10 +278,7 @@ class Attention(nn.Module):
                     scale=self.scaling,
                 )
             case "sdpa":
-                if attention_masks is not None:
-                    is_causal = False
-                else:
-                    is_causal = True
+                assert attention_masks is None
                 output = (
                     self.inner_attention(
                         xq,  # (bs, n_heads, seqlen, head_dim)
@@ -291,8 +286,6 @@ class Attention(nn.Module):
                         xv,  # (bs, n_kv_heads, seqlen, head_dim)
                         scale=self.scaling,
                         enable_gqa=self.enable_gqa,
-                        is_causal=is_causal,
-                        attn_mask=attention_masks,
                     )
                     .transpose(1, 2)
                     .contiguous()
@@ -536,12 +529,16 @@ class Qwen3Model(ModelProtocol):
             case "block_causal":
                 B = input_batch.shape[0]
                 assert tokenizer.eos_id is not None
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
-            case "document_mask":
+                mask_mods.append(
+                    get_document_mask_mod(
+                        input_ids=input_batch, eos_id=tokenizer.eos_id
+                    )
+                )
+            case "position_block_causal":
                 assert extra_inputs is not None and "positions" in extra_inputs
                 positions = extra_inputs["positions"]
                 B = input_batch.shape[0]
-                mask_mods.append(get_document_mask_mod_from_positions(positions))
+                mask_mods.append(get_document_mask_mod(positions=positions))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
@@ -550,6 +547,28 @@ class Qwen3Model(ModelProtocol):
             and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
         )
 
+    def _get_varlen_attention_masks(
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
+    ) -> AttentionMasksType:
+        match self.model_args.attn_mask_type:
+            case "block_causal":
+                assert tokenizer.eos_id is not None
+                return create_varlen_metadata_for_document(
+                    input_ids=input_batch, eos_id=tokenizer.eos_id
+                )
+            case "position_block_causal":
+                assert extra_inputs is not None and "positions" in extra_inputs
+                positions = extra_inputs["positions"]
+                return create_varlen_metadata_for_document(positions=positions)
+            case _:
+                raise ValueError(
+                    f"varlen attention is only supported with block_causal or "
+                    f"position_block_causal attention mask type, got {self.model_args.attn_mask_type}"
+                )
+
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
@@ -557,25 +576,16 @@ class Qwen3Model(ModelProtocol):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         match self.model_args.attn_type:
-            case "sdpa":
-                assert extra_inputs is not None and "positions" in extra_inputs
-                return create_sdpa_document_causal_mask(extra_inputs["positions"])
             case "flex":
                 return self._get_flex_attention_masks(
                     input_batch, tokenizer, extra_inputs
                 )
             case "varlen":
-                if self.model_args.attn_mask_type != "block_causal":
-                    raise ValueError(
-                        f"varlen attention is only supported with block_causal \
-                        attention mask type, got {self.model_args.attn_mask_type}"
-                    )
-                assert tokenizer.eos_id is not None
-                return create_varlen_metadata_for_document(
-                    input_batch, tokenizer.eos_id
+                return self._get_varlen_attention_masks(
+                    input_batch, tokenizer, extra_inputs
                 )
             case _:
-                raise TypeError("Only sdpa, varlen, and flex attn masks are supported")
+                raise TypeError("Only varlen and flex attn masks are supported")
 
     def forward(
         self,
