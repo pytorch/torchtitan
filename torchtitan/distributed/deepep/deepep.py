@@ -317,6 +317,24 @@ def get_buffer(group: ProcessGroup, hidden_bytes: int) -> Buffer:
     return _buffer
 
 
+def _indices_dtype_by_sort_size(data: Tensor, sort_dim=-1) -> torch.dtype:
+    sort_size = data.size(sort_dim)
+    indices_dtype = torch.long
+    if sort_size - 1 <= torch.iinfo(torch.int8).max:
+        indices_dtype = torch.int8
+    elif sort_size - 1 <= torch.iinfo(torch.uint8).max:
+        indices_dtype = torch.uint8
+    elif sort_size - 1 <= torch.iinfo(torch.int16).max:
+        indices_dtype = torch.int16
+    elif sort_size - 1 <= torch.iinfo(torch.uint16).max:
+        indices_dtype = torch.uint16
+    elif sort_size - 1 <= torch.iinfo(torch.int32).max:
+        indices_dtype = torch.int32
+    else:
+        indices_dtype = torch.long
+    return indices_dtype
+
+
 def _permute_tokens(
     hidden_states: torch.Tensor,
     dispatched_indices: torch.Tensor,
@@ -343,7 +361,15 @@ def _permute_tokens(
     valid_scores = dispatched_scores[mask]
 
     # Repeat each token by its valid count and select tokens in expert order
-    sort_order = torch.argsort(valid_expert_ids, stable=True)
+
+    # Current torch indexing mechanism supports only int64 and int32
+    # If other integer value is supported in indexing, the torch native ops, below optimization can be enjoyed
+    # indices_dtype = _indices_dtype_by_sort_size(valid_expert_ids) if valid_expert_ids.is_cuda or valid_expert_ids.is_cpu else torch.long
+    # indices_dtype = indices_dtype.to(torch.int32) # addinitional copy is required in the constraint indexing dtype (int32, long)
+    indices_dtype = torch.int32  # Free performance improvement
+    sort_order = torch.empty((), device=valid_expert_ids.device(), dtype=indices_dtype)
+    torch.argsort(valid_expert_ids, stable=True, out=sort_order)
+
     permuted_indices = torch.arange(
         len(hidden_states), device=hidden_states.device
     ).repeat_interleave(mask.sum(dim=1))[sort_order]
