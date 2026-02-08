@@ -186,14 +186,12 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
         scale: float | None = None,
         enable_gqa: bool = False,
         is_causal: bool = True,
-        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
             return F.scaled_dot_product_attention(
                 q,
                 k,
                 v,
-                attn_mask=attn_mask,
                 scale=scale,
                 is_causal=is_causal,
                 enable_gqa=enable_gqa,
