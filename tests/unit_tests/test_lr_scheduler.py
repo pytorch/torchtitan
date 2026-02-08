@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 
 import torch
 from torch.optim import Adam
-
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import ConfigManager
@@ -88,16 +87,16 @@ class TestLRScheduler(unittest.TestCase):
 
         # Expected adjustment factors for each step
         expected_factors = [
-            0.5,  # Step 0: 50% of max LR (warmup)
-            1.0,  # Step 1: 100% of max LR (warmup complete)
-            1.0,  # Step 2: We maunally added step of stable phase, to prevent LR from dropping to 0 at last step
-            7.0 / 8.0,  # Step 3: 7/8 of max LR
-            6.0 / 8.0,  # Step 4: 3/4 of max LR
-            5.0 / 8.0,  # Step 5: 5/8 of max LR
-            4.0 / 8.0,  # Step 6: 1/2 of max LR
-            3.0 / 8.0,  # Step 7: 3/8 of max LR
-            2.0 / 8.0,  # Step 8: 1/4 of max LR
-            1.0 / 8.0,  # Step 9: 1/8 of max LR
+            0.0,  # Step 0: 0% of max LR (warmup start)
+            0.5,  # Step 1: 50% of max LR (warmup)
+            1.0,  # Step 2: 100% of max LR (warmup complete)
+            1.0,  # Step 3: Stable phase (virtual step to prevent LR dropping to 0 at last step)
+            7.0 / 8.0,  # Step 4: 7/8 of max LR (decay starts)
+            6.0 / 8.0,  # Step 5: 3/4 of max LR
+            5.0 / 8.0,  # Step 6: 5/8 of max LR
+            4.0 / 8.0,  # Step 7: 1/2 of max LR
+            3.0 / 8.0,  # Step 8: 3/8 of max LR
+            2.0 / 8.0,  # Step 9: 1/4 of max LR
         ]
 
         # Check the learning rate at each step

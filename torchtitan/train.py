@@ -128,11 +128,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else None
         )
 
-        self.dataloader = self.train_spec.build_dataloader_fn(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
-            tokenizer=self.tokenizer,
-            job_config=job_config,
+        self.dataloader = (
+            self.train_spec.build_dataloader_fn(
+                dp_world_size=batch_degree,
+                dp_rank=batch_rank,
+                tokenizer=self.tokenizer,
+                job_config=job_config,
+            )
+            if self.train_spec.build_dataloader_fn is not None
+            else None
         )
 
         # build model (using meta init)
@@ -459,16 +463,32 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         extra_kwargs: dict[str, Any] = {}
 
         attn_type = getattr(self.model_args, "attn_type", "sdpa")
-        if attn_type in ["flex", "varlen"]:
+        if (
+            "attention_masks" not in extra_inputs.keys()
+            or extra_inputs["attention_masks"] is None
+        ):
+            model = cast(ModelProtocol, self.model_parts[0])
+            extra_inputs.pop("attention_masks")
             assert (
                 self.tokenizer is not None
-            ), "tokenizer is required for flex/varlen attention"
-            model = cast(ModelProtocol, self.model_parts[0])
-            extra_kwargs["attention_masks"] = model.get_attention_masks(
-                input_batch=inputs,
-                tokenizer=self.tokenizer,
-                extra_inputs=extra_inputs,
-            )
+            ), "tokenizer is required for sdpa/flex/varlen attention"
+            if attn_type in ["flex", "varlen"]:
+                extra_kwargs["attention_masks"] = model.get_attention_masks(
+                    input_batch=inputs,
+                    tokenizer=self.tokenizer,
+                    extra_inputs=extra_inputs,
+                )
+            elif attn_type == "sdpa":
+                if "positions" in extra_inputs.keys():
+                    extra_kwargs["attention_masks"] = model.get_attention_masks(
+                        input_batch=inputs,
+                        tokenizer=self.tokenizer,
+                        extra_inputs=extra_inputs,
+                    )
+            else:
+                raise ValueError(f"Unknown attention type: {attn_type}")
+        else:
+            extra_kwargs["attention_masks"] = extra_inputs.pop("attention_masks")
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(
