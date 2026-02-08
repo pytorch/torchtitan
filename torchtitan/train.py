@@ -478,15 +478,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     tokenizer=self.tokenizer,
                     extra_inputs=extra_inputs,
                 )
-            elif attn_type == "sdpa":
-                if "positions" in extra_inputs.keys():
-                    extra_kwargs["attention_masks"] = model.get_attention_masks(
-                        input_batch=inputs,
-                        tokenizer=self.tokenizer,
-                        extra_inputs=extra_inputs,
-                    )
-            else:
-                raise ValueError(f"Unknown attention type: {attn_type}")
         else:
             extra_kwargs["attention_masks"] = extra_inputs.pop("attention_masks")
 

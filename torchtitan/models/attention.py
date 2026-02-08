@@ -84,7 +84,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
             cu_seq_k,
             max_q,
             max_k,
-            scale=scale,
+            # scale=scale,
             # window_size=(left, right) controls the attention window relative to each
             # query position. 'left' is how many tokens before the query to attend to,
             # and 'right' is how many tokens after. A value of -1 means unlimited.
@@ -95,7 +95,7 @@ class VarlenAttentionWrapper(torch.nn.Module):
             #   - (-1, -1): Full bidirectional attention (no masking). Equivalent to
             #               is_causal=False.
             #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
-            window_size=(-1, 0),
+            # window_size=(-1, 0),
         )
 
 
