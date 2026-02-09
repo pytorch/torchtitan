@@ -64,9 +64,34 @@ jobs:
           rocminfo || true
         fi
 
+        # DEBUG: HIP Device name
+        if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          echo "::group::DEBUG HIP device-name"
+          # Search for hipcc
+          HIPCC="$(find / -type f -name hipcc -perm -111 -print -quit 2>/dev/null || true)"
+          if [[ -z "$HIPCC" ]]; then
+            echo "ERROR: hipcc not found on filesystem"
+            exit 1
+          fi
+          echo "Found hipcc at: $HIPCC"
+          # Compile and run the checked-in C++ program
+          OUTDIR="./hip_tmp"
+          sudo mkdir -p "$OUTDIR"
+          sudo chown -R $(id -u):$(id -g) "$OUTDIR"
+          "$HIPCC" -O2 torchtitan/experiments/autoparallel/debug_ci_script/debug_hip_device_name_ci.cpp -o "$OUTDIR/hip_device_name"
+          "$OUTDIR/hip_device_name"
+          echo "::endgroup::"
+        fi
+
         pip config --user set global.progress_bar off
 
         python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
+
+        sudo curl -L -o /usr/share/libdrm/amdgpu.ids   https://gitlab.freedesktop.org/mesa/libdrm/-/raw/main/data/amdgpu.ids
+        sudo mkdir -p /opt/amdgpu/share/libdrm
+        sudo ln -sf /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids
+        echo "Getting device name:"
+        python -c "import torch; print(torch.cuda.get_device_name(None))"
 
         # Install autoparallel - required dependency for autoparallel experiment
         python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
