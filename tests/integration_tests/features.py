@@ -121,7 +121,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "Checkpoint Integration Test - save load model only checkpoint in HF definition and format",
             "model_only_hf_checkpoint",
-            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -349,6 +348,20 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--parallelism.data_parallel_shard_degree=4",
+                    "--activation_checkpoint.mode=selective",
+                    "--activation_checkpoint.selective_ac_option=op",
+                    "--model.flavor=debugmodel_varlen_attn",
+                ]
+            ],
+            "FSDP+VARLEN_ATTN + per op SAC",
+            "fsdp+varlen_attn+per_op_sac",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
                     "--parallelism.context_parallel_degree=4",
                     "--parallelism.context_parallel_rotate_method='allgather'",
                 ]
@@ -471,7 +484,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "Generation script test",
             "test_generate",
             ngpu=2,
-            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             [
@@ -542,6 +554,21 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "Validation test with tp, cp, pp",
             "validation_tp_cp_pp",
             ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.dataloader.num_workers",
+                    "2",
+                    "--training.dataloader.pin_memory",
+                    "--training.dataloader.persistent_workers",
+                    "--training.dataloader.prefetch_factor",
+                    "4",
+                ],
+            ],
+            "Dataloader kwargs (via CLI args)",
+            "dataloader_kwargs",
+            ngpu=2,
         ),
     ]
 

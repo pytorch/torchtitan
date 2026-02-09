@@ -39,9 +39,9 @@ class FullDTensorTrainer(Trainer):
 
         # We could let the model perform parallelize_inputs, but calling it here in the
         # trainer preserves the potential of implementing dataloading pipelining,
-        # # which offloads logic (e.g., CP load # balancing) to CPU and overlaps it with
+        # which offloads logic (e.g., CP load balancing) to CPU and overlaps it with
         # the previous forward(). We also need to consider how PP shards inputs along
-        # the batch dimension. For now, keep # this function callsite in the trainer.
+        # the batch dimension. For now, keep this function callsite in the trainer.
         inputs, labels = self.parallelize_inputs(inputs, labels)
 
         assert isinstance(inputs, torch.distributed.tensor.DTensor), type(inputs)

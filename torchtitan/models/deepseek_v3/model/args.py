@@ -10,7 +10,6 @@
 from dataclasses import dataclass, field
 
 from torch import nn
-
 from torchtitan.config import JobConfig
 from torchtitan.models.moe import MoEArgs
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -37,14 +36,12 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
         n_heads (int): Number of attention heads.
         norm_eps (float): Epsilon value used for RMSNorm.
         moe_args (MoEArgs): MoE configuration.
-        n_expert_groups (int): Number of expert groups.
-        n_limited_groups (int): Number of limited groups for MoE routing.
         q_lora_rank (int): LoRA rank for query projections.
         kv_lora_rank (int): LoRA rank for key-value projections.
         qk_nope_head_dim (int): Dimension for query-key projections without positional embeddings.
         qk_rope_head_dim (int): Dimension for query-key projections with rotary embeddings.
         v_head_dim (int): Dimension for value projections.
-        use_flex_attn (bool): Whether to use FlexAttention.
+        attn_type (str): Attention type.
         attn_mask_type (str): Type of attention mask.
         original_seq_len (int): Original sequence length.
         rope_theta (float): Base for rotary positional encoding.
@@ -66,9 +63,9 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
 
     # MoE
     moe_args: MoEArgs = field(default_factory=MoEArgs)
-    # TODO: node-limited routing is not supported yet
-    n_expert_groups: int = 1
-    n_limited_groups: int = 1
+
+    # Expert parallel communication backend (set from config)
+    expert_parallel_comm_backend: str = "standard"  # "standard" or "deepep"
 
     # Multi-Head Latent Attention (MLA)
     q_lora_rank: int = 0
@@ -76,7 +73,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     qk_nope_head_dim: int = 128
     qk_rope_head_dim: int = 64
     v_head_dim: int = 128
-    use_flex_attn: bool = False
+    attn_type: str = "sdpa"
     attn_mask_type: str = "causal"
 
     # yarn
@@ -101,18 +98,24 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        if job_config.parallelism.context_parallel_degree > 1 and self.use_flex_attn:
+        if (
+            job_config.parallelism.context_parallel_degree > 1
+            and self.attn_type != "sdpa"
+        ):
             raise NotImplementedError(
-                "CP support for FlexAttention is still in progress."
+                f"Context Parallel only supports SDPA attention. "
+                f"Got attn_type='{self.attn_type}'. "
+                f"FlexAttention and varlen attention are not supported with CP."
             )
 
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
         )
 
-    def get_nparams_and_flops(
-        self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
+        # Configure expert parallel communication backend from config (defaults to "standard")
+        self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
+
+    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(
             self,
             model,

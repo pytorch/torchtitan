@@ -8,6 +8,7 @@ import functools
 from typing import Any, Generic, Iterator, TypeVar
 
 import torch
+import torch.distributed.tensor
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.state_dict import (
@@ -16,6 +17,7 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
@@ -87,6 +89,7 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
     def __len__(self) -> int:
         return len(self.optimizers)
 
+    # pyrefly: ignore [bad-override]
     def step(self, *args, **kwargs) -> None:
         for optimizer in self.optimizers:
             optimizer.step(*args, **kwargs)
@@ -126,6 +129,10 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         # We need to call Optimizer.__init__() to initialize some necessary optimizer
         # functionality such as hooks.
         Optimizer.__init__(self, all_params, optimizer_kwargs)
+
+    def init_cache_state_dict(self) -> None:
+        """Initialize cached state dict for TorchFT. No-op for base class."""
+        pass
 
 
 class OptimizersInBackwardContainer(OptimizersContainer):
@@ -169,9 +176,11 @@ class OptimizersInBackwardContainer(OptimizersContainer):
         )
         self._post_init(all_params, optimizer_kwargs)
 
+    # pyrefly: ignore [bad-override]
     def step(self) -> None:
         pass
 
+    # pyrefly: ignore [bad-override]
     def zero_grad(self) -> None:
         pass
 
@@ -342,9 +351,12 @@ def build_optimizers_with_moe_load_balancing(
 
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         for model_part in model_parts:
-            for transformer_block in model_part.layers.values():
+            layers = model_part.get_submodule("layers")
+            assert isinstance(layers, nn.ModuleDict)
+            for transformer_block in layers.values():
                 if transformer_block.moe_enabled:
                     # Assumption: load_balance_coeff is set universally on all moe blocks.
+                    # pyrefly: ignore [missing-attribute]
                     return bool(transformer_block.moe.load_balance_coeff)
         return False
 
@@ -356,18 +368,20 @@ def build_optimizers_with_moe_load_balancing(
         model_parts: list[nn.Module],
         parallel_dims: ParallelDims,
     ):
-        dp_cp_mesh = (
-            parallel_dims.world_mesh["dp_cp"] if parallel_dims.dp_cp_enabled else None
-        )
+        loss_mesh = parallel_dims.get_optional_mesh("loss")
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_list = []
         for model_part in model_parts:
-            for transformer_block in model_part.layers.values():
+            layers = model_part.get_submodule("layers")
+            assert isinstance(layers, nn.ModuleDict)
+            for transformer_block in layers.values():
                 if not transformer_block.moe_enabled:
                     continue
+                # pyrefly: ignore [missing-attribute]
                 if transformer_block.moe.load_balance_coeff is None:
                     return
+                # pyrefly: ignore [missing-attribute]
                 tokens_per_expert = transformer_block.moe.tokens_per_expert
                 if _is_recomputation_enabled(transformer_block):
                     # TODO: This is a hack, we assume with full AC, the tokens_per_expert is counted twice.
@@ -379,17 +393,27 @@ def build_optimizers_with_moe_load_balancing(
 
         tokens_per_expert_by_layer = torch.vstack(tokens_per_expert_list)
 
-        if dp_cp_mesh is not None:
-            # Perform single all-reduce to get global statistics across all processes
-            pg = dp_cp_mesh.get_group()
-            torch.distributed.all_reduce(
-                tokens_per_expert_by_layer, group=pg, op=torch.distributed.ReduceOp.SUM
-            )
+        if loss_mesh is not None:
+            if isinstance(tokens_per_expert_by_layer, torch.distributed.tensor.DTensor):
+                tokens_per_expert_by_layer = tokens_per_expert_by_layer.redistribute(
+                    placements=[Replicate()]
+                    * tokens_per_expert_by_layer.device_mesh.ndim
+                )
+            else:
+                # Perform single all-reduce to get global statistics across all processes
+                pg = loss_mesh.get_group()
+                torch.distributed.all_reduce(
+                    tokens_per_expert_by_layer,
+                    group=pg,
+                    op=torch.distributed.ReduceOp.SUM,
+                )
 
         moe_layer_idx = 0
         with torch.no_grad():
             for model_part in model_parts:
-                for transformer_block in model_part.layers.values():
+                layers = model_part.get_submodule("layers")
+                assert isinstance(layers, nn.ModuleDict)
+                for transformer_block in layers.values():
                     if not transformer_block.moe_enabled:
                         continue
                     moe = transformer_block.moe
@@ -401,11 +425,14 @@ def build_optimizers_with_moe_load_balancing(
 
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
+                    # pyrefly: ignore [missing-attribute]
                     expert_bias_delta = moe.load_balance_coeff * torch.sign(
                         tokens_per_expert.mean() - tokens_per_expert
                     )
                     expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                    # pyrefly: ignore [missing-attribute]
                     moe.expert_bias.add_(expert_bias_delta)
+                    # pyrefly: ignore [missing-attribute]
                     moe.tokens_per_expert.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):

@@ -32,13 +32,13 @@ from torchtitan.tools.logging import logger
 def _get_dp_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
     if parallel_dims.dp_replicate_enabled:
         if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-            dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+            dp_mesh_dim_names = ["dp_replicate", "fsdp"]
         else:
-            dp_mesh_dim_names = ("dp_replicate",)
+            dp_mesh_dim_names = ["dp_replicate"]
     else:
-        dp_mesh_dim_names = ("dp_shard_cp",)
+        dp_mesh_dim_names = ["fsdp"]
 
-    return parallel_dims.world_mesh[tuple(dp_mesh_dim_names)]
+    return parallel_dims.get_mesh(dp_mesh_dim_names)
 
 
 def _get_spmd_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
@@ -81,62 +81,18 @@ def parallelize_llama(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ) -> nn.Module:
+    # This workflow still reuses the legacy apply-one-parallelization-per-time style.
+    # We will change it to a more holistic approach by figuring out the sharding
+    # for each parameter first and then apply the transformation to the entire model.
     if parallel_dims.cp_enabled:
-        # TODO: SDPA + CP enablement:
-        # Dependency: https://github.com/pytorch/pytorch/pull/167381 (sharding rule fix)
-        # Goal: Enable Shard(2) -> Replicate() transition on the CP mesh placement.
-        #
-        # Implementation options for handling the required allgather:
-        # 1. Transform into ring attention (requires converting current implementation
-        #    to an async TP-like operation)
-        # 2. Retain explicit allgather (approach used in Llama 4)
-
-        # TODO: FlexAttention + CP enablement:
-        # Need to resolve DTensor + FlexAttention compatibility issues.
-
         raise NotImplementedError("CP is not implemented yet.")
 
     if parallel_dims.tp_enabled:
-        # TODO: TP parallelization strategy - Key architectural decision:
-        #
-        # Option 1: Parallelize parameters directly (current design approach)
-        # - Apply TP dimension immediately at this point
-        # - Requires _StridedShard for implementation
-        #
-        # Option 2: Record the placement and apply full placements later
-        # - Record TP dimension placement now, apply full placement later with DP dimension
-        # - No need to use _StridedShard, we can just use Shard()
-        #
-        # It's mostly likely that we will go with option 2 as we are going to use
-        # parameterization to handle the full parameters transformation, which
-        # makes option 2 more natural.
         raise NotImplementedError("TP is not implemented yet.")
 
     if job_config.activation_checkpoint.mode != "none":
-        # TODO: Graph based AC.
         raise NotImplementedError("AC is not implemented yet.")
 
-    # TODO: CP integration challenge:
-    #
-    # Problem:
-    # When CP is enabled, the mesh structure becomes ["dp_replicate", "dp_shard", "cp"]
-    # to maintain sequence sharding in DTensor. However, naively applying data_parallel
-    # may trigger two separate allgather operations because DTensor.redistribute cannot
-    # recognize that the two mesh dimensions can be flattened into a single allgather.
-    #
-    # Potential solution using SimpleFSDP:
-    # 1. Transform mesh: ["dp_replicate", "dp_shard", "cp"] -> ["dp_replicate", "dp_shard_cp"]
-    #    via to_local() and from_local()
-    # 2. Redistribute placement on ["dp_shard_cp"] dimension
-    # 3. Transform mesh back: ["dp_replicate", "dp_shard_cp"] -> ["dp_replicate", "dp_shard", "cp"]
-    #    via to_local() and from_local()
-    #
-    # Note: This solution leaves the dp_shard process group wasted (
-    # we can initialize it with fake backend).
-    #
-    # Note: We may be able to implement this solution with parameterization directly.
-
-    # Keep cp_enabled here to remind us cp_enabled=True requires data_parallel
     if (
         parallel_dims.dp_replicate_enabled
         or parallel_dims.dp_shard_enabled
@@ -144,8 +100,6 @@ def parallelize_llama(
     ):
         model = apply_dp(model, parallel_dims, job_config)
 
-    # Apply compilation after SPMD parallelization is complete. This differs from
-    # eager mode parallelization where compilation occurs earlier.
     return apply_compile(model, parallel_dims, job_config)
 
 
@@ -153,15 +107,9 @@ def parallelize_buffers(
     model: nn.Module,
     parallel_dims: ParallelDims,
 ) -> nn.Module:
-    # Buffer-to-mesh mapping in multi-SPMD scenarios:
-    #
-    # When buffers are used with different SPMD meshes (e.g., dense vs sparse meshes), we
-    # will need an explicit mapping to associate each buffer with its corresponding mesh.
-    # This indicates that the current implementation is not general enough to support
-    # nD meshes.
-    #
-    # The solution is that we need to reparameterize the buffers together with the
-    # parameters within a module.
+    # This is also a temporarily workaround, we need to figure out the best
+    # way to understand the sharding for both parameters and buffers and
+    # apply the sharding.
     spmd_mesh = _get_spmd_mesh(parallel_dims)
     placements = (Replicate() for _ in range(spmd_mesh.ndim))
     for m in model.modules():
@@ -178,14 +126,14 @@ def parallelize_buffers(
 def build_parallelize_inputs_fn(
     parallel_dims: ParallelDims,
 ) -> Callable[[torch.Tensor, torch.Tensor], tuple[DTensor, DTensor]]:
+
     spmd_mesh = _get_spmd_mesh(parallel_dims)
 
-    # TODO: We need to make this more general to support nD mesh. But we can do this
-    # after the DeviceMesh revamp PR is landed.
     spmd_placements = []
-    if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-        spmd_placements.append(Shard(0))
+    # Note: placements order must match mesh dimension order ["dp_replicate", "fsdp"]
     if parallel_dims.dp_replicate_enabled:
+        spmd_placements.append(Shard(0))
+    if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
         spmd_placements.append(Shard(0))
 
     def parallelize_inputs(
@@ -234,7 +182,7 @@ def apply_compile(
     # TODO: This API just implements compiler toolkit.
     # We should also add torch.compile() support
 
-    if not (job_config.compile.enable and "model" in job_config.compile.passes):
+    if not (job_config.compile.enable and "model" in job_config.compile.graph_passes):
         return model
 
     compiler_passes = []

@@ -86,10 +86,9 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
             world_size=world_size,
         )
 
-        world_mesh = parallel_dims.world_mesh
         if parallel_dims.dp_enabled:
-            dp_mesh = world_mesh["dp"]
-            dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
+            batch_mesh = parallel_dims.get_mesh("batch")
+            dp_degree, dp_rank = batch_mesh.size(), batch_mesh.get_local_rank()
         else:
             dp_degree, dp_rank = 1, 0
         self.dp_degree, self.dp_rank = dp_degree, dp_rank
@@ -102,9 +101,10 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
         dist_utils.set_determinism(
-            world_mesh,
+            parallel_dims,
             self.device,
             job_config.debug,
+            distinct_seed_mesh_dims=["pp"],  # same as `torchtitan/train.py`
         )
         self.train_spec = get_train_spec(job_config.model.name)
 
@@ -227,6 +227,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 if self.train_spec.state_dict_adapter
                 else None
             ),
+            base_folder=job_config.job.dump_folder,
         )
 
         loss_parallel_enabled = (

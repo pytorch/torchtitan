@@ -19,7 +19,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.models.moe.utils import set_token_group_alignment_size_m
 from torchtitan.protocols.model_converter import register_model_converter
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 
 from .utils import module_filter_fn
 
@@ -39,9 +39,9 @@ class MXLinearConverter(QuantizationConverter):
             )
 
         # Can be removed if we enable the emulated versions
-        assert has_cuda_capability(
-            10, 0
-        ), "MXFP8 is only supported on SM100 or architectures"
+        assert has_cuda_capability(10, 0) or has_rocm_capability(
+            9, 5
+        ), "MXFP8 is only supported on CUDA SM100 or later, or ROCm gfx950 or later"
 
         # TP not yet supported with torch.compile
         model_compile_enabled = (

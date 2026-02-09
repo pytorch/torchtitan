@@ -17,12 +17,12 @@ from torchtitan.experiments.compiler_toolkit.common_utils import (
     disable_compile,
     parallelize_inputs,
     register_blockmask_pytree_node,
-    validate_flex_attention_annotation,
 )
 
 from torchtitan.experiments.compiler_toolkit.graph_utils import (
     CompiledModule,
     get_compiler_passes_from_config,
+    get_joint_custom_passes_from_config,
     joint_graph_builder,
     make_compiler_with_passes,
 )
@@ -76,10 +76,13 @@ def parallelize_deepseekv3(
     with disable_compile(job_config):
         model = simple_fsdp_parallelize_deepseekv3(model, parallel_dims, job_config)
 
-    # Get compiler passes from config
-    compiler_passes = get_compiler_passes_from_config(job_config)
+    # Get joint custom passes from config
+    joint_custom_passes = get_joint_custom_passes_from_config(parallel_dims, job_config)
 
-    # Create compilers with specified passes (defaults to no passes)
+    # Get compiler passes from config
+    compiler_passes = get_compiler_passes_from_config(model, job_config)
+
+    # Create compilers with specified passes
     fw_compiler, bw_compiler = make_compiler_with_passes(
         compiler_passes, dump_folder=job_config.job.dump_folder
     )
@@ -89,8 +92,9 @@ def parallelize_deepseekv3(
         joint_graph_builder,
         fw_compiler=fw_compiler,
         bw_compiler=bw_compiler,
-        joint_custom_pass=validate_flex_attention_annotation,
+        joint_custom_passes=joint_custom_passes,
         dump_folder=job_config.job.dump_folder,
+        job_config=job_config,
     )
 
     # TODO: CompiledModule should take sample input as well, so that we can
