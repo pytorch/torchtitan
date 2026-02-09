@@ -74,8 +74,6 @@ def default_activation_checkpoint_policy() -> _PolicyFn:
             torch._higher_order_ops.inductor_compiled_code
         ] = CheckpointPolicy.MUST_SAVE
 
-    compute_intensive_ops[torch.ops.aten.max.default] = CheckpointPolicy.MUST_SAVE
-
     if hasattr(torch.ops, "torch_attn") and hasattr(
         torch.ops.torch_attn, "_varlen_attn"
     ):
@@ -87,23 +85,6 @@ def default_activation_checkpoint_policy() -> _PolicyFn:
         torch.ops._c10d_functional.reduce_scatter_tensor.default: CheckpointPolicy.MUST_SAVE,
         torch.ops._c10d_functional.all_to_all_single.default: CheckpointPolicy.MUST_SAVE,
     }
-
-    # DeepEP ops for MoE expert parallelism
-    # Try to import deepep module to register custom ops, then check if they exist
-    try:
-        import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
-
-        if hasattr(torch.ops, "deepep"):
-            if hasattr(torch.ops.deepep, "dispatch"):
-                communication_intensive_ops[
-                    torch.ops.deepep.dispatch.default
-                ] = CheckpointPolicy.MUST_SAVE
-            if hasattr(torch.ops.deepep, "combine"):
-                communication_intensive_ops[
-                    torch.ops.deepep.combine.default
-                ] = CheckpointPolicy.MUST_SAVE
-    except ImportError:
-        pass  # DeepEP not available
 
     policy_fn = partial(
         _sac_policy_fn,
