@@ -623,6 +623,14 @@ class Checkpoint:
     This will load the model only, excluding the specified keys.
     """
 
+    additional_load_paths: list[str] = field(default_factory=list)
+    """
+    Additional checkpoint paths to load from after the primary checkpoint.
+    Useful for loading state dicts from multiple sources, e.g., base model
+    weights from one checkpoint and LoRA adapter weights from another.
+    Each path should contain a valid DCP checkpoint directory.
+    """
+
     enable_first_step_checkpoint: bool = False
     """
     Enable the checkpoint save at first step. This will save a checkpoint immediately

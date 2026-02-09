@@ -167,7 +167,7 @@ class TestCheckpointManager(unittest.TestCase):
                 sd_to_save[key] = val
         torch.save(sd_to_save, os.path.join(checkpoint_id, "state_dict.pt"))
 
-    def fake_load(self, states: dict, checkpoint_id=None):
+    def fake_load(self, states: dict, checkpoint_id=None, **kwargs):
         path = os.path.join(checkpoint_id, "state_dict.pt")
         loaded = torch.load(path, weights_only="False")
         for key, val in loaded.items():
@@ -750,7 +750,7 @@ class TestCheckpointManager(unittest.TestCase):
                 self.assertNotIn("optimizer", state_dict)
             return
 
-        def fake_load(state_dict: dict, checkpoint_id=None):
+        def fake_load(state_dict: dict, checkpoint_id=None, **kwargs):
             self.assertIn("bias", state_dict)
             self.assertIn("weight", state_dict)
             # No model prefix
@@ -776,6 +776,133 @@ class TestCheckpointManager(unittest.TestCase):
         manager.save(curr_step=1)
         manager.save(curr_step=2, last_step=True)
         manager.load(step=1)
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    def test_partial_state_dict_save(self, mock_save, mock_rank):
+        """Test that ModelWrapper.state_dict_to_save() filters keys correctly
+        when the model has a state_dict_to_save method."""
+
+        class PartialSaveModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.base_weight = nn.Parameter(torch.randn(2, 2))
+                self.adapter_weight = nn.Parameter(torch.randn(2, 2))
+
+            def state_dict_to_save(self):
+                # Only save the adapter weight
+                return {"adapter_weight": self.adapter_weight}
+
+        partial_model = PartialSaveModel()
+        mock_save.side_effect = self.fake_save
+
+        cfg = self.job_config.checkpoint
+        cfg.keep_latest_k = 0
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=[partial_model],
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            checkpoint_config=cfg,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
+        )
+
+        manager.save(curr_step=1)
+        self.assertEqual(mock_save.call_count, 1)
+        checkpoint_path = os.path.join(self.test_folder, "step-1", "state_dict.pt")
+        saved_data = torch.load(checkpoint_path, weights_only=False)
+
+        # Only adapter_weight should be saved
+        self.assertIn("adapter_weight", saved_data)
+        self.assertNotIn("base_weight", saved_data)
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.save")
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_additional_load_paths(self, mock_load, mock_save, mock_rank):
+        """Test that additional_load_paths loads from extra checkpoint directories."""
+        mock_save.side_effect = self.fake_save
+        mock_load.side_effect = self.fake_load
+
+        # Create an additional checkpoint directory with a saved state
+        additional_dir = os.path.join(self.base_temp_dir, "additional_ckpt")
+        os.makedirs(additional_dir, exist_ok=True)
+        torch.save(
+            {"weight": torch.ones(2, 2), "bias": torch.ones(2)},
+            os.path.join(additional_dir, "state_dict.pt"),
+        )
+
+        cfg = self.job_config.checkpoint
+        cfg.keep_latest_k = 0
+        cfg.additional_load_paths = [additional_dir]
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            checkpoint_config=cfg,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
+        )
+
+        # Save and then load - additional_load_paths should be loaded after main ckpt
+        manager.save(curr_step=1)
+        manager.load(step=1)
+
+        # dcp.load should be called twice: once for main checkpoint, once for additional
+        self.assertEqual(mock_load.call_count, 2)
+        # Verify the second call used the additional path
+        _, kwargs2 = mock_load.call_args_list[1]
+        self.assertEqual(kwargs2.get("checkpoint_id"), additional_dir)
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch("torchtitan.components.checkpoint.dcp.load")
+    def test_additional_load_paths_invalid_path_raises(self, mock_load, mock_rank):
+        """Test that an invalid additional_load_paths raises ValueError."""
+        cfg = self.job_config.checkpoint
+        cfg.keep_latest_k = 0
+        cfg.additional_load_paths = ["/nonexistent/path"]
+
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            checkpoint_config=cfg,
+            sd_adapter=None,
+            base_folder=self.job_config.job.dump_folder,
+            ft_manager=self.ft_manager,
+        )
+
+        # Even without a main checkpoint, loading should try additional paths and fail
+        with self.assertRaises(ValueError):
+            manager.load(step=-1)
+        manager.close()
+
+    def test_model_wrapper_default_behavior(self):
+        """Test that ModelWrapper works correctly with plain nn.Module (no state_dict_to_save)."""
+        from torchtitan.components.checkpoint import ModelWrapper
+
+        model = nn.Linear(3, 3)
+        wrapper = ModelWrapper(model)
+
+        # For a plain nn.Module without state_dict_to_save, all keys should be included
+        sd_save = wrapper.state_dict_to_save()
+        sd_load = wrapper.state_dict_to_load()
+        sd_full = wrapper._get_state_dict()
+
+        self.assertEqual(set(sd_save.keys()), set(sd_full.keys()))
+        self.assertEqual(set(sd_load.keys()), set(sd_full.keys()))
 
 
 if __name__ == "__main__":
