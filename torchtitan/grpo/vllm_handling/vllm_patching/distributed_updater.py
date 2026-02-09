@@ -9,6 +9,21 @@ from typing import Any, Optional
 import torch
 
 
+def is_lora_param(name: str) -> bool:
+    """Check if a parameter name corresponds to a LoRA weight."""
+    return any(
+        suffix in name
+        for suffix in [
+            "lora_a_stacked",
+            "lora_b_stacked",
+            ".lora_a",
+            ".lora_b",
+            "_lora_a",
+            "_lora_b",
+        ]
+    )
+
+
 def init_process_group(
     backend=None,
     init_method: Optional[str] = None,
@@ -202,6 +217,61 @@ def get_name_conversions(param_mappings):
     return name_conversions
 
 
+def reshape_lora_for_vllm(
+    tensor: torch.Tensor, vllm_name: str, vllm_shape: tuple
+) -> torch.Tensor:
+    """
+    Reshape a LoRA tensor from torchtitan format to vLLM stacked format.
+
+    vLLM expects:
+    - Attention LoRA: [1, 1, rank, dim] or [1, 1, dim, rank] (for single adapter)
+    - MoE LoRA: [num_experts, rank, dim] or [num_experts, dim, rank]
+
+    torchtitan provides:
+    - Attention LoRA: [rank, dim] or [dim, rank]
+    - MoE LoRA: [num_experts, rank, dim] or [num_experts, dim, rank]
+
+    Args:
+        tensor: The tensor from torchtitan
+        vllm_name: The target vLLM parameter name (used to determine reshape needed)
+        vllm_shape: The expected shape in vLLM state dict
+
+    Returns:
+        Reshaped tensor matching vLLM format
+    """
+    # Check if this is an attention LoRA (needs [1, 1, ...] prefix)
+    is_attention_lora = any(
+        proj in vllm_name
+        for proj in [
+            "qkv_proj.q_proj",
+            "qkv_proj.k_proj",
+            "qkv_proj.v_proj",
+            "o_proj.o_proj",
+        ]
+    )
+
+    if is_attention_lora:
+        # Add batch dimensions [1, 1, ...] for vLLM stacked format
+        if len(tensor.shape) == 2:
+            # Shape is [rank, dim] or [dim, rank], need [1, 1, rank, dim] or [1, 1, dim, rank]
+            tensor = tensor.unsqueeze(0).unsqueeze(0)
+        elif len(tensor.shape) == 3:
+            # Already has one leading dim, add another
+            tensor = tensor.unsqueeze(0)
+
+    # For MoE LoRA, the shape should already match [num_experts, rank, dim]
+    # or [num_experts, dim, rank] - no reshape needed
+
+    # Verify shape matches expected vLLM shape
+    if tensor.shape != tuple(vllm_shape):
+        raise ValueError(
+            f"LoRA tensor shape mismatch for {vllm_name}: "
+            f"got {tensor.shape}, expected {tuple(vllm_shape)}"
+        )
+
+    return tensor
+
+
 # permute for sliced rotary
 def permute_1d(w, n_heads):
     dim1 = w.shape[0]
@@ -374,7 +444,21 @@ def weight_updater_process(state_dict, q_heads, kv_heads, tp_rank, tp_size, gpu_
                         flush=True,
                     )
 
-            if "qkv_proj.weight" in name:
+            # Check if this is a LoRA parameter by looking at the name
+            if is_lora_param(name):
+                # Handle LoRA weights - they should NOT be permuted
+                if json_data["param_mappings"][tt_name]["needs_permute"]:
+                    raise NotImplementedError(
+                        f"LoRA weights do not support permutation at this time, but {tt_name} has needs_permute=True."
+                    )
+
+                # Reshape LoRA tensor to match vLLM stacked format
+                vllm_shape = state_dict[name].shape
+                tensor = reshape_lora_for_vllm(tensor, name, vllm_shape)
+
+                _debug_diff(name, state_dict[name].data, tensor)
+                state_dict[name].data.copy_(tensor)
+            elif "qkv_proj.weight" in name:
                 key_val = (
                     "q" if ".wq." in tt_name else "v" if ".wv." in tt_name else "k"
                 )

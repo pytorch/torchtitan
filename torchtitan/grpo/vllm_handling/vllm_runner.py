@@ -21,7 +21,8 @@ import vllm.envs as envs
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.utils import with_cancellation
+
+from vllm.entrypoints.utils import process_lora_modules, with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.usage.usage_lib import UsageContext
@@ -165,7 +166,11 @@ async def init_app(
             engine_args, usage_context=UsageContext.API_SERVER
         )
     )
+    # Merge default_mm_loras into the static lora_modules
+    default_mm_loras = {}
+    lora_modules = process_lora_modules(args.lora_modules, default_mm_loras)
     app.state.engine_client = engine
+    app.state.args = args
     return app
 
 
@@ -199,6 +204,8 @@ async def run_server(
 
 
 if __name__ == "__main__":
+    from vllm.entrypoints.openai.cli_args import LoRAParserAction, optional_type
+
     parser = FlexibleArgumentParser()
     parser.add_argument("--host", type=str, default=None)
     parser.add_argument("--port", type=parser.check_port, default=8000)
@@ -226,6 +233,20 @@ if __name__ == "__main__":
         help="FastAPI root_path when app is behind a path based routing proxy",
     )
     parser.add_argument("--log-level", type=str, default="debug")
+    # frontend_group = parser.add_argument_group(
+    #         title="Frontend",
+    #         description="copy/paste for lora support",
+    #     )
+    frontend_kwargs = {
+        "lora_modules": {
+            "type": optional_type(str),
+            "action": LoRAParserAction,
+            "nargs": "+",
+        }
+    }
+
+    for key, value in frontend_kwargs.items():
+        parser.add_argument(f"--{key.replace('_', '-')}", **value)
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
 

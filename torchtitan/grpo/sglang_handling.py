@@ -183,6 +183,17 @@ def get_hostname_url():
 
 def param_to_sglang_data(name, needs_permute=False):
     out_permute = False
+    is_lora = (
+        ".lora_a" in name or ".lora_b" in name or "_lora_a" in name or "_lora_b" in name
+    )
+
+    # LoRA weights must never be permuted - this is a hard requirement
+    if is_lora and needs_permute:
+        raise NotImplementedError(
+            f"LoRA parameter '{name}' cannot be permuted. "
+            "LoRA weights do not support permutation for weight updates to vLLM."
+        )
+
     # check if name is weird
     if "attention." in name and any(
         [
@@ -191,43 +202,105 @@ def param_to_sglang_data(name, needs_permute=False):
             ".wv" in name,
         ]
     ):
-        # column parallel qkv, so...
-        out_permute = (".wq" in name) or (".wk" in name)
-        out_name = "model." + name.split("attention")[0] + "self_attn.qkv_proj"
-        if ".bias" in name:
-            out_name += ".bias"
+        if is_lora:
+            # LoRA attention weights: wq.lora_a -> qkv_proj.q_proj.lora_a_stacked
+            # Determine which projection (q, k, or v)
+            if ".wq" in name:
+                proj = "q_proj"
+            elif ".wk" in name:
+                proj = "k_proj"
+            else:
+                proj = "v_proj"
+            # Determine lora_a or lora_b
+            lora_suffix = "lora_a_stacked" if "lora_a" in name else "lora_b_stacked"
+            out_name = (
+                "model."
+                + name.split("attention")[0]
+                + f"self_attn.qkv_proj.{proj}.{lora_suffix}"
+            )
         else:
-            out_name += ".weight"
+            # column parallel qkv, so...
+            out_permute = (".wq" in name) or (".wk" in name)
+            out_name = "model." + name.split("attention")[0] + "self_attn.qkv_proj"
+            if ".bias" in name:
+                out_name += ".bias"
+            else:
+                out_name += ".weight"
     elif "attention." in name and ".wo" in name:
-        out_name = "model." + name.split("attention")[0] + "self_attn.o_proj"
-        if ".bias" in name:
-            out_name += ".bias"
+        if is_lora:
+            # LoRA o_proj weights: wo.lora_a -> o_proj.o_proj.lora_a_stacked
+            lora_suffix = "lora_a_stacked" if "lora_a" in name else "lora_b_stacked"
+            out_name = (
+                "model."
+                + name.split("attention")[0]
+                + f"self_attn.o_proj.o_proj.{lora_suffix}"
+            )
         else:
-            out_name += ".weight"
+            out_name = "model." + name.split("attention")[0] + "self_attn.o_proj"
+            if ".bias" in name:
+                out_name += ".bias"
+            else:
+                out_name += ".weight"
     elif "attention." in name:
         # QK Norm
         out_name = "model." + name.replace("attention", "self_attn")
         out_permute = True
     elif "moe" in name:
-
-        out_name = "model." + name.replace("moe", "mlp").replace(
-            ".w1", ".w13_weight"
-        ).replace(".w3", ".w13_weight").replace(".w2", ".w2_weight").replace(
-            ".router.gate", ".gate"
-        )
+        if is_lora:
+            # MoE LoRA weights: moe.experts.w1_lora_a -> mlp.experts.w1_lora_a_stacked
+            out_name = "model." + name.replace("moe", "mlp")
+            # Replace w1_lora_a -> w1_lora_a_stacked, etc.
+            for w_name in ["w1", "w2", "w3"]:
+                out_name = out_name.replace(
+                    f".{w_name}_lora_a", f".{w_name}_lora_a_stacked"
+                )
+                out_name = out_name.replace(
+                    f".{w_name}_lora_b", f".{w_name}_lora_b_stacked"
+                )
+        else:
+            out_name = "model." + name.replace("moe", "mlp").replace(
+                ".w1", ".w13_weight"
+            ).replace(".w3", ".w13_weight").replace(".w2", ".w2_weight").replace(
+                ".router.gate", ".gate"
+            )
     elif (".w1." in name) or (".w3" in name):
-        out_name = "model." + name.replace("feed_forward", "mlp").replace(
-            ".w1.", ".gate_up_proj."
-        ).replace(".w3.", ".gate_up_proj.")
+        if is_lora:
+            # Dense LoRA: feed_forward.w1.lora_a -> mlp.gate_proj.lora_a_stacked
+            lora_suffix = "lora_a_stacked" if "lora_a" in name else "lora_b_stacked"
+            if ".w1." in name:
+                out_name = (
+                    "model."
+                    + name.split(".w1.")[0].replace("feed_forward", "mlp")
+                    + f".gate_proj.{lora_suffix}"
+                )
+            else:  # .w3
+                out_name = (
+                    "model."
+                    + name.split(".w3.")[0].replace("feed_forward", "mlp")
+                    + f".up_proj.{lora_suffix}"
+                )
+        else:
+            out_name = "model." + name.replace("feed_forward", "mlp").replace(
+                ".w1.", ".gate_up_proj."
+            ).replace(".w3.", ".gate_up_proj.")
     elif "w1w3" in name:
         out_name = "model." + name.replace("feed_forward", "mlp").replace(
             "w1w3", "gate_up_proj"
         )
     elif "feed_forward" in name:
-        out_name = "model." + name.replace("feed_forward", "mlp")
-        mapping = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
-        for key, val in mapping.items():
-            out_name = out_name.replace(key, val)
+        if is_lora:
+            # feed_forward.w2.lora_a -> mlp.down_proj.lora_a_stacked
+            lora_suffix = "lora_a_stacked" if "lora_a" in name else "lora_b_stacked"
+            out_name = (
+                "model."
+                + name.split(".w2.")[0].replace("feed_forward", "mlp")
+                + f".down_proj.{lora_suffix}"
+            )
+        else:
+            out_name = "model." + name.replace("feed_forward", "mlp")
+            mapping = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
+            for key, val in mapping.items():
+                out_name = out_name.replace(key, val)
     elif "_norm" in name:
         out_name = "model." + name.replace("attention_norm", "input_layernorm").replace(
             "ffn_norm", "post_attention_layernorm"
