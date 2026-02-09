@@ -181,8 +181,7 @@ def _apply_op_sac(
     """
     from torch.utils.checkpoint import create_selective_checkpoint_contexts
 
-    # Get mm shapes to force recompute based on FQN matching
-    mm_recompute_shapes: set[tuple[int, int]] = set()
+    mm_recompute_shapes = set()
     if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
         for module_fqn, submod in module.named_modules():
             fqn = module_fqn
@@ -208,25 +207,15 @@ def _apply_op_sac(
     base_policy = default_activation_checkpoint_policy()
 
     def _create_wrapped_policy():
-        """Create a policy that wraps the base policy with additional logic.
-
-        This wrapper handles:
-        1. Force recompute for specific mm shapes (per_op_sac_force_recompute_mm_shapes_by_fqns)
-        2. CUDA->CPU tensor copies that must be saved
-        """
-
         def wrapped_policy(ctx, func, *args, **kwargs) -> CheckpointPolicy:
-            # Special case: CUDA->CPU tensor copies must be saved
             if (
                 func == torch.ops.aten._to_copy.default
-                and len(args) > 0
                 and "cuda" in str(args[0].device)
                 and "device" in kwargs
                 and str(kwargs["device"]) == "cpu"
             ):
                 return CheckpointPolicy.MUST_SAVE
 
-            # Special case: Force recompute for specific mm shapes
             if (
                 func == torch.ops.aten.mm.default
                 and len(args) > 1
@@ -234,7 +223,6 @@ def _apply_op_sac(
             ):
                 return CheckpointPolicy.PREFER_RECOMPUTE
 
-            # Delegate to the base policy
             return base_policy(ctx, func, *args, **kwargs)
 
         return wrapped_policy
@@ -315,7 +303,6 @@ def apply_ac(
         model (nn.Module): The model to apply activation checkpointing to.
         ac_config (ACConfig): The activation checkpointing config.
         model_compile_enabled (bool): Whether torch.compile is enabled for the model.
-        base_folder (str): The base folder for saving memory budget pareto visualization.
 
     Returns:
         None
