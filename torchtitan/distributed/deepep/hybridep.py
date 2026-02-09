@@ -10,13 +10,12 @@ HybridEP: Expert Parallel Communication for GB200 NVLink72 Systems.
 Provides efficient token dispatch/combine for MoE training via TMA-optimized all-to-all.
 
 Configuration (via job_config.parallelism.hybridep):
-    receive_tokens_ratio: Buffer multiplier (must be >= 1.0, upper bound is EP group size)
     num_permuted_tokens: Output buffer size for CPU-free non-blocking mode. This must be
         large enough to hold all tokens that may be received after dispatch. If the buffer
         is too small, tokens will be silently dropped and handle.overflow_flag will be True.
         (Older HybridEP versions would cause illegal memory access errors instead.)
 
-Reference: https://github.com/deepseek-ai/DeepEP
+Reference: https://github.com/Autumn1998/DeepEP/blob/refactor/docs/Hybrid-EP_Implementation.md
 """
 
 from dataclasses import dataclass
@@ -63,7 +62,7 @@ class DispatchHandle(OpaqueBase):
         return "DispatchHandle()", {"DispatchHandle": DispatchHandle}
 
 
-register_opaque_type(DispatchHandle, typ="value")
+register_opaque_type(DispatchHandle, typ="reference")
 
 
 @dataclass
@@ -79,25 +78,6 @@ class DispatchState:
     handle: DispatchHandle
     permuted_scores: Optional[torch.Tensor] = None
     num_tokens: int = 0
-
-
-def _preprocess_inputs(
-    indices: torch.Tensor,
-    scores: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Normalize inputs: ensure 2D, contiguous, float32 scores, mask invalid."""
-    top_k = indices.shape[1] if indices.dim() == 2 else 1
-
-    if indices.dim() != 2:
-        indices = indices.view(-1, top_k).contiguous()
-        scores = scores.view(-1, top_k).contiguous()
-    else:
-        indices = indices.contiguous()
-        scores = scores.contiguous()
-
-    indices = indices.masked_fill(scores == 0, -1)
-    scores = scores.float() if scores.dtype != torch.float32 else scores
-    return indices, scores
 
 
 def _apply_scores(
@@ -121,7 +101,7 @@ def _require_hybridep() -> Any:
     except ImportError as e:
         raise ImportError(
             "HybridEP requires deep_ep library. "
-            "Install from: https://github.com/deepseek-ai/DeepEP"
+            "Install from: https://github.com/deepseek-ai/DeepEP, branch: hybrid-ep"
         ) from e
     _hybrid_ep_cls = HybridEPBuffer
     return _hybrid_ep_cls
@@ -216,11 +196,8 @@ def _dispatch_impl(
                 f"  - Buffer size (num_permuted_tokens): {num_permuted_tokens}\n"
                 f"  - Tokens dropped: {expected_tokens - actual_tokens}\n\n"
                 f"Fix: Increase num_permuted_tokens in your config:\n"
-                f"  --parallelism.hybridep.num_permuted_tokens={recommended}\n\n"
-                f"Formula: (local_batch_size × seq_len) × top_k × receive_tokens_ratio\n"
-                f"         {num_tokens} × {top_k} × 1.5 = {recommended}\n\n"
-                f"Note: The ep_degree cancels out in the math, so the formula is independent of EP size.\n"
-                f"Alternatively, set to None for dynamic sizing."
+                f"  --parallelism.hybridep.num_permuted_tokens={actual_tokens} * capacity_factor(for imbalanced routing)\n\n"
+                f"Note: Set to None for dynamic sizing."
             )
 
     if scores is None:
@@ -348,16 +325,11 @@ def get_buffer(
     hidden_dim: int,
     num_tokens: int,
     num_local_experts: int,
-    capacity_factor: float = 1.0,
     fp8_dispatch: bool = False,
 ) -> None:
     """Ensure the global HybridEP buffer is initialized, reinitializing if config changed.
 
-    Buffer is sized as: max_tokens = num_tokens × capacity_factor
-
-    Args:
-        capacity_factor: Must be >= top_k (lower bound) for balanced routing.
-            Upper bound is EP group size. Higher values handle load imbalance.
+    Buffer is internally sized as: max_tokens = num_tokens × EP_group_size (worst-case).
     """
     global _buffer
 
@@ -365,13 +337,12 @@ def get_buffer(
         raise AssertionError("HybridEP FP8 dispatch not yet supported")
 
     HybridEPBuffer = _require_hybridep()
-    max_tokens = int(num_tokens * capacity_factor)
 
     needs_reinit = (
         _buffer is None
         or _buffer.group != group
         or _buffer.config.hidden_dim < hidden_dim
-        or _buffer.config.max_num_of_tokens_per_rank < max_tokens
+        or _buffer.config.max_num_of_tokens_per_rank < num_tokens
         or _buffer.config.num_of_experts_per_rank < num_local_experts
     )
 
@@ -379,7 +350,7 @@ def get_buffer(
         _buffer = HybridEPBuffer(
             group=group,
             hidden_dim=hidden_dim,
-            max_num_of_tokens_per_rank=max_tokens,
+            max_num_of_tokens_per_rank=num_tokens,
             num_local_experts=num_local_experts,
             use_fp8=fp8_dispatch,
             num_sms_dispatch_api=_NUM_SMS_DISPATCH,
@@ -396,7 +367,6 @@ def dispatch_tokens(
     group: ProcessGroup,
     score_before_experts: bool = True,
     num_permuted_tokens: Optional[int] = None,
-    capacity_factor: float = 1.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via HybridEP all-to-all.
 
@@ -416,33 +386,27 @@ def dispatch_tokens(
             - Current HybridEP: Silently drops excess tokens, sets handle.overflow_flag=True
             - Older HybridEP: Causes illegal memory access (IMA) errors
 
-            To size correctly, consider: num_tokens * top_k * capacity_factor / ep_degree,
-            accounting for potential load imbalance across experts.
-        capacity_factor: Buffer multiplier (>= top_k, <= EP group size)
-
     Returns:
         (permuted_hidden, tokens_per_expert, state)
     """
-    indices, scores = _preprocess_inputs(selected_experts_indices, top_scores)
-    top_k = indices.shape[1] if indices.dim() == 2 else 1
+    selected_experts_indices = selected_experts_indices.contiguous()
+    top_scores = top_scores.contiguous()
 
     get_buffer(
         group=group,
         hidden_dim=hidden_states.shape[1],
         num_tokens=hidden_states.shape[0],
         num_local_experts=num_local_experts,
-        capacity_factor=capacity_factor,
     )
 
     hidden, permuted_scores, tokens_per_expert, dispatch_handle = (
         torch.ops.hybridep.dispatch(
-            hidden_states, indices, scores, num_experts, num_permuted_tokens
+            hidden_states, selected_experts_indices, top_scores, num_experts, num_permuted_tokens
         )
     )
 
     hidden, permuted_scores = _apply_scores(hidden, permuted_scores, score_before_experts)
     if permuted_scores is not None and permuted_scores.dtype != hidden.dtype:
-        # Avoid extra cast allocation during combine.
         permuted_scores = permuted_scores.to(hidden.dtype)
 
     state = DispatchState(

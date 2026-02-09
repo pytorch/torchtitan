@@ -329,7 +329,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
                       "hybridep" for GB200/NVLink72. Default is "deepep".
         
         User-configurable HybridEP settings (from job_config.parallelism.hybridep):
-        hybridep_capacity_factor: Buffer capacity multiplier for load imbalance (default: 1.0).
         hybridep_num_permuted_tokens: Pre-specified output size for non-blocking mode (default: None).
     """
 
@@ -338,7 +337,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
         score_before_experts: bool = True,
         comm_backend: str = "deepep",
         # User-configurable HybridEP settings (from job_config.parallelism.hybridep)
-        hybridep_capacity_factor: float = 1.0,
         hybridep_num_permuted_tokens: int | None = None,
     ):
         super().__init__()
@@ -347,7 +345,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
         self.comm_backend = comm_backend
         
         # HybridEP-specific configuration
-        self.hybridep_capacity_factor = hybridep_capacity_factor
         self.hybridep_num_permuted_tokens = hybridep_num_permuted_tokens
 
     def _token_dispatch(self, mod, inputs, device_mesh):
@@ -372,7 +369,6 @@ class DeepEPExpertParallel(BaseExpertParallel):
                 ep_group,
                 score_before_experts=self.score_before_experts,
                 num_permuted_tokens=self.hybridep_num_permuted_tokens,
-                capacity_factor=self.hybridep_capacity_factor,
             )
         else:
             from torchtitan.distributed.deepep import deepep

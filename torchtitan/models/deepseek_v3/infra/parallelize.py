@@ -131,7 +131,6 @@ def parallelize_deepseekv3(
             dual_pipe_v=dual_pipe_v,
             comm_backend=comm_backend,
             # HybridEP configuration from job_config (only used when comm_backend="hybridep")
-            hybridep_capacity_factor=job_config.parallelism.hybridep.receive_tokens_ratio,
             hybridep_num_permuted_tokens=job_config.parallelism.hybridep.num_permuted_tokens,
         )
 

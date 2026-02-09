@@ -307,31 +307,13 @@ class HybridEPConfig:
     Only effective when expert_parallel_comm_backend="hybridep".
     """
 
-    receive_tokens_ratio: float = 1.0
-    """
-    Ratio of max received tokens to local tokens per rank.
-    Reserves all-to-all communication buffers. The buffer must be large enough
-    to hold the maximum number of tokens any single EP rank may receive after
-    dispatch. If the buffer is too small, it causes illegal memory access (IMA).
-    
-    In balanced routing each rank receives num_tokens × top_k tokens
-    (the EP_degree cancels out), so the minimum safe value equals top_k.
-    
-    Bounds:
-    - Lower: 1.0 (balanced routing, no headroom)
-    - Upper: EP_degree (absolute worst case: all tokens to one rank)
-    
-    Recommendation: 1.5 (50% headroom for load imbalance).
-    With auxiliary-loss-free load balancing, routing stabilizes quickly
-    and top_k × 1.0-1.5 is typically sufficient.
-    """
-
     num_permuted_tokens: int | None = None
     """
     Determines output buffer size for grouped_mm. When set, enables CPU-free non-blocking
     mode required for CUDA graph compatibility.
     
-    Typical value: num_recevied_tokens × min(top_k, num_local_experts) (for balanced routing).
+    Typical value: For balaced-routing: local_batch_size × seq_len × min(top_k, num_local_experts).
+    The worst-case value is local_batch_size × seq_len × EP_group_size x min(top_k, num_local_experts).
     If None, uses blocking mode with D2H for sizing.
     """
 
