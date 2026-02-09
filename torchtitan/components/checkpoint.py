@@ -23,6 +23,7 @@ from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -61,7 +62,6 @@ class AsyncMode(str, enum.Enum):
 class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
-        self.cache_state_dict = self._get_state_dict()
 
     def _get_state_dict(self) -> dict[str, Any]:
         state_dict = {
@@ -69,8 +69,34 @@ class ModelWrapper(Stateful):
         }
         return state_dict
 
+    def state_dict_to_save(self) -> dict[str, Any]:
+        full_sd = self._get_state_dict()
+        keys_to_save: set[str] | None = None
+        for part in self.model:
+            if hasattr(part, "state_dict_to_save"):
+                if keys_to_save is None:
+                    keys_to_save = set()
+                # pyrefly: ignore [not-callable]
+                keys_to_save.update(part.state_dict_to_save().keys())
+        if keys_to_save is None:
+            return full_sd
+        return {k: v for k, v in full_sd.items() if k in keys_to_save}
+
+    def state_dict_to_load(self) -> dict[str, Any]:
+        full_sd = self._get_state_dict()
+        keys_to_load: set[str] | None = None
+        for part in self.model:
+            if hasattr(part, "state_dict_to_load"):
+                if keys_to_load is None:
+                    keys_to_load = set()
+                # pyrefly: ignore [not-callable]
+                keys_to_load.update(part.state_dict_to_load().keys())
+        if keys_to_load is None:
+            return full_sd
+        return {k: v for k, v in full_sd.items() if k in keys_to_load}
+
     def state_dict(self) -> dict[str, Any]:
-        return self.cache_state_dict
+        return self.state_dict_to_save()
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
@@ -79,9 +105,6 @@ class ModelWrapper(Stateful):
             options=StateDictOptions(strict=False),
         )
         list(map(func, self.model))
-        # `set_model_state_dict()` does change the keys of the input state_dict,
-        # we will need to reinitialize the cache_state_dict.
-        self.cache_state_dict = self._get_state_dict()
 
 
 class Terminate:
@@ -279,6 +302,7 @@ class CheckpointManager:
         self.sd_adapter = sd_adapter
         self.export_dtype = TORCH_DTYPE_MAP[checkpoint_config.export_dtype]
         self.exclude_from_loading = checkpoint_config.exclude_from_loading
+        self.additional_load_paths = checkpoint_config.additional_load_paths
         self.interval = checkpoint_config.interval
         self.enable_first_step_checkpoint = (
             checkpoint_config.enable_first_step_checkpoint
@@ -438,41 +462,54 @@ class CheckpointManager:
     def dcp_load(
         self,
         state_dict: dict[str, Any],
-        checkpoint_id: str,
+        checkpoint_id: str | list[str],
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
-        """Load the checkpoint with dcp.
+        """Load the checkpoint(s) with dcp.
         Args:
             state_dict (dict): The state dict to load.
-            checkpoint_id (str): The checkpoint id to load.
+            checkpoint_id (str | list[str]): The checkpoint id(s) to load.
+                When a list is provided, each checkpoint is loaded sequentially
+                using the same ``from_hf``/``from_quantized`` semantics.
             from_hf (bool): Whether to load from HuggingFace checkpoint with
                 its own model definition and safetensors format.
+            from_quantized (bool): Whether the HuggingFace checkpoint is quantized.
         """
+        checkpoint_ids = (
+            [checkpoint_id] if isinstance(checkpoint_id, str) else checkpoint_id
+        )
+        planner = (
+            DefaultLoadPlanner(allow_partial_load=True)
+            if len(checkpoint_ids) > 1
+            else DefaultLoadPlanner()
+        )
 
-        if from_hf:
-            assert (
-                self.sd_adapter is not None
-            ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            hf_state_dict = self.sd_adapter.to_hf(state_dict)
-            hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
-                checkpoint_id, from_quantized
-            )
+        for cid in checkpoint_ids:
+            if from_hf:
+                assert (
+                    self.sd_adapter is not None
+                ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
+                hf_state_dict = self.sd_adapter.to_hf(state_dict)
+                hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
+                    cid, from_quantized
+                )
 
-            dcp.load(
-                hf_state_dict,
-                storage_reader=hf_storage_reader,
-            )
+                dcp.load(
+                    hf_state_dict,
+                    storage_reader=hf_storage_reader,
+                    planner=planner,
+                )
 
-            state_dict = self.sd_adapter.from_hf(hf_state_dict)
-            self.states[MODEL].load_state_dict(state_dict)
-        else:
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
-
-            # TODO: Since we flatten the model states in state_dict, we need to
-            # manually call load_state_dict() for the model. Need to fix this.
-            if MODEL in self.states:
+                state_dict = self.sd_adapter.from_hf(hf_state_dict)
                 self.states[MODEL].load_state_dict(state_dict)
+            else:
+                dcp.load(state_dict, checkpoint_id=cid, planner=planner)
+
+                # TODO: Since we flatten the model states in state_dict, we need to
+                # manually call load_state_dict() for the model. Need to fix this.
+                if MODEL in self.states:
+                    self.states[MODEL].load_state_dict(state_dict)
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -575,6 +612,12 @@ class CheckpointManager:
         if not self.enable:
             return False
 
+        for path in self.additional_load_paths:
+            if not os.path.isdir(path):
+                raise ValueError(
+                    f"checkpoint.additional_load_paths contains invalid path: {path}"
+                )
+
         model_only = False
         from_hf = False
         from_quantized = False
@@ -618,6 +661,17 @@ class CheckpointManager:
                     f"loading HF safetensors from --model.hf_assets_path: {hf_assets_path}"
                 )
             else:
+                if self.additional_load_paths:
+                    additional_states = self.states[MODEL]._get_state_dict()
+                    self.dcp_load(
+                        additional_states,
+                        checkpoint_id=self.additional_load_paths,
+                        from_hf=False,
+                        from_quantized=False,
+                    )
+                    GarbageCollection.collect(
+                        "GC collection for additional checkpoint loading."
+                    )
                 return False
         else:
             if self.initial_load_path:
@@ -632,6 +686,17 @@ class CheckpointManager:
                 )
             step = self._find_load_step() if step == -1 else step
             if step == -1:
+                if self.additional_load_paths:
+                    additional_states = self.states[MODEL]._get_state_dict()
+                    self.dcp_load(
+                        additional_states,
+                        checkpoint_id=self.additional_load_paths,
+                        from_hf=False,
+                        from_quantized=False,
+                    )
+                    GarbageCollection.collect(
+                        "GC collection for additional checkpoint loading."
+                    )
                 return False
             model_only = step == 0
             checkpoint_id = self._create_checkpoint_id(step)
@@ -650,6 +715,14 @@ class CheckpointManager:
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
+        if self.additional_load_paths:
+            additional_states = self.states[MODEL]._get_state_dict()
+            self.dcp_load(
+                additional_states,
+                checkpoint_id=self.additional_load_paths,
+                from_hf=False,
+                from_quantized=False,
+            )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
@@ -735,7 +808,7 @@ class CheckpointManager:
         )
 
     def _flattened_model_states_sd(
-        self, state_dict: dict[str, Any] | None = None
+        self, state_dict: dict[str, Any] | None = None, for_load: bool = False
     ) -> dict[str, Any]:
         """Flatten the model states into a single dictionary.
 
@@ -744,7 +817,10 @@ class CheckpointManager:
         states = state_dict if state_dict is not None else self.states
         sd = {k: v for k, v in states.items() if k != MODEL}
         if MODEL in states:
-            sd.update(states[MODEL].state_dict())
+            if for_load:
+                sd.update(states[MODEL].state_dict_to_load())
+            else:
+                sd.update(states[MODEL].state_dict_to_save())
         return sd
 
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
@@ -761,7 +837,7 @@ class CheckpointManager:
         """
         # For the first step, we will only load the model.
         if model_only:
-            return self.states[MODEL].state_dict()
+            return self.states[MODEL].state_dict_to_load()
 
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
@@ -771,7 +847,7 @@ class CheckpointManager:
             k: v for k, v in self.states.items() if k not in self.exclude_from_loading
         }
 
-        states_to_load = self._flattened_model_states_sd(states_to_load)
+        states_to_load = self._flattened_model_states_sd(states_to_load, for_load=True)
 
         if self.enable_ft_dataloader_checkpoints:
             states_to_load.pop(DATALOADER)
@@ -785,7 +861,7 @@ class CheckpointManager:
         # is not the same as the export dtype at the end of the training.
 
         if self.last_save_model_only:
-            states = self.states[MODEL].state_dict()
+            states = self.states[MODEL].state_dict_to_save()
 
             if self.export_dtype != torch.float32:
                 states = {k: v.to(self.export_dtype) for k, v in states.items()}
