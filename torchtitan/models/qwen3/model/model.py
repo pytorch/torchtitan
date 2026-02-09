@@ -500,9 +500,11 @@ class Qwen3Model(ModelProtocol):
             assert self.tok_embeddings is not None and self.output is not None
             self.output.weight = self.tok_embeddings.weight
 
-        # If weight tying is enabled, we don't need to initialize the output layer
+        # The token embedding initialization produces weights with too large
+        # standard deviation for the output layer. Reinitialize the output weights
+        # with a smaller, truncated normal distribution to improve training stability.
         if self.output is not None:
-            nn.init.trunc_normal_(
+            trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,
