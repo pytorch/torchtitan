@@ -6,6 +6,7 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -71,3 +72,11 @@ class ModelProtocol(nn.Module):
         raise NotImplementedError(
             "This model does not support attention masking/Flex Attention."
         )
+
+    def state_dict_to_save(self) -> dict[str, Any]:
+        """Return the state dict subset to save. Override to save partial state (e.g. LoRA)."""
+        return self.state_dict()
+
+    def state_dict_to_load(self) -> dict[str, Any]:
+        """Return the state dict buffer for loading. Override to load partial state."""
+        return self.state_dict()

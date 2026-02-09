@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.protocols.model import ModelProtocol
 from torchtitan.tools.logging import logger
 
 
@@ -24,7 +25,7 @@ class ModelConverter(Protocol):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         ...
 
-    def convert(self, model: nn.Module):
+    def convert(self, model: ModelProtocol):
         """Inplace conversion of the model."""
         ...
 
@@ -66,7 +67,7 @@ class ModelConvertersContainer(ModelConverter):
         ]
         self.print_after_conversion = job_config.model.print_after_conversion
 
-    def convert(self, model: nn.Module):
+    def convert(self, model: ModelProtocol):
         for mh in self.converters:
             mh.convert(model)
         if self.print_after_conversion:
