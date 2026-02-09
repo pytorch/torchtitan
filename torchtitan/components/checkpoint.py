@@ -661,17 +661,6 @@ class CheckpointManager:
                     f"loading HF safetensors from --model.hf_assets_path: {hf_assets_path}"
                 )
             else:
-                if self.additional_load_paths:
-                    additional_states = self.states[MODEL]._get_state_dict()
-                    self.dcp_load(
-                        additional_states,
-                        checkpoint_id=self.additional_load_paths,
-                        from_hf=False,
-                        from_quantized=False,
-                    )
-                    GarbageCollection.collect(
-                        "GC collection for additional checkpoint loading."
-                    )
                 return False
         else:
             if self.initial_load_path:
@@ -686,17 +675,6 @@ class CheckpointManager:
                 )
             step = self._find_load_step() if step == -1 else step
             if step == -1:
-                if self.additional_load_paths:
-                    additional_states = self.states[MODEL]._get_state_dict()
-                    self.dcp_load(
-                        additional_states,
-                        checkpoint_id=self.additional_load_paths,
-                        from_hf=False,
-                        from_quantized=False,
-                    )
-                    GarbageCollection.collect(
-                        "GC collection for additional checkpoint loading."
-                    )
                 return False
             model_only = step == 0
             checkpoint_id = self._create_checkpoint_id(step)
@@ -711,18 +689,10 @@ class CheckpointManager:
         states = self._states_to_load(model_only)
         self.dcp_load(
             states,
-            checkpoint_id=checkpoint_id,
+            checkpoint_id=[checkpoint_id] + self.additional_load_paths,
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
-        if self.additional_load_paths:
-            additional_states = self.states[MODEL]._get_state_dict()
-            self.dcp_load(
-                additional_states,
-                checkpoint_id=self.additional_load_paths,
-                from_hf=False,
-                from_quantized=False,
-            )
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
             f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
