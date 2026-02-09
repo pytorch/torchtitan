@@ -19,6 +19,7 @@ from torchtitan.models.attention import (
     ScaledDotProductAttentionWrapper,
 )
 from torchtitan.models.moe import build_moe, FeedForward, MoE
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -332,8 +333,8 @@ class Attention(nn.Module):
             linear_list.append(self.wq)
 
         for linear in linear_list:
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
         self.kv_norm.reset_parameters()
         if self.q_lora_rank > 0:
@@ -444,7 +445,7 @@ class DeepSeekV3Model(ModelProtocol):
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
-            nn.init.trunc_normal_(
+            trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,

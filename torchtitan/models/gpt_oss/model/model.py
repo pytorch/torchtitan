@@ -17,6 +17,7 @@ from torchtitan.models.attention import (
     get_document_mask_mod,
     get_sliding_window_mask_mod,
 )
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -200,12 +201,12 @@ class Attention(nn.Module):
             self.wv,
         ]
 
-        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
+        trunc_normal_(self.sinks, mean=0.0, std=init_std)
         for linear in linear_list:
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
-            nn.init.trunc_normal_(linear.bias, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.bias, mean=0.0, std=init_std)
+        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+        trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
 
     def forward(
         self,
@@ -348,7 +349,6 @@ class GptOssModel(ModelProtocol):
             bias=False,
         )
         self.model_args = model_args
-        self.init_weights()
 
     def init_weights(self, buffer_device: torch.device | None = None) -> None:
         buffer_device = buffer_device or self.rope_cache.device
@@ -365,7 +365,7 @@ class GptOssModel(ModelProtocol):
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
-            nn.init.trunc_normal_(
+            trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,

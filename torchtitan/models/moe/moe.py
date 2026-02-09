@@ -12,6 +12,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.utils import trunc_normal_
+
 from torchtitan.tools.logging import logger
 from .utils import indices_padding_wrapper
 
@@ -66,9 +68,9 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float = 0.02):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
         for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -178,9 +180,9 @@ class GroupedExperts(nn.Module):
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
+        trunc_normal_(self.w1, mean=0.0, std=0.02)
+        trunc_normal_(self.w2, mean=0.0, std=init_std)
+        trunc_normal_(self.w3, mean=0.0, std=init_std)
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -353,7 +355,7 @@ class TokenChoiceTopKRouter(nn.Module):
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+        trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
 
 
 # NOTE: the reason we make this a stateless module is to support
