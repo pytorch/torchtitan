@@ -33,6 +33,7 @@ from vllm.model_executor.layers.batch_invariant import (
     init_batch_invariance,
     vllm_is_batch_invariant,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,7 @@ async def main():
     trainer_tp_size = 1
     generator_tp_size = 1
 
-    init_batch_invariance()
+    init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
     batch_invariant = vllm_is_batch_invariant()
     mode = ModelMode.UNIFIED
 

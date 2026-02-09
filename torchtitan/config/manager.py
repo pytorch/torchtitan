@@ -144,15 +144,18 @@ class ConfigManager:
 
             # Custom field overrides base type
             elif name in c_map:
+                # pyrefly: ignore [bad-argument-type]
                 result.append((name, c_map[name].type, c_map[name]))
 
             # Only in Base
             else:
+                # pyrefly: ignore [bad-argument-type]
                 result.append((name, f.type, f))
 
         # Only in Custom
         for name, f in c_map.items():
             if name not in b_map:
+                # pyrefly: ignore [bad-argument-type]
                 result.append((name, f.type, f))
 
         return make_dataclass(f"Merged{base.__name__}", result, bases=(base,))

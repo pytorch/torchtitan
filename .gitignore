@@ -45,3 +45,7 @@ Sessionx.vim
 
 # Vibe coding
 .claude
+
+# Experiment rl
+converted/
+models/

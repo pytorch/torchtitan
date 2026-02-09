@@ -136,6 +136,7 @@ class WandBLogger(BaseLogger):
 
     def __init__(self, log_dir: str, job_config: JobConfig, tag: str | None = None):
         # Import wandb here to avoid startup import
+        # pyrefly: ignore [missing-import]
         import wandb
 
         self.wandb = wandb

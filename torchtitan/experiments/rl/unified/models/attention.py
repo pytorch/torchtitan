@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-
 from vllm.model_executor.layers.attention import Attention
 
 
@@ -99,7 +98,8 @@ class VLLMAttention(torch.nn.Module):
         output_flat = self.vllm_attn(q, k, v)
 
         # Output is (batch * seq_len, num_heads * head_dim), reshape to (batch, seq_len, num_heads, head_dim)
-        output = output_flat.view(batch_size, seq_len, num_heads, head_dim)
+        # Use self.num_heads and self.head_dim since vLLM Attention outputs based on its configured dimensions
+        output = output_flat.view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # Transpose back to TorchTitan format: (batch, num_heads, seq_len, head_dim)
         output = output.transpose(1, 2)

@@ -14,9 +14,10 @@ The integration consists of two main components:
 ## Quick Start
 ### Prerequisites
 
-1. Install PyTorch nightly for torchtitan:
+1. Install PyTorch nightly & Monarch for torchtitan:
 ```
 pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
+pip3 install torchmonarch
 ```
 
 
