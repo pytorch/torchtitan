@@ -9,6 +9,7 @@ import gc
 import subprocess
 import time
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Generator, Optional
 
 import torch
@@ -24,7 +25,15 @@ def has_cuda_capability(major: int, minor: int) -> bool:
     )
 
 
-def get_device_info() -> tuple[str, torch.device]:
+def has_rocm_capability(major: int, minor: int) -> bool:
+    is_rocm = torch.cuda.is_available() and torch.version.hip is not None
+    return is_rocm and torch.cuda.get_device_capability() >= (
+        major,
+        minor,
+    )
+
+
+def get_device_info() -> tuple[str, ModuleType]:
     device_type = _get_available_device_type() or "cuda"
     device_module = _get_device_module(device_type)  # default device_module:torch.cuda
     return device_type, device_module
@@ -64,8 +73,8 @@ class GarbageCollection:
         logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
 
 
-# hardcoded BF16 type peak flops for NVIDIA A100, H100, H200, B200 GPU and AMD MI250, MI300X, MI325X, MI355X and Intel PVC
-def get_peak_flops(device_name: str) -> int:
+# hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU and AMD MI250, MI300X, MI325X, MI355X and Intel PVC
+def get_peak_flops(device_name: str) -> float:
     try:
         # Run the lspci command and capture the output
         result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
@@ -94,6 +103,15 @@ def get_peak_flops(device_name: str) -> int:
     elif "H200" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/h200/
         return 989e12
+    elif "H20" in device_name:
+        # NVIDIA H20 is a region-specific GPU variant.
+        # Since first-hand specifications do not seem to be readily available on
+        # NVIDIA's official global website, we refer to technical reports from
+        # Tom's Hardware. The peak BF16/FP16 Tensor performance is reported as
+        # 148 TFLOPS.
+        # Ref: https://www.tomshardware.com/news/
+        # nvidias-latest-regulation-compliant-gpu-for-china-has-been-delayed-to-early-next-year
+        return 148e12
     elif "B200" in device_name:
         # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
         return 2.25e15

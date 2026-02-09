@@ -61,3 +61,11 @@ repos:
       types: [text]
       additional_dependencies:
         - tomli
+
+- repo: https://github.com/facebook/pyrefly-pre-commit
+  rev: 0.45.1
+  hooks:
+    - id: pyrefly-check
+      name: Pyrefly (type checking)
+      pass_filenames: false
+      language: system

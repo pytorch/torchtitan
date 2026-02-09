@@ -1,0 +1,105 @@
+name: Set Matrix
+
+on:
+  workflow_call:
+    inputs:
+      runner-rocm:
+        description: 'Override default (linux.rocm.gpu.gfx942.8) ROCm runner label'
+        required: false
+        type: string
+      runner-cuda:
+        description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
+        required: false
+        type: string
+    outputs:
+      matrix:
+        description: dynamically set matrix
+        value: ${{ jobs.set.outputs.matrix }}
+
+jobs:
+  set:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    env:
+      # Event flags evaluated by github actions before the step runs:
+      IS_MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      IS_SCHEDULE:  ${{ github.event_name == 'schedule' }}
+      IS_8GPU_TAG:  ${{ startsWith(github.ref, 'refs/tags/ciflow/8gpu/') }}
+      TRIGGERED_8GPU_LABEL: ${{ github.event_name == 'pull_request' && github.event.action == 'labeled' }}
+
+      # Default CUDA & ROCm runners
+      DEFAULT_ROCM_RUNNER: linux.rocm.gpu.gfx942.8
+      DEFAULT_CUDA_RUNNER: linux.g5.48xlarge.nvidia.gpu
+
+      # Input CUDA & ROCm runners
+      ROCM_RUNNER_INPUT: ${{ inputs.runner-rocm }}
+      CUDA_RUNNER_INPUT: ${{ inputs.runner-cuda }}
+
+    steps:
+      - id: set
+        run: |
+          set -euo pipefail
+
+          # Select runner if provided, else use default value
+          ROCM_RUNNER="${ROCM_RUNNER_INPUT:-$DEFAULT_ROCM_RUNNER}"
+          CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
+
+          # Define ROCm matrix
+          ROCM_MATRIX=$(cat <<EOF
+          {
+            "name": "rocm",
+            "runner": "${ROCM_RUNNER}",
+            "gpu-arch-type": "rocm",
+            "gpu-arch-version": "7.1",
+            "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
+            "index-url": "https://download.pytorch.org/whl/nightly/rocm7.1"
+          }
+          EOF
+          )
+
+          # Define CUDA matrix
+          CUDA_MATRIX=$(cat <<EOF
+          {
+            "name": "cuda",
+            "runner": "${CUDA_RUNNER}",
+            "gpu-arch-type": "cuda",
+            "gpu-arch-version": "12.6",
+            "docker-image": "torchtitan-ubuntu-20.04-clang12",
+            "index-url": "https://download.pytorch.org/whl/nightly/cu126"
+          }
+          EOF
+          )
+
+          # Use default value as 'false' for unset environment variables
+          IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
+          IS_SCHEDULE="${IS_SCHEDULE:-false}"
+          IS_8GPU_TAG="${IS_8GPU_TAG:-false}"
+          TRIGGERED_8GPU_LABEL="${TRIGGERED_8GPU_LABEL:-false}"
+
+          # Decide which matrix entries to include based on event type
+          # Runs ROCm only for push tag OR when PR label gets triggered
+          if [[ "$IS_8GPU_TAG" == "true" || "$TRIGGERED_8GPU_LABEL" == "true" ]]; then
+            cat > matrix.json <<JSON
+          {"include": [$ROCM_MATRIX]}
+          JSON
+
+          # Runs CUDA and ROCm for normal PR (if PR label is present) OR for push to main, cron schedule
+          elif [[ ("$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true") ]]; then
+            cat > matrix.json <<JSON
+          {"include": [$CUDA_MATRIX,$ROCM_MATRIX]}
+          JSON
+
+          # Runs CUDA only as default (includes normal PR, if PR label is NOT present)
+          else
+            cat > matrix.json <<JSON
+          {"include": [$CUDA_MATRIX]}
+          JSON
+          fi
+
+          # Export matrix to job outputs
+          {
+            echo 'matrix<<EOF'
+            cat matrix.json
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT

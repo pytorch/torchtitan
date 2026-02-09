@@ -6,30 +6,97 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-import functools
 from collections.abc import Callable
-from typing import ClassVar
+from typing import ClassVar, NamedTuple
 
 import torch
 import torch.nn.functional as F
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.nn.attention.flex_attention import (
     _mask_mod_signature,
+    _score_mod_signature,
     BlockMask,
     create_block_mask,
     flex_attention,
 )
 
+from torch.nn.attention.varlen import varlen_attn
+from torch.types import Number
+
 
 __all__ = [
     "FlexAttentionWrapper",
     "ScaledDotProductAttentionWrapper",
+    "VarlenAttentionWrapper",
+    "VarlenMetadata",
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_sliding_window_mask_mod",
     "get_fixed_block_mask_mod",
     "create_attention_mask",
 ]
+
+
+class VarlenMetadata(NamedTuple):
+    """
+    Cumulative sequence positions for queries and keys/values.
+
+    """
+
+    cu_seq_q: torch.Tensor
+    cu_seq_k: torch.Tensor
+    max_q: Number
+    max_k: Number
+
+
+class VarlenAttentionWrapper(torch.nn.Module):
+    _compiled_varlen_attn: ClassVar[Callable] = torch.compile(
+        varlen_attn, mode="max-autotune-no-cudagraphs"
+    )
+
+    def forward(
+        self,
+        xq: torch.Tensor,
+        xk: torch.Tensor,
+        xv: torch.Tensor,
+        attention_masks: VarlenMetadata,
+        scale: float | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+
+        cu_seq_q = attention_masks.cu_seq_q
+        cu_seq_k = attention_masks.cu_seq_k
+        max_q = attention_masks.max_q
+        max_k = attention_masks.max_k
+
+        xq_packed = xq.transpose(1, 2).flatten(0, 1)  # (bs * seqlen, n_heads, head_dim)
+        xk_packed = xk.transpose(1, 2).flatten(
+            0, 1
+        )  # (bs * seqlen, n_kv_heads, head_dim)
+        xv_packed = xv.transpose(1, 2).flatten(
+            0, 1
+        )  # (bs * seqlen, n_kv_heads, head_dim)
+
+        return VarlenAttentionWrapper._compiled_varlen_attn(
+            xq_packed,
+            xk_packed,
+            xv_packed,
+            cu_seq_q,
+            cu_seq_k,
+            max_q,
+            max_k,
+            scale=scale,
+            # window_size=(left, right) controls the attention window relative to each
+            # query position. 'left' is how many tokens before the query to attend to,
+            # and 'right' is how many tokens after. A value of -1 means unlimited.
+            #
+            # This replaces the is_causal flag:
+            #   - (-1, 0): Causal attention - each token attends to all previous tokens
+            #              and itself, but no future tokens. Equivalent to is_causal=True.
+            #   - (-1, -1): Full bidirectional attention (no masking). Equivalent to
+            #               is_causal=False.
+            #   - (W, 0): Sliding window causal - attend to at most W previous tokens.
+            window_size=(-1, 0),
+        )
 
 
 class FlexAttentionWrapper(torch.nn.Module):
@@ -46,7 +113,14 @@ class FlexAttentionWrapper(torch.nn.Module):
     """
 
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention, mode="max-autotune-no-cudagraphs"
+        flex_attention,
+        # This options also encapsulate max-autotune-no-cudagraphs.
+        options={
+            "wrap_inductor_compiled_regions": True,
+            "max_autotune": True,
+            "coordinate_descent_tuning": True,
+            "triton.cudagraphs": False,
+        },
     )
 
     def forward(
@@ -55,9 +129,11 @@ class FlexAttentionWrapper(torch.nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         *,
-        block_mask: BlockMask,
+        score_mod: _score_mod_signature | None = None,
+        block_mask: BlockMask | None = None,
         scale: float | None = None,
         return_lse: bool = False,
+        enable_gqa: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # 1. _compiled_flex_attn has to be a class variable, otherwise there will
         #    be multiple compiled flex_attention instances, which can be slow.
@@ -66,13 +142,13 @@ class FlexAttentionWrapper(torch.nn.Module):
         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
         # 3. Used `return_lse` instead of `return_aux` because of easier TP module notation
         #    to convert `lse` to be DTensor.
-
         return FlexAttentionWrapper._compiled_flex_attn(
             q,
             k,
             v,
             block_mask=block_mask,
             scale=scale,
+            enable_gqa=enable_gqa,
             return_lse=return_lse,
         )
 
@@ -90,7 +166,7 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
     """
 
     # TODO: remove sdpa_backends after PyTorch 2.9 is released.
-    sdpa_backends: ClassVar[list[SDPBackend]] = []
+    sdpa_backends: list[SDPBackend] = []
 
     def __init__(self) -> None:
         super().__init__()
@@ -98,7 +174,6 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
             self.sdpa_backends = [
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.FLASH_ATTENTION,
-                SDPBackend.EFFICIENT_ATTENTION,
                 SDPBackend.MATH,
             ]
 
@@ -109,19 +184,13 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
         v: torch.Tensor,
         *,
         scale: float | None = None,
+        enable_gqa: bool = False,
+        is_casual: bool = True,
     ) -> torch.Tensor:
         with sdpa_kernel(self.sdpa_backends, set_priority=True):
-            return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
-
-
-# We cannot do inner function/closure because we won't be able to cache it --
-# if we an inner function, a new closure will be created every time
-# `get_causal_mask_mod` is called.
-def _causal_mask(
-    b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
-) -> torch.Tensor:
-    """Causal mask that prevents attention to future tokens."""
-    return q_idx >= kv_idx
+            return F.scaled_dot_product_attention(
+                q, k, v, scale=scale, is_causal=is_casual, enable_gqa=enable_gqa
+            )
 
 
 def get_causal_mask_mod() -> _mask_mod_signature:
@@ -130,6 +199,13 @@ def get_causal_mask_mod() -> _mask_mod_signature:
     Returns:
         A mask modifier function that implements causal masking.
     """
+
+    def _causal_mask(
+        b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+    ) -> torch.Tensor:
+        """Causal mask that prevents attention to future tokens."""
+        return q_idx >= kv_idx
+
     return _causal_mask
 
 
@@ -218,11 +294,63 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
 _compiled_create_block_mask = torch.compile(create_block_mask)
 
 
-@functools.lru_cache(4)
 def create_attention_mask(*args, **kwargs):
-    """Create an attention mask using compiled create_block_mask.
-
-    This function is cached to avoid recreating BlockMasks for the same
-    arguments.
-    """
+    """Create an attention mask using compiled create_block_mask."""
     return _compiled_create_block_mask(*args, **kwargs)
+
+
+def create_varlen_metadata_for_document(
+    input_batch: torch.Tensor, eos_id: int
+) -> VarlenMetadata:
+    """
+    Creates cumulative sequence length indices needed for variable length attention
+
+    Args:
+        input_batch
+        eos_id: the EOS id marker
+
+    Returns:
+        VarlenMetadata containing cumulative sequence length indices for q, k, and max_seq_len
+    """
+    batch_size, seq_len = input_batch.shape
+    device = input_batch.device
+    cu_seqlens_list, all_seq_lengths = [], []
+    offset = 0
+    max_seqlen = 0
+
+    for b in range(batch_size):
+        tokens = input_batch[b]
+        eos_positions = (tokens == eos_id).nonzero(as_tuple=True)[0].to(torch.int32)
+        sample_cu_seqlens = torch.cat(
+            [
+                torch.tensor([0], dtype=torch.int32, device=device),
+                eos_positions + 1,
+                torch.tensor([seq_len], dtype=torch.int32, device=device),
+            ]
+        )
+        sample_cu_seqlens = torch.unique_consecutive(sample_cu_seqlens)
+
+        seq_lengths = torch.diff(sample_cu_seqlens)
+        all_seq_lengths.append(seq_lengths)
+
+        cu_seqlens_adjusted = sample_cu_seqlens[:-1] + offset
+        cu_seqlens_list.append(cu_seqlens_adjusted)
+
+        offset += seq_len
+
+    packed_cu_seqlens = torch.cat(
+        cu_seqlens_list + [torch.tensor([offset], dtype=torch.int32, device=device)]
+    )
+
+    max_seqlen = 0
+    if len(all_seq_lengths) > 0:
+        all_seq_lengths = torch.cat(all_seq_lengths)
+        # device to host sync but only done once per model forward
+        max_seqlen = all_seq_lengths.max().item()
+
+    return VarlenMetadata(
+        cu_seq_q=packed_cu_seqlens,
+        cu_seq_k=packed_cu_seqlens,
+        max_q=max_seqlen,
+        max_k=max_seqlen,
+    )

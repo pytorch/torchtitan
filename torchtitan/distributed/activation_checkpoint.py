@@ -11,13 +11,14 @@ import os
 from collections import defaultdict
 
 import torch
+import torch._functorch.config
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 
 from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
-from torchtitan.tools.logging import logger, warn_once
+from torchtitan.tools.logging import logger
 
 
 _layer_sac_count = 0
@@ -155,88 +156,12 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     )
 
 
-def _apply_op_sac_to_transformer_block_with_flex(
-    module: nn.Module,
-    ac_config: ACConfig,
-    *,
-    base_fqn: str | None = None,
-    model_compile_enabled: bool = False,
-    op_sac_save_list: set[torch._ops.OpOverload],
-) -> nn.Module:
-    """Apply SAC to the transformer block that uses FlexAttention.
-
-    Args:
-        module (nn.Module): The transformer block to apply SAC to.
-        ac_config (ACConfig): The Activation Checkpoint config.
-        base_fqn (str, optional): The base fqn of the module. Defaults to None.
-        model_compile_enabled (bool): Whether model compilation is enabled.
-            Defaults to False.
-        op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
-            of recomputing.
-
-    Returns:
-        nn.Module: The transformer block with SAC applied.
-    """
-
-    warn_once(
-        logger,
-        (
-            "Flex Attention requires compilation for good performance.\n"
-            "Thus, torch.compile is always used for Flex Attention, "
-            "regardless of the compile.enable flag.\n"
-            "However, when selective activation checkpointing (SAC) is enabled, "
-            "torch.compile may be invalidated:\n"
-            "1. If compile.enable is False, SAC will ignore any torch.compile "
-            "inside the SAC region.\n"
-            "2. If compile.enable is True but the transformer block contains an MoE module.\n\n"
-            "For both cases, we will not wrap the entire TransformerBlock with SAC:\n"
-            "   - For case 1: SAC will be used for MoE and FeedForward modules, "
-            "while full AC will be used for the Attention module.\n"
-            "   - For case 2: SAC will be applied to MoE and Attention modules if the block "
-            "is sparse. But we still apply SAC to an entire dense block.\n"
-        ),
-    )
-
-    def wrap_submodule(name: str, full_ac: bool = False) -> None:
-        submodule = getattr(module, name)
-        if full_ac:
-            submodule = _apply_full_ac(submodule, ac_config)
-        else:
-            submodule = _apply_op_sac(
-                submodule,
-                ac_config,
-                base_fqn=f"{base_fqn}.{name}" if base_fqn else name,
-                op_sac_save_list=op_sac_save_list,
-            )
-        module.register_module(name, submodule)
-
-    if hasattr(module, "moe"):
-        wrap_submodule("moe", full_ac=False)
-        if model_compile_enabled:
-            wrap_submodule("attention", full_ac=False)
-        else:
-            wrap_submodule("attention", full_ac=True)
-    else:
-        if model_compile_enabled:
-            module = _apply_op_sac(
-                module,
-                ac_config,
-                base_fqn=base_fqn,
-                op_sac_save_list=op_sac_save_list,
-            )
-        else:
-            wrap_submodule("feed_forward", full_ac=False)
-            wrap_submodule("attention", full_ac=True)
-    return module
-
-
 def _apply_ac_to_transformer_block(
     module: nn.Module,
     ac_config: ACConfig,
     *,
     base_fqn: str | None = None,
     model_compile_enabled: bool = False,
-    use_flex_attn: bool = False,
     op_sac_save_list: set[torch._ops.OpOverload] | None = None,
 ) -> nn.Module:
     valid_ac_modes = ("full", "selective")
@@ -259,26 +184,9 @@ def _apply_ac_to_transformer_block(
 
     if use_op_sac:
         op_sac_save_list = op_sac_save_list or set()
-        if use_flex_attn:
-            """
-            For Flex Attention, we need to apply SAC carefully to avoid invalidating
-            torch.compile. Any torch.compile inside the SAC region will be ignored,
-            and any torch.compile outside the SAC region will also be ignored if the
-            SAC region contains a graph break (e.g., MoE).
-
-            TODO: remove this once SAC issues are resolved.
-            """
-            return _apply_op_sac_to_transformer_block_with_flex(
-                module,
-                ac_config,
-                base_fqn=base_fqn,
-                model_compile_enabled=model_compile_enabled,
-                op_sac_save_list=op_sac_save_list,
-            )
-        else:
-            return _apply_op_sac(
-                module, ac_config, base_fqn=base_fqn, op_sac_save_list=op_sac_save_list
-            )
+        return _apply_op_sac(
+            module, ac_config, base_fqn=base_fqn, op_sac_save_list=op_sac_save_list
+        )
 
     return _apply_layer_sac(module, ac_config)
 
@@ -288,26 +196,33 @@ def apply_ac(
     ac_config: ACConfig,
     *,
     model_compile_enabled: bool = False,
-    use_flex_attn: bool = False,
     op_sac_save_list: set[torch._ops.OpOverload] | None = None,
     base_folder: str = "",
 ) -> None:
     """Apply activation checkpointing to the model.
 
-    Note that SAC, Flex Attention and model compilation have some conflicts.
-    We explicitly ask the user to pass these configs to warn as the wrapping
-    will be different.
-
     Args:
         model (nn.Module): The model to apply activation checkpointing to.
         ac_config (ACConfig): The activation checkpointing config.
         model_compile_enabled (bool): Whether torch.compile is enabled for the model.
-        use_flex_attn (bool): Whether flex attention is enabled for the model.
         op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
             of recomputing.
     Returns:
         None
     """
+    # Disable dynamo LRU cache to workaround an interaction between SAC, PP, and Flex:
+    #
+    # When forward runs with a second PP microbatch, it triggers recompilation with dynamic
+    # shapes enabled. Now there are two valid compiled graphs. By default, dynamo selects
+    # the latest one (the dynamic shapes version), so the runtime wrapper expects an extra
+    # symint output. When SAC caches the inductor HOP output from the static graph for
+    # batch_idx=0, it would miss that symint and cause an assertion failure. The workaround
+    # here is to disable the LRU cache, and select graphs in insertion order instead.
+    #
+    # Also see: https://github.com/pytorch/pytorch/issues/166926
+    # pyrefly: ignore [missing-attribute]
+    torch._C._dynamo.eval_frame._set_lru_cache(False)
+
     if ac_config.mode == "memory_budget":
         assert model_compile_enabled, "Memory budget mode requires model to be compiled"
         if ac_config.visualize_memory_budget_pareto:
@@ -320,15 +235,15 @@ def apply_ac(
         torch._functorch.config.activation_memory_budget = ac_config.memory_budget
         logger.info(f"Selected {ac_config.memory_budget} budget option")
     else:
-        for layer_id, transformer_block in model.layers.named_children():
+        layers = model.get_submodule("layers")
+        for layer_id, transformer_block in layers.named_children():
             transformer_block = _apply_ac_to_transformer_block(
                 transformer_block,
                 ac_config,
                 base_fqn=f"layers.{layer_id}",
                 model_compile_enabled=model_compile_enabled,
-                use_flex_attn=use_flex_attn,
                 op_sac_save_list=op_sac_save_list,
             )
-            model.layers.register_module(layer_id, transformer_block)
+            layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")

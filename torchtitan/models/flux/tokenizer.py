@@ -11,6 +11,7 @@
 from typing import List
 
 import torch
+
 from transformers import CLIPTokenizer, T5Tokenizer
 
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
@@ -46,6 +47,7 @@ class FluxTestTokenizer(BaseTokenizer):
     def get_vocab_size(self) -> int:
         return self.tiktokenizer.vocab_size
 
+    # pyrefly: ignore [bad-override]
     def encode(self, text: str | list[str]) -> torch.Tensor:
         """
         Use TikTokenizer to encode the text into tokens, and then pad and chunk the tokens to max_length.
@@ -72,6 +74,7 @@ class FluxTestTokenizer(BaseTokenizer):
             tokens = self._pad_and_chunk_tokens(tokens, self._max_length, self.pad_id)
             return torch.tensor(tokens)
 
+    # pyrefly: ignore [bad-override]
     def decode(self, t: List[int]) -> str:
         """
         Decode function. This function will not be called.
@@ -96,10 +99,12 @@ class FluxTokenizer(BaseTokenizer):
         self.is_clip = "clip" in model_path.lower()
 
         if self.is_clip:
+            # pyrefly: ignore [bad-assignment]
             self._tokenizer: CLIPTokenizer = CLIPTokenizer.from_pretrained(
                 model_path, max_length=max_length, **hf_kwargs
             )
         else:
+            # pyrefly: ignore [bad-assignment]
             self._tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(
                 model_path, max_length=max_length, **hf_kwargs
             )
@@ -107,6 +112,7 @@ class FluxTokenizer(BaseTokenizer):
     def get_vocab_size(self) -> int:
         return self._tokenizer.vocab_size
 
+    # pyrefly: ignore [bad-override]
     def encode(
         self,
         s: str | list[str],
@@ -125,7 +131,8 @@ class FluxTokenizer(BaseTokenizer):
         )["input_ids"]
         return tokens
 
-    def decode(self, t: List[int]) -> str:
+    # pyrefly: ignore [bad-override]
+    def decode(self, t: list[int]) -> list[str] | str:
         """
         Decode function. This function will not be called.
         """
@@ -136,11 +143,15 @@ def build_flux_tokenizer(job_config: JobConfig) -> tuple[BaseTokenizer, BaseToke
     """
     Build the tokenizer for Flux.
     """
+    # pyrefly: ignore [missing-attribute]
     t5_tokenizer_path = job_config.encoder.t5_encoder
+    # pyrefly: ignore [missing-attribute]
     clip_tokenzier_path = job_config.encoder.clip_encoder
+    # pyrefly: ignore [missing-attribute]
     max_t5_encoding_len = job_config.encoder.max_t5_encoding_len
 
     # NOTE: This tokenizer is used for offline CI and testing only, borrowed from llama3 tokenizer
+    # pyrefly: ignore [missing-attribute]
     if job_config.training.test_mode:
         tokenizer_class = FluxTestTokenizer
         t5_tokenizer_path = clip_tokenzier_path = job_config.model.hf_assets_path

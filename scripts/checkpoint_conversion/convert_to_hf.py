@@ -32,6 +32,7 @@ def convert_to_hf(
         model = train_spec.model_cls(model_args)
     model = ModelWrapper(model)
 
+    # pyrefly: ignore[bad-instantiation, not-callable]
     sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
     assert (
         sd_adapter is not None

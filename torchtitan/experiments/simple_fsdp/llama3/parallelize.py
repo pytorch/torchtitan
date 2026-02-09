@@ -24,12 +24,17 @@ _op_sac_save_list = {
     torch.ops.aten.mm.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    torch.ops.aten._scaled_dot_product_attention_math.default,
+    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
     # for low precision training, it's useful to always save
     # the result of max, since the absolute maximum is
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
+    torch.ops.torch_attn._varlen_attn,
+    torch._higher_order_ops.inductor_compiled_code,
 }
 
 
@@ -92,7 +97,7 @@ def parallelize_llama(
         # all-gather happens in high precision.
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
 
-        tp_mesh = parallel_dims.world_mesh["tp"]
+        tp_mesh = parallel_dims.get_mesh("tp")
         apply_tp(
             model,
             tp_mesh,
@@ -102,7 +107,6 @@ def parallelize_llama(
         maybe_enable_async_tp(job_config, tp_mesh)
 
     if job_config.activation_checkpoint.mode != "none":
-        use_flex_attn = getattr(model.model_args, "use_flex_attn", False)
         model_compile_enabled = (
             job_config.compile.enable and "model" in job_config.compile.components
         )
@@ -110,7 +114,6 @@ def parallelize_llama(
             model,
             job_config.activation_checkpoint,
             model_compile_enabled=model_compile_enabled,
-            use_flex_attn=use_flex_attn,
             op_sac_save_list=_op_sac_save_list,
             base_folder=job_config.job.dump_folder,
         )
@@ -123,13 +126,13 @@ def parallelize_llama(
     ):
         if parallel_dims.dp_replicate_enabled:
             if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-                dp_mesh_dim_names = ("dp_replicate", "dp_shard_cp")
+                dp_mesh_dim_names = ["dp_replicate", "fsdp"]
                 dp_mode = "hybrid_shard"
             else:
-                dp_mesh_dim_names = ("dp_replicate",)
+                dp_mesh_dim_names = ["dp_replicate"]
                 dp_mode = "replicate"
         else:
-            dp_mesh_dim_names = ("dp_shard_cp",)
+            dp_mesh_dim_names = ["fsdp"]
             dp_mode = "fully_shard"
 
         mp_policy = MixedPrecisionPolicy(
@@ -139,7 +142,7 @@ def parallelize_llama(
 
         model = data_parallel(
             model,
-            parallel_dims.world_mesh[tuple(dp_mesh_dim_names)],
+            parallel_dims.get_mesh(dp_mesh_dim_names),
             mode=dp_mode,
             mp_policy=mp_policy,
         )

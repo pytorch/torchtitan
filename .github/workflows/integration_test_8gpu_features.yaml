@@ -3,6 +3,8 @@ name: 8 GPU Feature Tests
 on:
   push:
     branches: [ main ]
+    tags:
+      - ciflow/8gpu/*
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
@@ -25,26 +27,17 @@ permissions:
       contents: read
 
 jobs:
+  # Step 1: Dynamically compute the matrix based on conditions
+  set-matrix:
+    uses: ./.github/workflows/set-matrix.yaml
+
+  # Step 2: Use the dynamic matrix in the build-test job
   build-test:
+    needs: set-matrix
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: cuda
-            runner: linux.g5.48xlarge.nvidia.gpu
-            gpu-arch-type: cuda
-            gpu-arch-version: "12.6"
-            # This image is faster to clone than the default, but it lacks CC needed by triton
-            # (1m25s vs 2m37s).
-            docker-image: torchtitan-ubuntu-20.04-clang12
-            index-url: https://download.pytorch.org/whl/nightly/cu126
-          - name: rocm
-            runner: linux.rocm.gpu.gfx942.8
-            gpu-arch-type: rocm
-            gpu-arch-version: "7.0"
-            docker-image: torchtitan-rocm-ubuntu-22.04-clang12
-            index-url: https://download.pytorch.org/whl/nightly/rocm7.0
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
     with:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
@@ -73,14 +66,35 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        export TEST_WITH_ROCM=$([[ "${{ matrix.gpu-arch-type }}" == "rocm" ]] && echo 1 || echo 0)
-        python -m tests.integration_tests.run_tests --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        sudo mkdir -p "comm_traces"
+        sudo chown -R $(id -u):$(id -g) "comm_traces"
 
-        # Verify the accuracy.
-        echo "Checking FSDP4 v.s. HSDP2FSDP2TP2 accuracy parity"
+        # Verify the accuracy first.
+        echo "Checking FSDP8 v.s. HSDP (4, 2) accuracy parity"
         export baseline_options="--parallelism.data_parallel_replicate_degree=1"
-        export test_options="--parallelism.data_parallel_replicate_degree=2 --parallelism.tensor_parallel_degree=2"
-        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal --baseline-ngpus=4 --test-ngpus=8 --steps=1
+        export test_options="--parallelism.data_parallel_replicate_degree=4"
+
+        # Set architecture-specific parameters
+        if [[ "${{ matrix.gpu-arch-type }}" == "cuda" ]]; then
+          LOSS_FILE="tests/assets/losses/llama3_cuda.txt"
+          STEPS=10
+        elif [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          # The loss results of FSDP and HSDP start to diverge after 5th
+          # step when running with ROCm, we also need to adjust this.
+          # But this is more an unknown issue that AMD people may want to
+          # figure out the root cause or confirm that this is an expected
+          # behavior.
+          LOSS_FILE="tests/assets/losses/llama3_rocm.txt"
+          STEPS=5
+        else
+          echo "Error: Unknown GPU architecture type: ${{ matrix.gpu-arch-type }}"
+          exit 1
+        fi
+
+        python3 scripts/loss_compare.py . . --baseline-options="${baseline_options}" --test-options="${test_options}" --job-dump-folder="${RUNNER_TEMP}/artifacts-to-be-uploaded/accuracy_comparison_outputs" --assert-equal --steps=${STEPS} --import-result ${LOSS_FILE}
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*
+
+        python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite features $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
 
         # Cleanup the checkpoints so that we don't waste network bandwidth and time.
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

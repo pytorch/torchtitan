@@ -18,7 +18,7 @@ from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import Color, device_module, device_type
+from torchtitan.tools.utils import Color, device_module, device_type, NoColor
 
 if TYPE_CHECKING:
     from torchtitan.protocols import BaseModelArgs
@@ -40,6 +40,7 @@ DeviceMemStats = namedtuple(
 
 class DeviceMemoryMonitor:
     def __init__(self, device: str = f"{device_type}:0"):
+        # pyrefly: ignore [read-only]
         self.device = torch.device(device)  # device object
         self.device_name = device_module.get_device_name(self.device)
         self.device_index = device_module.current_device()
@@ -147,6 +148,13 @@ class WandBLogger(BaseLogger):
             entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
             name=os.getenv("WANDB_RUN_NAME", None),
+            id=os.getenv("WANDB_RUN_ID", None),
+            notes=os.getenv("WANDB_RUN_NOTES", None),
+            tags=os.getenv("WANDB_RUN_TAGS", None),
+            group=os.getenv("WANDB_RUN_GROUP", None),
+            job_type=os.getenv("WANDB_RUN_JOB_TYPE", None),
+            resume_from=os.getenv("WANDB_RESUME_FROM", None),
+            fork_from=os.getenv("WANDB_FORK_FROM", None),
             dir=log_dir,
             config=job_config.to_dict(),
         )
@@ -187,7 +195,7 @@ class LoggerContainer(BaseLogger):
 
 
 def ensure_pp_loss_visible(
-    parallel_dims: ParallelDims, job_config: JobConfig, color: Color
+    parallel_dims: ParallelDims, job_config: JobConfig, color: Color | NoColor
 ) -> None:
     """
     Ensures that the loss is visible on the console for pipeline-parallel training.
@@ -341,7 +349,7 @@ class MetricsProcessor:
     device_memory_monitor: DeviceMemoryMonitor
     color: utils.NoColor | utils.Color
 
-    gpu_peak_flops: int
+    gpu_peak_flops: float
     ntokens_since_last_log: int
     data_loading_times: list[float]
     time_last_log: float
@@ -393,6 +401,19 @@ class MetricsProcessor:
         grad_norm: float,
         extra_metrics: dict[str, Any] | None = None,
     ):
+        """
+        Log training metrics including loss, throughput, and memory statistics.
+
+        Args:
+            step: Current training step
+            global_avg_loss: Global average loss across all valid tokens on all ranks
+                Defined as global_loss_sum / global_valid_tokens
+            global_max_loss: Maximum local loss across all ranks
+                Defined as max(local_loss_sum / global_valid_tokens)
+            grad_norm: Gradient norm after clipping
+            extra_metrics: Optional additional metrics to log
+
+        """
         assert self.num_flops_per_token > 0, "num_flops_per_token must be set"
 
         time_delta = time.perf_counter() - self.time_last_log
@@ -453,7 +474,9 @@ class MetricsProcessor:
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
-    def log_validation(self, loss: float, step: int):
+    def log_validation(
+        self, loss: float, step: int, extra_metrics: dict[str, Any] | None = None
+    ):
         time_delta = time.perf_counter() - self.time_last_log
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
@@ -471,6 +494,10 @@ class MetricsProcessor:
             "validation_metrics/memory/max_reserved(GiB)": device_mem_stats.max_reserved_gib,
             "validation_metrics/memory/max_reserved(%)": device_mem_stats.max_reserved_pct,
         }
+
+        if extra_metrics:
+            metrics.update(extra_metrics)
+
         self.logger.log(metrics, step)
 
         color = self.color
