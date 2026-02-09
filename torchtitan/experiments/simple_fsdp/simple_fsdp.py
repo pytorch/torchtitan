@@ -164,7 +164,9 @@ class ReplicateComputation(torch.nn.Module):
         self.param_sharding = param_sharding
         self.mode = mode
         self.compute_placements: list[Placement] = [Replicate()] * self.device_mesh.ndim
-        self.grad_placements: list[Placement] = [Partial(reduce_op="sum")] * self.device_mesh.ndim
+        self.grad_placements: list[Placement] = [
+            Partial(reduce_op="sum")
+        ] * self.device_mesh.ndim
         mp_policy = mp_policy or MixedPrecisionPolicy()
         self.param_dtype: torch.dtype | None = mp_policy.param_dtype
         self.reduce_dtype: torch.dtype | None = mp_policy.reduce_dtype
