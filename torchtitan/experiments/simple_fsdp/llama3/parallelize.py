@@ -145,6 +145,7 @@ def parallelize_llama(
             parallel_dims.get_mesh(dp_mesh_dim_names),
             mode=dp_mode,
             mp_policy=mp_policy,
+            full_dtensor=True,  # Keep weights as DTensors for DTensor input compatibility
         )
         logger.info(
             "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode

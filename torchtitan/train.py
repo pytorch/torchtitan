@@ -15,6 +15,7 @@ from typing import Any, cast, Iterable, Iterator
 import torch
 import torch.distributed.checkpoint.stateful
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor, Shard
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
@@ -415,6 +416,53 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # Tensors stay on CPU; moved to GPU per-microbatch during training
             yield input_dict, labels
 
+    def _get_dp_mesh_dim_names(self) -> list[str] | None:
+        """Get the data parallel mesh dimension names for DTensor input wrapping.
+
+        Returns the mesh dimension names used for data parallelism,
+        or None if data parallelism is not enabled.
+
+        The returned mesh dimension names match what the parallelization functions
+        use, ensuring inputs are wrapped on the same mesh as the model weights.
+        """
+        parallel_dims = self.parallel_dims
+
+        # Check if any data parallelism is enabled
+        if not (
+            parallel_dims.dp_replicate_enabled
+            or parallel_dims.dp_shard_enabled
+            or parallel_dims.cp_enabled
+        ):
+            return None
+
+        if parallel_dims.dp_replicate_enabled:
+            if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
+                return ["dp_replicate", "fsdp"]
+            else:
+                return ["dp_replicate"]
+        else:
+            return ["fsdp"]
+
+    def _is_simple_fsdp_model(self) -> bool:
+        """Check if the model uses SimpleFSDP with full_dtensor mode.
+
+        SimpleFSDP with full_dtensor=True keeps weights as DTensors,
+        allowing DTensor inputs to flow through the model without conversion.
+        Other models (FSDP2, DDP) use local tensors and need DTensor inputs
+        converted to local before forward.
+        """
+        return self.job_config.model.name.startswith("simple_fsdp")
+
+    def _wrap_as_dtensor(self, tensor: torch.Tensor, mesh_dim_names: list[str]) -> DTensor:
+        """Wrap a local tensor as a DTensor with Shard(0) placement on each mesh dimension.
+
+        For 1D mesh: uses [Shard(0)]
+        For 2D mesh (HSDP): uses [Shard(0), Shard(0)]
+        """
+        mesh = self.parallel_dims.get_mesh(mesh_dim_names)
+        placements = [Shard(0)] * mesh.ndim
+        return DTensor.from_local(tensor, mesh, placements)
+
     def post_dataloading_process(
         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor], dict[str, Any]]:
@@ -480,6 +528,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.job_config.parallelism.context_parallel_load_balancer,
             )
 
+        # Wrap inputs as DTensor for SimpleFSDP with full_dtensor mode.
+        # This enables automatic gradient reduction via DTensor's Partial placement.
+        dp_mesh_dim_names = self._get_dp_mesh_dim_names()
+        if dp_mesh_dim_names is not None:
+            inputs = self._wrap_as_dtensor(inputs, dp_mesh_dim_names)
+            labels = self._wrap_as_dtensor(labels, dp_mesh_dim_names)
+
         return inputs, labels, extra_inputs, extra_kwargs
 
     def forward_backward_step(
@@ -533,7 +588,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             assert len(model_parts) == 1
             with self.train_context():
                 with self.maybe_enable_amp:
+                    # For FSDP2/DDP models, convert DTensor inputs to local tensors
+                    # before forward to avoid "mixed DTensor and Tensor" errors.
+                    # SimpleFSDP with full_dtensor=True keeps weights as DTensors,
+                    # so DTensor inputs can flow through without conversion.
+                    if not self._is_simple_fsdp_model():
+                        if isinstance(inputs, DTensor):
+                            inputs = inputs.to_local()
+                        if isinstance(labels, DTensor):
+                            labels = labels.to_local()
+
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+
+                    # Handle DTensor output from SimpleFSDP full_dtensor mode.
+                    # Convert to local tensors for loss computation while
+                    # maintaining gradient connection for backward pass.
+                    if isinstance(pred, DTensor):
+                        pred = pred.to_local()
+                    if isinstance(labels, DTensor):
+                        labels = labels.to_local()
+
                     # Compute loss sum (reduction='sum')
                     loss_sum = self.loss_fn(pred, labels)
 

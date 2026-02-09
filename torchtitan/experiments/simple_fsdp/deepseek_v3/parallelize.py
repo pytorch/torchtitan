@@ -163,6 +163,7 @@ def parallelize_deepseekv3(
                     mp_policy=mp_policy,
                     shard_dim=experts_shard_dim,
                     reduction_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
+                    full_dtensor=True,  # Keep weights as DTensors for DTensor input compatibility
                 )
 
         model = data_parallel(
@@ -170,6 +171,7 @@ def parallelize_deepseekv3(
             dp_mesh,
             dp_mode,
             mp_policy=mp_policy,
+            full_dtensor=True,  # Keep weights as DTensors for DTensor input compatibility
         )
 
         logger.info(
