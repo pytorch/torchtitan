@@ -13,6 +13,7 @@ from torch.nn import init
 from torchtitan.tools.logging import logger
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
+from torchtitan.models.utils import trunc_normal_
 
 from .args import HFTransformerModelArgs
 
@@ -193,7 +194,7 @@ class HFTransformerModel(nn.Module):
                 # Initialize weights and biases for q, k, v projections
                 for proj_name in ["q_proj", "k_proj", "v_proj"]:
                     proj = getattr(module, proj_name)
-                    nn.init.trunc_normal_(proj.weight, mean=0.0, std=0.02)
+                    trunc_normal_(proj.weight, mean=0.0, std=0.02)
                     if proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
@@ -202,7 +203,7 @@ class HFTransformerModel(nn.Module):
                 # Handle different names for the output projection layer
                 o_proj = getattr(module, "o_proj", getattr(module, "dense", None))
                 if o_proj is not None:
-                    nn.init.trunc_normal_(o_proj.weight, mean=0.0, std=init_std)
+                    trunc_normal_(o_proj.weight, mean=0.0, std=init_std)
                     if o_proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(o_proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
@@ -216,20 +217,20 @@ class HFTransformerModel(nn.Module):
 
                 # gate_proj (or fc1) should always use std=0.02 for numerical stability.
                 if gate_proj is not None:
-                    nn.init.trunc_normal_(gate_proj.weight, mean=0.0, std=0.02)
+                    trunc_normal_(gate_proj.weight, mean=0.0, std=0.02)
                     if gate_proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(gate_proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
                         init.uniform_(gate_proj.bias, -bound, bound)
                 # up_proj and down_proj (or fc2) use the depth-dependent init_std.
                 if up_proj is not None:
-                    nn.init.trunc_normal_(up_proj.weight, mean=0.0, std=init_std)
+                    trunc_normal_(up_proj.weight, mean=0.0, std=init_std)
                     if up_proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(up_proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
                         init.uniform_(up_proj.bias, -bound, bound)
                 if down_proj is not None:
-                    nn.init.trunc_normal_(down_proj.weight, mean=0.0, std=init_std)
+                    trunc_normal_(down_proj.weight, mean=0.0, std=init_std)
                     if down_proj.bias is not None:
                         fan_in, _ = init._calculate_fan_in_and_fan_out(down_proj.weight)
                         bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
@@ -240,7 +241,7 @@ class HFTransformerModel(nn.Module):
             ):  # TODO(3outeille): find a better way to detect lm_head
                 final_out_std = config.hidden_size**-0.5
                 cutoff_factor = 3
-                nn.init.trunc_normal_(
+                trunc_normal_(
                     module.weight,
                     mean=0.0,
                     std=final_out_std,
@@ -258,7 +259,7 @@ class HFTransformerModel(nn.Module):
                 ):
                     final_out_std = config.hidden_size**-0.5
                     cutoff_factor = 3
-                    nn.init.trunc_normal_(
+                    trunc_normal_(
                         module.weight,
                         mean=0.0,
                         std=final_out_std,
