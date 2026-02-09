@@ -4,16 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Activation checkpointing module.
-
-This module provides utilities to apply activation checkpointing to the model.
-
-Key design patterns:
-1. Policy factory functions are decorated with @lru_cache() to avoid dynamo recompilations
-2. Ops are categorized into compute_intensive_ops and communication_intensive_ops
-3. Policy functions have signature: (ctx, op, *args, **kwargs) -> CheckpointPolicy
-4. Policy factories have a `cache_hash` attribute for dynamo cache management
-"""
+# This file provides the util functions to apply activation checkpointing to the model.
+# Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import os
 from functools import lru_cache, partial
@@ -167,45 +159,6 @@ def _apply_layer_sac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
         return module
 
 
-def _get_mm_recompute_shapes(
-    module: nn.Module,
-    ac_config: ACConfig,
-    base_fqn: str | None = None,
-) -> set[tuple[int, int]]:
-    """Extract mm shapes that should be force-recomputed based on FQN matching.
-
-    Args:
-        module: The module to analyze.
-        ac_config: The activation checkpointing config.
-        base_fqn: The base FQN of the module.
-
-    Returns:
-        Set of (in_features, out_features) shapes to force recompute.
-    """
-    mm_recompute_shapes: set[tuple[int, int]] = set()
-    if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
-        for module_fqn, submod in module.named_modules():
-            fqn = module_fqn
-            if base_fqn is not None:
-                fqn = f"{base_fqn}.{module_fqn}"
-            if not any(
-                filter_fqn in fqn
-                for filter_fqn in ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
-            ):
-                continue
-            if not isinstance(submod, nn.Linear):
-                raise ValueError(
-                    "per_op_sac_force_recompute_mm_shapes_by_fqns expected to match "
-                    f"a nn.Linear, but got: {submod}"
-                )
-            out_f, in_f = submod.weight.shape
-            mm_recompute_shapes.add((in_f, out_f))
-        logger.debug(
-            f"Selective op AC force recomputing mms with rhs shapes {mm_recompute_shapes}"
-        )
-    return mm_recompute_shapes
-
-
 def _apply_op_sac(
     module: nn.Module,
     ac_config: ACConfig,
@@ -229,10 +182,29 @@ def _apply_op_sac(
     from torch.utils.checkpoint import create_selective_checkpoint_contexts
 
     # Get mm shapes to force recompute based on FQN matching
-    mm_recompute_shapes = _get_mm_recompute_shapes(module, ac_config, base_fqn)
+    mm_recompute_shapes: set[tuple[int, int]] = set()
+    if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
+        for module_fqn, submod in module.named_modules():
+            fqn = module_fqn
+            if base_fqn is not None:
+                fqn = f"{base_fqn}.{module_fqn}"
+            if not any(
+                filter_fqn in fqn
+                for filter_fqn in ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
+            ):
+                continue
+            if not isinstance(submod, nn.Linear):
+                raise ValueError(
+                    "per_op_sac_force_recompute_mm_shapes_by_fqns expected to match "
+                    f"a nn.Linear, but got: {submod}"
+                )
+            out_f, in_f = submod.weight.shape
+            mm_recompute_shapes.add((in_f, out_f))
+        logger.debug(
+            f"Selective op AC force recomputing mms with rhs shapes {mm_recompute_shapes}"
+        )
 
     # Get the policy from default_activation_checkpoint_policy
-    # This returns a policy function directly (via functools.partial)
     base_policy = default_activation_checkpoint_policy()
 
     def _create_wrapped_policy():
@@ -245,7 +217,6 @@ def _apply_op_sac(
 
         def wrapped_policy(ctx, func, *args, **kwargs) -> CheckpointPolicy:
             # Special case: CUDA->CPU tensor copies must be saved
-            # This prevents issues with CPU offloading during recomputation
             if (
                 func == torch.ops.aten._to_copy.default
                 and len(args) > 0
@@ -256,18 +227,19 @@ def _apply_op_sac(
                 return CheckpointPolicy.MUST_SAVE
 
             # Special case: Force recompute for specific mm shapes
-            # This is used for things like router gates in MoE models
-            if func == torch.ops.aten.mm.default and len(args) > 1:
-                if args[1].shape in mm_recompute_shapes:
-                    return CheckpointPolicy.PREFER_RECOMPUTE
+            if (
+                func == torch.ops.aten.mm.default
+                and len(args) > 1
+                and args[1].shape in mm_recompute_shapes
+            ):
+                return CheckpointPolicy.PREFER_RECOMPUTE
 
-            # Delegate to the base policy for all other decisions
+            # Delegate to the base policy
             return base_policy(ctx, func, *args, **kwargs)
 
         return wrapped_policy
 
     def selective_checkpointing_context_fn():
-        """Context function that creates checkpoint contexts with the wrapped policy."""
         return create_selective_checkpoint_contexts(_create_wrapped_policy())
 
     return ptd_checkpoint_wrapper(
