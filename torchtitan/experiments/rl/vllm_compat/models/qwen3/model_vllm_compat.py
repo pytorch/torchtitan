@@ -20,9 +20,9 @@ from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
 
 # Import from main torchtitan
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
-from torchtitan.models.utils import trunc_normal_
 
 # Import from local experiment's models
 from ..attention import VLLMCompatibleFlashAttention

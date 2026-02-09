@@ -10,10 +10,10 @@ import math
 import torch
 from torch import nn
 from torch.nn import init
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.tools.logging import logger
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
-from torchtitan.models.utils import trunc_normal_
 
 from .args import HFTransformerModelArgs
 

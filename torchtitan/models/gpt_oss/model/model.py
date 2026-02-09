@@ -17,9 +17,9 @@ from torchtitan.models.attention import (
     get_document_mask_mod,
     get_sliding_window_mask_mod,
 )
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
-from torchtitan.models.utils import trunc_normal_
 
 from .args import GptOssModelArgs
 from .moe import GptOssMoE

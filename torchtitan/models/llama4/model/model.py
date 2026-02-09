@@ -21,8 +21,8 @@ from torchtitan.models.attention import (
     get_fixed_block_mask_mod,
     ScaledDotProductAttentionWrapper,
 )
-from torchtitan.models.utils import trunc_normal_
 from torchtitan.models.moe import MoE
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 

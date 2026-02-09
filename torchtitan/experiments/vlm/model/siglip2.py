@@ -17,8 +17,9 @@ from torchtitan.models.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.models.utils import trunc_normal_
+from torchtitan.protocols.model import AttentionMasksType
+
 from .args import Siglip2ModelArgs
 
 

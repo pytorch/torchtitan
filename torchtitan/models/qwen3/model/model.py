@@ -24,8 +24,8 @@ from torchtitan.models.attention import (
     VarlenAttentionWrapper,
     VarlenMetadata,
 )
-from torchtitan.models.utils import trunc_normal_
 from torchtitan.models.moe import MoE
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 

@@ -19,9 +19,9 @@ from torchtitan.models.attention import (
     ScaledDotProductAttentionWrapper,
 )
 from torchtitan.models.moe import build_moe, FeedForward, MoE
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
-from torchtitan.models.utils import trunc_normal_
 
 from .args import DeepSeekV3ModelArgs
 
