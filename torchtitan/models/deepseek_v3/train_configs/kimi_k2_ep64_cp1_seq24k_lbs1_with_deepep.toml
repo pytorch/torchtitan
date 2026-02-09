@@ -1,0 +1,65 @@
+# EP/CP Sweep - Run D4 with DeepEP Sanity Autotune: ep64_seq24k_lbs1
+# EP=64, CP=1, SEQ=24K, LBS=1, expert_parallel_comm_backend=deepep, sanity autotune
+
+[job]
+dump_folder = "./outputs/ep_cp_sweep/D4_ep64_seq24k_lbs1_deepep_sanity_autotune"
+description = "EP/CP Sweep D4 DeepEP Sanity Autotune: EP=64 CP=1 SEQ=24K LBS=1"
+
+[profiling]
+enable_profiling = false
+
+[metrics]
+log_freq = 1
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2"
+hf_assets_path = "/home/phuc/kimi_1t/torchtitan/assets/hf/DeepSeek-V3-Base"
+
+[optimizer]
+name = "AdamW"
+lr = 2.2e-4
+state_dtype = "bfloat16"
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+
+[training]
+dtype = "bfloat16"
+local_batch_size = 1
+seq_len = 24576
+steps = 5
+dataset = "c4_test"
+enable_cpu_offload = true
+clear_cache_between_steps = true
+skip_optimizer_step = false
+aggressive_memory_mode = "maximum"
+aggressive_memory_verbose = true
+
+[parallelism]
+data_parallel_shard_degree = -1
+expert_parallel_degree = 64
+context_parallel_degree = 1
+expert_parallel_comm_backend = "deepep"
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = true
+components = ["loss"]
+
+[deepep]
+autotune = true
+autotune_verbose = true
+nvl_buffer_size = 256
+autotune_warmup = 1
+autotune_repeat = 2
+
+[debug]
+moe_force_load_balance = true
+
+[comm]
+init_timeout_seconds = 1800
+train_timeout_seconds = 1800
