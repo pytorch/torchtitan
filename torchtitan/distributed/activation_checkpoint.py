@@ -24,7 +24,6 @@ from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
 from torchtitan.tools.logging import logger
 
 
-# Type alias for policy functions
 _PolicyFn = Callable[..., CheckpointPolicy]
 
 _layer_sac_count = 0
@@ -38,32 +37,15 @@ def _sac_policy_fn(
     communication_intensive_ops: dict,
     **kwargs,
 ) -> CheckpointPolicy:
-    # Save compute-intensive ops (mm, attention, conv, flex_attention, etc.)
-    if op in compute_intensive_ops:
+    if op in (compute_intensive_ops | communication_intensive_ops):
         return CheckpointPolicy.MUST_SAVE
 
-    # Save communication-intensive ops (reduce_scatter, all_to_all, etc.)
-    if op in communication_intensive_ops:
-        return CheckpointPolicy.MUST_SAVE
-
-    # Default: recompute everything else
     return CheckpointPolicy.PREFER_RECOMPUTE
 
 
 @lru_cache()
 def default_activation_checkpoint_policy() -> _PolicyFn:
-    """Returns a checkpointing policy function that saves results of compute-intensive ops.
-
-    The policy saves compute-intensive and communication-intensive ops while
-    recomputing everything else. Uses dicts (not sets) to workaround dynamo
-    guarding issues (https://github.com/pytorch/pytorch/issues/168163).
-
-    Returns:
-        A policy function that can be used with checkpoint contexts.
-
-    Note:
-        This function is cached with @lru_cache() to avoid dynamo recompilations.
-        The cache_hash attribute is used by dynamo for cache management.
+    """Returns a checkpointing policy function that saves results of compute and communicate ops.
     """
     aten_op_types = get_default_op_list()
     compute_intensive_ops = {
@@ -203,7 +185,6 @@ def _apply_op_sac(
             f"Selective op AC force recomputing mms with rhs shapes {mm_recompute_shapes}"
         )
 
-    # Get the policy from default_activation_checkpoint_policy
     base_policy = default_activation_checkpoint_policy()
 
     def _create_wrapped_policy():
