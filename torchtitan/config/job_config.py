@@ -125,81 +125,6 @@ class Model:
 
 
 @dataclass
-class Optimizer:
-    name: str = "AdamW"
-    """Optimizer to use"""
-
-    lr: float = 8e-4
-    """Learning rate to use"""
-
-    beta1: float = 0.9
-    beta2: float = 0.95
-    """Exponential moving average hyperparameters to use"""
-
-    eps: float = 1e-8
-    """Epsilon value to use"""
-
-    weight_decay: float = 0.1
-    """Weight decay to use"""
-
-    implementation: Literal["for-loop", "foreach", "fused"] = "fused"
-    """
-    Specify which optimizer implementation to use:
-    - 'fused': Use fused implementation (CUDA only) for best performance.
-    - 'foreach': Use some horizontal fusion of tensors for better performance.
-    - 'for-loop': Use the default implementation for the optimizer (slowest).
-    - more info: https://pytorch.org/docs/stable/optim.html
-    """
-
-    early_step_in_backward: bool = False
-    """
-    Whether to apply optimizer in the backward. Caution, optimizer_in_backward
-    is not compatible with gradients clipping, users should not call
-    register_post_accumulate_grad_hook after the optimizer is built.
-    """
-
-
-@dataclass
-class LRScheduler:
-    warmup_steps: int = 200
-    """
-    Steps for lr scheduler warmup, normally 1/5 of --training.steps
-    """
-
-    total_steps: int | None = None
-    """
-    Total steps for LR schedule calculation. If None, defaults to training.steps.
-    This allows decoupling the LR schedule from the actual training steps,
-    which is useful for debugging with fewer steps while maintaining the same LR curve,
-    or for early stopping scenarios.
-    """
-
-    decay_ratio: float | None = None
-    """
-    Controls the proportion of the training steps allocated to the learning rate decay phase.
-    If `None`, the learning rate will begin decaying immediately after the warmup period.
-    Otherwise, the learning rate will remain stable after the warmup period and
-    only start decaying during the last `decay_ratio` portion of the total training steps.
-    This is known as the Warmup-Stable-Decay (WSD) schedule, as described in https://arxiv.org/abs/2404.06395.
-    """
-
-    decay_type: Literal["linear", "sqrt", "cosine"] = "linear"
-    """
-    Learning rate decay type to use during training:
-    - 'linear': linearly decays learning rate from initial to final value
-    - 'sqrt': decays learning rate following a 1 minus square root curve
-    - 'cosine': smoothly decays learning rate following a cosine curve
-    """
-
-    min_lr_factor: float = 0.0
-    """
-    Min lr ratio for lr scheduler.
-    If provided, the range of decay factor is scaled from 1 to `min_lr_factor`
-    to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.min_lr_factor`.
-    """
-
-
-@dataclass
 class DataLoader:
     """
     Configuration for PyTorch DataLoader settings.
@@ -984,6 +909,17 @@ class Debug:
 
     moe_force_load_balance: bool = False
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
+
+
+# Backward-compatible aliases: the canonical Config classes now live inside
+# OptimizersContainer and LRSchedulersContainer respectively.  These imports
+# are placed here (after FaultTolerance is defined) to avoid circular imports:
+# optimizer.py -> ft/manager.py -> job_config.FaultTolerance.
+from torchtitan.components.lr_scheduler import LRSchedulersContainer  # noqa: E402
+from torchtitan.components.optimizer import OptimizersContainer  # noqa: E402
+
+Optimizer = OptimizersContainer.Config
+LRScheduler = LRSchedulersContainer.Config
 
 
 @dataclass
