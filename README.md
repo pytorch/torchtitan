@@ -72,7 +72,7 @@ We look forward to your contributions!
 11. Flexible learning rate scheduler (warmup-stable-decay)
 12. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
 13. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
-14. All options easily configured via [toml files](torchtitan/models/llama3/train_configs/)
+14. All options easily configured via [Python config files](torchtitan/models/llama3/train_configs/)
 15. [Helper scripts](scripts/) to
     - download tokenizers from Hugging Face
     - convert original Llama 3 checkpoints into the expected DCP format
@@ -142,7 +142,7 @@ python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets 
 Llama 3 8B model locally on 8 GPUs
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.py" ./run_train.sh
 ```
 
 ### Multi-Node Training

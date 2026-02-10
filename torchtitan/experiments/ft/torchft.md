@@ -36,12 +36,12 @@ RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join
 2. Launch the first TorchTitan instance:
 
 ```bash
-NGPU=4 CUDA_VISIBLE_DEVICES=0,1,2,3 TRAIN_FILE=torchtitan.experiments.ft.train CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --fault_tolerance.enable --fault_tolerance.replica_id=0 --fault_tolerance.group_size=2 --parallelism.data_parallel_shard_degree=4
+NGPU=4 CUDA_VISIBLE_DEVICES=0,1,2,3 TRAIN_FILE=torchtitan.experiments.ft.train MODEL=llama3 CONFIG=llama3_8B ./run_train.sh --fault_tolerance.enable --fault_tolerance.replica_id=0 --fault_tolerance.group_size=2 --parallelism.data_parallel_shard_degree=4
 ```
 3. Launch the second TorchTitan instance:
 
 ```bash
-NGPU=4 CUDA_VISIBLE_DEVICES=4,5,6,7 TRAIN_FILE=torchtitan.experiments.ft.train CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --fault_tolerance.enable --fault_tolerance.replica_id=1 --fault_tolerance.group_size=2 --parallelism.data_parallel_shard_degree=4
+NGPU=4 CUDA_VISIBLE_DEVICES=4,5,6,7 TRAIN_FILE=torchtitan.experiments.ft.train MODEL=llama3 CONFIG=llama3_8B ./run_train.sh --fault_tolerance.enable --fault_tolerance.replica_id=1 --fault_tolerance.group_size=2 --parallelism.data_parallel_shard_degree=4
 ```
 
 ### Explanation
@@ -68,12 +68,12 @@ The `--training.global_batch_size` parameter refers to global batch size that wi
 
 #### Replica Group 0
 ```bash
-TRAIN_FILE=torchtitan.experiments.ft.train CONFIG_FILE=./torchtitan/models/llama3_ft/train_configs/debug_model.toml CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 ./run_train.sh --parallelism.data_parallel_shard_degree=4 --fault_tolerance.enable --fault_tolerance.group_size=2 --fault_tolerance.replica_id=0
+TRAIN_FILE=torchtitan.experiments.ft.train MODEL=llama3_ft CONFIG=llama3_ft_debugmodel CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 ./run_train.sh --parallelism.data_parallel_shard_degree=4 --fault_tolerance.enable --fault_tolerance.group_size=2 --fault_tolerance.replica_id=0
 ```
 
 #### Replica Group 1
 ```bash
-TRAIN_FILE=torchtitan.experiments.ft.train CONFIG_FILE=./torchtitan/models/llama3_ft/train_configs/debug_model.toml CUDA_VISIBLE_DEVICES=4,5,6,7 NGPU=4 ./run_train.sh --parallelism.data_parallel_shard_degree=4 --fault_tolerance.enable --fault_tolerance.group_size=2 --fault_tolerance.replica_id=1
+TRAIN_FILE=torchtitan.experiments.ft.train MODEL=llama3_ft CONFIG=llama3_ft_debugmodel CUDA_VISIBLE_DEVICES=4,5,6,7 NGPU=4 ./run_train.sh --parallelism.data_parallel_shard_degree=4 --fault_tolerance.enable --fault_tolerance.group_size=2 --fault_tolerance.replica_id=1
 ```
 
 ## Fault Tolerance Configuration Options

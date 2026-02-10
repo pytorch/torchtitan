@@ -142,10 +142,12 @@ def run_training(
     )
 
     if passes:
+        # Use the compiler_toolkit base config which includes custom compile fields
+        env["CONFIG_FILE"] = (
+            "./torchtitan/experiments/compiler_toolkit/tests/base_config.py"
+        )
         cmd.extend(
             [
-                "--job.custom_config_module",
-                "torchtitan.experiments.compiler_toolkit.job_config",
                 "--compile.passes",
                 passes,
             ]

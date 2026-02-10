@@ -102,8 +102,8 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
 
         # Check if config file exists
         assert args.config_path.endswith(
-            ".toml"
-        ), "Base config path must end with .toml"
+            ".py"
+        ), "Base config path must end with .py"
         assert os.path.exists(
             args.config_path
         ), f"Base config path {args.config_path} does not exist"
@@ -123,7 +123,7 @@ def main():
     parser.add_argument("output_dir")
     parser.add_argument(
         "--config_path",
-        default="./tests/integration_tests/base_config.toml",
+        default="./tests/integration_tests/base_config.py",
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(

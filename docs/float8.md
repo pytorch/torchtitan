@@ -9,9 +9,9 @@ Please install latest [TorchAO](https://github.com/pytorch/ao/tree/main/torchao/
 USE_CPP=0 python -m pip install git+https://github.com/pytorch/ao.git
 ```
 
-For float8 with tensorwise scaling, launch training job with the following command (or alternatively set configs in toml files)
+For float8 with tensorwise scaling, launch training job with the following command (or alternatively set configs in Python config files)
 ```
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.converters="quantize.linear.float8" --quantize.linear.float8.enable_fsdp_float8_all_gather --quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp --compile.enable
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.py" ./run_train.sh --model.converters="quantize.linear.float8" --quantize.linear.float8.enable_fsdp_float8_all_gather --quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp --compile.enable
 ```
 * `--model.converters="quantize.linear.float8"`: swap `nn.Linear` with `Float8Linear` to perform float8 matmul.
 * `--quantize.linear.float8.enable_fsdp_float8_all_gather`: cast `Float8Linear.weight` from high precision to float8 before FSDP all-gather so we can communicate in float8 to save bandwidth.
@@ -20,9 +20,9 @@ CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_trai
     * **Auto-filter**: add `"auto_filter_small_kn"` as one of the `filter_fqns` to to enable automatic module filtering, which will automatically not convert linear layers are not large enough to benefit from float8 training, since the GEMM has to be big enough that the speedup from using FP8 tensorcores is greater than the overhead of creating dynamically quantized inputs. The thresholds for conversion are based on microbenchmarks measured on NVIDIA H100 GPUs, where (K,N) represents the linear layer weight shape. For best performance, you should still manually filter out layers that are too small to benefit from float8 training.
 * `--compile.enable` (required for competitive performance): use `torch.compile` to fuse the float8 scaling/casting kernels
 
-For float8 with rowwise scaling, launch training job with the following command (or alternatively set configs in toml files)
+For float8 with rowwise scaling, launch training job with the following command (or alternatively set configs in Python config files)
 ```
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.converters="quantize.linear.float8" --quantize.linear.float8.recipe_name rowwise --training.compile
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.py" ./run_train.sh --model.converters="quantize.linear.float8" --quantize.linear.float8.recipe_name rowwise --training.compile
 ```
 * `--model.converters="quantize.linear.float8"`: swap `nn.Linear` with `Float8Linear` to perform float8 matmul.
 * `--quantize.linear.float8.recipe_name="rowwise"`: use the rowwise scaling recipe for higher accuracy compared to tensorwise scaling

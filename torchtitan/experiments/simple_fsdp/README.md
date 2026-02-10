@@ -17,14 +17,16 @@ This folder includes an experimental frontend implementation for [SimpleFSDP: Si
 #### Training Llama3 models
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.name simple_fsdp.llama3 --compile.enable --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.py" ./run_train.sh --model.name simple_fsdp.llama3 --compile.enable
 ```
 
 #### Training DeepSeek_v3 models
 
 ```bash
-CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name simple_fsdp.deepseek_v3 --compile.enable --activation_checkpoint.mode "none" --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config
+CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.py" ./run_train.sh --model.name simple_fsdp.deepseek_v3 --compile.enable --activation_checkpoint.mode "none"
 ```
+
+> **Note**: To use the SimpleFSDP-specific config fields (e.g., `compile.graph_passes`), create a Python config file that merges the SimpleFSDP config using `ConfigManager._merge_configs()`. See [docs/extension.md](../../../docs/extension.md) for details.
 
 ### Composability Support
 

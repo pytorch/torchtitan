@@ -26,7 +26,7 @@ To reproduce the results using the original torchtitan commit, change all instan
     --rdzv_backend c10d \
     --rdzv_endpoint "$MASTER_ADDR:29500" \
     torchtitan/train.py \
-    --job.config-file torchtitan/models/llama3/train_configs/llama3_8b.toml \
+    --job.config-file torchtitan/models/llama3/train_configs/llama3_8b.py \
     --metrics.enable_wandb \
     --training.local_batch_size=2 \
     --training.compile \

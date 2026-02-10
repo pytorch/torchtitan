@@ -75,7 +75,7 @@ When appropriate, one should consider
 
 - Adding CPU/GPU unit/integration tests.
   - To add a unit test, put it in the [tests](tests/) folder and follow the existing test files.
-  - To add a GPU integration test, create a new `OverrideDefinitions` in [integration_tests.py](tests/integration_tests.py). It will override the default config to run on the Llama 3 [debug model](torchtitan/models/llama/train_configs/debug_model.toml).
+  - To add a GPU integration test, create a new `OverrideDefinitions` in [integration_tests.py](tests/integration_tests.py). It will override the default config to run on the Llama 3 [debug model](torchtitan/models/llama3/train_configs/debug_model.py).
 - Updating [README](README.md) and writing a new note in the [docs](docs/) folder on installation and usage, similar to [float8.md](docs/float8.md).
 - Updating [performance.md](docs/performance.md) with new performance results.
 - Creating GitHub issues for things that cannot be addressed at the moment.
