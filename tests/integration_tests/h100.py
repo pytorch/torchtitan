@@ -35,9 +35,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.converters quantize.linear.float8",
-                    "--quantize.linear.float8.enable_fsdp_float8_all_gather",
-                    "--quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp",
+                    "--job.config_file ./tests/integration_tests/base_config_float8.py",
                 ],
             ],
             "Float8 test",
@@ -47,14 +45,12 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--job.config_file ./tests/integration_tests/base_config_float8.py",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.enable_async_tensor_parallel",
-                    "--model.converters quantize.linear.float8",
-                    "--quantize.linear.float8.enable_fsdp_float8_all_gather",
-                    "--quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp",
                 ],
             ],
             "FSDP+async TP+PP+torch.compile+Float8",
@@ -65,13 +61,11 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--job.config_file ./tests/integration_tests/base_config_float8.py",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.context_parallel_degree 2",
-                    "--model.converters quantize.linear.float8",
-                    "--quantize.linear.float8.enable_fsdp_float8_all_gather",
-                    "--quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp",
                 ]
             ],
             "HSDP+CP+torch.compile+Float8",

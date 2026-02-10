@@ -6,7 +6,7 @@
 import pytest
 
 from torchtitan.components.quantization.float8 import Float8LinearConverter
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigManager, Model
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     build_model_converters,
@@ -34,7 +34,9 @@ def test_build_model_converters_empty_list():
     config = config_manager.parse_args([])
     parallel_dims = build_parallel_dims(config, 1)
 
-    model_converters = build_model_converters(config, parallel_dims)
+    model_converters = build_model_converters(
+        job_config=config, parallel_dims=parallel_dims
+    )
     assert isinstance(model_converters, ModelConvertersContainer)
     assert model_converters.converters == []
 
@@ -42,16 +44,16 @@ def test_build_model_converters_empty_list():
 def test_build_model_converters_float8_converter():
     pytest.importorskip("torchao")
     config_manager = ConfigManager()
-    config = config_manager.parse_args(
-        [
-            "--model.converters",
-            "quantize.linear.float8",
-            "--quantize.linear.float8.emulate",
-        ]
+    config = config_manager.parse_args([])
+    # Set converter config directly (not via CLI)
+    config.model = Model(
+        converters=[Float8LinearConverter.Config(emulate=True)],
     )
     parallel_dims = build_parallel_dims(config, 1)
 
-    model_converters = build_model_converters(config, parallel_dims)
+    model_converters = build_model_converters(
+        job_config=config, parallel_dims=parallel_dims
+    )
     assert isinstance(model_converters, ModelConvertersContainer)
     assert len(model_converters.converters) == 1
     assert isinstance(model_converters.converters[0], Float8LinearConverter)

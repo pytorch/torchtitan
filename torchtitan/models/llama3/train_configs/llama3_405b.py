@@ -6,6 +6,7 @@
 
 # NOTE: this config is a preset for 128 H100 GPUs.
 
+from torchtitan.components.quantization.float8 import Float8LinearConverter
 from torchtitan.config import (
     ActivationCheckpoint,
     Checkpoint,
@@ -18,11 +19,9 @@ from torchtitan.config import (
     Optimizer,
     Parallelism,
     Profiling,
-    Quantize,
     Training,
     Validation,
 )
-from torchtitan.config.job_config import Float8Linear, QuantizedLinear
 
 default_config = JobConfig(
     job=Job(
@@ -39,7 +38,13 @@ default_config = JobConfig(
         name="llama3",
         flavor="405B",
         hf_assets_path="./assets/hf/Llama-3.1-405B",
-        converters=["float8"],
+        converters=[
+            Float8LinearConverter.Config(
+                enable_fsdp_float8_all_gather=True,
+                precompute_float8_dynamic_scale_for_fsdp=True,
+                filter_fqns=["output"],
+            ),
+        ],
     ),
     optimizer=Optimizer(lr=8e-5),
     lr_scheduler=LRScheduler(warmup_steps=600),
@@ -56,15 +61,6 @@ default_config = JobConfig(
     checkpoint=Checkpoint(interval=500),
     activation_checkpoint=ActivationCheckpoint(mode="full"),
     compile=Compile(enable=True),
-    quantize=Quantize(
-        linear=QuantizedLinear(
-            float8=Float8Linear(
-                enable_fsdp_float8_all_gather=True,
-                precompute_float8_dynamic_scale_for_fsdp=True,
-                filter_fqns=["output"],
-            ),
-        ),
-    ),
     validation=Validation(
         dataset="c4_validation",
         freq=500,
