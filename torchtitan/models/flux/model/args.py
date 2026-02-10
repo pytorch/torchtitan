@@ -30,6 +30,9 @@ class FluxModelArgs(BaseModelArgs):
     qkv_bias: bool = True
     autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
 
+    def update_from_config(self, **kwargs) -> None:
+        pass
+
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         # TODO(jianiw): Add the number of flops for the autoencoder
         nparams = sum(p.numel() for p in model.parameters())

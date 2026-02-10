@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 import torch
 
+from torchtitan.config.configurable import Configurable
 from torchtitan.tools.logging import logger
 
 
@@ -83,18 +84,20 @@ class Model:
     """DEPRECATED: Use hf_assets_path instead."""
     """Tokenizer path"""
 
-    converters: list = field(default_factory=list)
-    """
-    List of model converter Config objects to apply to the model.
-    Each entry should be a Configurable.Config instance (e.g.
-    Float8LinearConverter.Config) whose build() constructs the converter.
+
+@dataclass(kw_only=True, slots=True)
+class ModelConverters(Configurable.Config):
+    """Configuration for model converters (quantization, etc.).
+
+    Each entry in converter_configs should be a Configurable.Config instance
+    (e.g. Float8LinearConverter.Config) whose build() constructs the converter.
     """
 
+    converter_configs: list = field(default_factory=list)
+    """List of converter Config objects to apply to the model."""
+
     print_after_conversion: bool = False
-    """
-    If true, model definition will be printed to stdout after all model
-    converters have been applied.
-    """
+    """If true, model definition will be printed after converters are applied."""
 
 
 @dataclass
@@ -799,6 +802,7 @@ class JobConfig:
     profiling: Profiling = field(default_factory=Profiling)
     metrics: Metrics = field(default_factory=Metrics)
     model: Model = field(default_factory=Model)
+    model_converters: ModelConverters = field(default_factory=ModelConverters)
     optimizer: Optimizer = field(default_factory=Optimizer)
     lr_scheduler: LRScheduler = field(default_factory=LRScheduler)
     training: Training = field(default_factory=Training)

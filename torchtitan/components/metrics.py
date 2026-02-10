@@ -9,7 +9,7 @@ import time
 from collections import namedtuple
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -20,10 +20,6 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type, NoColor
-
-if TYPE_CHECKING:
-    from torchtitan.config.job_config import JobConfig
-    from torchtitan.protocols import BaseModelArgs
 
 
 # named tuple for passing device memory stats for logging
@@ -575,36 +571,3 @@ class MetricsProcessor(Configurable):
 
     def close(self):
         self.logger.close()
-
-
-def build_metrics_processor(
-    *,
-    job_config: "JobConfig",
-    parallel_dims: ParallelDims,
-    model_args: "BaseModelArgs | None" = None,
-    tag: str | None = None,
-) -> MetricsProcessor:
-    """Create a metrics processor.
-
-    This function bridges from the full ``JobConfig`` to the typed sub-configs
-    that ``MetricsProcessor`` accepts, extracting the relevant config sections.
-
-    Args:
-        job_config (JobConfig): Job configuration.
-        parallel_dims (ParallelDims): Parallel dimensions.
-        model_args (BaseModelArgs | None): Model-specific arguments. Defaults to None.
-        tag (str | None): Tag to use for TensorBoard or WandB. Defaults to None.
-
-    Returns:
-        MetricsProcessor: A metrics processor.
-    """
-    return MetricsProcessor(
-        config=job_config.metrics,
-        parallel_dims=parallel_dims,
-        dump_folder=job_config.job.dump_folder,
-        pp_schedule=job_config.parallelism.pipeline_parallel_schedule,
-        ft_enable=job_config.fault_tolerance.enable,
-        ft_replica_id=job_config.fault_tolerance.replica_id,
-        config_dict=job_config.to_dict(),
-        tag=tag,
-    )

@@ -16,7 +16,7 @@ from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import ValidationContext, Validator
-from torchtitan.config import JobConfig
+from torchtitan.config import Parallelism, Validation
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.flux.flux_datasets import build_flux_validation_dataloader
 from torchtitan.models.flux.inference.sampling import generate_image, save_image
@@ -37,17 +37,27 @@ class FluxValidator(Validator):
     Simple validator focused on correctness and integration.
 
     Args:
-        job_config: Job configuration
-        validation_dataloader: The validation dataloader
+        validation: Validation configuration
+        parallelism: Parallelism configuration
+        job_config: Full job config (needed for Flux-specific fields)
+        dp_world_size: Data parallel world size
+        dp_rank: Data parallel rank
+        tokenizer: Tokenizer
+        parallel_dims: Parallel dimensions
         loss_fn: Loss function to use for validation
-        model: The model to validate (single model, no parallelism)
+        validation_context: Context manager for validation
+        maybe_enable_amp: Context manager for AMP
+        metrics_processor: Metrics processor
     """
 
     validation_dataloader: BaseDataLoader
 
     def __init__(
         self,
-        job_config: JobConfig,
+        *,
+        validation: Validation,
+        parallelism: Parallelism,
+        job_config,
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
@@ -59,8 +69,12 @@ class FluxValidator(Validator):
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
+        **kwargs,
     ):
+        # Store job_config for Flux-specific accesses
         self.job_config = job_config
+        self.validation = validation
+        self.parallelism = parallelism
         self.tokenizer = tokenizer
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
@@ -275,34 +289,3 @@ class FluxValidator(Validator):
         # re-enable cfg dropout for training
         # pyrefly: ignore [missing-attribute]
         self.job_config.training.classifier_free_guidance_prob = training_cfg_prob
-
-
-def build_flux_validator(
-    job_config: JobConfig,
-    dp_world_size: int,
-    dp_rank: int,
-    tokenizer: BaseTokenizer,
-    parallel_dims: ParallelDims,
-    loss_fn: LossFunction,
-    validation_context: ValidationContext,
-    maybe_enable_amp: AbstractContextManager[None],
-    metrics_processor: MetricsProcessor | None = None,
-    pp_schedule: _PipelineSchedule | None = None,
-    pp_has_first_stage: bool | None = None,
-    pp_has_last_stage: bool | None = None,
-) -> FluxValidator:
-    """Build a simple validator focused on correctness."""
-    return FluxValidator(
-        job_config=job_config,
-        dp_world_size=dp_world_size,
-        dp_rank=dp_rank,
-        tokenizer=tokenizer,
-        parallel_dims=parallel_dims,
-        loss_fn=loss_fn,
-        validation_context=validation_context,
-        maybe_enable_amp=maybe_enable_amp,
-        metrics_processor=metrics_processor,
-        pp_schedule=pp_schedule,
-        pp_has_first_stage=pp_has_first_stage,
-        pp_has_last_stage=pp_has_last_stage,
-    )
