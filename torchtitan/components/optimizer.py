@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
-from typing import Any, Generic, Iterator, TypeVar
+from dataclasses import dataclass
+from typing import Any, Generic, Iterator, Literal, TypeVar
 
 import torch
 import torch.distributed.tensor
@@ -21,7 +22,7 @@ from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
 
 from torchtitan.components.ft import FTManager, has_torchft
-from torchtitan.config import Optimizer as OptimizerConfig
+from torchtitan.config.configurable import Configurable
 from torchtitan.distributed import ParallelDims
 
 __all__ = [
@@ -38,7 +39,7 @@ if has_torchft:
 T = TypeVar("T", bound=Optimizer)
 
 
-class OptimizersContainer(Optimizer, Stateful, Generic[T]):
+class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     """A container for multiple optimizers.
 
     This class is used to wrap multiple optimizers into a single object that can be
@@ -63,6 +64,99 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         optimizer_kwargs (Dict[str, Any]): Keyword arguments for the optimizers.
         name (str): Name of the optimizers.
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        name: str = "AdamW"
+        """Optimizer to use"""
+
+        lr: float = 8e-4
+        """Learning rate to use"""
+
+        beta1: float = 0.9
+        beta2: float = 0.95
+        """Exponential moving average hyperparameters to use"""
+
+        eps: float = 1e-8
+        """Epsilon value to use"""
+
+        weight_decay: float = 0.1
+        """Weight decay to use"""
+
+        implementation: Literal["for-loop", "foreach", "fused"] = "fused"
+        """
+        Specify which optimizer implementation to use:
+        - 'fused': Use fused implementation (CUDA only) for best performance.
+        - 'foreach': Use some horizontal fusion of tensors for better performance.
+        - 'for-loop': Use the default implementation for the optimizer (slowest).
+        - more info: https://pytorch.org/docs/stable/optim.html
+        """
+
+        early_step_in_backward: bool = False
+        """
+        Whether to apply optimizer in the backward. Caution, optimizer_in_backward
+        is not compatible with gradients clipping, users should not call
+        register_post_accumulate_grad_hook after the optimizer is built.
+        """
+
+        def build(self, *, model_parts, parallel_dims, ft_manager=None):
+            """Build an OptimizersContainer from this config.
+
+            Args:
+                model_parts: List of model parts to be optimized.
+                parallel_dims: Parallel dimensions for the model.
+                ft_manager: Optional fault tolerance manager.
+
+            Returns:
+                An OptimizersContainer (or subclass) for the given model parts.
+            """
+            if self.early_step_in_backward:
+                if parallel_dims.ep_enabled:
+                    raise NotImplementedError(
+                        "Optimizers in backward is not supported with Expert Parallel."
+                    )
+                if parallel_dims.pp_enabled:
+                    raise NotImplementedError(
+                        "Optimizers in backward is not supported with Pipeline Parallel."
+                    )
+                if ft_manager and ft_manager.enabled:
+                    raise NotImplementedError(
+                        "TorchFT is not supported with optimizers in backward."
+                    )
+
+            optimizer_classes = {
+                "Adam": torch.optim.Adam,
+                "AdamW": torch.optim.AdamW,
+            }
+            if self.name not in optimizer_classes:
+                raise NotImplementedError(f"Optimizer {self.name} not added.")
+            optimizer_cls = optimizer_classes[self.name]
+
+            assert self.implementation in ["fused", "foreach", "for-loop"]
+            optimizer_kwargs = {
+                "lr": self.lr,
+                "betas": (self.beta1, self.beta2),
+                "eps": self.eps,
+                "weight_decay": self.weight_decay,
+                "fused": self.implementation == "fused",
+                "foreach": self.implementation == "foreach",
+            }
+
+            if self.early_step_in_backward:
+                return OptimizersInBackwardContainer(
+                    model_parts, optimizer_cls, optimizer_kwargs
+                )
+
+            if ft_manager and ft_manager.enabled:
+                return FTOptimizersContainer(
+                    model_parts,
+                    optimizer_cls,
+                    optimizer_kwargs,
+                    ft_manager.manager,
+                    use_ft_optimizer=ft_manager.use_async_quorum,
+                )
+
+            return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
 
     optimizers: list[T]
     model_parts: list[nn.Module]
@@ -252,16 +346,14 @@ class FTOptimizersContainer(OptimizersContainer):
 
 def build_optimizers(
     model_parts: list[nn.Module],
-    optimizer_config: OptimizerConfig,
+    optimizer_config: "OptimizersContainer.Config",
     parallel_dims: ParallelDims,
     ft_manager: FTManager | None = None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
-    This function creates a ``OptimizersContainer`` for the given model parts.
-    ``optimizer_config`` should define the correct optimizer name and parameters.
-    This function currently supports creating ``OptimizersContainer`` and
-    ``OptimizersInBackwardContainer``.
+    This function delegates to ``optimizer_config.build()`` which contains
+    the factory logic for creating the appropriate ``OptimizersContainer`` subclass.
 
     **Note**
     Users who want to customize the optimizer behavior can create their own
@@ -271,80 +363,25 @@ def build_optimizers(
 
     Args:
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        optimizer_config (OptimizerConfig): Optimizer config containing the optimizer name and parameters.
+        optimizer_config (OptimizersContainer.Config): Optimizer config containing the optimizer name and parameters.
         parallel_dims (ParallelDims): Parallel dimensions for the model.
+        ft_manager (FTManager | None): Optional fault tolerance manager.
     """
-    optim_in_bwd = optimizer_config.early_step_in_backward
-    if optim_in_bwd:
-        if parallel_dims.ep_enabled:
-            raise NotImplementedError(
-                "Optimizers in backward is not supported with Expert Parallel."
-            )
-        if parallel_dims.pp_enabled:
-            raise NotImplementedError(
-                "Optimizers in backward is not supported with Pipeline Parallel."
-            )
-        if ft_manager and ft_manager.enabled:
-            raise NotImplementedError(
-                "TorchFT is not supported with optimizers in backward."
-            )
-
-    name = optimizer_config.name
-    lr = optimizer_config.lr
-    beta1 = optimizer_config.beta1
-    beta2 = optimizer_config.beta2
-    eps = optimizer_config.eps
-    weight_decay = optimizer_config.weight_decay
-
-    optim_implementation = optimizer_config.implementation
-    assert optim_implementation in ["fused", "foreach", "for-loop"]
-
-    fused = optim_implementation == "fused"
-    foreach = optim_implementation == "foreach"
-
-    optimizer_kwargs = {
-        "lr": lr,
-        "betas": (beta1, beta2),
-        "eps": eps,
-        "weight_decay": weight_decay,
-        "fused": fused,
-        "foreach": foreach,
-    }
-
-    optimizer_classes = {
-        "Adam": torch.optim.Adam,
-        "AdamW": torch.optim.AdamW,
-    }
-    if name not in optimizer_classes:
-        raise NotImplementedError(f"Optimizer {name} not added.")
-    optimizer_cls = optimizer_classes[name]
-
-    if optim_in_bwd:
-        return OptimizersInBackwardContainer(
-            model_parts, optimizer_cls, optimizer_kwargs
-        )
-
-    if ft_manager and ft_manager.enabled:
-        return FTOptimizersContainer(
-            model_parts,
-            optimizer_cls,
-            optimizer_kwargs,
-            ft_manager.manager,
-            use_ft_optimizer=ft_manager.use_async_quorum,
-        )
-
-    return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
+    return optimizer_config.build(
+        model_parts=model_parts,
+        parallel_dims=parallel_dims,
+        ft_manager=ft_manager,
+    )
 
 
 def build_optimizers_with_moe_load_balancing(
     model_parts: list[nn.Module],
-    optimizer_config: OptimizerConfig,
+    optimizer_config: "OptimizersContainer.Config",
     parallel_dims: ParallelDims,
     ft_manager: FTManager | None = None,
 ) -> OptimizersContainer:
-    optimizers = build_optimizers(
+    optimizers = optimizer_config.build(
         model_parts=model_parts,
-        optimizer_config=optimizer_config,
         parallel_dims=parallel_dims,
         ft_manager=ft_manager,
     )
