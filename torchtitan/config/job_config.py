@@ -65,32 +65,6 @@ class Profiling:
 
 
 @dataclass
-class Metrics:
-    log_freq: int = 10
-    """How often to log metrics to TensorBoard, in iterations"""
-
-    enable_tensorboard: bool = False
-    """Whether to log metrics to TensorBoard"""
-
-    disable_color_printing: bool = False
-    """Whether to disable color printing in logs"""
-
-    save_tb_folder: str = "tb"
-    """Folder to dump TensorBoard states"""
-
-    save_for_all_ranks: bool = False
-    """
-    Whether to save TensorBoard/Wandb metrics only for rank 0 or for all ranks.
-    When this option is False and pipeline_parallel_degree is > 1, the metrics
-    component uses the 0th rank of the last stage pipeline group, which is the
-    only stage that computes loss metrics.
-    """
-
-    enable_wandb: bool = False
-    """Whether to log metrics to Weights & Biases"""
-
-
-@dataclass
 class Model:
     name: str = "llama3"
     """Which model to train"""
@@ -912,12 +886,14 @@ class Debug:
 
 
 # Backward-compatible aliases: the canonical Config classes now live inside
-# OptimizersContainer and LRSchedulersContainer respectively.  These imports
-# are placed here (after FaultTolerance is defined) to avoid circular imports:
+# their owning component classes. These imports are placed here (after
+# FaultTolerance is defined) to avoid circular imports:
 # optimizer.py -> ft/manager.py -> job_config.FaultTolerance.
 from torchtitan.components.lr_scheduler import LRSchedulersContainer  # noqa: E402
+from torchtitan.components.metrics import MetricsProcessor  # noqa: E402
 from torchtitan.components.optimizer import OptimizersContainer  # noqa: E402
 
+Metrics = MetricsProcessor.Config
 Optimizer = OptimizersContainer.Config
 LRScheduler = LRSchedulersContainer.Config
 
