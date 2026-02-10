@@ -6,6 +6,7 @@
 
 
 import math
+from collections.abc import Callable
 
 import torch
 from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
@@ -72,18 +73,18 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         class FlashAttnWithBackward(torch.autograd.Function):
             @staticmethod
             def forward(
-                ctx,
-                q,
-                k,
-                v,
-                out,
-                cu_seqlens,
-                seq_len,
-                scale,
-                num_splits,
-                flash_fn,
-                fa_version,
-            ):
+                ctx: torch.autograd.function.FunctionCtx,
+                q: torch.Tensor,
+                k: torch.Tensor,
+                v: torch.Tensor,
+                out: torch.Tensor,
+                cu_seqlens: torch.Tensor,
+                seq_len: int,
+                scale: float,
+                num_splits: int,
+                flash_fn: Callable[..., torch.Tensor],
+                fa_version: int,
+            ) -> torch.Tensor:
                 # Call flash attention for forward (fast)
                 output = flash_fn(
                     q,
@@ -106,7 +107,20 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 return output
 
             @staticmethod
-            def backward(ctx, grad_output):
+            def backward(
+                ctx: torch.autograd.function.FunctionCtx, grad_output: torch.Tensor
+            ) -> tuple[
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ]:
                 q, k, v, output = ctx.saved_tensors
                 scale = ctx.scale
                 seq_len = ctx.seq_len
@@ -136,7 +150,11 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
 
                 # For GQA, we need to expand K/V to match Q's num_heads
                 # Each KV head serves (num_heads // num_kv_heads) Q heads
-                if num_kv_heads != num_heads:
+                if num_kv_heads < num_heads:
+                    assert enable_gqa, "GQA requires enable_gqa=True"
+                    assert (
+                        num_heads % num_kv_heads == 0
+                    ), "num_heads must be a multiple of num_kv_heads"
                     n_rep = num_heads // num_kv_heads
                     k_t = k_t.repeat_interleave(n_rep, dim=1)
                     v_t = v_t.repeat_interleave(n_rep, dim=1)
@@ -188,11 +206,19 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 )
 
                 # For GQA, we need to reduce grad_k and grad_v back to num_kv_heads
-                if num_kv_heads != num_heads:
+                if num_kv_heads < num_heads:
+                    assert enable_gqa, "GQA requires enable_gqa=True"
+                    assert (
+                        num_heads % num_kv_heads == 0
+                    ), "num_heads must be a multiple of num_kv_heads"
                     n_rep = num_heads // num_kv_heads
                     # Reshape and sum over the repeated dimension
-                    grad_k_t = grad_k_t.reshape(batch_size, num_kv_heads, n_rep, seq_len, head_dim).sum(dim=2)
-                    grad_v_t = grad_v_t.reshape(batch_size, num_kv_heads, n_rep, seq_len, head_dim).sum(dim=2)
+                    grad_k_t = grad_k_t.reshape(
+                        batch_size, num_kv_heads, n_rep, seq_len, head_dim
+                    ).sum(dim=2)
+                    grad_v_t = grad_v_t.reshape(
+                        batch_size, num_kv_heads, n_rep, seq_len, head_dim
+                    ).sum(dim=2)
 
                 grad_k = grad_k_t.transpose(1, 2).reshape(
                     total_tokens, num_kv_heads, head_dim
