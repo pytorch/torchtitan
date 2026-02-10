@@ -11,8 +11,10 @@ from autoparallel.api import AutoParallel
 from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 
 from torch.distributed.tensor.placement_types import Shard
-from torchtitan.config import JobConfig
+from torchtitan.config import ActivationCheckpoint, Parallelism, Training
+from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.experiments.autoparallel.job_config import Experimental
 
 from torchtitan.tools.logging import logger
 
@@ -28,7 +30,14 @@ def set_torchtitan_fields(orig, new):
 def parallelize_deepseekv3(
     model,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    *,
+    training: Training,
+    model_converters: list,
+    parallelism: Parallelism,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpoint,
+    experimental: Experimental,
+    dump_folder: str,
 ):
     """
     Apply Autoparallel to the model
@@ -45,7 +54,7 @@ def parallelize_deepseekv3(
 
     # allow configuring inductor comms optimizations from torchtitan commandline
     configure_inductor_for_autobucketing(
-        job_config.experimental.comms_bucket_reorder_strategy
+        experimental.comms_bucket_reorder_strategy
     )
 
     # Build the sparse mesh for MoE expert parallelism
@@ -68,26 +77,26 @@ def parallelize_deepseekv3(
             layer.moe.axis_name = "ep"
 
     def input_fn():
-        global_batch_size = job_config.training.global_batch_size
+        global_batch_size = training.global_batch_size
         if global_batch_size < 0:
             # This global batch size results in 1 gradient accumulation
             # step.
             dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
-            global_batch_size = job_config.training.local_batch_size * dp_degree
+            global_batch_size = training.local_batch_size * dp_degree
         return (
             torch.randint(
                 0,
                 model.model_args.vocab_size,
-                (global_batch_size, job_config.training.seq_len),
+                (global_batch_size, training.seq_len),
                 device=torch.device("cuda"),
             ),
         )
 
-    should_compile = job_config.compile.enable
+    should_compile = compile_config.enable
     if should_compile:
         # TODO: support more options in AP API
-        assert job_config.compile.components == ["model"]
-        assert job_config.compile.backend == "inductor"
+        assert compile_config.components == ["model"]
+        assert compile_config.backend == "inductor"
 
     mp_policy = None
     with AutoParallel(
@@ -103,7 +112,7 @@ def parallelize_deepseekv3(
         x_sharding = (Shard(0), Shard(0))
         loss_parallel_enabled = (
             parallel_dims.tp_enabled
-            and not job_config.parallelism.disable_loss_parallel
+            and not parallelism.disable_loss_parallel
         )
         assert not loss_parallel_enabled
         autop.add_input_constraints([x_sharding])

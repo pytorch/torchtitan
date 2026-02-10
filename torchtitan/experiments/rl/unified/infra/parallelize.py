@@ -21,14 +21,22 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config import JobConfig
+from torchtitan.config import ActivationCheckpoint, Parallelism, Training
+from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 
 
 def parallelize_qwen3(
     model: nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    *,
+    training: Training,
+    model_converters: list,
+    parallelism: Parallelism,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpoint,
+    experimental: Experimental,
+    dump_folder: str,
 ):
     """
     Temporary helper to apply tensor parallelism to the Qwen3 dense model so vLLM can run the torchtitan model.
@@ -39,9 +47,9 @@ def parallelize_qwen3(
         apply_non_moe_tp(
             model,
             tp_mesh,
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
+            enable_async_tp=parallelism.enable_async_tensor_parallel,
         )
 
     return model

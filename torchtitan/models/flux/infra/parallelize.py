@@ -15,7 +15,8 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import ActivationCheckpoint, Parallelism, Training, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.models.llama3.infra.parallelize import disable_fsdp_gradient_division
@@ -25,10 +26,17 @@ from torchtitan.tools.logging import logger
 def parallelize_flux(
     model: nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    *,
+    training: Training,
+    model_converters: list,
+    parallelism: Parallelism,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpoint,
+    experimental: Experimental,
+    dump_folder: str,
 ):
-    if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
+    if ac_config.mode != "none":
+        apply_ac(model, ac_config)
 
     if parallel_dims.cp_enabled:
         apply_cp(model, parallel_dims.get_mesh("cp"))
@@ -42,9 +50,9 @@ def parallelize_flux(
         apply_fsdp(
             model,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
-            cpu_offload=job_config.training.enable_cpu_offload,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            cpu_offload=training.enable_cpu_offload,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -172,7 +180,8 @@ def parallelize_encoders(
     t5_model: nn.Module,
     clip_model: nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    *,
+    training: Training,
 ):
     if parallel_dims.dp_shard_enabled:  # apply FSDP or HSDP
         names = (
@@ -180,15 +189,15 @@ def parallelize_encoders(
         )
 
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
         dp_mesh = parallel_dims.get_mesh(names)
         fsdp_config: dict[str, Any] = {
             "mesh": dp_mesh,
             "mp_policy": mp_policy,
         }
-        if job_config.training.enable_cpu_offload:
+        if training.enable_cpu_offload:
             fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
         # NOTE: only apply FSDP to the T5 encoder, not the CLIP text encoder.
