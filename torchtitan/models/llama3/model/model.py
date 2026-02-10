@@ -514,16 +514,7 @@ class Transformer(ModelProtocol):
             case "block_causal":
                 B = input_batch.shape[0]
                 assert tokenizer.eos_id is not None
-                mask_mods.append(
-                    get_document_mask_mod(
-                        input_ids=input_batch, eos_id=tokenizer.eos_id
-                    )
-                )
-            case "position_block_causal":
-                assert extra_inputs is not None and "positions" in extra_inputs
-                positions = extra_inputs["positions"]
-                B = input_batch.shape[0]
-                mask_mods.append(get_document_mask_mod(positions=positions))
+                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
@@ -532,28 +523,6 @@ class Transformer(ModelProtocol):
         return create_attention_mask(
             and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
         )
-
-    def _get_varlen_attention_masks(
-        self,
-        input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
-    ) -> AttentionMasksType:
-        match self.model_args.attn_mask_type:
-            case "block_causal":
-                assert tokenizer.eos_id is not None
-                return create_varlen_metadata_for_document(
-                    input_ids=input_batch, eos_id=tokenizer.eos_id
-                )
-            case "position_block_causal":
-                assert extra_inputs is not None and "positions" in extra_inputs
-                positions = extra_inputs["positions"]
-                return create_varlen_metadata_for_document(positions=positions)
-            case _:
-                raise ValueError(
-                    f"varlen attention is only supported with block_causal or "
-                    f"position_block_causal attention mask type, got {self.model_args.attn_mask_type}"
-                )
 
     def get_attention_masks(
         self,
@@ -567,8 +536,14 @@ class Transformer(ModelProtocol):
                     input_batch, tokenizer, extra_inputs
                 )
             case "varlen":
-                return self._get_varlen_attention_masks(
-                    input_batch, tokenizer, extra_inputs
+                if self.model_args.attn_mask_type != "block_causal":
+                    raise ValueError(
+                        f"varlen attention is only supported with block_causal \
+                        attention mask type, got {self.model_args.attn_mask_type}"
+                    )
+                assert tokenizer.eos_id is not None
+                return create_varlen_metadata_for_document(
+                    input_batch, tokenizer.eos_id
                 )
             case _:
                 raise TypeError("Only varlen and flex attn masks are supported")
