@@ -16,7 +16,6 @@ from torchtitan.config.job_config import PEFT
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools.logging import logger
 
-# pyrefly: ignore[import-error]
 from transformers import AutoModelForCausalLM
 
 device_type = "cuda" if torch.cuda.is_available() else "cpu"

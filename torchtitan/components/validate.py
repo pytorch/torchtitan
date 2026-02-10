@@ -6,19 +6,20 @@
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from typing import Any, TypeAlias
+from typing import Any, cast, TypeAlias
 
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.loss import LossFunction
+from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
+from torchtitan.protocols import ModelProtocol
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -29,7 +30,7 @@ class BaseValidator:
     def __init__(self, job_config: JobConfig):
         self.job_config = job_config
 
-    def validate(self, model_parts: list[nn.Module]) -> dict[str, float]:
+    def validate(self, model_parts: list[nn.Module], step: int) -> None:
         raise NotImplementedError("validate method not implemented")
 
     def should_validate(self, step: int) -> bool:
@@ -132,8 +133,9 @@ class Validator(BaseValidator):
         extra_kwargs: dict[str, Any] = {}
 
         try:
-            # pyrefly: ignore [not-callable]
-            extra_kwargs["attention_masks"] = model_parts[0].get_attention_masks(
+            extra_kwargs["attention_masks"] = cast(
+                ModelProtocol, model_parts[0]
+            ).get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
@@ -154,7 +156,6 @@ class Validator(BaseValidator):
         return inputs, labels, extra_inputs, extra_kwargs
 
     @torch.no_grad()
-    # pyrefly: ignore [bad-override]
     def validate(
         self,
         model_parts: list[nn.Module],
@@ -170,7 +171,6 @@ class Validator(BaseValidator):
         device_type = utils.device_type
         num_steps = 0
 
-        # pyrefly: ignore [not-iterable]
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
@@ -187,6 +187,31 @@ class Validator(BaseValidator):
             inputs, labels, extra_inputs, extra_kwargs = self.post_dataloading_process(
                 input_dict, labels, model_parts
             )
+
+            # Count valid tokens for this batch
+            local_valid_tokens = torch.tensor(0, dtype=torch.int64, device=device_type)
+            local_valid_tokens += (labels != IGNORE_INDEX).sum()
+
+            # All-reduce token count across DP ranks to get global token count
+            if parallel_dims.dp_enabled:
+                batch_mesh = parallel_dims.get_mesh("batch")
+                global_valid_tokens = dist_utils.dist_sum(
+                    local_valid_tokens, batch_mesh, None
+                )
+            else:
+                global_valid_tokens = local_valid_tokens.float()
+
+            optional_context_parallel_ctx = None
+            if parallel_dims.cp_enabled:
+                cp_mesh = parallel_dims.get_mesh("cp")
+                optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
+                    cp_mesh=cp_mesh,
+                    # pyrefly: ignore [bad-argument-type]
+                    cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
+                    cp_seq_dims=[1, 1] + [0 for _ in model_parts],
+                    cp_no_restore_buffers={inputs, labels},
+                    cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+                )
 
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
@@ -214,10 +239,8 @@ class Validator(BaseValidator):
 
                 # accumulate losses across pipeline microbatches
                 # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-                loss = (
-                    # using sum instead of mean because we already rescale the
-                    # loss_fn down by a factor of n_microbatches in
-                    # torchtitan/distributed/pipeline_parallel.py
+                loss_sum = (
+                    # using sum because loss_fn already uses reduction='sum'
                     torch.sum(torch.stack(losses)).to(device_type)
                     if self.pp_has_last_stage
                     else torch.tensor([-1.0], device=device_type)
@@ -229,10 +252,9 @@ class Validator(BaseValidator):
                         predictions = model_parts[0](
                             inputs, **extra_inputs, **extra_kwargs
                         )
-                        loss = self.loss_fn(predictions, labels)
+                        loss_sum = self.loss_fn(predictions, labels)
 
-            accumulated_losses.append(loss.detach())
-
+            accumulated_losses.append(loss_sum.detach() / global_valid_tokens)
             num_steps += 1
 
         # Compute average loss
@@ -267,6 +289,7 @@ def build_validator(
     pp_has_last_stage: bool | None = None,
 ) -> BaseValidator:
     """Build a simple validator focused on correctness."""
+    assert metrics_processor is not None
     return Validator(
         job_config=job_config,
         dp_world_size=dp_world_size,
@@ -276,7 +299,6 @@ def build_validator(
         loss_fn=loss_fn,
         validation_context=validation_context,
         maybe_enable_amp=maybe_enable_amp,
-        # pyrefly: ignore [bad-argument-type]
         metrics_processor=metrics_processor,
         pp_schedule=pp_schedule,
         pp_has_first_stage=pp_has_first_stage,

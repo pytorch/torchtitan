@@ -14,7 +14,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import Future
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, cast
 
 import torch
 import torch.distributed as dist
@@ -192,6 +192,7 @@ class CheckpointManager:
     """
 
     mp_queue_send: queue.Queue
+    pg: dist.ProcessGroup
     purge_thread: threading.Thread | None
 
     def __init__(
@@ -237,7 +238,6 @@ class CheckpointManager:
             )
 
         if self.ft_manager:
-            # pyrefly: ignore [missing-attribute]
             optimizers.init_cache_state_dict()
 
             def state_dict():
@@ -259,7 +259,7 @@ class CheckpointManager:
 
             # pyrefly: ignore [missing-attribute]
             self.ft_manager.set_state_dict_fns(load_state_dict, state_dict)
-            # pyrefly: ignore [missing-attribute]
+            assert ft_manager is not None
             self.ft_replica_id = ft_manager.replica_id
 
         async_mode = checkpoint_config.async_mode.lower()
@@ -387,6 +387,7 @@ class CheckpointManager:
 
         storage_writer: HuggingFaceStorageWriter | None = None
         checkpoint_save_id: str | None = None
+        fqn_to_index_mapping: dict[Any, int] | None = None
         if to_hf:
             if HuggingFaceStorageWriter is None:
                 raise RuntimeError(
@@ -424,7 +425,6 @@ class CheckpointManager:
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
-                # pyrefly: ignore [bad-argument-type]
                 process_group=self.pg,
             )
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
@@ -432,7 +432,6 @@ class CheckpointManager:
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
-                # pyrefly: ignore [bad-argument-type]
                 process_group=self.pg,
                 async_checkpointer_type=AsyncCheckpointerType.PROCESS,
                 async_stager=self.stager,
@@ -447,13 +446,11 @@ class CheckpointManager:
                 process_group=self.pg,
             )
 
-        # pyrefly: ignore [missing-attribute]
-        if to_hf and self.sd_adapter.fqn_to_index_mapping:
+        if to_hf and fqn_to_index_mapping:
             consolidate_safetensors_files_on_every_rank(
                 input_dir=os.path.join(checkpoint_id, "sharded"),
                 output_dir=checkpoint_id,
-                # pyrefly: ignore [bad-argument-type]
-                fqn_to_index_mapping=self.sd_adapter.fqn_to_index_mapping,
+                fqn_to_index_mapping=fqn_to_index_mapping,
                 num_threads=5,
             )
 
@@ -613,21 +610,18 @@ class CheckpointManager:
                     )
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
                 if self.stager is None:
-                    # pyrefly: ignore[bad-assignment]
                     self.stager = DefaultStager(StagingOptions(True, True, True, True))
                 result = self.dcp_save(
                     states,
                     checkpoint_id=checkpoint_id,
                     async_mode=self.async_mode,
                 )
-                # pyrefly: ignore [missing-attribute]
+                assert isinstance(result, AsyncSaveResponse)
                 self.save_future = result.upload_completion
-                # pyrefly: ignore [missing-attribute]
                 self.staging_future = result.staging_completion
                 self.staging = True
             elif self.async_mode == AsyncMode.ASYNC:
                 GarbageCollection.collect("GC collection invoked by checkpointer.")
-                # pyrefly: ignore[bad-assignment]
                 self.save_future = self.dcp_save(
                     states, checkpoint_id=checkpoint_id, async_mode=self.async_mode
                 )
@@ -709,16 +703,19 @@ class CheckpointManager:
                         f"loading from HF safetensors from --checkpoint.initial_load_path: {self.initial_load_path}"
                     )
             elif from_hf:
-                # pyrefly: ignore [missing-attribute]
-                checkpoint_id = self.sd_adapter.hf_assets_path
+                assert (
+                    self.sd_adapter is not None
+                    and self.sd_adapter.hf_assets_path is not None
+                ), "from_hf is True but sd_adapter or hf_assets_path is not provided."
+                hf_assets_path = self.sd_adapter.hf_assets_path
+                checkpoint_id = hf_assets_path
                 if not os.path.isdir(checkpoint_id):
                     raise ValueError(
                         "model.hf_assets_path is being used to load HF weights but the path is not valid. \
                         Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
                     )
                 logger.info(
-                    # pyrefly: ignore [missing-attribute]
-                    f"loading HF safetensors from --model.hf_assets_path: {self.sd_adapter.hf_assets_path}"
+                    f"loading HF safetensors from --model.hf_assets_path: {hf_assets_path}"
                 )
             else:
                 return False
@@ -768,7 +765,7 @@ class CheckpointManager:
         with ``async_checkpoint_with_pinned_memory``.
         """
         if self.enable_staging and self.staging:
-            # pyrefly: ignore [missing-attribute]
+            assert self.staging_future is not None
             self.staging_future.result()
             self.staging = False
 
@@ -814,7 +811,6 @@ class CheckpointManager:
         begin = time.monotonic()
         self._async_wait()
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
-        # pyrefly: ignore[bad-assignment]
         self.save_future = self.dcp_save(
             self.ft_states, checkpoint_id=checkpoint_id, async_mode=AsyncMode.ASYNC
         )
@@ -961,7 +957,7 @@ class CheckpointManager:
         ):
             if self.save_future is not None:
                 self.save_future.result()
-                self.save_future = None  # pyrefly: ignore[bad-assignment]
+                self.save_future = None
         elif self.save_future is not None:
             raise RuntimeError(
                 "self.save_future is not None, but self.async_mode is not enabled "

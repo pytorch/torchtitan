@@ -54,7 +54,10 @@ from torchtitan.distributed.expert_parallel import (
     TensorParallel,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
+from torchtitan.models.llama3.infra.parallelize import (
+    apply_ddp,
+    disable_fsdp_gradient_division,
+)
 from torchtitan.models.moe import moe as moe_module
 from torchtitan.tools.logging import logger
 
@@ -451,12 +454,6 @@ def apply_fsdp(
                 shard_placement_fn=_experts_shard_placement_fn,
             )
 
-            # NOTE: # Although the FSDP sharding of experts is done on a mesh of
-            #       a different size than other parameters, the gradient division
-            #       factor should be consistent with data.
-            transformer_block.moe.experts.set_gradient_divide_factor(
-                gradient_divide_factor,
-            )
         if not transformer_block.moe_enabled:
             try:
                 if hasattr(transformer_block.feed_forward.w1, "lora_a"):
@@ -513,6 +510,9 @@ def apply_fsdp(
         )
 
     fully_shard(model, **fsdp_config)
+
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
     # in EP could interfere with implicit prefetching in FSDP
@@ -685,17 +685,57 @@ def apply_moe_ep_tp(
         )
 
 
+def old_apply_compile(model: nn.Module, compile_config: CompileConfig):
+    """
+    Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
+    repeated structure. Alternatively one can compile the whole model (after applying DP).
+    """
+    logger.info("Using old apply_compile")
+    # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
+    # but it is experimental.
+    # torch._dynamo.config.capture_scalar_outputs = True
+    for layer_id, transformer_block in model.layers.named_children():
+        # IMPORTANT: MoE layers MUST use fullgraph=False, non-MoE layers SHOULD use fullgraph=True.
+        #
+        # Why MoE needs fullgraph=False:
+        #   DeepEP's PrimusTurboDeepepManager.setup_metadata() mutates instance state
+        #   (self.token_probs, self.token_indices) inside activation checkpointing regions.
+        #   When fullgraph=True, torch.compile wraps these in HigherOrderOperator which
+        #   raises "Mutating a variable not in the current scope (SideEffects)" error.
+        #   fullgraph=False allows graph breaks, permitting these state mutations.
+        #
+        # Why non-MoE layers should use fullgraph=True:
+        #   fullgraph=False on attention/FFN layers causes unnecessary graph breaks,
+        #   which interferes with activation checkpointing and retains more intermediate
+        #   tensors during backward pass, leading to OOM on memory-constrained setups.
+        #
+        # Respect user config for non-MoE layers, but MoE layers MUST use False
+        fullgraph = compile_config.fullgraph
+        if transformer_block.moe_enabled:
+            fullgraph = False
+        transformer_block = torch.compile(
+            transformer_block,
+            backend=compile_config.backend,
+            fullgraph=fullgraph,
+        )
+        model.layers.register_module(layer_id, transformer_block)
+
+    logger.info("Compiling each TransformerBlock with torch.compile")
+
+
 def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: bool):
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    if compile_config.use_old_compile:
+        return old_apply_compile(model, compile_config)
+
     # NOTE: This flag is needed for torch.compile to avoid graph breaking on dynamic shapes in token-choice MoE
     # but it is experimental.
     torch._dynamo.config.capture_scalar_outputs = True
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
-        # pyrefly: ignore[missing-attribute]
         if transformer_block.moe_enabled:
             # If it is a MoE layer, FSDP(GroupedExperts) will cause a graph break
             # So we must weave compile wrappers around those FSDP hooks to

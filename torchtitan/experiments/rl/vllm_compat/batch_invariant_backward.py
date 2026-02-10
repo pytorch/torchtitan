@@ -69,7 +69,12 @@ class SiluAndMulFunction(Function):
         # vLLM custom ops require a config context to be set
         # Since these are parameter free we instantiate default config
         with set_current_vllm_config(VllmConfig()):
-            vllm_silu_and_mul = VLLMSiluAndMul()
+            # compile_native=False to avoid compiling the inner details of
+            # the CustomOp for now - NOTE: if we enable compile in vLLM in
+            # the future, we need to compile this op as well.
+            # see vllm-project/vllm#32806  for more details
+            vllm_silu_and_mul = VLLMSiluAndMul(compile_native=False)
+
         output = vllm_silu_and_mul(x)
 
         # Save for backward

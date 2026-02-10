@@ -14,6 +14,8 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.components.peft.lora import lora_or_linear
 from torchtitan.config.job_config import PEFT
+from torchtitan.models.utils import trunc_normal_, normal_
+
 from torchtitan.tools.logging import logger
 from .utils import indices_padding_wrapper, indices_padding_wrapper_lora
 
@@ -28,44 +30,6 @@ def moe_init_std(dim_in: int, n_layers: int) -> float:
     return (2 / (dim_in * n_layers)) ** 0.5
 
 
-def fast_init_trunc_normal_(
-    tensor: torch.Tensor,
-    mean: float = 0.0,
-    std: float = 1.0,
-    a: float = -2.0,
-    b: float = 2.0,
-) -> None:
-    """
-    Fast truncated normal initialization that handles bfloat16 tensors on CPU.
-
-    When tensors are bfloat16 on CPU, nn.init.trunc_normal_ is extremely slow
-    because CPUs don't have native bfloat16 support. This function temporarily
-    converts to float32 for the initialization, then converts back.
-    """
-    if tensor.device.type == "cpu" and tensor.dtype == torch.bfloat16:
-        with torch.no_grad():
-            # Initialize in float32 for CPU performance
-            temp = torch.empty_like(tensor, dtype=torch.float32)
-            nn.init.trunc_normal_(temp, mean=mean, std=std, a=a, b=b)
-            tensor.copy_(temp.to(torch.bfloat16))
-    else:
-        nn.init.trunc_normal_(tensor, mean=mean, std=std, a=a, b=b)
-
-
-def fast_init_normal_(
-    tensor: torch.Tensor, mean: float = 0.0, std: float = 1.0
-) -> None:
-    """
-    Fast normal initialization that handles bfloat16 tensors on CPU.
-    """
-    if tensor.device.type == "cpu" and tensor.dtype == torch.bfloat16:
-        with torch.no_grad():
-            temp = torch.empty_like(tensor, dtype=torch.float32)
-            nn.init.normal_(temp, mean=mean, std=std)
-            tensor.copy_(temp.to(torch.bfloat16))
-    else:
-        nn.init.normal_(tensor, mean=mean, std=std)
-
 
 @dataclass
 class MoEArgs:
@@ -77,6 +41,7 @@ class MoEArgs:
     score_func: Literal["softmax", "sigmoid"] = "sigmoid"
     route_norm: bool = False
     route_scale: float = 1.0
+    gate_bias: bool = False
     score_before_experts: bool = True
 
     # token-choice with optional node limited routing
@@ -205,9 +170,9 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float = 0.02):
-        fast_init_trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
         for linear in (self.w2, self.w3):
-            fast_init_trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -421,9 +386,9 @@ class GroupedExperts(nn.Module):
     def init_weights(self, init_std: float, n_layers: int):
         std_in = moe_init_std(self.w1.shape[-1], n_layers)
         std_out = moe_init_std(self.w2.shape[0], n_layers)
-        fast_init_trunc_normal_(self.w1, mean=0.0, std=std_in)
-        fast_init_trunc_normal_(self.w2, mean=0.0, std=std_in)
-        fast_init_trunc_normal_(self.w3, mean=0.0, std=std_out)
+        trunc_normal_(self.w1, mean=0.0, std=std_in)
+        trunc_normal_(self.w2, mean=0.0, std=std_in)
+        trunc_normal_(self.w3, mean=0.0, std=std_out)
 
 
 def _groupmm(x, w, offs):
@@ -567,12 +532,12 @@ class LoraGroupedExperts(nn.Module):
     def init_weights(self, init_std: float, n_layers: int):
         std_in = moe_init_std(self.w1.shape[-1], n_layers)
         std_out = moe_init_std(self.w2.shape[0], n_layers)
-        fast_init_trunc_normal_(self.w1, mean=0.0, std=std_in)
-        fast_init_trunc_normal_(self.w2, mean=0.0, std=std_in)
-        fast_init_trunc_normal_(self.w3, mean=0.0, std=std_out)
-        fast_init_trunc_normal_(self.w1_lora_a, mean=0.0, std=std_in)
-        fast_init_trunc_normal_(self.w2_lora_a, mean=0.0, std=std_in)
-        fast_init_trunc_normal_(self.w3_lora_a, mean=0.0, std=std_in)
+        trunc_normal_(self.w1, mean=0.0, std=std_in)
+        trunc_normal_(self.w2, mean=0.0, std=std_in)
+        trunc_normal_(self.w3, mean=0.0, std=std_out)
+        trunc_normal_(self.w1_lora_a, mean=0.0, std=std_in)
+        trunc_normal_(self.w2_lora_a, mean=0.0, std=std_in)
+        trunc_normal_(self.w3_lora_a, mean=0.0, std=std_in)
         nn.init.zeros_(self.w1_lora_b)
         nn.init.zeros_(self.w2_lora_b)
         nn.init.zeros_(self.w3_lora_b)
@@ -597,6 +562,7 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func (Literal["softmax", "sigmoid"]): Whether to use sigmoid or softmax for router scores.
         route_norm (bool): Whether to normalize the routing scores when using sigmoid.
         route_scale (float): Scaling factor applied to the routing scores.
+        gate_bias (bool): Whether to include a bias term in the router's linear gate.
     """
 
     def __init__(
@@ -609,10 +575,11 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid"],
         route_norm: bool,
         route_scale: float,
+        gate_bias: bool,
         _debug_force_load_balance: bool = False,
     ):
         super().__init__()
-        self.gate = nn.Linear(dim, num_experts, bias=False)
+        self.gate = nn.Linear(dim, num_experts, bias=gate_bias)
         self.num_experts = num_experts
         self.num_expert_groups = num_expert_groups
         self.num_limited_groups = num_limited_groups
@@ -755,7 +722,7 @@ class TokenChoiceTopKRouter(nn.Module):
         # DTensor, direct .data assignment (e.g., self.gate.weight.data = x) is
         # silently ignored, leaving weights uninitialized. This causes NaN loss
         # when CPU offload is enabled with 3+ GPUs.
-        fast_init_normal_(self.gate.weight, mean=0.0, std=1.0)
+        normal_(self.gate.weight, mean=0.0, std=1.0)
 
         # Normalize rows in-place
         with torch.no_grad():
@@ -877,6 +844,7 @@ class MoE(nn.Module):
             score_func=moe_args.score_func,
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
+            gate_bias=moe_args.gate_bias,
             _debug_force_load_balance=moe_args._debug_force_load_balance,
         )
         if peft_config is not None and peft_config.enable_peft:
@@ -1034,7 +1002,7 @@ class MoE(nn.Module):
         if self.shared_experts is not None:
             self.shared_experts.init_weights(init_std)
             if self.shared_gate is not None:
-                fast_init_trunc_normal_(
+                trunc_normal_(
                     self.shared_gate.weight,
                     mean=0.0,
                     std=moe_init_std(self.shared_gate.weight.shape[1], n_layers),
@@ -1048,7 +1016,6 @@ class MoE(nn.Module):
                 self.experts.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:
-                # pyrefly: ignore[bad-assignment]
                 self.expert_bias = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
                 )

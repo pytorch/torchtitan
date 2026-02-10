@@ -10,7 +10,7 @@ import json
 import os
 import time
 from datetime import timedelta
-from typing import Any, Iterable
+from typing import Any, cast, Iterable, Iterator
 
 import torch
 import torch.distributed.checkpoint.stateful
@@ -20,7 +20,7 @@ import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
-from torchtitan.components.loss import rescale_accumulated_loss
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.metrics import (
     build_metrics_processor,
     ensure_pp_loss_visible,
@@ -28,6 +28,7 @@ from torchtitan.components.metrics import (
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.protocols import ModelProtocol
 from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.tools import utils
 from torchtitan.tools.aggressive_memory_manager import create_aggressive_memory_manager
@@ -50,6 +51,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # swappable training components in TrainSpec
     tokenizer: train_spec_module.BaseTokenizer | None
     dataloader: train_spec_module.BaseDataLoader
+    # TODO: we should make this list[ModelProtocol] but this will affect many components.
+    # will do this in a separate PR
     model_parts: list[torch.nn.Module]
     loss_fn: train_spec_module.LossFunction
     optimizers: train_spec_module.OptimizersContainer
@@ -95,6 +98,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # init distributed and build meshes
         self.parallel_dims = parallel_dims = self.init_distributed()
 
+        # Logging needs to happen after distributed initialized
+        job_config.maybe_log()
         # Log mesh visualization for debugging distributed setup (rank 0 only)
         log_mesh_visualization(parallel_dims.world_mesh, parallel_dims)
 
@@ -104,7 +109,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             batch_degree, batch_rank = 1, 0
 
-        # pyrefly: ignore [bad-argument-type]
         self.ft_manager = FTManager(job_config.fault_tolerance)
         batch_degree, batch_rank = self.ft_manager.get_dp_info(batch_degree, batch_rank)
 
@@ -219,12 +223,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
+        buffer_device: torch.device | None
         if job_config.checkpoint.create_seed_checkpoint:
             init_device = "cpu"
             buffer_device = None
         elif job_config.training.enable_cpu_offload:
             init_device = "cpu"
-            buffer_device = device_type
+            buffer_device = torch.device(device_type)
         else:
             init_device = device_type
             buffer_device = None
@@ -254,9 +259,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             job_config.training.local_batch_size * batch_degree
         )
         assert self.gradient_accumulation_steps > 0
-        self.loss_fn = rescale_accumulated_loss(
-            self.loss_fn, self.gradient_accumulation_steps
-        )
 
         if job_config.training.epochs is not None:
             steps_per_epoch = len(self.dataloader) // max(
@@ -308,12 +310,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    # pyrefly: ignore [not-callable]
-                    m.init_weights(buffer_device=buffer_device)
+                    cast(ModelProtocol, m).init_weights(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
-            # pyrefly: ignore [bad-argument-type]
             ensure_pp_loss_visible(parallel_dims, job_config, color)
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
@@ -321,8 +321,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
-                # pyrefly: ignore [not-callable]
-                model.init_weights(buffer_device=buffer_device)
+                cast(ModelProtocol, model).init_weights(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
@@ -379,7 +378,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             states={"train_state": self},
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
-                # pyrefly: ignore[bad-instantiation]
                 self.train_spec.state_dict_adapter(
                     model_args, job_config.model.hf_assets_path
                 )
@@ -480,9 +478,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
-        """Returns an iterator that processes batches from the data iterator."""
-        device_type = utils.device_type
+    ) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        """Returns an iterator that processes batches from the data iterator.
+
+        Note: Tensors are yielded on CPU. The caller is responsible for moving
+        them to GPU when needed. This allows for more efficient memory usage
+        when doing gradient accumulation.
+        """
         data_iterator = iter(data_iterable)
 
         while True:
@@ -501,16 +503,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 time.perf_counter() - data_load_start
             )
 
-            # Move tensors to the appropriate device
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(device_type)
-                elif isinstance(v, list):
-                    input_dict[k] = [
-                        x.to(device_type) for x in v if isinstance(x, torch.Tensor)
-                    ]
-            labels = labels.to(device_type)
-
+            # Tensors stay on CPU; moved to GPU per-microbatch during training
             yield input_dict, labels
 
     def post_dataloading_process(
@@ -558,8 +551,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         attn_type = getattr(self.model_args, "attn_type", "sdpa")
         if attn_type in ["flex", "varlen"]:
-            # pyrefly: ignore [not-callable]
-            extra_kwargs["attention_masks"] = self.model_parts[0].get_attention_masks(
+            assert (
+                self.tokenizer is not None
+            ), "tokenizer is required for flex/varlen attention"
+            model = cast(ModelProtocol, self.model_parts[0])
+            extra_kwargs["attention_masks"] = model.get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
                 extra_inputs=extra_inputs,
@@ -678,7 +674,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         return metrics
 
     def forward_backward_step(
-        self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+        self,
+        *,
+        input_dict: dict[str, torch.Tensor],
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         model_parts = self.model_parts
         parallel_dims = self.parallel_dims
@@ -713,10 +713,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
             loss = (
-                # using sum instead of mean because we already rescale the
-                # loss_fn down by a factor of n_microbatches in
-                # torchtitan/distributed/pipeline_parallel.py
-                torch.sum(torch.stack(losses)).to(self.device)
+                # Rescale PP loss to be "local loss sum / global valid tokens)
+                # because each microbathes could have different number of valid tokens
+                (torch.sum(torch.stack(losses)) / global_valid_tokens).to(self.device)
                 if self.pp_has_last_stage
                 else torch.tensor([-1.0], device=self.device)
             )
@@ -726,7 +725,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context():
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
-                    loss = self.loss_fn(pred, labels)
+                    # Compute loss sum (reduction='sum')
+                    loss_sum = self.loss_fn(pred, labels)
+
+                    # Scale the loss by the inverse of the total weight denominator before backward
+                    # This ensures gradients are properly normalized across all microbatches
+                    loss = loss_sum / global_valid_tokens
+
                 # need to free pred before bwd to avoid peaking memory
                 del pred
                 loss.backward()
@@ -735,10 +740,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if self.aggressive_mem_manager is not None:
             self.aggressive_mem_manager.post_backward()
 
+        # The returned loss here is local SUM loss / global_valid_tokens
         return loss
 
     def train_step(
-        self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+        self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
         # AGGRESSIVE cache clearing before step for accurate memory measurements
         if self.job_config.training.aggressive_memory_mode:
@@ -767,13 +773,38 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self.detailed_memory_tracker.measure("before_forward", self.step)
         self.cuda_memory_tracker.measure_all("before_forward", self.step)
 
-        accumulated_losses = []
-        # If data runs out during gradient accumulation, that
-        # entire step will not be executed.
+        # Collect all microbatches on CPU and count total valid tokens
+        microbatches = []
+        local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _microbatch in range(self.gradient_accumulation_steps):
-            # pyrefly: ignore [no-matching-overload]
             input_dict, labels = next(data_iterator)
-            loss = self.forward_backward_step(input_dict, labels)
+            local_valid_tokens += (labels != IGNORE_INDEX).sum()
+            microbatches.append((input_dict, labels))
+
+        # All-reduce to get global token count across DP ranks
+        # Move to GPU for distributed communication
+        local_valid_tokens = local_valid_tokens.to(self.device)
+        if parallel_dims.dp_enabled:
+            batch_mesh = parallel_dims.get_mesh("batch")
+            global_valid_tokens = dist_utils.dist_sum(local_valid_tokens, batch_mesh)
+        else:
+            global_valid_tokens = local_valid_tokens.float()
+
+        # Process each microbatch: move to GPU, forward/backward, then free
+        accumulated_losses = []
+        for input_dict, labels in microbatches:
+            # Move tensors to GPU
+            for k, v in input_dict.items():
+                if isinstance(v, torch.Tensor):
+                    input_dict[k] = v.to(self.device)
+            labels = labels.to(self.device)
+
+            loss = self.forward_backward_step(
+                input_dict=input_dict,
+                labels=labels,
+                # pyrefly: ignore [bad-argument-type]
+                global_valid_tokens=global_valid_tokens,
+            )
             accumulated_losses.append(loss.detach())
 
         # Track memory after forward/backward
@@ -833,9 +864,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             loss = loss.detach()
             ft_pg = self.ft_manager.loss_sync_pg
             loss_mesh = parallel_dims.get_optional_mesh("loss")
+
+            # For global_avg_loss, we want the average loss across all ranks:
+            # loss = local_loss_sum / global_valid_tokens
+            # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
+            #                 = sum(loss)
+            #
+            # For global_max_loss, we want the max of local average losses across ranks:
+            # local_avg_loss = local_loss_sum / local_valid_tokens
+            #                = (loss * global_valid_tokens) / local_valid_tokens
+            # global_max_loss = max(local_avg_loss)
+            local_avg_loss = loss * global_valid_tokens / local_valid_tokens
             global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_mean(loss, loss_mesh, ft_pg),
-                dist_utils.dist_max(loss, loss_mesh, ft_pg),
+                dist_utils.dist_sum(loss, loss_mesh, ft_pg),
+                dist_utils.dist_max(local_avg_loss, loss_mesh, ft_pg),
                 dist_utils.dist_sum(
                     torch.tensor(
                         self.ntokens_seen, dtype=torch.int64, device=self.device
@@ -901,7 +943,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 leaf_folder=leaf_folder,
             ) as memory_profiler,
             maybe_semi_sync_training(
-                # pyrefly: ignore [bad-argument-type]
                 job_config.fault_tolerance,
                 ft_manager=self.ft_manager,
                 model=self.model_parts[0],
@@ -944,10 +985,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     self.job_config.validation.enable
                     and self.validator.should_validate(self.step)
                 ):
-                    # pyrefly: ignore [missing-attribute]
-                    with self.loss_fn.no_rescale():
-                        # pyrefly: ignore [bad-argument-count]
-                        self.validator.validate(self.model_parts, self.step)
+                    self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
                 if torch_profiler:

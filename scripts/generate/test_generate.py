@@ -240,7 +240,7 @@ def test_generate(
                 "input_text": input_text,
                 "output_text": output_text,
             }
-            output_data["responses"].append(_data)  # pyrefly: ignore[missing-attribute]
+            output_data["responses"].append(_data)
 
             logger.info(f"{r}\n{input_text}{b}{output_text}\n{color.reset}")
 
