@@ -21,14 +21,14 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.metrics import (
-    build_metrics_processor,
     ensure_pp_loss_visible,
+    MetricsProcessor,
 )
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.protocols import ModelProtocol
-from torchtitan.protocols.model_converter import build_model_converters
+
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
@@ -53,7 +53,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     optimizers: train_spec_module.OptimizersContainer
     lr_schedulers: train_spec_module.LRSchedulersContainer
     validator: train_spec_module.BaseValidator
-    metrics_processor: train_spec_module.MetricsProcessor
+    metrics_processor: "MetricsProcessor"
     model_args: train_spec_module.BaseModelArgs
 
     # non-swappable training components
@@ -138,7 +138,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
         # set the model args from training job configs
-        model_args.update_from_config(job_config)
+        model_args.update_from_config(
+            training=job_config.training,
+            parallelism=job_config.parallelism,
+            debug=job_config.debug,
+            job_config=job_config,
+        )
         self.model_args = model_args
 
         logger.info(
@@ -151,22 +156,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         ):
             model = self.train_spec.model_cls(model_args)
 
-        # Build the collection of model converters. No-op if `model.converters` empty
-        model_converters = build_model_converters(
-            job_config=job_config, parallel_dims=parallel_dims
+        # Build the collection of model converters. No-op if converter_configs empty
+        model_compile_enabled = (
+            job_config.compile.enable and "model" in job_config.compile.components
+        )
+        model_converters = job_config.model_converters.build(
+            parallel_dims=parallel_dims,
+            model_compile_enabled=model_compile_enabled,
         )
         model_converters.convert(model)
 
         # metrics logging
-        build_metrics_processor_fn = (
-            build_metrics_processor
-            if self.train_spec.build_metrics_processor_fn is None
-            else self.train_spec.build_metrics_processor_fn
-        )
-        self.metrics_processor = build_metrics_processor_fn(
-            job_config=job_config,
+        self.metrics_processor = job_config.metrics.build(
             parallel_dims=parallel_dims,
-            model_args=model_args,
+            dump_folder=job_config.job.dump_folder,
+            pp_schedule=job_config.parallelism.pipeline_parallel_schedule,
+            ft_enable=job_config.fault_tolerance.enable,
+            ft_replica_id=job_config.fault_tolerance.replica_id,
+            config_dict=job_config.to_dict(),
         )
         color = self.metrics_processor.color
 
@@ -237,7 +244,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 model,
                 parallel_dims,
                 training=job_config.training,
-                model_converters=job_config.model.converters,
+                model_converters=job_config.model_converters,
                 parallelism=job_config.parallelism,
                 compile_config=job_config.compile,
                 ac_config=job_config.activation_checkpoint,
@@ -270,7 +277,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 model,
                 parallel_dims,
                 training=job_config.training,
-                model_converters=job_config.model.converters,
+                model_converters=job_config.model_converters,
                 parallelism=job_config.parallelism,
                 compile_config=job_config.compile,
                 ac_config=job_config.activation_checkpoint,
@@ -349,7 +356,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Build validator if validation is configured
         if job_config.validation.enable:
-            assert self.train_spec.build_validator_fn is not None
+            assert self.train_spec.validator_cls is not None
 
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
                 (
@@ -361,7 +368,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 else (None, None, None)
             )
 
-            self.validator = self.train_spec.build_validator_fn(
+            self.validator = self.train_spec.validator_cls(
+                validation=job_config.validation,
+                parallelism=job_config.parallelism,
                 job_config=job_config,
                 dp_world_size=batch_degree,
                 dp_rank=batch_rank,

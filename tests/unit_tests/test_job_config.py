@@ -221,7 +221,7 @@ class TestJobConfig(unittest.TestCase):
     def test_job_config_model_converters_default(self):
         config_manager = ConfigManager()
         config = config_manager.parse_args([])
-        assert config.model.converters == []
+        assert config.model_converters.converter_configs == []
 
     def test_print_help(self):
         from tyro.extras import get_parser
@@ -269,7 +269,7 @@ class TestJobConfig(unittest.TestCase):
                 )
                 default_config = MergedJobConfig()
                 default_config.custom_config.how_is_your_day = "really good"
-                default_config.model.converters = ["float8", "mxfp"]
+                default_config.model_converters.converter_configs = ["float8", "mxfp"]
                 """,
             )
 
@@ -279,7 +279,7 @@ class TestJobConfig(unittest.TestCase):
             )
 
             assert config.custom_config.how_is_your_day == "really good"
-            assert config.model.converters == ["float8", "mxfp"]
+            assert config.model_converters.converter_configs == ["float8", "mxfp"]
             result = config.to_dict()
             assert isinstance(result, dict)
 

@@ -7,7 +7,7 @@
 from dataclasses import dataclass
 
 from torch import nn
-from torchtitan.config.job_config import JobConfig
+from torchtitan.config import Debug, Parallelism, Training
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols import BaseModelArgs
 from transformers import AutoConfig
@@ -147,10 +147,22 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
         args_str = "\n".join(args_lines)
         return f"{self.__class__.__name__}(\n{args_str}\n)"
 
-    def update_from_config(self, job_config: JobConfig):
+    def update_from_config(
+        self,
+        *,
+        training: Training,
+        parallelism: Parallelism,
+        debug: Debug,
+        job_config=None,
+        **kwargs,
+    ):
+        # Extract HF model ID from the extended job_config
+        hf_model_id = getattr(
+            getattr(job_config, "hf_transformers", None), "model", ""
+        )
         # Load HF config (overwrites our HF attributes)
         hf_model_config = AutoConfig.from_pretrained(
-            job_config.hf_transformers.model,
+            hf_model_id,
             attn_implementation=self.attn_implementation,
             trust_remote_code=True,
         )
@@ -169,9 +181,9 @@ class HFTransformerModelArgs(PretrainedConfig, BaseModelArgs):
             if hasattr(self, key) and value is not None:
                 setattr(self, key, value)
 
-        self.max_seq_len = job_config.training.seq_len
+        self.max_seq_len = training.seq_len
 
-        self.deterministic = job_config.debug.deterministic
+        self.deterministic = debug.deterministic
 
         # Configure HF-specific settings to match TorchTitan settings
         # TODO: false ?

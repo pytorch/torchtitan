@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from torch import nn
 
-from torchtitan.config import JobConfig
+from torchtitan.config import Debug, Parallelism, Training
 
 from torchtitan.models.moe import MoEArgs
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -62,8 +62,15 @@ class TransformerModelArgs(BaseModelArgs):
     # frequency of using MoE layer instead of feedforward layer in a transformer block
     interleave_moe_layer_step: int = 2
 
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
-        seq_len = job_config.training.seq_len
+    def update_from_config(
+        self,
+        *,
+        training: Training,
+        parallelism: Parallelism,
+        debug: Debug,
+        **kwargs,
+    ) -> None:
+        seq_len = training.seq_len
         if seq_len > self.max_seq_len:
             logger.warning(
                 f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
@@ -77,7 +84,7 @@ class TransformerModelArgs(BaseModelArgs):
             self.moe_args.use_grouped_mm = False
 
         if (
-            job_config.parallelism.context_parallel_degree > 1
+            parallelism.context_parallel_degree > 1
             and self.attn_type != "sdpa"
         ):
             raise NotImplementedError(
@@ -87,7 +94,7 @@ class TransformerModelArgs(BaseModelArgs):
             )
 
         self.moe_args._debug_force_load_balance = (
-            job_config.debug.moe_force_load_balance
+            debug.moe_force_load_balance
         )
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:

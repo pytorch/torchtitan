@@ -11,7 +11,7 @@ from tests.integration_tests.base_config import apply_base_settings
 
 default_config = JobConfig()
 apply_base_settings(default_config)
-default_config.model.converters = [
+default_config.model_converters.converter_configs = [
     Float8LinearConverter.Config(
         enable_fsdp_float8_all_gather=True,
         precompute_float8_dynamic_scale_for_fsdp=True,

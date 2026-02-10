@@ -15,9 +15,9 @@ from torch.distributed.elastic.multiprocessing.errors import record
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.metrics import build_metrics_processor
+from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.components.validate import build_validator
+from torchtitan.components.validate import Validator
 from torchtitan.config import JobConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
@@ -37,7 +37,7 @@ class Trainer(ForgeEngine):
     tokenizer: train_spec_module.BaseTokenizer | None
     dataloader: train_spec_module.BaseDataLoader
     validator: train_spec_module.BaseValidator
-    metrics_processor: train_spec_module.MetricsProcessor
+    metrics_processor: MetricsProcessor
 
     # additional training states
     step: int
@@ -73,10 +73,13 @@ class Trainer(ForgeEngine):
         )
 
         # metrics logging
-        self.metrics_processor = build_metrics_processor(
-            job_config=job_config,
+        self.metrics_processor = job_config.metrics.build(
             parallel_dims=self.parallel_dims,
-            model_args=model_args,
+            dump_folder=job_config.job.dump_folder,
+            pp_schedule=job_config.parallelism.pipeline_parallel_schedule,
+            ft_enable=job_config.fault_tolerance.enable,
+            ft_replica_id=job_config.fault_tolerance.replica_id,
+            config_dict=job_config.to_dict(),
         )
         color = self.metrics_processor.color
 
@@ -106,8 +109,9 @@ class Trainer(ForgeEngine):
 
         # Build validator if validation is configured
         if job_config.validation.enable:
-            self.validator = build_validator(
-                job_config=job_config,
+            self.validator = Validator(
+                validation=job_config.validation,
+                parallelism=job_config.parallelism,
                 dp_world_size=self.dp_degree,
                 dp_rank=self.dp_rank,
                 tokenizer=self.tokenizer,
@@ -115,6 +119,7 @@ class Trainer(ForgeEngine):
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
+                metrics_processor=self.metrics_processor,
             )
 
         logger.info(

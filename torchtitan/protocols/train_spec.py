@@ -15,7 +15,6 @@ from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
@@ -31,13 +30,11 @@ PipeliningFunction: TypeAlias = Callable[
 ]
 DataLoaderBuilder: TypeAlias = Callable[..., BaseDataLoader]
 TokenizerBuilder: TypeAlias = Callable[..., BaseTokenizer]
-MetricsProcessorBuilder: TypeAlias = Callable[..., MetricsProcessor]
 OptimizersBuilder: TypeAlias = Callable[..., OptimizersContainer]
 LRSchedulersBuilder: TypeAlias = Callable[
     [OptimizersContainer, LRScheduler, int], LRSchedulersContainer
 ]
 LossFunctionBuilder: TypeAlias = Callable[..., LossFunction]
-ValidatorBuilder: TypeAlias = Callable[..., BaseValidator]
 
 
 @dataclass
@@ -51,8 +48,7 @@ class TrainSpec:
     build_dataloader_fn: DataLoaderBuilder
     build_tokenizer_fn: TokenizerBuilder | None
     build_loss_fn: LossFunctionBuilder
-    build_validator_fn: ValidatorBuilder | None = None
-    build_metrics_processor_fn: MetricsProcessorBuilder | None = None
+    validator_cls: type[BaseValidator] | None = None
     state_dict_adapter: type[BaseStateDictAdapter] | None = None
 
 

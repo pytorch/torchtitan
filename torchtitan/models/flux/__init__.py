@@ -15,7 +15,7 @@ from .model.args import FluxModelArgs
 from .model.autoencoder import AutoEncoderParams
 from .model.model import FluxModel
 from .model.state_dict_adapter import FluxStateDictAdapter
-from .validate import build_flux_validator
+from .validate import FluxValidator
 
 __all__ = [
     "FluxModelArgs",
@@ -116,6 +116,6 @@ def get_train_spec() -> TrainSpec:
         build_dataloader_fn=build_flux_dataloader,
         build_tokenizer_fn=None,
         build_loss_fn=build_mse_loss,
-        build_validator_fn=build_flux_validator,
+        validator_cls=FluxValidator,
         state_dict_adapter=FluxStateDictAdapter,
     )

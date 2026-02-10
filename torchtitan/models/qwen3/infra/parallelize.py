@@ -22,7 +22,7 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.components.quantization.float8 import find_float8_linear_config
-from torchtitan.config import ActivationCheckpoint, Parallelism, Training, TORCH_DTYPE_MAP
+from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -61,7 +61,7 @@ def parallelize_qwen3(
     parallel_dims: ParallelDims,
     *,
     training: Training,
-    model_converters: list,
+    model_converters: ModelConverters,
     parallelism: Parallelism,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpoint,
@@ -93,7 +93,7 @@ def parallelize_qwen3(
         ):
             raise RuntimeError("Async TP requires torch.compile")
 
-        float8_config = find_float8_linear_config(model_converters)
+        float8_config = find_float8_linear_config(model_converters.converter_configs)
         enable_float8_linear = float8_config is not None
         float8_is_rowwise = (
             float8_config is not None

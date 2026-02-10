@@ -26,7 +26,7 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import ActivationCheckpoint, Parallelism, Training
+from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training
 from torchtitan.config.job_config import Compile, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.dual_pipe_v import overlap_callback
@@ -46,7 +46,7 @@ def pipeline_llm(
     parallel_dims: ParallelDims,
     *,
     training: Training,
-    model_converters: list,
+    model_converters: ModelConverters,
     parallelism: Parallelism,
     compile_config: Compile,
     ac_config: ActivationCheckpoint,

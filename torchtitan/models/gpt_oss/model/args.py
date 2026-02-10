@@ -10,7 +10,7 @@ from typing import Literal
 
 from torch import nn
 
-from torchtitan.config.job_config import JobConfig
+from torchtitan.config import Debug, Parallelism, Training
 from torchtitan.models.moe import MoEArgs
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.train_spec import BaseModelArgs
@@ -72,8 +72,15 @@ class GptOssModelArgs(BaseModelArgs):
     ntk_alpha: float = 1.0
     ntk_beta: float = 32.0
 
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
-        seq_len = job_config.training.seq_len
+    def update_from_config(
+        self,
+        *,
+        training: Training,
+        parallelism: Parallelism,
+        debug: Debug,
+        **kwargs,
+    ) -> None:
+        seq_len = training.seq_len
         if seq_len > self.max_seq_len:
             logger.warning(
                 f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
@@ -86,7 +93,7 @@ class GptOssModelArgs(BaseModelArgs):
             )
             self.moe_args.use_grouped_mm = False
 
-        if job_config.parallelism.context_parallel_degree > 1:
+        if parallelism.context_parallel_degree > 1:
             raise NotImplementedError(
                 "CP support for gpt-oss model is still in progress."
             )

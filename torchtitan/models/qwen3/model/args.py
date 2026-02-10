@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from torch import nn
 
-from torchtitan.config import JobConfig
+from torchtitan.config import Debug, Parallelism, Training
 from torchtitan.models.moe import MoEArgs
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.train_spec import BaseModelArgs
@@ -47,8 +47,15 @@ class Qwen3ModelArgs(BaseModelArgs):
     moe_inter_dim: int = 768
     moe_args: MoEArgs = field(default_factory=MoEArgs)
 
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
-        seq_len = job_config.training.seq_len
+    def update_from_config(
+        self,
+        *,
+        training: Training,
+        parallelism: Parallelism,
+        debug: Debug,
+        **kwargs,
+    ) -> None:
+        seq_len = training.seq_len
         if seq_len > self.max_seq_len:
             logger.warning(
                 f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
@@ -56,7 +63,7 @@ class Qwen3ModelArgs(BaseModelArgs):
         self.max_seq_len = seq_len
 
         self.moe_args._debug_force_load_balance = (
-            job_config.debug.moe_force_load_balance
+            debug.moe_force_load_balance
         )
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:

@@ -19,7 +19,6 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.config import ConfigManager, JobConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.protocols.model_converter import build_model_converters
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools.logging import init_logger, logger
 
@@ -83,7 +82,12 @@ def estimate_memory(job_config: JobConfig):
 
     # build model (using meta init)
     model_args = train_spec.model_args[job_config.model.flavor]
-    model_args.update_from_config(job_config)
+    model_args.update_from_config(
+        training=job_config.training,
+        parallelism=job_config.parallelism,
+        debug=job_config.debug,
+        job_config=job_config,
+    )
 
     with (
         FakeTensorMode()
@@ -96,12 +100,28 @@ def estimate_memory(job_config: JobConfig):
         with torch.device("meta"):
             model = train_spec.model_cls(model_args)
 
-        # Build the collection of model converters. No-op if `model.converters` empty
-        model_converters = build_model_converters(job_config, parallel_dims)
+        # Build the collection of model converters. No-op if converter_configs empty
+        model_compile_enabled = (
+            job_config.compile.enable and "model" in job_config.compile.components
+        )
+        model_converters = job_config.model_converters.build(
+            parallel_dims=parallel_dims,
+            model_compile_enabled=model_compile_enabled,
+        )
         model_converters.convert(model)
 
         # apply PT-D DP/TP parallelisms and activation checkpointing
-        train_spec.parallelize_fn(model, parallel_dims, job_config)
+        train_spec.parallelize_fn(
+            model,
+            parallel_dims,
+            training=job_config.training,
+            model_converters=job_config.model_converters,
+            parallelism=job_config.parallelism,
+            compile_config=job_config.compile,
+            ac_config=job_config.activation_checkpoint,
+            experimental=job_config.experimental,
+            dump_folder=job_config.job.dump_folder,
+        )
 
         model.to_empty(device="cuda")
         if not active_fake_mode():

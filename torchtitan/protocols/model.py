@@ -14,7 +14,7 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
 
-from torchtitan.config import JobConfig
+from torchtitan.config import Debug, Parallelism, Training
 from torchtitan.models.attention import VarlenMetadata
 
 
@@ -32,7 +32,14 @@ class BaseModelArgs:
     _enforced: str = "This field is used to enforce all fields have defaults."
 
     @abstractmethod
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
+    def update_from_config(
+        self,
+        *,
+        training: Training,
+        parallelism: Parallelism,
+        debug: Debug,
+        **kwargs,
+    ) -> None:
         pass
 
     @abstractmethod
