@@ -20,6 +20,13 @@ uv pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/
 uv pip install torchmonarch
 ```
 
+Install Flash Attention v3 kernels:
+```
+# CUDA 12
+pip install flash-attn-3 --extra-index=https://download.pytorch.org/whl/test/cu126
+# CUDA 13
+pip install flash-attn-3 --extra-index=https://download.pytorch.org/whl/test/cu130
+```
 
 2. Install vLLM from source [vllm-use-an-existing-pytorch-installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#use-an-existing-pytorch-installation):
 ```bash
