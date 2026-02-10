@@ -96,7 +96,6 @@ def parallelize_deepseekv3(
         )
         maybe_enable_async_tp(job_config, tp_mesh)
 
-    # Check if using DeepEP/HybridEP for MoE communication
     comm_backend = job_config.parallelism.expert_parallel_comm_backend
     if comm_backend in ("deepep", "hybridep"):
         if not parallel_dims.ep_enabled:
@@ -116,6 +115,7 @@ def parallelize_deepseekv3(
             _op_sac_save_list.add(torch.ops.hybridep.dispatch.default)
             _op_sac_save_list.add(torch.ops.hybridep.combine.default)
         else:
+            from torchtitan.distributed.deepep import deepep  # noqa: F401
             _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
             _op_sac_save_list.add(torch.ops.deepep.combine.default)
 
@@ -130,7 +130,6 @@ def parallelize_deepseekv3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
             comm_backend=comm_backend,
-            # HybridEP configuration from job_config (only used when comm_backend="hybridep")
             moe_expert_capacity_factor=job_config.parallelism.hybridep.moe_expert_capacity_factor,
             hybridep_non_blocking=job_config.parallelism.hybridep.enable_non_blocking,
         )
