@@ -76,5 +76,5 @@ class TestDatasetCheckpointing(unittest.TestCase):
             tokenizer=tokenizer,
             dp_world_size=world_size,
             dp_rank=rank,
-            job_config=config,
+            training=config.training,
         )

@@ -118,7 +118,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # build tokenizer and dataloader
         self.tokenizer = (
-            self.train_spec.build_tokenizer_fn(job_config)
+            self.train_spec.build_tokenizer_fn(job_config.model.hf_assets_path)
             if self.train_spec.build_tokenizer_fn is not None
             else None
         )
@@ -128,6 +128,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 dp_world_size=batch_degree,
                 dp_rank=batch_rank,
                 tokenizer=self.tokenizer,
+                training=job_config.training,
                 job_config=job_config,
             )
             if self.train_spec.build_dataloader_fn is not None
@@ -248,7 +249,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
-            ensure_pp_loss_visible(parallel_dims, job_config, color)
+            ensure_pp_loss_visible(parallel_dims, job_config.parallelism.pipeline_parallel_schedule, color)
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)

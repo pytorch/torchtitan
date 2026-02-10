@@ -195,7 +195,7 @@ class LoggerContainer(BaseLogger):
 
 
 def ensure_pp_loss_visible(
-    parallel_dims: ParallelDims, job_config: JobConfig, color: Color | NoColor
+    parallel_dims: ParallelDims, pp_schedule: str, color: Color | NoColor
 ) -> None:
     """
     Ensures that the loss is visible on the console for pipeline-parallel training.
@@ -206,7 +206,7 @@ def ensure_pp_loss_visible(
     """
 
     # V Block Schedules return loss on rank 0
-    if job_config.parallelism.pipeline_parallel_schedule == "ZBVZeroBubble":
+    if pp_schedule == "ZBVZeroBubble":
         return
 
     # Calculate the rank where loss is visible (first rank of the last pipeline stage)
@@ -229,7 +229,7 @@ def ensure_pp_loss_visible(
 
 def _get_metrics_rank(
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    pp_schedule: str,
 ) -> int:
     """
     Determines which rank should log metrics.
@@ -245,7 +245,7 @@ def _get_metrics_rank(
         return 0
 
     # V Block Schedules return loss on rank 0
-    if job_config.parallelism.pipeline_parallel_schedule == "ZBVZeroBubble":
+    if pp_schedule == "ZBVZeroBubble":
         return 0
 
     # Calculate first rank of the last pipeline stage
@@ -276,7 +276,7 @@ def _build_metric_logger(
     # Determine if this rank should log
     should_log = has_logging_enabled
     if (not metrics_config.save_for_all_ranks) and should_log:
-        metrics_rank = _get_metrics_rank(parallel_dims, job_config)
+        metrics_rank = _get_metrics_rank(parallel_dims, job_config.parallelism.pipeline_parallel_schedule)
         should_log = torch.distributed.get_rank() == metrics_rank
 
     logger.debug(

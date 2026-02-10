@@ -93,7 +93,7 @@ def parallelize_llama(
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             cp_enabled=parallel_dims.cp_enabled,
         )
-        maybe_enable_async_tp(job_config, tp_mesh)
+        maybe_enable_async_tp(job_config.parallelism, job_config.compile, tp_mesh)
 
     attn_type = getattr(model.model_args, "attn_type", "sdpa")
     if parallel_dims.cp_enabled:
