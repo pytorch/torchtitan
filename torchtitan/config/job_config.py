@@ -83,12 +83,11 @@ class Model:
     """DEPRECATED: Use hf_assets_path instead."""
     """Tokenizer path"""
 
-    converters: list[str] = field(default_factory=list)
+    converters: list = field(default_factory=list)
     """
-    Comma separated list of converters to apply to the model.
-    For instance, the `float8` converter swaps `torch.nn.Linear`
-    with `Float8Linear`. This feature requires you to install 'torchao'
-    which can be found here: https://github.com/pytorch/ao
+    List of model converter Config objects to apply to the model.
+    Each entry should be a Configurable.Config instance (e.g.
+    Float8LinearConverter.Config) whose build() constructs the converter.
     """
 
     print_after_conversion: bool = False
@@ -626,114 +625,6 @@ class Compile:
 
 
 @dataclass
-class Float8Linear:
-    enable_fsdp_float8_all_gather: bool = False
-    """Whether enable float8 all-gather in FSDP, recommended for tensorwise scaling"""
-
-    precompute_float8_dynamic_scale_for_fsdp: bool = False
-    """Whether precompute float8 scales dynamically for FSDP, recommended for tensorwise scaling"""
-
-    recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = None
-    """If specified, creates float8 config from recipe name"""
-
-    filter_fqns: list[str] = field(default_factory=list)
-    """
-    Comma-separated list of fully qualified names of modules to skip applying float8 training to.
-    nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
-    Example: --quantize.linear.float8.filter_fqns "attention.wq,attention.wk,attention.wv,output"
-    """
-    emulate: bool = False
-    """
-    If True, emulation is used instead of hardware accelerated gemm. This is for test purpose only,
-    as the current CI does not have sm_89 capability, required by Float8.
-    Not compatible with torch.compile.
-    """
-
-
-@dataclass
-class Float8GroupedMM:
-    fqns: list[str] | str = field(default_factory=list)
-    """
-    *Prototype feature, performance optimization still in progress*
-    Comma-separated list of fully qualified names of MoE Layers to apply FP8 dynamic quantization on grouped GEMM operations.
-    This is a prototype feature that requires the torchao nightly build.
-    Example: --quantize.grouped_mm.float8.fqns="experts"
-    """
-
-
-@dataclass
-class MXLinear:
-    mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
-    """
-    Temp work around for inductor performance gap.
-
-    CUDA is recommended for best performance.
-
-    Example: --quantize.linear.mx.mxfp8_dim1_cast_kernel_choice="cuda"
-    """
-
-    recipe_name: str = "mxfp8_cublas"
-    """
-    If specified, creates MX config from recipe name. See
-    https://github.com/pytorch/ao/tree/main/torchao/prototype/mx_formats for more information.
-    Example: --quantize.linear.mx.recipe_name="mxfp8_cublas"
-    """
-
-    filter_fqns: list[str] = field(default_factory=lambda: ["output"])
-    """
-    Comma-separated list of fully qualified names of modules to skip applying mxfp8 training to.
-    nn.Linear modules with any dim size not divisible by 16 are also always skipped due to hardware requirements.
-    By default we always skip the output layer.
-    Example: --quantize.linear.mx.filter_fqns="attention.wq,attention.wk,attention.wv,output"
-    """
-
-
-@dataclass
-class MXGroupedMM:
-    recipe_name: Literal["mxfp8"] = "mxfp8"
-    """
-    Quantization recipe name for grouped GEMMs. Options: ["mxfp8"]
-
-    Example: --quantize.grouped_mm.mx.recipe_name="mxfp8"
-    """
-
-    fqns: list[str] | str = field(default_factory=list)
-    """
-    *Prototype feature, performance optimization still in progress*
-    Comma-separated list of fully qualified names of MoE modules to apply MXFP8 dynamic quantization on grouped GEMM operations.
-    This is a prototype feature that requires the torchao nightly build.
-    Example: --quantize.grouped_mm.mx.fqns="experts"
-    """
-
-
-@dataclass
-class QuantizedLinear:
-    float8: Float8Linear = field(default_factory=Float8Linear)
-    """FP8 training config for nn.Linear layers"""
-
-    mx: MXLinear = field(default_factory=MXLinear)
-    """MX training config for nn.Linear layers"""
-
-
-@dataclass
-class QuantizedGroupedMM:
-    float8: Float8GroupedMM = field(default_factory=Float8GroupedMM)
-    """FP8 training config for grouped GEMMs"""
-
-    mx: MXGroupedMM = field(default_factory=MXGroupedMM)
-    """MX training config for grouped GEMMs"""
-
-
-@dataclass
-class Quantize:
-    linear: QuantizedLinear = field(default_factory=QuantizedLinear)
-    """Quantized training config for nn.Linear layers"""
-
-    grouped_mm: QuantizedGroupedMM = field(default_factory=QuantizedGroupedMM)
-    """Quantized training config for grouped GEMMs"""
-
-
-@dataclass
 class Comm:
     init_timeout_seconds: int = 300
     """Timeout for communication operations, during initialization and first train step."""
@@ -917,7 +808,6 @@ class JobConfig:
         default_factory=ActivationCheckpoint
     )
     compile: Compile = field(default_factory=Compile)
-    quantize: Quantize = field(default_factory=Quantize)
     comm: Comm = field(default_factory=Comm)
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)

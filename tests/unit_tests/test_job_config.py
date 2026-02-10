@@ -218,14 +218,10 @@ class TestJobConfig(unittest.TestCase):
                 config.checkpoint.exclude_from_loading == cmdline_splits
             ), config.checkpoint.exclude_from_loading
 
-    def test_job_config_model_converters_split(self):
+    def test_job_config_model_converters_default(self):
         config_manager = ConfigManager()
         config = config_manager.parse_args([])
         assert config.model.converters == []
-
-        config_manager = ConfigManager()
-        config = config_manager.parse_args(["--model.converters", "float8,mxfp"])
-        assert config.model.converters == ["float8", "mxfp"]
 
     def test_print_help(self):
         from tyro.extras import get_parser
@@ -309,12 +305,9 @@ class TestJobConfig(unittest.TestCase):
                     f"--job.config_file={fp.name}",
                     "--custom_config.how-is-your-day",
                     "bad",
-                    "--model.converters",
-                    "float8,mxfp",
                 ]
             )
             assert config.custom_config.how_is_your_day == "bad"
-            assert config.model.converters == ["float8", "mxfp"]
 
         # Invalid args should still cause SystemExit
         with tempfile.NamedTemporaryFile(suffix=".py") as fp:

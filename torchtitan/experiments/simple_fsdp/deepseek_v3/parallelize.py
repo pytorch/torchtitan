@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
+from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 
@@ -71,10 +72,11 @@ def parallelize_deepseekv3(
         raise NotImplementedError("CP support is only supported for SDPA.")
 
     if parallel_dims.tp_enabled:
-        enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
+        float8_config = find_float8_linear_config(job_config.model.converters)
+        enable_float8_linear = float8_config is not None
+        float8_is_rowwise = (
+            float8_config is not None
+            and float8_config.recipe_name in ("rowwise", "rowwise_with_gw_hp")
         )
 
         enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise

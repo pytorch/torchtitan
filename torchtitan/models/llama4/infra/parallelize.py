@@ -22,6 +22,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
+from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import NoParallel, ParallelDims
@@ -90,10 +91,11 @@ def parallelize_llama(
 
     tp_mesh = None
     if parallel_dims.tp_enabled:
-        enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
-            "rowwise",
-            "rowwise_with_gw_hp",
+        float8_config = find_float8_linear_config(job_config.model.converters)
+        enable_float8_linear = float8_config is not None
+        float8_is_rowwise = (
+            float8_config is not None
+            and float8_config.recipe_name in ("rowwise", "rowwise_with_gw_hp")
         )
 
         # For now, float8 all-gather with TP is only supported for tensorwise

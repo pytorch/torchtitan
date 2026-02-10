@@ -27,7 +27,6 @@ from .job_config import (
     Optimizer,
     Parallelism,
     Profiling,
-    Quantize,
     Training,
     Validation,
 )
@@ -49,7 +48,6 @@ __all__ = [
     "ActivationCheckpoint",
     "Compile",
     "FaultTolerance",
-    "Quantize",
     "Parallelism",
     "Comm",
     "Profiling",

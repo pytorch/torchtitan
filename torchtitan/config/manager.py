@@ -55,7 +55,11 @@ class ConfigManager:
         return self.config
 
     def _maybe_load_python_config(self, args: list[str]) -> JobConfig | None:
-        """Load a Python config file that defines a `default_config` variable."""
+        """Load a Python config file that defines a `default_config` variable.
+
+        If multiple --job.config_file args are present, the last one wins
+        (consistent with standard CLI override behavior).
+        """
         valid_keys = {"--job.config-file", "--job.config_file"}
         file_path = None
         for i, arg in enumerate(args):
@@ -63,10 +67,8 @@ class ConfigManager:
                 key, value = arg.split("=", 1)
                 if key in valid_keys:
                     file_path = value
-                    break
             elif i < len(args) - 1 and arg in valid_keys:
                 file_path = args[i + 1]
-                break
 
         if file_path is None:
             return None
