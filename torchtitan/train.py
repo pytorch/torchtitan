@@ -797,6 +797,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             for k, v in input_dict.items():
                 if isinstance(v, torch.Tensor):
                     input_dict[k] = v.to(self.device)
+                elif isinstance(v, list):
+                    input_dict[k] = [
+                        x.to(self.device) for x in v if isinstance(x, torch.Tensor)
+                    ]
             labels = labels.to(self.device)
 
             loss = self.forward_backward_step(
