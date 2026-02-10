@@ -73,6 +73,7 @@ def generate():
         enforce_eager=gen_config.enforce_eager,
         # HuggingFace overrides
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
+        attention_backend=gen_config.attention_backend,
     )
     if gen_config.seed is not None:
         engine_kwargs["seed"] = gen_config.seed
