@@ -409,7 +409,7 @@ class MetricsProcessor:
             global_avg_loss: Global average loss across all valid tokens on all ranks
                 Defined as global_loss_sum / global_valid_tokens
             global_max_loss: Maximum local loss across all ranks
-                Defined as max(local_loss_sum / global_valid_tokens)
+                Defined as max(local_loss_sum / local_valid_tokens)
             grad_norm: Gradient norm after clipping
             extra_metrics: Optional additional metrics to log
 
@@ -460,7 +460,7 @@ class MetricsProcessor:
         color = self.color
         logger.info(
             f"{color.red}step: {step:2}  "
-            f"{color.green}loss: {global_avg_loss:7.4f}  "
+            f"{color.green}loss: {global_avg_loss:8.5f}  "
             f"{color.orange}grad_norm: {grad_norm:7.4f}  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "

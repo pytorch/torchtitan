@@ -12,6 +12,8 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.utils import trunc_normal_
+
 from torchtitan.tools.logging import logger
 from .utils import indices_padding_wrapper
 
@@ -25,6 +27,7 @@ class MoEArgs:
     score_func: Literal["softmax", "sigmoid"] = "sigmoid"
     route_norm: bool = False
     route_scale: float = 1.0
+    gate_bias: bool = False
     score_before_experts: bool = True
 
     # token-choice with optional node limited routing
@@ -65,9 +68,9 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float = 0.02):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
         for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -177,9 +180,9 @@ class GroupedExperts(nn.Module):
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
+        trunc_normal_(self.w1, mean=0.0, std=0.02)
+        trunc_normal_(self.w2, mean=0.0, std=init_std)
+        trunc_normal_(self.w3, mean=0.0, std=init_std)
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -201,6 +204,7 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func (Literal["softmax", "sigmoid"]): Whether to use sigmoid or softmax for router scores.
         route_norm (bool): Whether to normalize the routing scores when using sigmoid.
         route_scale (float): Scaling factor applied to the routing scores.
+        gate_bias (bool): Whether to include a bias term in the router's linear gate.
     """
 
     def __init__(
@@ -213,10 +217,11 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid"],
         route_norm: bool,
         route_scale: float,
+        gate_bias: bool,
         _debug_force_load_balance: bool = False,
     ):
         super().__init__()
-        self.gate = nn.Linear(dim, num_experts, bias=False)
+        self.gate = nn.Linear(dim, num_experts, bias=gate_bias)
         self.num_experts = num_experts
         self.num_expert_groups = num_expert_groups
         self.num_limited_groups = num_limited_groups
@@ -350,7 +355,7 @@ class TokenChoiceTopKRouter(nn.Module):
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+        trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
 
 
 # NOTE: the reason we make this a stateless module is to support
@@ -433,6 +438,7 @@ class MoE(nn.Module):
             score_func=moe_args.score_func,
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
+            gate_bias=moe_args.gate_bias,
             _debug_force_load_balance=moe_args._debug_force_load_balance,
         )
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
