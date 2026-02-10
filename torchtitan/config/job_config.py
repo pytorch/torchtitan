@@ -265,7 +265,14 @@ class Training:
     """Max norm for gradient clipping"""
 
     steps: int = 10000
-    """How many train steps to run"""
+    """How many train steps to run (ignored if epochs > 0)"""
+
+    epochs: int = -1
+    """
+    Number of epochs to train for. If set to a positive value, training will run
+    for the specified number of epochs and the 'steps' setting will be ignored.
+    If set to -1 (default), training will use step-based termination via 'steps'.
+    """
 
     enable_cpu_offload: bool = False
     """
