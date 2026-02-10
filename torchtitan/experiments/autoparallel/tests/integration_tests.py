@@ -24,7 +24,6 @@ def build_autoparallel_test_list() -> list[OverrideDefinitions]:
                     "--model.name autoparallel.llama3",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.autoparallel.job_config",
                 ],
             ],
             "llama3 AutoParallel FSDP+TP",
@@ -39,7 +38,6 @@ def build_autoparallel_test_list() -> list[OverrideDefinitions]:
         #             "--model.name autoparallel.deepseek_v3",
         #             "--parallelism.data_parallel_shard_degree 2",
         #             "--parallelism.expert_parallel_degree 2",
-        #             "--job.custom_config_module=torchtitan.experiments.autoparallel.job_config",
         #             "--activation_checkpoint.mode none",
         #         ],
         #     ],
@@ -67,7 +65,7 @@ def main():
     )
     parser.add_argument(
         "--config_path",
-        default="./tests/integration_tests/base_config.toml",
+        default="./torchtitan/experiments/autoparallel/tests/base_config.py",
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(

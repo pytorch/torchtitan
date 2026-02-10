@@ -100,7 +100,7 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
     uses different train.py in command to run the model"""
 
     # Check if config file exists
-    assert args.config_path.endswith(".toml"), "Base config path must end with .toml"
+    assert args.config_path.endswith(".py"), "Base config path must end with .py"
     assert os.path.exists(
         args.config_path
     ), f"Base config path {args.config_path} does not exist"
@@ -125,7 +125,7 @@ def main():
     parser.add_argument("output_dir")
     parser.add_argument(
         "--config_path",
-        default="./torchtitan/models/flux/train_configs/debug_model.toml",
+        default="./torchtitan/models/flux/train_configs/debug_model.py",
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(

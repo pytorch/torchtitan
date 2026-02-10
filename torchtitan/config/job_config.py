@@ -17,7 +17,7 @@ from torchtitan.tools.logging import logger
 @dataclass
 class Job:
     config_file: str | None = None
-    """File to read job configs from"""
+    """Python config file to load defaults from"""
 
     dump_folder: str = "./outputs"
     """Folder to dump job outputs"""
@@ -30,12 +30,6 @@ class Job:
 
     save_config_file: str | None = None
     """Path to save job config into"""
-
-    custom_config_module: str = ""
-    """
-    This option allows users to extend the existing JobConfig with a customized
-    JobConfig dataclass. Users need to ensure that the path can be imported.
-    """
 
 
 @dataclass
@@ -215,12 +209,17 @@ class DataLoader:
     Note:
         persistent_workers and prefetch_factor are only valid if num_workers > 0.
 
-    Example (TOML config file):
-        [training.dataloader]
-        num_workers = 4
-        pin_memory = true
-        persistent_workers = true
-        prefetch_factor = 2
+    Example (Python config file):
+        default_config = JobConfig(
+            training=Training(
+                dataloader=DataLoader(
+                    num_workers=4,
+                    pin_memory=True,
+                    persistent_workers=True,
+                    prefetch_factor=2,
+                ),
+            ),
+        )
     """
 
     num_workers: int = 0
@@ -934,15 +933,6 @@ class Experimental:
     successfully imported. One method to achieve this, you can place your module
     inside the ``torchtitan/torchtitan`` folder and execute ``pip install -e .`` to
     make it available for import.
-    """
-
-    custom_args_module: str = ""
-    """
-    DEPRECATED (moved to Job.custom_config_module). Will be removed soon.
-
-    This option allows users to extend TorchTitan's existing JobConfig by extending
-    a user defined JobConfig dataclass. Similar to ``--experimental.custom_import``, the user
-    needs to ensure that the path can be imported.
     """
 
 

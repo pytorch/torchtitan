@@ -25,7 +25,7 @@ Example usages:
 
 2. Compare losses between two commits with custom config and options:
    loss_compare.py main my_branch \
-       --baseline-config='./custom.toml' \
+       --baseline-config='./custom.py' \
        --baseline-options='--parallelism.tensor_parallel_degree=2' \
        --output-folder=my_comparison
 
@@ -51,7 +51,7 @@ Example usages:
 
 8. Run baseline only with specific config and compare against imported losses:
    loss_compare.py . . --assert-equal --import-result=expected_losses.txt \
-       --baseline-config='./custom.toml'
+       --baseline-config='./custom.py'
 
 9. Run baseline only and export the losses (no comparison):
    loss_compare.py . . --export-result=baseline_losses.txt
@@ -890,7 +890,7 @@ def parse_arguments() -> argparse.Namespace:
 Examples:
   %(prog)s abc123 def456
   %(prog)s abc123 def456 --steps=200
-  %(prog)s abc123 def456 --baseline-config='./custom.toml' \\
+  %(prog)s abc123 def456 --baseline-config='./custom.py' \\
       --baseline-options='--parallelism.tensor_parallel_degree=2' --steps=50
   %(prog)s abc123 def456 --no-seed-checkpoint
   %(prog)s . . --baseline-options='--parallelism.dp=1' \\
@@ -902,11 +902,11 @@ Examples:
     parser.add_argument("test_commit", help="Git commit hash for test")
     parser.add_argument(
         "--baseline-config",
-        default="./torchtitan/models/llama3/train_configs/debug_model.toml",
+        default="./torchtitan/models/llama3/train_configs/debug_model.py",
         help=(
             "Config file for baseline run "
             "(default: ./torchtitan/models/llama3/train_configs/"
-            "llama3_debug.toml)"
+            "debug_model.py)"
         ),
     )
     parser.add_argument(

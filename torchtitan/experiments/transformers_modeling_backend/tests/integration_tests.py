@@ -22,7 +22,6 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
             [
                 [
                     "--model.name transformers_modeling_backend",
-                    "--job.custom_config_module=torchtitan.experiments.transformers_modeling_backend.job_config",
                     "--hf_transformers.model Qwen/Qwen2.5-7B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -48,7 +47,7 @@ def main():
     parser.add_argument("output_dir")
     parser.add_argument(
         "--config_path",
-        default="./tests/integration_tests/base_config.toml",
+        default="./torchtitan/experiments/transformers_modeling_backend/tests/base_config.py",
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(

@@ -61,7 +61,7 @@ The folder should be organized as follows
   - Sometimes `torchtitan/train.py` may not be enough to run the model. There is a [tradeoff](/docs/extension.md#train-script) between extending the existing one vs. having a new one.
   - Even if a new one needs to be added, it should reuse `torchtitan/train.py` as much as possible. See `torchtitan/experiments/flux/train.py` as an example.
 - `train_configs` folder
-  - There should be one `.toml` file for each model variant (e.g. Llama 3.1 8B / 70B / 405B) as well as a `debug_model.toml`.
+  - There should be one Python config file (`.py`) for each model variant (e.g. Llama 3.1 8B / 70B / 405B) as well as a `debug_model.py`.
   - They should be verified with real training jobs, in terms of optimized throughput and loss converging.
 
 ## Testing and Benchmarking
