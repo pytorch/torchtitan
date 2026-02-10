@@ -174,6 +174,7 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
             self.sdpa_backends = [
                 SDPBackend.CUDNN_ATTENTION,
                 SDPBackend.FLASH_ATTENTION,
+                SDPBackend.MATH,
             ]
 
     def forward(
