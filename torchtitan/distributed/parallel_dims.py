@@ -124,7 +124,6 @@ class ParallelDims:
                 0,
                 dim_degrees,
                 dim_names,
-                # pyrefly: ignore [bad-argument-type]
                 backend_override=backend_override,
             )
 

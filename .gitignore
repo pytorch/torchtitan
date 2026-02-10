@@ -45,7 +45,3 @@ Sessionx.vim
 
 # Vibe coding
 .claude
-
-# Experiments/rl artifacts
-/converted/
-/models/
