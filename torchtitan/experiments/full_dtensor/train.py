@@ -21,7 +21,6 @@ class FullDTensorTrainer(Trainer):
         # parallelize_buffers must be called here instead of in parallelize_fn because
         # buffers are re-initialized after parallelize_fn executes. The current buffer
         # initialization creates regular tensors rather than DTensors.
-        # NOTE: This function will likely be removed when we rewrite parameterization.
         for m in self.model_parts:
             parallelize_buffers(m, self.parallel_dims)
 

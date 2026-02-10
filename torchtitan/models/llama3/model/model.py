@@ -573,7 +573,7 @@ class Transformer(ModelProtocol):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
-        for layer in self.layers.values():
+        for name, layer in self.layers.items():
             h = layer(
                 h, self.freqs_cis, attention_masks=attention_masks, positions=positions
             )
