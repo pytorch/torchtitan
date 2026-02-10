@@ -261,7 +261,7 @@ class Validator(BaseValidator):
         loss = torch.sum(torch.stack(accumulated_losses))
         loss /= num_steps
         if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_mean(
+            global_avg_loss = dist_utils.dist_sum(
                 loss, parallel_dims.get_optional_mesh("loss")
             )
         else:
