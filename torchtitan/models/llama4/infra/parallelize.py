@@ -144,7 +144,8 @@ def parallelize_llama(
             dual_pipe_v=dual_pipe_v,
             comm_backend=comm_backend,
             # HybridEP configuration from job_config (only used when comm_backend="hybridep")
-            hybridep_num_permuted_tokens=job_config.parallelism.hybridep.num_permuted_tokens,
+            moe_expert_capacity_factor=job_config.parallelism.hybridep.moe_expert_capacity_factor,
+            hybridep_non_blocking=job_config.parallelism.hybridep.enable_non_blocking,
         )
 
     attn_type = getattr(model.model_args, "attn_type", "sdpa")
@@ -508,7 +509,8 @@ def apply_moe_ep_tp(
     comm_backend: str = "standard",
     # HybridEP settings (only used when comm_backend="hybridep")
     # User-configurable (from job_config.parallelism.hybridep):
-    hybridep_num_permuted_tokens: int | None = None,
+    moe_expert_capacity_factor: float | None = None,
+    hybridep_non_blocking: bool = False,
 ):
     assert ep_mesh is not None or tp_mesh is not None
 
@@ -576,7 +578,8 @@ def apply_moe_ep_tp(
                     score_before_experts=score_before_experts,
                     comm_backend=comm_backend,
                     # User-configurable settings (from job_config)
-                    hybridep_num_permuted_tokens=hybridep_num_permuted_tokens,
+                    moe_expert_capacity_factor=moe_expert_capacity_factor,
+                    hybridep_non_blocking=hybridep_non_blocking,
                 )
                 logger.info(f"Applying {comm_backend.upper()} to MoE layer")
             else:

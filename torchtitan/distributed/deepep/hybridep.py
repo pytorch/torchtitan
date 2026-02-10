@@ -10,12 +10,11 @@ HybridEP: Expert Parallel Communication for GB200 NVLink72 Systems.
 Provides efficient token dispatch/combine for MoE training via TMA-optimized all-to-all.
 
 Configuration (via job_config.parallelism.hybridep):
-    num_permuted_tokens: Output buffer size for CPU-free non-blocking mode. This must be
-        large enough to hold all tokens that may be received after dispatch. If the buffer
-        is too small, tokens will be silently dropped and handle.overflow_flag will be True.
-        (Older HybridEP versions would cause illegal memory access errors instead.)
-
-Reference: https://github.com/Autumn1998/DeepEP/blob/refactor/docs/Hybrid-EP_Implementation.md
+    moe_expert_capacity_factor: Capacity factor per expert in (0, 1]. None means no token dropping.
+    enable_non_blocking: Enable CPU-free non-blocking dispatch mode (default: False).
+        When True, pre-allocates the output buffer as num_tokens × ep_size × min(num_local_experts, top_k) x moe_expert_capacity_factor.
+        If moe_expert_capacity_factor is set, the buffer is further scaled by that factor.
+        When False, uses blocking mode with D2H for dynamic sizing.
 """
 
 from dataclasses import dataclass
@@ -113,7 +112,7 @@ _handle_type = get_opaque_type_name(DispatchHandle)
 torch.library.define(
     "hybridep::dispatch",
     f"(Tensor x, Tensor topk_idx, Tensor topk_weights, int num_experts, "
-    f"int? num_permuted_tokens) -> (Tensor, Tensor, Tensor, {_handle_type})",
+    f"int? num_permuted_tokens, float? moe_expert_capacity_factor) -> (Tensor, Tensor, Tensor, {_handle_type})",
 )
 
 torch.library.define(
@@ -129,6 +128,7 @@ def _dispatch_impl(
     topk_weights: torch.Tensor,
     num_experts: int,
     num_permuted_tokens: Optional[int] = None,
+    moe_expert_capacity_factor: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
     """CUDA dispatch: convert sparse routing to dense, call TMA-optimized all-to-all."""
     global _buffer
@@ -195,9 +195,7 @@ def _dispatch_impl(
                 f"  - Expected tokens after dispatch: {expected_tokens}\n"
                 f"  - Buffer size (num_permuted_tokens): {num_permuted_tokens}\n"
                 f"  - Tokens dropped: {expected_tokens - actual_tokens}\n\n"
-                f"Fix: Increase num_permuted_tokens in your config:\n"
-                f"  --parallelism.hybridep.num_permuted_tokens={actual_tokens} * capacity_factor(for imbalanced routing)\n\n"
-                f"Note: Set to None for dynamic sizing."
+                f"Fix: Increase moe_expert_capacity_factor in your config or set to None for dynamic sizing."
             )
 
     if scores is None:
@@ -215,6 +213,7 @@ def _dispatch_fake(
     topk_weights: torch.Tensor,
     num_experts: int,
     num_permuted_tokens: Optional[int] = None,
+    moe_expert_capacity_factor: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
     """Fake dispatch for torch.compile tracing."""
     if num_permuted_tokens is not None:
@@ -273,12 +272,12 @@ def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
         if grad_probs_dense is not None
         else None
     )
-    return grad_x, None, grad_weights, None, None
+    return grad_x, None, grad_weights, None, None, None
 
 
 def _dispatch_setup_context(ctx, inputs, output):
     """Save context for dispatch backward."""
-    x, topk_idx, _, _, _ = inputs
+    x, topk_idx, _, _, _, _ = inputs
     _, _, _, dispatch_handle = output
     ctx.dispatch_handle = dispatch_handle
     ctx.input_dtype = x.dtype
@@ -326,10 +325,13 @@ def get_buffer(
     num_tokens: int,
     num_local_experts: int,
     fp8_dispatch: bool = False,
+    moe_expert_capacity_factor: Optional[float] = None,
 ) -> None:
     """Ensure the global HybridEP buffer is initialized, reinitializing if config changed.
 
-    Buffer is internally sized as: max_tokens = num_tokens × EP_group_size (worst-case).
+    HybridEP internally scales by EP_group_size for worst-case receive sizing.
+    If moe_expert_capacity_factor is set, num_tokens is scaled by that factor to limit
+    the receive buffer, enabling token dropping (excess tokens are dropped during dispatch).
     """
     global _buffer
 
@@ -337,12 +339,15 @@ def get_buffer(
         raise AssertionError("HybridEP FP8 dispatch not yet supported")
 
     HybridEPBuffer = _require_hybridep()
+    max_tokens = num_tokens
+    if moe_expert_capacity_factor is not None:
+        max_tokens = int(num_tokens * moe_expert_capacity_factor)
 
     needs_reinit = (
         _buffer is None
         or _buffer.group != group
         or _buffer.config.hidden_dim < hidden_dim
-        or _buffer.config.max_num_of_tokens_per_rank < num_tokens
+        or _buffer.config.max_num_of_tokens_per_rank < max_tokens
         or _buffer.config.num_of_experts_per_rank < num_local_experts
     )
 
@@ -350,7 +355,7 @@ def get_buffer(
         _buffer = HybridEPBuffer(
             group=group,
             hidden_dim=hidden_dim,
-            max_num_of_tokens_per_rank=num_tokens,
+            max_num_of_tokens_per_rank=max_tokens,
             num_local_experts=num_local_experts,
             use_fp8=fp8_dispatch,
             num_sms_dispatch_api=_NUM_SMS_DISPATCH,
@@ -367,6 +372,7 @@ def dispatch_tokens(
     group: ProcessGroup,
     score_before_experts: bool = True,
     num_permuted_tokens: Optional[int] = None,
+    moe_expert_capacity_factor: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via HybridEP all-to-all.
 
@@ -385,6 +391,8 @@ def dispatch_tokens(
             be received after the all-to-all dispatch. If the buffer is too small:
             - Current HybridEP: Silently drops excess tokens, sets handle.overflow_flag=True
             - Older HybridEP: Causes illegal memory access (IMA) errors
+        moe_expert_capacity_factor: Capacity factor per expert in [0, 1].
+            None means no token dropping (default).
 
     Returns:
         (permuted_hidden, tokens_per_expert, state)
@@ -397,11 +405,13 @@ def dispatch_tokens(
         hidden_dim=hidden_states.shape[1],
         num_tokens=hidden_states.shape[0],
         num_local_experts=num_local_experts,
+        moe_expert_capacity_factor=moe_expert_capacity_factor,
     )
 
     hidden, permuted_scores, tokens_per_expert, dispatch_handle = (
         torch.ops.hybridep.dispatch(
-            hidden_states, selected_experts_indices, top_scores, num_experts, num_permuted_tokens
+            hidden_states, selected_experts_indices, top_scores, num_experts,
+            num_permuted_tokens, moe_expert_capacity_factor,
         )
     )
 

@@ -329,7 +329,9 @@ class DeepEPExpertParallel(BaseExpertParallel):
                       "hybridep" for GB200/NVLink72. Default is "deepep".
         
         User-configurable HybridEP settings (from job_config.parallelism.hybridep):
-        hybridep_num_permuted_tokens: Pre-specified output size for non-blocking mode (default: None).
+        moe_expert_capacity_factor: Capacity factor per expert in [0, 1]. None means no dropping.
+        hybridep_non_blocking: Enable CPU-free non-blocking dispatch mode (default: False).
+            When True, pre-allocates output buffer as num_tokens × ep_size × min(num_local_experts, top_k).
     """
 
     def __init__(
@@ -337,7 +339,8 @@ class DeepEPExpertParallel(BaseExpertParallel):
         score_before_experts: bool = True,
         comm_backend: str = "deepep",
         # User-configurable HybridEP settings (from job_config.parallelism.hybridep)
-        hybridep_num_permuted_tokens: int | None = None,
+        moe_expert_capacity_factor: float | None = None,
+        hybridep_non_blocking: bool = False,
     ):
         super().__init__()
         self._state = None  # State preserved between dispatch and combine
@@ -345,7 +348,8 @@ class DeepEPExpertParallel(BaseExpertParallel):
         self.comm_backend = comm_backend
         
         # HybridEP-specific configuration
-        self.hybridep_num_permuted_tokens = hybridep_num_permuted_tokens
+        self.moe_expert_capacity_factor = moe_expert_capacity_factor
+        self.hybridep_non_blocking = hybridep_non_blocking
 
     def _token_dispatch(self, mod, inputs, device_mesh):
         """Dispatch tokens via DeepEP or HybridEP based on configured backend."""
@@ -360,6 +364,16 @@ class DeepEPExpertParallel(BaseExpertParallel):
         if self.comm_backend == "hybridep":
             from torchtitan.distributed.deepep import hybridep
 
+            # Compute num_permuted_tokens for non-blocking mode
+            num_permuted_tokens = None
+            if self.hybridep_non_blocking:
+                num_tokens = hidden_states.shape[0]
+                ep_size = ep_group.size()
+                top_k = selected_experts_indices.shape[1]
+                num_permuted_tokens = num_tokens * ep_size * min(num_local_experts, top_k)
+                if self.moe_expert_capacity_factor is not None:
+                    num_permuted_tokens = int(num_permuted_tokens * self.moe_expert_capacity_factor)
+
             hidden_states, tokens_per_expert, self._state = hybridep.dispatch_tokens(
                 hidden_states,
                 selected_experts_indices,
@@ -368,7 +382,8 @@ class DeepEPExpertParallel(BaseExpertParallel):
                 num_experts,
                 ep_group,
                 score_before_experts=self.score_before_experts,
-                num_permuted_tokens=self.hybridep_num_permuted_tokens,
+                num_permuted_tokens=num_permuted_tokens,
+                moe_expert_capacity_factor=self.moe_expert_capacity_factor,
             )
         else:
             from torchtitan.distributed.deepep import deepep

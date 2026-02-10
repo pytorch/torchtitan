@@ -307,14 +307,19 @@ class HybridEPConfig:
     Only effective when expert_parallel_comm_backend="hybridep".
     """
 
-    num_permuted_tokens: int | None = None
+    moe_expert_capacity_factor: float | None = None
     """
-    Determines output buffer size for grouped_mm. When set, enables CPU-free non-blocking
-    mode required for CUDA graph compatibility.
-    
-    Typical value: For balaced-routing: local_batch_size × seq_len × min(top_k, num_local_experts).
-    The worst-case value is local_batch_size × seq_len × EP_group_size x min(top_k, num_local_experts).
-    If None, uses blocking mode with D2H for sizing.
+    Capacity factor for each expert, in the range (0, 1].
+    Controls what fraction of tokens each expert can accept. None means no token will be dropped (default).
+    """
+
+    enable_non_blocking: bool = False
+    """
+    Enable CPU-free non-blocking dispatch mode (required for CUDA graph compatibility).
+    When True, pre-allocates the output buffer as:
+        num_permuted_tokens = num_tokens × EP_group_size × min(num_local_experts, top_k)
+    If moe_expert_capacity_factor is also set, the buffer is further scaled by that factor.
+    When False, uses blocking mode with D2H for dynamic sizing.
     """
 
 
