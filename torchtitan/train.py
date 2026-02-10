@@ -236,11 +236,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ) = self.train_spec.pipelining_fn(
                 model,
                 parallel_dims,
-                job_config,
-                self.device,
-                model_args,
-                self.train_spec.parallelize_fn,
-                self.loss_fn,
+                training=job_config.training,
+                model_converters=job_config.model.converters,
+                parallelism=job_config.parallelism,
+                compile_config=job_config.compile,
+                ac_config=job_config.activation_checkpoint,
+                experimental=job_config.experimental,
+                dump_folder=job_config.job.dump_folder,
+                device=self.device,
+                model_args=model_args,
+                parallelize_fn=self.train_spec.parallelize_fn,
+                loss_fn=self.loss_fn,
             )
             # when PP is enabled, `model` obj is no longer used after this point,
             # model_parts is used instead
@@ -260,7 +266,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-            model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
+            model = self.train_spec.parallelize_fn(
+                model,
+                parallel_dims,
+                training=job_config.training,
+                model_converters=job_config.model.converters,
+                parallelism=job_config.parallelism,
+                compile_config=job_config.compile,
+                ac_config=job_config.activation_checkpoint,
+                experimental=job_config.experimental,
+                dump_folder=job_config.job.dump_folder,
+            )
 
             model.to_empty(device=init_device)
             with torch.no_grad():

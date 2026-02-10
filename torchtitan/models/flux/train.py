@@ -79,7 +79,7 @@ class FluxTrainer(Trainer):
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
             parallel_dims=self.parallel_dims,
-            job_config=job_config,
+            training=job_config.training,
         )
 
         if job_config.validation.enable:

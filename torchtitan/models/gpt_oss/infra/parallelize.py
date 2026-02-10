@@ -19,8 +19,8 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torchtitan.components.quantization.float8 import find_float8_linear_config
-from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.config.job_config import JobConfig
+from torchtitan.config import ActivationCheckpoint, Parallelism, Training, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.dual_pipe_v import (
@@ -62,27 +62,34 @@ _op_sac_save_list = {
 def parallelize_gptoss(
     model: nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    *,
+    training: Training,
+    model_converters: list,
+    parallelism: Parallelism,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpoint,
+    experimental: Experimental,
+    dump_folder: str,
 ):
     assert (
-        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
-        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
     model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
+        compile_config.enable and "model" in compile_config.components
     )
 
     if parallel_dims.tp_enabled:
         if (
-            job_config.parallelism.enable_async_tensor_parallel
+            parallelism.enable_async_tensor_parallel
             and not model_compile_enabled
         ):
             raise RuntimeError("Async TP requires torch.compile")
 
-        float8_config = find_float8_linear_config(job_config.model.converters)
+        float8_config = find_float8_linear_config(model_converters)
         enable_float8_linear = float8_config is not None
         float8_is_rowwise = (
             float8_config is not None
@@ -97,13 +104,13 @@ def parallelize_gptoss(
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
             enable_async_tp=False,
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
+        dual_pipe_v = get_dual_pipe_v_flag(parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims)
 
         apply_moe_ep_tp(
             model,
@@ -114,10 +121,10 @@ def parallelize_gptoss(
             dual_pipe_v=dual_pipe_v,
         )
 
-    if job_config.activation_checkpoint.mode != "none":
+    if ac_config.mode != "none":
         apply_ac(
             model,
-            job_config.activation_checkpoint,
+            ac_config,
             model_compile_enabled=model_compile_enabled,
             # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
@@ -142,11 +149,11 @@ def parallelize_gptoss(
         apply_fsdp(
             model,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
             edp_mesh=edp_mesh,
         )
@@ -159,7 +166,7 @@ def parallelize_gptoss(
         if parallel_dims.cp_enabled:
             logger.info("Applied Context Parallel to the model")
 
-        if job_config.training.enable_cpu_offload:
+        if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         dp_mesh = parallel_dims.get_mesh("dp_replicate")

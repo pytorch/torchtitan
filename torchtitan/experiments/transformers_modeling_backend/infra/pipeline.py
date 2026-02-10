@@ -19,9 +19,10 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
+from torchtitan.config import ActivationCheckpoint, Parallelism, Training
+from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
-from torchtitan.experiments.transformers_modeling_backend.job_config import JobConfig
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
 
@@ -281,7 +282,14 @@ def pipeline_module_split(
 def pipeline_hf_transformers(
     model: nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    *,
+    training: Training,
+    model_converters: list,
+    parallelism: Parallelism,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpoint,
+    experimental: Experimental,
+    dump_folder: str,
     device: torch.device,
     model_args: BaseModelArgs,
     parallelize_fn: ParallelizeFunction,
@@ -291,10 +299,10 @@ def pipeline_hf_transformers(
 
     # Determine the number of virtual stages based on schedule type
     schedule_class = get_schedule_class(
-        job_config.parallelism.pipeline_parallel_schedule
+        parallelism.pipeline_parallel_schedule
     )
     is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
-    layers_per_stage = job_config.parallelism.pipeline_parallel_layers_per_stage
+    layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
     if hasattr(model_args, "n_layers"):
         num_layers = model_args.n_layers
     else:
@@ -302,8 +310,8 @@ def pipeline_hf_transformers(
 
     # You can adjust these weights based on the computational cost of embeddings and output layers
     # Higher weights mean these modules are treated as "heavier" in the distribution
-    input_weight = job_config.parallelism.pipeline_parallel_first_stage_less_layers
-    output_weight = job_config.parallelism.pipeline_parallel_last_stage_less_layers
+    input_weight = parallelism.pipeline_parallel_first_stage_less_layers
+    output_weight = parallelism.pipeline_parallel_last_stage_less_layers
 
     # Calculate number of virtual stages
     if layers_per_stage is not None:
@@ -352,7 +360,7 @@ def pipeline_hf_transformers(
         stages_per_rank = 1 if is_single_stage_schedule else 2
         num_virtual_stages = parallel_dims.pp * stages_per_rank
 
-    module_names_per_stage = job_config.parallelism.module_fqns_per_model_part
+    module_names_per_stage = parallelism.module_fqns_per_model_part
     if module_names_per_stage is None:
         module_names_per_stage = generate_llm_fqn_per_model_part(
             num_virtual_stages, num_layers, input_weight, output_weight
@@ -361,7 +369,7 @@ def pipeline_hf_transformers(
     stages, model_parts = pipeline_module_split(
         model,
         pp_mesh,
-        job_config.parallelism.pipeline_parallel_schedule,
+        parallelism.pipeline_parallel_schedule,
         device,
         module_names_per_stage,
     )
@@ -371,13 +379,23 @@ def pipeline_hf_transformers(
     # optimizer, and checkpointing
     for i, m in enumerate(model_parts):
         # apply SPMD-style PT-D techniques
-        m = parallelize_fn(m, parallel_dims, job_config)
+        m = parallelize_fn(
+            m,
+            parallel_dims,
+            training=training,
+            model_converters=model_converters,
+            parallelism=parallelism,
+            compile_config=compile_config,
+            ac_config=ac_config,
+            experimental=experimental,
+            dump_folder=dump_folder,
+        )
         model_parts[i] = m
         # NOTE: this is to update the model in the stage
         #       in case the model is modified e.g. by torch.compile
         stages[i].submod = m
 
-    pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
+    pp_schedule = build_pipeline_schedule(parallelism=parallelism, local_batch_size=training.local_batch_size, stages=stages, loss_fn=loss_fn)
 
     # This is used in the train loop to determine whether to pass in the input_ids and labels
     has_first_stage = False

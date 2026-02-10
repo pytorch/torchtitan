@@ -22,7 +22,8 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.components.quantization.float8 import find_float8_linear_config
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import ActivationCheckpoint, Parallelism, Training, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
@@ -58,17 +59,24 @@ _op_sac_save_list = {
 def parallelize_qwen3(
     model: nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    *,
+    training: Training,
+    model_converters: list,
+    parallelism: Parallelism,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpoint,
+    experimental: Experimental,
+    dump_folder: str,
 ):
     assert (
-        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
-        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
     attn_type = getattr(model.model_args, "attn_type", "sdpa")
-    if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
+    if parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
         raise NotImplementedError(
             f"Context Parallel only supports SDPA attention. "
             f"Got attn_type='{attn_type}'. "
@@ -76,16 +84,16 @@ def parallelize_qwen3(
         )
 
     model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
+        compile_config.enable and "model" in compile_config.components
     )
     if parallel_dims.tp_enabled:
         if (
-            job_config.parallelism.enable_async_tensor_parallel
+            parallelism.enable_async_tensor_parallel
             and not model_compile_enabled
         ):
             raise RuntimeError("Async TP requires torch.compile")
 
-        float8_config = find_float8_linear_config(job_config.model.converters)
+        float8_config = find_float8_linear_config(model_converters)
         enable_float8_linear = float8_config is not None
         float8_is_rowwise = (
             float8_config is not None
@@ -101,14 +109,14 @@ def parallelize_qwen3(
         apply_non_moe_tp(
             model,
             tp_mesh,
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
+            enable_async_tp=parallelism.enable_async_tensor_parallel,
             cp_enabled=parallel_dims.cp_enabled,
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        dual_pipe_v = get_dual_pipe_v_flag(job_config, parallel_dims)
+        dual_pipe_v = get_dual_pipe_v_flag(parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims)
 
         apply_moe_ep_tp(
             model,
@@ -127,19 +135,19 @@ def parallelize_qwen3(
             attn_type,
         )
 
-    if job_config.activation_checkpoint.mode != "none":
+    if ac_config.mode != "none":
         apply_ac(
             model,
-            job_config.activation_checkpoint,
+            ac_config,
             model_compile_enabled=model_compile_enabled,
             # pyrefly: ignore [bad-argument-type]
             op_sac_save_list=_op_sac_save_list,
-            base_folder=job_config.job.dump_folder,
+            base_folder=dump_folder,
         )
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, job_config.compile, parallel_dims.ep_enabled)
+        apply_compile(model, compile_config, parallel_dims.ep_enabled)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -159,11 +167,11 @@ def parallelize_qwen3(
         apply_fsdp(
             model,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
             edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
@@ -174,7 +182,7 @@ def parallelize_qwen3(
         else:
             logger.info("Applied FSDP to the model")
 
-        if job_config.training.enable_cpu_offload:
+        if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         dp_mesh = parallel_dims.get_mesh("dp_replicate")
