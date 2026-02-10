@@ -526,14 +526,14 @@ def trunc_normal_(
         The input tensor filled with values from the truncated normal distribution.
     """
 
-    tmp = tensor.float()
+    tmp = torch.empty_like(tensor, dtype=torch.float32)
     nn.init.trunc_normal_(tmp, mean=mean, std=std, a=a, b=b)
-    tensor.copy_(tmp)
+    tensor.copy_(tmp.to(tensor.dtype))
 
 
 def normal_(
     tensor: torch.Tensor, mean: float = 0.0, std: float = 1.0
 ):
-    tmp = tensor.float()
+    tmp = torch.empty_like(tensor, dtype=torch.float32)
     nn.init.normal_(tmp, mean=mean, std=std)
-    tensor.copy_(tmp)
+    tensor.copy_(tmp.to(tensor.dtype))
