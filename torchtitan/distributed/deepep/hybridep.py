@@ -166,37 +166,10 @@ def _dispatch_impl(
         non_blocking=num_permuted_tokens is not None,
     )
 
-    if num_permuted_tokens is not None:
-        overflow_detected = False
-
-        if hasattr(handle, "overflow_flag"):
-            overflow_flag = handle.overflow_flag
-            if isinstance(overflow_flag, torch.Tensor):
-                overflow_detected = overflow_flag.item()
-            else:
-                overflow_detected = bool(overflow_flag)
-      
-        elif hidden.shape[0] == num_permuted_tokens:
-            expected_tokens = tokens_per_expert.sum().item()
-            overflow_detected = expected_tokens > hidden.shape[0]
-
-        if overflow_detected:
-            num_tokens = x.shape[0]  # = local_batch_size × seq_len
-            top_k = topk_idx.shape[1] if topk_idx.dim() == 2 else 1
-            expected_tokens = tokens_per_expert.sum().item()
-            actual_tokens = hidden.shape[0]
-            recommended = int(num_tokens * top_k * 1.5)
-            raise RuntimeError(
-                f"HybridEP buffer overflow: num_permuted_tokens={num_permuted_tokens} is too small.\n"
-                f"Tokens were silently dropped, which would cause incorrect training.\n\n"
-                f"Details:\n"
-                f"  - Input tokens per rank (local_batch_size × seq_len): {num_tokens}\n"
-                f"  - top_k: {top_k}\n"
-                f"  - Expected tokens after dispatch: {expected_tokens}\n"
-                f"  - Buffer size (num_permuted_tokens): {num_permuted_tokens}\n"
-                f"  - Tokens dropped: {expected_tokens - actual_tokens}\n\n"
-                f"Fix: Increase moe_expert_capacity_factor in your config or set to None for dynamic sizing."
-            )
+    # NOTE: No synchronous overflow check here — calling .item() on GPU tensors
+    # would trigger cudaStreamSynchronize and defeat the purpose of non_blocking mode.
+    # If the buffer is too small, DeepEP silently drops tokens (handle.overflow_flag).
+    # Rely on correct buffer sizing in get_buffer() instead.
 
     if scores is None:
         scores = torch.empty(0, device=x.device, dtype=torch.float32)
