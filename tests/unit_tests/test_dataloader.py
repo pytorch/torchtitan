@@ -142,7 +142,7 @@ class TestParallelAwareDataloader(unittest.TestCase):
             tokenizer=tokenizer,
             dp_world_size=1,
             dp_rank=0,
-            job_config=config,
+            training=config.training,
         )
 
         self.assertEqual(dataloader.batch_size, 8)

@@ -70,7 +70,7 @@ class Validator(BaseValidator):
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
         self.validation_dataloader = build_text_validation_dataloader(
-            job_config=job_config,
+            validation=job_config.validation,
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
             tokenizer=tokenizer,

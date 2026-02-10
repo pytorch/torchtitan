@@ -378,6 +378,7 @@ def build_mm_dataloader(
     tokenizer: HuggingFaceTokenizer,
     job_config: JobConfig,
     infinite: bool = True,
+    **kwargs,
 ) -> ParallelAwareDataloader:
     """Build a data loader for multimodal datasets.
 
