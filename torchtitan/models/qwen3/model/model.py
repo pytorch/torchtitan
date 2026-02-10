@@ -25,6 +25,7 @@ from torchtitan.models.attention import (
     VarlenMetadata,
 )
 from torchtitan.models.moe import MoE
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -201,8 +202,8 @@ class Attention(nn.Module):
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
         if self.q_norm is not None:
             self.q_norm.reset_parameters()
         if self.k_norm is not None:
@@ -330,9 +331,9 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
         for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
 class TransformerBlock(nn.Module):
@@ -498,16 +499,18 @@ class Qwen3Model(ModelProtocol):
             # we ensure the weights are tied here
             assert self.tok_embeddings is not None and self.output is not None
             self.output.weight = self.tok_embeddings.weight
-        else:
-            # If weight tying is enabled, we don't need to initialize the output layer
-            if self.output is not None:
-                nn.init.trunc_normal_(
-                    self.output.weight,
-                    mean=0.0,
-                    std=final_out_std,
-                    a=-cutoff_factor * final_out_std,
-                    b=cutoff_factor * final_out_std,
-                )
+
+        # The token embedding initialization produces weights with too large
+        # standard deviation for the output layer. Reinitialize the output weights
+        # with a smaller, truncated normal distribution to improve training stability.
+        if self.output is not None:
+            trunc_normal_(
+                self.output.weight,
+                mean=0.0,
+                std=final_out_std,
+                a=-cutoff_factor * final_out_std,
+                b=cutoff_factor * final_out_std,
+            )
 
     def _precompute_rope_cache(self) -> torch.Tensor:
         return precompute_rope_cache(

@@ -12,6 +12,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from torchtitan.models.moe.moe import MoE
 from torchtitan.models.moe.utils import _permute, _unpermute
+from torchtitan.models.utils import trunc_normal_
 
 from .args import GptOssModelArgs
 
@@ -261,10 +262,10 @@ class GptOssGroupedExperts(nn.Module):
             )
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
+        trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
+        trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
+        trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
+        trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
 
 
 class GptOssMoE(MoE):
