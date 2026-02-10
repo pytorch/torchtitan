@@ -7,8 +7,8 @@ from typing import List, Protocol, Union
 
 import torch.nn as nn
 
-from torchtitan.config import JobConfig
 from torchtitan.config.configurable import Configurable
+from torchtitan.config.job_config import ModelConverters
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
@@ -31,30 +31,33 @@ class ModelConverter(Protocol):
         ...
 
 
-class ModelConvertersContainer(ModelConverter):
+class ModelConvertersContainer(Configurable, ModelConverter):
     """Model converters sequential container.
 
     Builds converters from their Config objects and applies them
     to the model sequentially.
+
+    Config is ModelConverters from job_config.py (auto-wired via __init_subclass__).
     """
+
+    Config = ModelConverters
 
     def __init__(
         self,
+        config: ModelConverters,
         *,
-        converter_configs: list[Configurable.Config],
-        print_after_conversion: bool,
         parallel_dims: ParallelDims,
         model_compile_enabled: bool,
     ):
-        _validate_quantization(converter_configs)
+        _validate_quantization(config.converter_configs)
         self.converters: list[ModelConverter] = [
-            config.build(
+            cc.build(
                 parallel_dims=parallel_dims,
                 model_compile_enabled=model_compile_enabled,
             )
-            for config in converter_configs
+            for cc in config.converter_configs
         ]
-        self.print_after_conversion = print_after_conversion
+        self.print_after_conversion = config.print_after_conversion
 
     def convert(self, model: nn.Module):
         for mh in self.converters:
@@ -84,19 +87,3 @@ def _validate_quantization(converter_configs: list[Configurable.Config]):
                     "Cannot combine model converters with different quantization types: "
                     f"'{qt}' and '{existing_type}'"
                 )
-
-
-def build_model_converters(
-    *, job_config: JobConfig, parallel_dims: ParallelDims
-) -> ModelConvertersContainer:
-    """Build the collection of model converters to apply to the model."""
-    compile_config = job_config.compile
-    model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
-    )
-    return ModelConvertersContainer(
-        converter_configs=job_config.model.converters,
-        print_after_conversion=job_config.model.print_after_conversion,
-        parallel_dims=parallel_dims,
-        model_compile_enabled=model_compile_enabled,
-    )

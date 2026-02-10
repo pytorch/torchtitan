@@ -14,7 +14,7 @@ from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
 
-from torchtitan.config import ActivationCheckpoint, Parallelism, Training, TORCH_DTYPE_MAP
+from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.job_config import Experimental
@@ -27,7 +27,7 @@ def parallelize_llama(
     parallel_dims: ParallelDims,
     *,
     training: Training,
-    model_converters: list,
+    model_converters: ModelConverters,
     parallelism: Parallelism,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpoint,

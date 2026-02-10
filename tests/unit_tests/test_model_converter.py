@@ -6,12 +6,9 @@
 import pytest
 
 from torchtitan.components.quantization.float8 import Float8LinearConverter
-from torchtitan.config import ConfigManager, Model
+from torchtitan.config import ConfigManager, ModelConverters
 from torchtitan.distributed import ParallelDims
-from torchtitan.protocols.model_converter import (
-    build_model_converters,
-    ModelConvertersContainer,
-)
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 
 def build_parallel_dims(job_config, world_size):
@@ -34,8 +31,12 @@ def test_build_model_converters_empty_list():
     config = config_manager.parse_args([])
     parallel_dims = build_parallel_dims(config, 1)
 
-    model_converters = build_model_converters(
-        job_config=config, parallel_dims=parallel_dims
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    model_converters = config.model_converters.build(
+        parallel_dims=parallel_dims,
+        model_compile_enabled=model_compile_enabled,
     )
     assert isinstance(model_converters, ModelConvertersContainer)
     assert model_converters.converters == []
@@ -46,13 +47,17 @@ def test_build_model_converters_float8_converter():
     config_manager = ConfigManager()
     config = config_manager.parse_args([])
     # Set converter config directly (not via CLI)
-    config.model = Model(
-        converters=[Float8LinearConverter.Config(emulate=True)],
+    config.model_converters = ModelConverters(
+        converter_configs=[Float8LinearConverter.Config(emulate=True)],
     )
     parallel_dims = build_parallel_dims(config, 1)
 
-    model_converters = build_model_converters(
-        job_config=config, parallel_dims=parallel_dims
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    model_converters = config.model_converters.build(
+        parallel_dims=parallel_dims,
+        model_compile_enabled=model_compile_enabled,
     )
     assert isinstance(model_converters, ModelConvertersContainer)
     assert len(model_converters.converters) == 1

@@ -10,7 +10,7 @@
 from dataclasses import dataclass, field
 
 from torch import nn
-from torchtitan.config import JobConfig
+from torchtitan.config import Debug, Parallelism, Training
 from torchtitan.models.moe import MoEArgs
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs
@@ -84,8 +84,15 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     beta_slow: int = 1
     mscale: float = 1.0
 
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
-        seq_len = job_config.training.seq_len
+    def update_from_config(
+        self,
+        *,
+        training: Training,
+        parallelism: Parallelism,
+        debug: Debug,
+        **kwargs,
+    ) -> None:
+        seq_len = training.seq_len
         if seq_len > self.max_seq_len:
             logger.warning(
                 f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
@@ -99,7 +106,7 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             self.moe_args.use_grouped_mm = False
 
         if (
-            job_config.parallelism.context_parallel_degree > 1
+            parallelism.context_parallel_degree > 1
             and self.attn_type != "sdpa"
         ):
             raise NotImplementedError(
@@ -109,11 +116,11 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             )
 
         self.moe_args._debug_force_load_balance = (
-            job_config.debug.moe_force_load_balance
+            debug.moe_force_load_balance
         )
 
         # Configure expert parallel communication backend from config (defaults to "standard")
-        self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
+        self.moe_impl = parallelism.expert_parallel_comm_backend
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(

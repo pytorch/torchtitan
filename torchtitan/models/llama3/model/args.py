@@ -10,7 +10,7 @@
 from dataclasses import dataclass, field
 
 from torch import nn
-from torchtitan.config import JobConfig
+from torchtitan.config import Debug, Parallelism, Training
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
@@ -46,8 +46,15 @@ class TransformerModelArgs(BaseModelArgs):
     attn_mask_type: str = "causal"
     eos_id: int = 0
 
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
-        seq_len = job_config.training.seq_len
+    def update_from_config(
+        self,
+        *,
+        training: Training,
+        parallelism: Parallelism,
+        debug: Debug,
+        **kwargs,
+    ) -> None:
+        seq_len = training.seq_len
         if seq_len > self.max_seq_len:
             logger.warning(
                 f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
@@ -55,7 +62,7 @@ class TransformerModelArgs(BaseModelArgs):
         self.max_seq_len = seq_len
 
         if (
-            job_config.parallelism.context_parallel_degree > 1
+            parallelism.context_parallel_degree > 1
             and self.attn_type == "varlen"
         ):
             raise NotImplementedError(

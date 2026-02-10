@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
-from torchtitan.config import ActivationCheckpoint, Parallelism, Training, TORCH_DTYPE_MAP
+from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -32,7 +32,7 @@ def parallelize_vlm(
     parallel_dims: ParallelDims,
     *,
     training: Training,
-    model_converters: list,
+    model_converters: ModelConverters,
     parallelism: Parallelism,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpoint,

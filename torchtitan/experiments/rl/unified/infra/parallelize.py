@@ -21,7 +21,7 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config import ActivationCheckpoint, Parallelism, Training
+from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training
 from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 
@@ -31,7 +31,7 @@ def parallelize_qwen3(
     parallel_dims: ParallelDims,
     *,
     training: Training,
-    model_converters: list,
+    model_converters: ModelConverters,
     parallelism: Parallelism,
     compile_config: CompileConfig,
     ac_config: ActivationCheckpoint,
