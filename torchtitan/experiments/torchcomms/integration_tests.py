@@ -77,7 +77,7 @@ def main():
     parser.add_argument("output_dir")
     parser.add_argument(
         "--config_path",
-        default="./tests/integration_tests/base_config.toml",
+        default="./tests/integration_tests/base_config.py",
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(

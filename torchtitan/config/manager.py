@@ -4,19 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import importlib
+import importlib.util
 import os
 import sys
 
 from dataclasses import field, fields, is_dataclass, make_dataclass
-from typing import Any, Type
+from typing import Type
 
 import tyro
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
 
 from torchtitan.tools.logging import logger
 
@@ -25,17 +20,13 @@ from .job_config import JobConfig
 
 class ConfigManager:
     """
-    Parses, merges, and validates a JobConfig from TOML and CLI sources.
+    Parses, merges, and validates a JobConfig from Python config files and CLI sources.
 
     Configuration precedence:
-        CLI args > TOML file > JobConfig defaults
+        CLI args > Python config file > JobConfig defaults
 
-    CLI arguments use the format <section>.<key> to map to TOML entries.
-    Example:
-        model.name →
-
-        [model]
-        name
+    Python config files define a `default_config` variable of type JobConfig.
+    CLI arguments use the format <section>.<key> to override config values.
     """
 
     def __init__(self, config_cls: Type[JobConfig] = JobConfig):
@@ -44,14 +35,16 @@ class ConfigManager:
         self.register_tyro_rules(custom_registry)
 
     def parse_args(self, args: list[str] = sys.argv[1:]) -> JobConfig:
-        toml_values = self._maybe_load_toml(args)
-        config_cls = self._maybe_add_custom_config(args, toml_values)
+        loaded_config = self._maybe_load_python_config(args)
 
-        base_config = (
-            self._dict_to_dataclass(config_cls, toml_values)
-            if toml_values
-            else config_cls()
-        )
+        if loaded_config:
+            # Use the loaded config's type (which may already be a merged type
+            # if the Python config did its own merge)
+            config_cls = type(loaded_config)
+            base_config = loaded_config
+        else:
+            config_cls = self.config_cls
+            base_config = config_cls()
 
         self.config = tyro.cli(
             config_cls, args=args, default=base_config, registry=custom_registry
@@ -61,9 +54,10 @@ class ConfigManager:
 
         return self.config
 
-    def _maybe_load_toml(self, args: list[str]) -> dict[str, Any] | None:
-        # 1. Check CLI
+    def _maybe_load_python_config(self, args: list[str]) -> JobConfig | None:
+        """Load a Python config file that defines a `default_config` variable."""
         valid_keys = {"--job.config-file", "--job.config_file"}
+        file_path = None
         for i, arg in enumerate(args):
             if "=" in arg:
                 key, value = arg.split("=", 1)
@@ -73,47 +67,25 @@ class ConfigManager:
             elif i < len(args) - 1 and arg in valid_keys:
                 file_path = args[i + 1]
                 break
-        else:
+
+        if file_path is None:
             return None
 
         try:
-            with open(file_path, "rb") as f:
-                return tomllib.load(f)
-        except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
+            spec = importlib.util.spec_from_file_location("_user_config", file_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f"Cannot load config file: {file_path}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception as e:
             logger.exception(f"Error while loading config file: {file_path}")
             raise e
 
-    def _maybe_add_custom_config(
-        self, args: list[str], toml_values: dict[str, Any] | None
-    ) -> Type[JobConfig]:  # noqa: B006
-        """
-        Find and merge custom config module with current JobConfig class, if it is given.
-        The search order is first searching CLI args, then toml config file.
-        """
-        module_path = None
-
-        # 1. Check CLI
-        valid_keys = {
-            "--job.custom_config_module",
-            "--job.custom-config-module",
-        }
-        for i, arg in enumerate(args):
-            key = arg.split("=")[0]
-            if key in valid_keys:
-                module_path = arg.split("=", 1)[1] if "=" in arg else args[i + 1]
-                break
-
-        # 2. If not found in CLI, check TOML
-        if not module_path and toml_values:
-            job = toml_values.get("job", {})
-            if isinstance(job, dict):
-                module_path = job.get("custom_config_module")
-
-        if not module_path:
-            return self.config_cls
-
-        JobConfigExtended = importlib.import_module(module_path).JobConfig
-        return self._merge_configs(self.config_cls, JobConfigExtended)
+        if not hasattr(module, "default_config"):
+            raise ValueError(
+                f"Config file {file_path} must define a 'default_config' variable"
+            )
+        return module.default_config
 
     @staticmethod
     def _merge_configs(base, custom) -> Type:
@@ -157,39 +129,7 @@ class ConfigManager:
 
         return make_dataclass(f"Merged{base.__name__}", result, bases=(base,))
 
-    def _dict_to_dataclass(self, cls, data: dict[str, Any]) -> Any:
-        """Convert dictionary to dataclass, handling nested structures."""
-        if not is_dataclass(cls):
-            return data
-
-        valid_fields = set(f.name for f in fields(cls))
-        if invalid_fields := set(data) - valid_fields:
-            raise ValueError(
-                f"Invalid field names in {cls} data: {invalid_fields}.\n"
-                "Please modify your .toml config file or override these fields from the command line.\n"
-                "Run `NGPU=1 ./run_train.sh --help` to read all valid fields."
-            )
-
-        result = {}
-        for f in fields(cls):
-            if f.name in data:
-                value = data[f.name]
-                if is_dataclass(f.type) and isinstance(value, dict):
-                    result[f.name] = self._dict_to_dataclass(f.type, value)
-                else:
-                    result[f.name] = value
-        return cls(**result)
-
     def _validate_config(self) -> None:
-        if self.config.experimental.custom_args_module:
-            logger.warning(
-                "This field is being moved to --job.custom_config_module and "
-                "will be deprecated soon. Setting job.custom_config_module to "
-                "experimental.custom_args_module temporarily."
-            )
-            self.config.job.custom_config_module = (
-                self.config.experimental.custom_args_module
-            )
         # TODO: temporary mitigation of BC breaking change in hf_assets_path
         #       tokenizer default path, need to remove later
         if self.config.model.tokenizer_path:

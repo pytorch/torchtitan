@@ -6,7 +6,7 @@ This directory contains tests for the torchtitan project, including unit tests a
 
 - `unit_tests/`: Contains unit tests for individual components
 - `integration_tests/`: Contains integration tests that test multiple components together
-  - `base_config.toml`: Base configuration file for integration tests
+  - `base_config.py`: Base configuration file for integration tests
   - `features.py`: Tests for torchtitan features and composability
   - `ft.py`: Fault-tolerance integration tests
   - `h100.py`: Tests cases for H100 GPUs
@@ -37,7 +37,7 @@ python -m tests.integration_tests.run_tests <output_dir> [--config_path CONFIG_P
 Arguments:
 - `output_dir`: (Required) Directory where test outputs will be stored
 - `--test_suite`: (Optional) Specific test suite to run by name (default: "features")
-- `--config_path`: (Optional) Path to the base config file (default: "./tests/integration_tests/base_config.toml")
+- `--config_path`: (Optional) Path to the base config file (default: "./tests/integration_tests/base_config.py")
 - `--test_name`: (Optional) Specific test to run by name (default: "all")
 - `--ngpu`: (Optional) Number of GPUs to use for testing (default: 8)
 

@@ -1,8 +1,8 @@
 ## Enable Memory Profiling
 
-Launch training job with the following command (or alternatively set configs in toml files)
+Launch training job with the following command (or alternatively set configs in Python config files)
 ```
-CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --profiling.enable_memory_snapshot --profiling.save_memory_snapshot_folder memory_snapshot
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.py" ./run_train.sh --profiling.enable_memory_snapshot --profiling.save_memory_snapshot_folder memory_snapshot
 ```
 * `--profiling.enable_memory_snapshot`: to enable memory profiling
 * `--profiling.save_memory_snapshot_folder`: configures the folder which memory snapshots are dumped into (`./outputs/memory_snapshot/` by default)
@@ -12,16 +12,16 @@ CONFIG_FILE="./train_configs/debug_model.toml" ./run_train.sh --profiling.enable
 You can find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
 
-## Overriding Boolean Flags from `.toml` via CLI
+## Overriding Boolean Flags from Config via CLI
 
 Boolean flags are treated as **actions**. To disable a flag from the command line, use the `--no` prefix.
 
-For example, given the following in your `.toml` file:
+For example, given the following in your Python config file:
 
-```toml
-[profiling]
-enable_memory_snapshot = true
-
+```python
+default_config = JobConfig(
+    profiling=Profiling(enable_memory_snapshot=True),
+)
 ```
 You can override it at runtime via CLI with:
 
@@ -34,7 +34,7 @@ You can override it at runtime via CLI with:
 
 ## Debugging Config Values
 
-To inspect how configuration values are interpreted—including those from `.toml` files and CLI overrides—run the config manager directly:
+To inspect how configuration values are interpreted—including those from Python config files and CLI overrides—run the config manager directly:
 
 ```bash
 python -m torchtitan.config.manager [your cli args...]
@@ -43,7 +43,7 @@ python -m torchtitan.config.manager [your cli args...]
 For example,
 
 ```bash
-python -m torchtitan.config.manager --job.config_file ./torchtitan/models/llama3/train_configs/llama3_8b.toml --profiling.enable_memory_snapshot
+python -m torchtitan.config.manager --job.config_file ./torchtitan/models/llama3/train_configs/llama3_8b.py --profiling.enable_memory_snapshot
 ```
 
 To list all available CLI flags and usage:
@@ -81,7 +81,7 @@ NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
 **Example use case:**
 ```bash
 # Validate a 128-GPU configuration on a single GPU
-NGPU=128 COMM_MODE="fake_backend" CONFIG_FILE="./train_configs/llama3_70b.toml" ./run_train.sh
+NGPU=128 COMM_MODE="fake_backend" CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_70b.py" ./run_train.sh
 ```
 
 #### 2. `local_tensor` - Single-GPU Distributed Simulation
@@ -133,7 +133,7 @@ When debugging issues with multi-dimensional parallelism (combinations of FSDP, 
 Set consistent random seeds across all parallelism dimensions:
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_train.sh --debug.seed 42
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.py" ./run_train.sh --debug.seed 42
 ```
 
 **Seed behavior with parallelism:**
@@ -147,7 +147,7 @@ CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_tr
 Enable deterministic algorithms to ensure bit-for-bit reproducibility across runs:
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_train.sh --debug.deterministic
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.py" ./run_train.sh --debug.deterministic
 ```
 
 **What it does:**
@@ -177,7 +177,7 @@ For multiple experimental runs with different parallelism configs, we need to us
 #### Creating a Seed Checkpoint
 
 ```bash
-NGPU=1 CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_train.sh --checkpoint.enable --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
+NGPU=1 CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.py" ./run_train.sh --checkpoint.enable --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
 ```
 
 #### Loading Seed Checkpoints for Debugging
@@ -185,7 +185,7 @@ NGPU=1 CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" .
 When using seed checkpoints for debugging or validation purposes, you can enable the `load_only` configuration to load checkpoints without saving any new ones during training. This is particularly useful when you only want to verify model correctness or compare different configurations without cluttering your disk:
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.toml" ./run_train.sh --checkpoint.enable --checkpoint.load_only
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/debug_model.py" ./run_train.sh --checkpoint.enable --checkpoint.load_only
 ```
 
 The `--checkpoint.load_only` flag prevents the training process from saving any checkpoints, allowing you to:

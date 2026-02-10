@@ -36,11 +36,11 @@ This is an ongoing effort, and the level of grouping is subject to change.
 
 ### Extending `JobConfig`
 
-[`JobConfig`](../torchtitan/config/job_config.py) supports custom extension through the `--job.custom_config_module` flag.
-This lets you define a custom module that extends `JobConfig` with additional fields.
+[`JobConfig`](../torchtitan/config/job_config.py) supports custom extension via Python config files.
+Use `ConfigManager._merge_configs` to merge your custom `JobConfig` with the default one.
 
-When specified, your custom `JobConfig` is merged with the default:
-- If a field exists in both, the custom config’s value replaces the default.
+When merged:
+- If a field exists in both, the custom config's value replaces the default.
 - Fields unique to either config are retained.
 
 #### Example
@@ -72,15 +72,22 @@ class JobConfig:
     training: Training= field(default_factory=Training)
 ```
 
+Then create a Python config file that merges and constructs the config:
+
+```python
+# torchtitan/experiments/your_folder/train_configs/my_config.py
+from torchtitan.config import ConfigManager, JobConfig
+from torchtitan.experiments.your_folder.job_config import JobConfig as CustomJobConfig
+
+MergedJobConfig = ConfigManager._merge_configs(JobConfig, CustomJobConfig)
+
+default_config = MergedJobConfig()
+default_config.custom_config.how_is_your_day = "great"
+default_config.training.steps = 100
+```
+
 Then run your script with:
 
 ```bash
---job.custom_config_module=torchtitan.experiments.your_folder.job_config
-```
-
-Or specify it in your `.toml` config:
-
-```toml
-[job]
-custom_config_module = "torchtitan.experiments.your_folder.job_config"
+--job.config_file=torchtitan/experiments/your_folder/train_configs/my_config.py
 ```

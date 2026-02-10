@@ -21,7 +21,6 @@ def build_vlm_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--job.custom_config_module torchtitan.experiments.vlm.job_config",
                     "--model.name vlm",
                     "--training.dataset cc12m-test",
                     "--parallelism.data_parallel_shard_degree 4",
@@ -47,7 +46,7 @@ def main():
     parser.add_argument("output_dir")
     parser.add_argument(
         "--config_path",
-        default="./tests/integration_tests/base_config.toml",
+        default="./torchtitan/experiments/vlm/tests/base_config.py",
         help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(

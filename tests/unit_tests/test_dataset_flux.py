@@ -53,11 +53,11 @@ class TestFluxDataLoader(unittest.TestCase):
                 # in the dataset, then the test will fail, due to huggingface's
                 # non-resumption when checkpointing after the first epoch
 
-                path = "torchtitan.models.flux.job_config"
                 config_manager = ConfigManager()
                 config = config_manager.parse_args(
                     [
-                        f"--job.custom_config_module={path}",
+                        "--job.config_file",
+                        "./torchtitan/models/flux/train_configs/debug_model.py",
                         "--training.img_size",
                         str(256),
                         "--training.dataset",

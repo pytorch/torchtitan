@@ -54,10 +54,10 @@ DATASETS = {
 ```
 
 ### 4. Configure Your Training
-In your training configuration file (`.toml`), set your dataset:
+In your Python config file, set your dataset:
 
-```toml
-dataset = "wikipedia"
+```python
+default_config.training.dataset = "wikipedia"
 ```
 
 That's it! Your custom dataset is now ready to use with `torchtitan`.

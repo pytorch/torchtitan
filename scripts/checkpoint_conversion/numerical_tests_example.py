@@ -109,7 +109,7 @@ if __name__ == "__main__":
     hf_model_name = "meta-llama/Meta-Llama-3-8B"
 
     # tt params
-    config_path = "torchtitan/models/llama3/train_configs/llama3_8b.toml"
+    config_path = "torchtitan/models/llama3/train_configs/llama3_8b.py"
     checkpoint_path = "outputs/test_checkpoint/step-0-fromhf"  # dcp checkpoint from convert_from_hf.py
     # dcp checkpoint from convert_from_hf.py without using sd_adapter's permute
     checkpoint_path_no_perm = "outputs/test_checkpoint/step-0-fromhfnoperm"

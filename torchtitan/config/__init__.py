@@ -30,11 +30,14 @@ from .job_config import (
     Training,
     Validation,
 )
+from .configurable import Configurable, Module
 from .manager import ConfigManager
 
 __all__ = [
     "JobConfig",
     "ConfigManager",
+    "Configurable",
+    "Module",
     "TORCH_DTYPE_MAP",
     "Job",
     "Model",

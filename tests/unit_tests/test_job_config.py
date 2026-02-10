@@ -5,12 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 import tempfile
+import textwrap
 import unittest
 from dataclasses import dataclass
 
 import pytest
-import tomli_w
 from torchtitan.config import ConfigManager, JobConfig
+
+
+def _write_python_config(fp, code: str):
+    """Write a Python config file that defines default_config."""
+    fp.write(textwrap.dedent(code).encode())
+    fp.flush()
 
 
 class TestJobConfig(unittest.TestCase):
@@ -24,18 +30,27 @@ class TestJobConfig(unittest.TestCase):
         config = config_manager.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama3/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.py",
             ]
         )
         assert config.training.steps == 10
 
     def test_job_file_does_not_exist(self):
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(Exception):
             config_manager = ConfigManager()
-            config = config_manager.parse_args(["--job.config_file", "ohno.toml"])
+            config = config_manager.parse_args(
+                ["--job.config_file", "ohno.py"]
+            )
 
     def test_empty_config_file(self):
-        with tempfile.NamedTemporaryFile() as fp:
+        with tempfile.NamedTemporaryFile(suffix=".py") as fp:
+            _write_python_config(
+                fp,
+                """\
+                from torchtitan.config import JobConfig
+                default_config = JobConfig()
+                """,
+            )
             config_manager = ConfigManager()
             config = config_manager.parse_args(["--job.config_file", fp.name])
             assert config.job.description
@@ -45,7 +60,7 @@ class TestJobConfig(unittest.TestCase):
         config = config_manager.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama3/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.py",
                 "--job.dump_folder",
                 "/tmp/test_tt/",
             ]
@@ -68,22 +83,24 @@ class TestJobConfig(unittest.TestCase):
         config = config_manager.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama3/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.py",
             ]
         )
         assert config.parallelism.module_fqns_per_model_part is None
 
-        # toml has module names, cmdline does not
-        with tempfile.NamedTemporaryFile() as fp:
-            with open(fp.name, "wb") as f:
-                tomli_w.dump(
-                    {
-                        "parallelism": {
-                            "module_fqns_per_model_part": toml_chunks,
-                        }
-                    },
-                    f,
+        # config file has module names, cmdline does not
+        with tempfile.NamedTemporaryFile(suffix=".py") as fp:
+            _write_python_config(
+                fp,
+                f"""\
+                from torchtitan.config import JobConfig, Parallelism
+                default_config = JobConfig(
+                    parallelism=Parallelism(
+                        module_fqns_per_model_part={toml_chunks!r},
+                    ),
                 )
+                """,
+            )
             config_manager = ConfigManager()
             config = config_manager.parse_args(["--job.config_file", fp.name])
             assert (
@@ -91,16 +108,18 @@ class TestJobConfig(unittest.TestCase):
             ), config.parallelism.module_fqns_per_model_part
 
         # test that the field accepts list of lists structure
-        with tempfile.NamedTemporaryFile() as fp:
-            with open(fp.name, "wb") as f:
-                tomli_w.dump(
-                    {
-                        "parallelism": {
-                            "module_fqns_per_model_part": cmdline_chunks,
-                        }
-                    },
-                    f,
+        with tempfile.NamedTemporaryFile(suffix=".py") as fp:
+            _write_python_config(
+                fp,
+                f"""\
+                from torchtitan.config import JobConfig, Parallelism
+                default_config = JobConfig(
+                    parallelism=Parallelism(
+                        module_fqns_per_model_part={cmdline_chunks!r},
+                    ),
                 )
+                """,
+            )
             config_manager = ConfigManager()
             config = config_manager.parse_args(["--job.config_file", fp.name])
             assert (
@@ -109,16 +128,18 @@ class TestJobConfig(unittest.TestCase):
 
         # test empty chunks are handled correctly
         empty_chunks = [[], ["tok_embeddings"], []]
-        with tempfile.NamedTemporaryFile() as fp:
-            with open(fp.name, "wb") as f:
-                tomli_w.dump(
-                    {
-                        "parallelism": {
-                            "module_fqns_per_model_part": empty_chunks,
-                        }
-                    },
-                    f,
+        with tempfile.NamedTemporaryFile(suffix=".py") as fp:
+            _write_python_config(
+                fp,
+                f"""\
+                from torchtitan.config import JobConfig, Parallelism
+                default_config = JobConfig(
+                    parallelism=Parallelism(
+                        module_fqns_per_model_part={empty_chunks!r},
+                    ),
                 )
+                """,
+            )
             config_manager = ConfigManager()
             config = config_manager.parse_args(["--job.config_file", fp.name])
             assert (
@@ -126,24 +147,24 @@ class TestJobConfig(unittest.TestCase):
             ), config.parallelism.module_fqns_per_model_part
 
     def test_parse_exclude_from_loading(self):
-        toml_splits = ["optimizer", "dataloader"]
+        config_splits = ["optimizer", "dataloader"]
         cmdline_splits = ["optimizer", "lr_scheduler"]
         # no split points specified
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama3/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.py",
             ]
         )
         assert config.checkpoint.exclude_from_loading == []
 
-        # toml has no split points, but cmdline splits are specified
+        # config has no split points, but cmdline splits are specified
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
                 "--job.config_file",
-                "./torchtitan/models/llama3/train_configs/debug_model.toml",
+                "./torchtitan/models/llama3/train_configs/debug_model.py",
                 "--checkpoint.exclude_from_loading",
                 ",".join(cmdline_splits),
             ]
@@ -152,34 +173,38 @@ class TestJobConfig(unittest.TestCase):
             config.checkpoint.exclude_from_loading == cmdline_splits
         ), config.checkpoint.exclude_from_loading
 
-        # toml has split points, cmdline does not
-        with tempfile.NamedTemporaryFile() as fp:
-            with open(fp.name, "wb") as f:
-                tomli_w.dump(
-                    {
-                        "checkpoint": {
-                            "exclude_from_loading": toml_splits,
-                        }
-                    },
-                    f,
+        # config has split points, cmdline does not
+        with tempfile.NamedTemporaryFile(suffix=".py") as fp:
+            _write_python_config(
+                fp,
+                f"""\
+                from torchtitan.config import JobConfig, Checkpoint
+                default_config = JobConfig(
+                    checkpoint=Checkpoint(
+                        exclude_from_loading={config_splits!r},
+                    ),
                 )
+                """,
+            )
             config_manager = ConfigManager()
             config = config_manager.parse_args(["--job.config_file", fp.name])
             assert (
-                config.checkpoint.exclude_from_loading == toml_splits
+                config.checkpoint.exclude_from_loading == config_splits
             ), config.checkpoint.exclude_from_loading
 
-        # toml has split points, cmdline overrides them
-        with tempfile.NamedTemporaryFile() as fp:
-            with open(fp.name, "wb") as f:
-                tomli_w.dump(
-                    {
-                        "checkpoint": {
-                            "exclude_from_loading": toml_splits,
-                        }
-                    },
-                    f,
+        # config has split points, cmdline overrides them
+        with tempfile.NamedTemporaryFile(suffix=".py") as fp:
+            _write_python_config(
+                fp,
+                f"""\
+                from torchtitan.config import JobConfig, Checkpoint
+                default_config = JobConfig(
+                    checkpoint=Checkpoint(
+                        exclude_from_loading={config_splits!r},
+                    ),
                 )
+                """,
+            )
             config_manager = ConfigManager()
             config = config_manager.parse_args(
                 [
@@ -232,83 +257,29 @@ class TestJobConfig(unittest.TestCase):
         assert config.checkpoint.fake_model is True
         assert hasattr(config, "model")
 
-    def test_custom_parser(self):
+    def test_custom_config_via_python_file(self):
+        """Test that Python config files can use _merge_configs to extend JobConfig."""
         path = "tests.assets.extended_job_config_example"
 
-        config_manager = ConfigManager()
-        config = config_manager.parse_args(
-            [
-                f"--job.custom_config_module={path}",
-                "--custom_config.how-is-your-day",
-                "bad",
-                "--model.converters",
-                "float8,mxfp",
-            ]
-        )
-        assert config.custom_config.how_is_your_day == "bad"
-        assert config.model.converters == ["float8", "mxfp"]
-        result = config.to_dict()
-        assert isinstance(result, dict)
-
-        # There will be a SystemExit raised by ArgumentParser with exist status 2.
-        with self.assertRaisesRegex(SystemExit, "2"):
-            config = config_manager.parse_args(
-                [
-                    f"--job.custom_config_module={path}",
-                    "--custom_config.how-is-your-day",
-                    "bad",
-                    "--model.converters",
-                    "float8,mxfp",
-                    "--abcde",
-                ]
-            )
-
-        with tempfile.NamedTemporaryFile(mode="w+b", delete=True) as fp:
-            tomli_w.dump(
-                {
-                    "job": {
-                        "custom_config_module": path,
-                    }
-                },
+        with tempfile.NamedTemporaryFile(suffix=".py") as fp:
+            _write_python_config(
                 fp,
+                f"""\
+                import importlib
+                from torchtitan.config import ConfigManager, JobConfig
+                custom_module = importlib.import_module("{path}")
+                MergedJobConfig = ConfigManager._merge_configs(
+                    JobConfig, custom_module.JobConfig
+                )
+                default_config = MergedJobConfig()
+                default_config.custom_config.how_is_your_day = "really good"
+                default_config.model.converters = ["float8", "mxfp"]
+                """,
             )
-            fp.flush()
 
             config_manager = ConfigManager()
             config = config_manager.parse_args(
-                [
-                    f"--job.config_file={fp.name}",
-                    f"--job.custom_config_module={path}",
-                    "--custom_config.how-is-your-day",
-                    "bad",
-                    "--model.converters",
-                    "float8,mxfp",
-                ]
-            )
-            assert config.custom_config.how_is_your_day == "bad"
-            assert config.training.my_custom_steps == 32
-            assert config.model.converters == ["float8", "mxfp"]
-            result = config.to_dict()
-            assert isinstance(result, dict)
-
-        with tempfile.NamedTemporaryFile(mode="w+b", delete=True) as fp:
-            tomli_w.dump(
-                {
-                    "job": {
-                        "custom_config_module": path,
-                    },
-                    "custom_config": {"how_is_your_day": "really good"},
-                    "model": {"converters": ["float8", "mxfp"]},
-                },
-                fp,
-            )
-            fp.flush()
-
-            config_manager = ConfigManager()
-            config = config_manager.parse_args(
-                [
-                    f"--job.config_file={fp.name}",
-                ]
+                [f"--job.config_file={fp.name}"]
             )
 
             assert config.custom_config.how_is_your_day == "really good"
@@ -316,25 +287,76 @@ class TestJobConfig(unittest.TestCase):
             result = config.to_dict()
             assert isinstance(result, dict)
 
-    def test_job_config_invalid_field(self):
-        with self.assertRaisesRegex(
-            ValueError,
-            r"Invalid field names in .* data: .*\.\n"
-            r"Please modify your \.toml config file or override these fields from the command line\.\n"
-            r"Run `NGPU=1 \./run_train\.sh --help` to read all valid fields\.",
-        ), tempfile.NamedTemporaryFile() as fp:
-            with open(fp.name, "wb") as f:
-                tomli_w.dump(
-                    {
-                        "model": {
-                            "name": "llama3",
-                            "fake_field": 0,  # should error on this invalid field
-                        }
-                    },
-                    f,
+        # Test CLI override of custom config fields
+        with tempfile.NamedTemporaryFile(suffix=".py") as fp:
+            _write_python_config(
+                fp,
+                f"""\
+                import importlib
+                from torchtitan.config import ConfigManager, JobConfig
+                custom_module = importlib.import_module("{path}")
+                MergedJobConfig = ConfigManager._merge_configs(
+                    JobConfig, custom_module.JobConfig
                 )
+                default_config = MergedJobConfig()
+                default_config.custom_config.how_is_your_day = "really good"
+                """,
+            )
+
             config_manager = ConfigManager()
-            config_manager.parse_args(["--job.config_file", fp.name])
+            config = config_manager.parse_args(
+                [
+                    f"--job.config_file={fp.name}",
+                    "--custom_config.how-is-your-day",
+                    "bad",
+                    "--model.converters",
+                    "float8,mxfp",
+                ]
+            )
+            assert config.custom_config.how_is_your_day == "bad"
+            assert config.model.converters == ["float8", "mxfp"]
+
+        # Invalid args should still cause SystemExit
+        with tempfile.NamedTemporaryFile(suffix=".py") as fp:
+            _write_python_config(
+                fp,
+                f"""\
+                import importlib
+                from torchtitan.config import ConfigManager, JobConfig
+                custom_module = importlib.import_module("{path}")
+                MergedJobConfig = ConfigManager._merge_configs(
+                    JobConfig, custom_module.JobConfig
+                )
+                default_config = MergedJobConfig()
+                """,
+            )
+            with self.assertRaisesRegex(SystemExit, "2"):
+                config_manager = ConfigManager()
+                config_manager.parse_args(
+                    [
+                        f"--job.config_file={fp.name}",
+                        "--abcde",
+                    ]
+                )
+
+    def test_job_config_invalid_field(self):
+        """Python configs with invalid fields raise TypeError at construction."""
+        with tempfile.NamedTemporaryFile(suffix=".py") as fp:
+            _write_python_config(
+                fp,
+                """\
+                from torchtitan.config import JobConfig, Model
+                default_config = JobConfig(
+                    model=Model(
+                        name="llama3",
+                        fake_field=0,
+                    ),
+                )
+                """,
+            )
+            with self.assertRaises(Exception):
+                config_manager = ConfigManager()
+                config_manager.parse_args(["--job.config_file", fp.name])
 
 
 if __name__ == "__main__":

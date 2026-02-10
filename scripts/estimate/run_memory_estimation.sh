@@ -12,7 +12,7 @@ set -ex
 # NGPU=4 ./run_memory_estimation.sh
 NGPU=${NGPU:-"8"}
 NNODES=${NNODES:-"1"}
-CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/debug_model.toml"}
+CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/llama3/train_configs/debug_model.py"}
 
 overrides=""
 if [ $# -ne 0 ]; then

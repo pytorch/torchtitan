@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 
 
 """
-Use --job.custom_config_module=torchtitan.experiments.autoparallel.job_config
+Use a Python config file with ConfigManager._merge_configs() to include
+autoparallel-specific config fields. See docs/extension.md for details.
 """
 
 

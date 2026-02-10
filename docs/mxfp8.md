@@ -12,7 +12,7 @@ MXFP8 training can provide substantial training speedups for models where the ma
   - [Usage](#usage)
 - [MXFP8 for Grouped GEMMs (MoE)](#mxfp8-for-grouped-gemms-moe)
   - [Usage](#usage-1)
-- [Example TOML Configuration](#example-toml-configuration)
+- [Example Python Configuration](#example-python-configuration)
 - [Performance](#performance)
   - [Dense Models](#dense-models)
   - [MoE models](#moe-models)
@@ -40,10 +40,10 @@ MXFP8 differs from standard Float8 training in its scaling approach:
 
 #### Usage
 
-To enable MXFP8 training for linear layers, launch your training job with the following command (or alternatively set configs in toml files):
+To enable MXFP8 training for linear layers, launch your training job with the following command (or alternatively set configs in Python config files):
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh \
+CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.py" ./run_train.sh \
   --model.converters="quantize.linear.mx" \
   --quantize.linear.mx.recipe_name="mxfp8_cublas" \
   --compile.enable
@@ -72,7 +72,7 @@ For Mixture-of-Experts (MoE) models, MXFP8 can accelerate the expert computation
 To enable MXFP8 for MoE expert layers:
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama4/train_configs/llama4_17bx16e.toml" ./run_train.sh \
+CONFIG_FILE="./torchtitan/models/llama4/train_configs/llama4_17bx16e.py" ./run_train.sh \
   --model.converters="quantize.grouped_mm.mx" \
   --quantize.grouped_mm.mx.fqns="experts" \
   --quantize.grouped_mm.mx.recipe_name="mxfp8" \
@@ -99,26 +99,40 @@ CONFIG_FILE="./torchtitan/models/llama4/train_configs/llama4_17bx16e.toml" ./run
 
 * **torch.compile recommendation**: All benchmarks in this document were run with `torch.compile` enabled. We recommend using `torch.compile` for best performance.
 
-### Example TOML Configuration
+### Example Python Configuration
 
-Here's an example configuration for MXFP8 training in a TOML file:
+Here's an example configuration for MXFP8 training in a Python config file:
 
-```toml
-[model]
-converters = ["quantize.linear.mx", "quantize.grouped_mm.mx"]
+```python
+from torchtitan.config import JobConfig, Model, Compile
+from torchtitan.config.job_config import (
+    MXLinear, MXGroupedMM, Quantize, QuantizedLinear, QuantizedGroupedMM,
+)
 
-[quantize.linear.mx]
-recipe_name = "mxfp8_cublas"
-mxfp8_dim1_cast_kernel_choice = "cuda"
-filter_fqns = ["output", "router.gate"]
-
-[quantize.grouped_mm.mx]
-recipe_name = "mxfp8"
-fqns = ["experts"]
-
-[compile]
-enable = true
-components = ["model"]
+default_config = JobConfig(
+    model=Model(
+        converters=["quantize.linear.mx", "quantize.grouped_mm.mx"],
+    ),
+    compile=Compile(
+        enable=True,
+        components=["model"],
+    ),
+    quantize=Quantize(
+        linear=QuantizedLinear(
+            mx=MXLinear(
+                recipe_name="mxfp8_cublas",
+                mxfp8_dim1_cast_kernel_choice="cuda",
+                filter_fqns=["output", "router.gate"],
+            ),
+        ),
+        grouped_mm=QuantizedGroupedMM(
+            mx=MXGroupedMM(
+                recipe_name="mxfp8",
+                fqns=["experts"],
+            ),
+        ),
+    ),
+)
 ```
 
 ### Performance
