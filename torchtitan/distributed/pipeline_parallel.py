@@ -26,7 +26,7 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import JobConfig
+from torchtitan.config import JobConfig, Parallelism
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.dual_pipe_v import overlap_callback
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
@@ -141,7 +141,7 @@ def pipeline_llm(
         #       in case the model is modified e.g. by torch.compile
         stages[i].submod = m
 
-    pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
+    pp_schedule = build_pipeline_schedule(job_config.parallelism, job_config.training.local_batch_size, stages, loss_fn)
 
     # This is used in the train loop to determine whether to pass in the input_ids and labels
     has_first_stage = False
@@ -156,19 +156,23 @@ def pipeline_llm(
 
 
 def build_pipeline_schedule(
-    job_config: JobConfig, stages: list[PipelineStage], loss_fn: Callable
+    parallelism: Parallelism,
+    local_batch_size: int,
+    stages: list[PipelineStage],
+    loss_fn: Callable,
 ) -> _PipelineSchedule:
     """Builds a pipeline schedule for the given job configuration and stages.
 
     Args:
-        job_config (JobConfig): The job configuration.
+        parallelism (Parallelism): The parallelism configuration.
+        local_batch_size (int): The local batch size for computing microbatches.
         stages (list[PipelineStage]): The stages to be scheduled.
         loss_fn (Callable): The loss function.
 
     Returns:
         _PipelineSchedule: The pipeline schedule for the given stages.
     """
-    pp_schedule_csv = job_config.parallelism.pipeline_parallel_schedule_csv
+    pp_schedule_csv = parallelism.pipeline_parallel_schedule_csv
 
     # Validate that pp_schedule_csv is a valid path
     if pp_schedule_csv:
@@ -179,21 +183,21 @@ def build_pipeline_schedule(
         schedule_class = _PipelineScheduleRuntime
     else:
         schedule_class = get_schedule_class(
-            job_config.parallelism.pipeline_parallel_schedule
+            parallelism.pipeline_parallel_schedule
         )
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
-    microbatch_size = job_config.parallelism.pipeline_parallel_microbatch_size
-    batch_size = job_config.training.local_batch_size
+    microbatch_size = parallelism.pipeline_parallel_microbatch_size
+    batch_size = local_batch_size
     # validate that the batch size is divisible by the microbatch_size otherwise we'll hang or error during training
     if batch_size % microbatch_size != 0:
         raise ValueError(
-            f"Batch size {job_config.training.local_batch_size} must be divisible by microbatch_size {microbatch_size}. "
+            f"Batch size {local_batch_size} must be divisible by microbatch_size {microbatch_size}. "
             "Update the config arguments for either batch_size or pipeline_parallel_microbatch_size."
         )
     n_microbatches = batch_size // microbatch_size
     # We expect that the number of local stages (`len(stages)`) is the same across all ranks
-    num_total_stages = job_config.parallelism.pipeline_parallel_degree * len(stages)
+    num_total_stages = parallelism.pipeline_parallel_degree * len(stages)
     if n_microbatches < num_total_stages:
         logger.warning(
             f"Number of microbatches ({n_microbatches}) is less than the total number "
@@ -209,11 +213,11 @@ def build_pipeline_schedule(
         scale_grads=False,
     )
     logger.info(
-        f"Using pipeline schedule {job_config.parallelism.pipeline_parallel_schedule} "
+        f"Using pipeline schedule {parallelism.pipeline_parallel_schedule} "
         f"with {n_microbatches} microbatches and {num_total_stages} stages."
     )
 
-    if job_config.parallelism.pipeline_parallel_expert_parallel_overlap and isinstance(
+    if parallelism.pipeline_parallel_expert_parallel_overlap and isinstance(
         schedule, ScheduleDualPipeV
     ):
         schedule.register_custom_function(OVERLAP_F_B, overlap_callback)

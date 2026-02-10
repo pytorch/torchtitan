@@ -316,6 +316,7 @@ def build_flux_dataloader(
     # This parameter is not used, keep it for compatibility
     tokenizer: FluxTokenizer | None,
     infinite: bool = True,
+    **kwargs,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets.
 

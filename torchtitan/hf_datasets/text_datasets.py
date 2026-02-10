@@ -17,7 +17,7 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import JobConfig
+from torchtitan.config import Training, Validation
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
@@ -170,8 +170,9 @@ def build_text_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
-    job_config: JobConfig,
+    training: Training,
     infinite: bool = True,
+    **kwargs,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets.
 
@@ -179,13 +180,13 @@ def build_text_dataloader(
         dp_world_size: Data parallelism world size.
         dp_rank: Data parallelism rank.
         tokenizer: Tokenizer to use for encoding text.
-        job_config: Job configuration containing dataset and DataLoader settings.
+        training: Training configuration containing dataset and DataLoader settings.
         infinite: Whether to loop the dataset infinitely.
     """
-    dataset_name = job_config.training.dataset
-    dataset_path = job_config.training.dataset_path
-    batch_size = job_config.training.local_batch_size
-    seq_len = job_config.training.seq_len
+    dataset_name = training.dataset
+    dataset_path = training.dataset_path
+    batch_size = training.local_batch_size
+    seq_len = training.seq_len
 
     hf_ds = HuggingFaceTextDataset(
         dataset_name=dataset_name,
@@ -198,7 +199,7 @@ def build_text_dataloader(
     )
 
     dataloader_kwargs = {
-        **asdict(job_config.training.dataloader),
+        **asdict(training.dataloader),
         "batch_size": batch_size,
     }
 
@@ -214,7 +215,7 @@ def build_text_validation_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
-    job_config: JobConfig,
+    validation: Validation,
     infinite: bool = False,
 ) -> ParallelAwareDataloader:
     """Build a validation data loader for HuggingFace datasets.
@@ -223,13 +224,13 @@ def build_text_validation_dataloader(
         dp_world_size: Data parallelism world size.
         dp_rank: Data parallelism rank.
         tokenizer: Tokenizer to use for encoding text.
-        job_config: Job configuration containing dataset and DataLoader settings.
+        validation: Validation configuration containing dataset and DataLoader settings.
         infinite: Whether to loop the dataset infinitely.
     """
-    dataset_name = job_config.validation.dataset
-    dataset_path = job_config.validation.dataset_path
-    batch_size = job_config.validation.local_batch_size
-    seq_len = job_config.validation.seq_len
+    dataset_name = validation.dataset
+    dataset_path = validation.dataset_path
+    batch_size = validation.local_batch_size
+    seq_len = validation.seq_len
 
     hf_ds = HuggingFaceTextDataset(
         dataset_name=dataset_name,
@@ -242,7 +243,7 @@ def build_text_validation_dataloader(
     )
 
     dataloader_kwargs = {
-        **asdict(job_config.validation.dataloader),
+        **asdict(validation.dataloader),
         "batch_size": batch_size,
     }
 

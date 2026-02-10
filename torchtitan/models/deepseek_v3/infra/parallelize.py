@@ -94,7 +94,7 @@ def parallelize_deepseekv3(
             enable_float8_tensorwise_tp=False,
             cp_enabled=parallel_dims.cp_enabled,
         )
-        maybe_enable_async_tp(job_config, tp_mesh)
+        maybe_enable_async_tp(job_config.parallelism, job_config.compile, tp_mesh)
 
     # Check if using DeepEP for MoE communication
     if job_config.parallelism.expert_parallel_comm_backend == "deepep":

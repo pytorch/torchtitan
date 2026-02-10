@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional, Union
 
 from tokenizers import AddedToken, Tokenizer
-from torchtitan.config import JobConfig
+
 from torchtitan.tools.logging import logger
 from typing_extensions import override
 
@@ -413,7 +413,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
 
 def build_hf_tokenizer(
-    job_config: JobConfig,
+    hf_assets_path: str,
 ) -> Union[HuggingFaceTokenizer, BaseTokenizer]:
     """
     Builds a HuggingFaceTokenizer from the specified path.
@@ -423,10 +423,10 @@ def build_hf_tokenizer(
     from various file formats and infers special token behavior.
 
     Args:
-        JobConfig: A JobConfig object containing the path to the tokenizer directory.
+        hf_assets_path: Path to the HF assets directory containing tokenizer files.
 
     Returns:
         tokenizer (HuggingFaceTokenizer): Loaded tokenizer instance with intelligent BOS/EOS handling
     """
-    tokenizer = HuggingFaceTokenizer(job_config.model.hf_assets_path)
+    tokenizer = HuggingFaceTokenizer(hf_assets_path)
     return tokenizer

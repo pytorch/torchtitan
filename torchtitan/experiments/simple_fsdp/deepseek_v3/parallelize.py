@@ -91,7 +91,7 @@ def parallelize_deepseekv3(
             enable_float8_tensorwise_tp=False,
             cp_enabled=parallel_dims.cp_enabled,
         )
-        maybe_enable_async_tp(job_config, parallel_dims.get_mesh("tp"))
+        maybe_enable_async_tp(job_config.parallelism, job_config.compile, parallel_dims.get_mesh("tp"))
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
