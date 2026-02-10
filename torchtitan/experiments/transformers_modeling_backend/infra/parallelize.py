@@ -17,13 +17,13 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torchtitan.components.quantization.float8 import find_float8_linear_config
-from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import ActivationCheckpoint, Parallelism, Training, TORCH_DTYPE_MAP
+from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import NoParallel, ParallelDims
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.experiments.transformers_modeling_backend.job_config import JobConfig
 from torchtitan.models.llama3.infra.parallelize import (
     apply_compile,
     apply_ddp,
@@ -35,7 +35,14 @@ from torchtitan.tools.logging import logger
 def parallelize_hf_transformers(
     model: nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    *,
+    training: Training,
+    model_converters: list,
+    parallelism: Parallelism,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpoint,
+    experimental: Experimental,
+    dump_folder: str,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
@@ -48,14 +55,14 @@ def parallelize_hf_transformers(
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
     assert (
-        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
-        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
     if parallel_dims.tp_enabled:
-        float8_config = find_float8_linear_config(job_config.model.converters)
+        float8_config = find_float8_linear_config(model_converters)
         enable_float8_linear = float8_config is not None
         float8_is_rowwise = (
             float8_config is not None
@@ -70,21 +77,21 @@ def parallelize_hf_transformers(
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
         )
-        maybe_enable_async_tp(job_config.parallelism, job_config.compile, parallel_dims.get_mesh("tp"))
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
+        compile_config.enable and "model" in compile_config.components
     )
 
-    if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
+    if ac_config.mode != "none":
+        apply_ac(model, ac_config)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, job_config.compile)
+        apply_compile(model, compile_config)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -96,11 +103,11 @@ def parallelize_hf_transformers(
         apply_fsdp(
             model,
             parallel_dims.get_mesh(list(dp_mesh_dim_names)),
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -112,7 +119,7 @@ def parallelize_hf_transformers(
             model.set_cp_mesh(parallel_dims.get_mesh("cp"))
             logger.info("Applied Context Parallel to the model")
 
-        if job_config.training.enable_cpu_offload:
+        if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         dp_replicate_mesh = parallel_dims.get_mesh("dp_replicate")
