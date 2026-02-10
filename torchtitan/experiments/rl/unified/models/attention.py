@@ -5,7 +5,119 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+from torch.nn.attention import activate_flash_attention_impl
+
+activate_flash_attention_impl("FA3")
+
 from vllm.model_executor.layers.attention import Attention
+from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.flash_attn import (
+    FlashAttentionImpl,
+    FlashAttentionMetadata,
+)
+
+
+class NativeFlashAttentionImpl(FlashAttentionImpl):
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass with FlashAttention.
+
+        Args:
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
+            attn_metadata: Metadata for attention.
+        Returns:
+            shape = [num_tokens, num_heads * head_size]
+        """
+        assert output is not None, "Output tensor must be provided."
+        assert (
+            self.vllm_flash_attn_version is not None
+        ), "FlashAttention version not detected."
+
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported for FlashAttentionImpl"
+            )
+
+        if attn_metadata is None:
+            # Profiling run.
+            return output.fill_(0)
+
+        attn_type = self.attn_type
+
+        # IMPORTANT!
+        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
+        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
+        # in this method. For example, `view` and `slice` (or `[:n]`) operations
+        # are surprisingly slow even in the case they do not invoke any GPU ops.
+        # Minimize the PyTorch ops in this method as much as possible.
+        # Whenever making a change in this method, please benchmark the
+        # performance to make sure it does not introduce any overhead.
+
+        num_actual_tokens = attn_metadata.num_actual_tokens
+
+        assert attn_type not in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER)
+
+        # For decoder and cross-attention, use KV cache as before
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        assert not self.kv_cache_dtype.startswith("fp8")
+
+        assert not attn_metadata.use_cascade
+
+        cu_seqlens_q = attn_metadata.query_start_loc
+        seqused_k = attn_metadata.seq_lens
+        max_seqlen_q = attn_metadata.max_query_len
+        max_seqlen_k = attn_metadata.max_seq_len
+        block_table = attn_metadata.block_table
+        scheduler_metadata = attn_metadata.scheduler_metadata
+
+        descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
+
+        q_descale = layer._q_scale.expand(descale_shape)
+        k_descale = layer._k_scale.expand(descale_shape)
+        v_descale = layer._v_scale.expand(descale_shape)
+
+        assert self.dcp_world_size == 1
+
+        if attn_metadata.causal:
+            sliding_window_size = (-1, 0)
+        else:
+            raise RuntimeError("Non-causal attention not supported yet.")
+
+        assert self.alibi_slopes is None
+
+        out = torch.nn.attention.varlen.varlen_attn(
+            query,
+            key,
+            value,
+            cu_seqlens_q,
+            cu_seqlens_q,
+            max_seqlen_q,
+            max_seqlen_k,
+            scale=self.scale,
+            window_size=sliding_window_size,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            cache_seqlens=seqused_k - cu_seqlens_q[1:],
+            cache_batch_idx=None,
+            page_table=block_table,
+        )
+        output.copy_(out)
+        return output
 
 
 class VLLMAttention(torch.nn.Module):
@@ -44,7 +156,7 @@ class VLLMAttention(torch.nn.Module):
             vllm_config.cache_config if hasattr(vllm_config, "cache_config") else None
         )
 
-        self.vllm_attn = Attention(
+        attention = Attention(
             num_heads=num_heads,
             head_size=head_dim,
             scale=self.scale,
@@ -53,6 +165,17 @@ class VLLMAttention(torch.nn.Module):
             quant_config=None,
             prefix=f"model.layers.{layer_name}.attention.inner_attention",
         )
+        reference_impl = attention.impl
+        attention.impl = NativeFlashAttentionImpl(
+            num_heads,
+            head_dim,
+            self.scale,
+            num_kv_heads,
+            alibi_slopes=reference_impl.alibi_slopes,
+            sliding_window=None,
+            kv_cache_dtype=reference_impl.kv_cache_dtype,
+        )
+        self.vllm_attn = attention
 
     def forward(
         self,
