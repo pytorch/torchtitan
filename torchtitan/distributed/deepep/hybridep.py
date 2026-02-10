@@ -27,6 +27,11 @@ from torch._library.opaque_object import (
     register_opaque_type,
     get_opaque_type_name,
 )
+from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.models.moe.utils import (
+    TOKEN_GROUP_ALIGN_SIZE_M,
+    maybe_align_num_tokens_for_mxfp8,
+)
 
 
 _hybrid_ep_cls: Any = None  # Lazily-loaded HybridEPBuffer class
@@ -146,9 +151,6 @@ def _dispatch_impl(
 
     # MXFP8 requires per-expert-group padding to multiples of 32 (scaling block size).
     # HybridEP's kernel handles this natively via pad_multiple.
-    from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
-    from torchtitan.models.moe.utils import TOKEN_GROUP_ALIGN_SIZE_M
-
     pad_multiple = (
         MXFP8_GROUP_ALIGNMENT_SIZE
         if TOKEN_GROUP_ALIGN_SIZE_M == MXFP8_GROUP_ALIGNMENT_SIZE
@@ -190,7 +192,7 @@ def _dispatch_fake(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
     """Fake dispatch for torch.compile tracing."""
     if num_permuted_tokens is not None:
-        out_tokens = num_permuted_tokens
+        out_tokens = maybe_align_num_tokens_for_mxfp8(num_permuted_tokens)
     else:
         out_tokens = x.shape[0]
     hidden = x.new_empty(out_tokens, x.shape[1])

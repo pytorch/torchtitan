@@ -25,6 +25,7 @@ from torch.distributed.tensor import (
 from torch.distributed.tensor.parallel import ParallelStyle
 
 from torchtitan.models.moe.utils import _permute, _unpermute
+from torchtitan.models.moe.utils import maybe_align_num_tokens_for_mxfp8
 
 
 class BaseExpertParallel(ParallelStyle, ABC):
@@ -373,6 +374,7 @@ class DeepEPExpertParallel(BaseExpertParallel):
                 num_permuted_tokens = num_tokens * ep_size * min(num_local_experts, top_k)
                 if self.moe_expert_capacity_factor is not None:
                     num_permuted_tokens = int(num_permuted_tokens * self.moe_expert_capacity_factor)
+                num_permuted_tokens = maybe_align_num_tokens_for_mxfp8(num_permuted_tokens)
 
             hidden_states, tokens_per_expert, self._state = hybridep.dispatch_tokens(
                 hidden_states,

@@ -13,6 +13,7 @@ from torchtitan.tools.utils import _round_up
 from .kernels import generate_permute_indices
 
 TOKEN_GROUP_ALIGN_SIZE_M = 8
+MXFP8_TOKEN_GROUP_ALIGNMENT_SIZE_M = 32
 ValidTokenGroupAlignmentSize = Literal[8, 16, 32]
 
 
@@ -37,6 +38,13 @@ def set_token_group_alignment_size_m(
     """
     global TOKEN_GROUP_ALIGN_SIZE_M
     TOKEN_GROUP_ALIGN_SIZE_M = alignment_size
+
+
+def maybe_align_num_tokens_for_mxfp8(num_tokens: int) -> int:
+    """Round up token count only when MXFP8 group alignment is active."""
+    if TOKEN_GROUP_ALIGN_SIZE_M != MXFP8_TOKEN_GROUP_ALIGNMENT_SIZE_M:
+        return num_tokens
+    return _round_up(num_tokens, MXFP8_TOKEN_GROUP_ALIGNMENT_SIZE_M)
 
 
 def _permute(x, num_tokens_per_expert, ep_degree, num_local_experts):
