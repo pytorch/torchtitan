@@ -59,6 +59,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=100,
             ),
+            # TODO (zhxchen17) Switch to custom attention backend once upstream is ready.
             attention_backend="FLASH_ATTN",
         ),
     )
