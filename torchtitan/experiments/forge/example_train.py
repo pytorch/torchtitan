@@ -74,7 +74,9 @@ class Trainer(ForgeEngine):
 
         # metrics logging
         self.metrics_processor = build_metrics_processor(
-            job_config, self.parallel_dims, model_args
+            job_config=job_config,
+            parallel_dims=self.parallel_dims,
+            model_args=model_args,
         )
         color = self.metrics_processor.color
 

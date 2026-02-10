@@ -162,7 +162,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else self.train_spec.build_metrics_processor_fn
         )
         self.metrics_processor = build_metrics_processor_fn(
-            job_config, parallel_dims, model_args
+            job_config=job_config,
+            parallel_dims=parallel_dims,
+            model_args=model_args,
         )
         color = self.metrics_processor.color
 
@@ -249,7 +251,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
-            ensure_pp_loss_visible(parallel_dims, job_config.parallelism.pipeline_parallel_schedule, color)
+            ensure_pp_loss_visible(
+                parallel_dims=parallel_dims,
+                pp_schedule=job_config.parallelism.pipeline_parallel_schedule,
+                color=color,
+            )
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
             model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
