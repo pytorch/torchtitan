@@ -463,23 +463,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         extra_kwargs: dict[str, Any] = {}
 
         attn_type = getattr(self.model_args, "attn_type", "sdpa")
-        if (
-            "attention_masks" not in extra_inputs.keys()
-            or extra_inputs["attention_masks"] is None
-        ):
-            model = cast(ModelProtocol, self.model_parts[0])
-            extra_inputs.pop("attention_masks")
+        if attn_type in ["flex", "varlen"]:
             assert (
                 self.tokenizer is not None
-            ), "tokenizer is required for sdpa/flex/varlen attention"
-            if attn_type in ["flex", "varlen"]:
-                extra_kwargs["attention_masks"] = model.get_attention_masks(
-                    input_batch=inputs,
-                    tokenizer=self.tokenizer,
-                    extra_inputs=extra_inputs,
-                )
-        else:
-            extra_kwargs["attention_masks"] = extra_inputs.pop("attention_masks")
+            ), "tokenizer is required for flex/varlen attention"
+            model = cast(ModelProtocol, self.model_parts[0])
+            extra_kwargs["attention_masks"] = model.get_attention_masks(
+                input_batch=inputs,
+                tokenizer=self.tokenizer,
+                extra_inputs=extra_inputs,
+            )
 
         if self.parallel_dims.cp_enabled:
             inputs, labels, extra_kwargs = prepare_context_parallel_input(

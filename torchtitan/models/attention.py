@@ -217,8 +217,6 @@ def get_causal_mask_mod() -> _mask_mod_signature:
 def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signature:
     """Creates a document mask that prevents attention across document boundaries.
 
-    Document boundaries can be detected either from EOS tokens or position ID resets.
-
     Args:
         batch: Input batch tensor with shape [b, s, h, d]
         eos_id: End-of-sequence token ID that marks document boundaries
@@ -226,7 +224,6 @@ def get_document_mask_mod(batch: torch.Tensor, eos_id: int) -> _mask_mod_signatu
     Returns:
         A mask modifier function that implements document-level masking.
     """
-    # batch is [b, s, h, d] shape
     # batch is [b, s, h, d] shape
     eos_mask = batch == eos_id
     eos_mask[:, -1] = True
