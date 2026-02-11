@@ -311,7 +311,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             parallel_dims.tp_enabled
             and not job_config.parallelism.disable_loss_parallel
         )
-        self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
+        self.train_context = dist_utils.get_train_context(
+            enable_loss_parallel=loss_parallel_enabled,
+            model_parts=self.model_parts,
+            debug_config=job_config.debug,
+            dump_folder=job_config.job.dump_folder,
+        )
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
             parallel_dims,
             job_config.training.mixed_precision_param,
