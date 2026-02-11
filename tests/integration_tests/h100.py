@@ -78,5 +78,24 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             "hsdp+cp+compile+float8",
             ngpu=8,
         ),
+        # Experimental, non-blocking: PRs can land if only this test fails
+        OverrideDefinitions(
+            [
+                [
+                    "--job.config_file ./torchtitan/models/deepseek_v3/train_configs/debug_model.toml",
+                    "--model.name simple_fsdp.deepseek_v3",
+                    "--parallelism.tensor_parallel_degree 1",
+                    "--parallelism.expert_parallel_degree 8",
+                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
+                    "--compile.graph_passes auto_bucketing",
+                    "--activation_checkpoint.mode none",
+                    "--compile.backend inductor",
+                    "--compile.enable",
+                ]
+            ],
+            "[Experimental, non-blocking landing if fails] SimpleFSDP DeepSeekV3 auto_bucketing",
+            "simplefsdp_deepseekv3_auto_bucketing",
+            ngpu=8,
+        ),
     ]
     return integration_tests_flavors
