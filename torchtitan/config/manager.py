@@ -129,7 +129,7 @@ class ConfigManager:
             - Otherwise, the field from `custom` overrides the one in `base` (type, default, etc.).
         - Fields only present in `base` or `custom` are preserved as-is.
         """
-        result = []
+        result: list[str | tuple[str, Any] | tuple[str, Any, Any]] = []
         b_map = {f.name: f for f in fields(base)}
         c_map = {f.name: f for f in fields(custom)}
 
