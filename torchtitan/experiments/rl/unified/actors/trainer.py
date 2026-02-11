@@ -11,7 +11,7 @@ from typing import Any, Optional
 import torch
 from monarch.actor import Actor, endpoint
 from torchtitan.experiments.rl.unified.actors.generator import TrajectoryData
-from torchtitan.experiments.rl.unified.models.parallelism_utils import (
+from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     create_trainer_parallel_dims,
 )
 from torchtitan.experiments.rl.unified.models.utils import load_model, ModelMode
