@@ -60,6 +60,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # non-swappable training components
     checkpointer: CheckpointManager
     ft_manager: FTManager
+    grad_scaler: torch.amp.GradScaler | None
 
     # runtime utilities
     device: torch.device
@@ -189,6 +190,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             init_device = device_type
             buffer_device = None
 
+        # Validate FP16 + early_step_in_backward incompatibility
+        fp16_in_use = (
+            job_config.training.mixed_precision_param == "float16"
+            or job_config.training.dtype == "float16"
+        )
+        if fp16_in_use and job_config.optimizer.early_step_in_backward:
+            raise ValueError(
+                "FP16 training requires GradScaler for loss scaling, which is "
+                "incompatible with optimizer.early_step_in_backward. "
+                "Please disable early_step_in_backward when using FP16."
+            )
+
         self.loss_fn = self.train_spec.build_loss_fn(
             job_config, parallel_dims=parallel_dims, ft_manager=self.ft_manager
         )
@@ -215,6 +228,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
         assert self.gradient_accumulation_steps > 0
 
+        self.grad_scaler = dist_utils.build_grad_scaler(job_config, device_type)
+        # Wrap loss_fn for PP if FP16 is active
+        loss_fn_for_pp = self.loss_fn
+        if self.grad_scaler is not None:
+            _original = self.loss_fn
+            _scaler = self.grad_scaler
+
+            def _scaled_loss_fn(pred, labels):
+                return _scaler.scale(_original(pred, labels))
+
+            loss_fn_for_pp = _scaled_loss_fn
+
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
@@ -236,7 +261,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.device,
                 model_args,
                 self.train_spec.parallelize_fn,
-                self.loss_fn,
+                loss_fn_for_pp,
             )
             # when PP is enabled, `model` obj is no longer used after this point,
             # model_parts is used instead
@@ -521,13 +546,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             # accumulate losses across pipeline microbatches
             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-            loss = (
-                # Rescale PP loss to be "local loss sum / global valid tokens)
-                # because each microbathes could have different number of valid tokens
-                (torch.sum(torch.stack(losses)) / global_valid_tokens).to(self.device)
-                if self.pp_has_last_stage
-                else torch.tensor([-1.0], device=self.device)
-            )
+            if self.pp_has_last_stage:
+                # Rescale PP loss to be "local loss sum / global valid tokens"
+                # because each microbatch could have different number of valid tokens
+                loss = (torch.sum(torch.stack(losses)) / global_valid_tokens).to(
+                    self.device
+                )
+                # When using GradScaler, losses from PP schedule are scaled;
+                # unscale for correct logging
+                if self.grad_scaler is not None:
+                    loss = loss / self.grad_scaler.get_scale()
+            else:
+                loss = torch.tensor([-1.0], device=self.device)
         else:
             # Non-PP forward / backward
             assert len(model_parts) == 1
@@ -543,7 +573,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
                 # need to free pred before bwd to avoid peaking memory
                 del pred
-                loss.backward()
+
+                if self.grad_scaler is not None:
+                    scaled_loss = self.grad_scaler.scale(loss)
+                    scaled_loss.backward()
+                else:
+                    loss.backward()
 
         # The returned loss here is local SUM loss / global_valid_tokens
         return loss
@@ -593,6 +628,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             )
             accumulated_losses.append(loss.detach())
 
+        if self.grad_scaler is not None:
+            self.grad_scaler.unscale_(self.optimizers)
+
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
@@ -601,7 +639,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
+
+        if self.grad_scaler is not None:
+            self.grad_scaler.step(self.optimizers)
+            self.grad_scaler.update()
+        else:
+            self.optimizers.step()
+
         self.lr_schedulers.step()
 
         # Reduce the data collected over gradient accumulation steps.
@@ -645,6 +689,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+        if self.grad_scaler is not None:
+            extra_metrics["grad_scaler/scale"] = self.grad_scaler.get_scale()
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -742,11 +788,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         return self.step < self.job_config.training.steps
 
     def state_dict(self) -> dict[str, Any]:
-        return {"step": self.step, "ntokens_seen": self.ntokens_seen}
+        sd: dict[str, Any] = {"step": self.step, "ntokens_seen": self.ntokens_seen}
+        if self.grad_scaler is not None:
+            sd["grad_scaler"] = self.grad_scaler.state_dict()
+        return sd
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         self.step = state_dict["step"]
         self.ntokens_seen = state_dict["ntokens_seen"]
+        if self.grad_scaler is not None and "grad_scaler" in state_dict:
+            self.grad_scaler.load_state_dict(state_dict["grad_scaler"])
 
     def close(self) -> None:
         if hasattr(self, "checkpointer") and self.checkpointer:

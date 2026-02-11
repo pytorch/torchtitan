@@ -570,6 +570,63 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "dataloader_kwargs",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.mixed_precision_param=float16",
+                ],
+            ],
+            "FP16 mixed precision with FSDP and GradScaler",
+            "fsdp_fp16",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.mixed_precision_param=float16",
+                    "--checkpoint.enable",
+                ],
+                [
+                    "--training.mixed_precision_param=float16",
+                    "--checkpoint.enable",
+                    "--training.steps 20",
+                ],
+            ],
+            "FP16 checkpoint save and resume with GradScaler state",
+            "fp16_checkpoint",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.mixed_precision_param=float16",
+                    "--compile.enable",
+                ],
+            ],
+            "FP16 mixed precision with torch.compile",
+            "fp16_compile",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.mixed_precision_param=float16",
+                    "--activation_checkpoint.mode selective",
+                    "--activation_checkpoint.selective_ac_option op",
+                ],
+            ],
+            "FP16 mixed precision with selective activation checkpointing",
+            "fp16_sac",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.mixed_precision_param=float16",
+                    "--compile.enable",
+                    "--activation_checkpoint.mode selective",
+                    "--activation_checkpoint.selective_ac_option op",
+                ],
+            ],
+            "FP16 mixed precision with torch.compile and selective AC",
+            "fp16_compile_sac",
+        ),
     ]
 
     return integration_tests_flavors

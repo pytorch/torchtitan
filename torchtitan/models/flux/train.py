@@ -206,7 +206,11 @@ class FluxTrainer(Trainer):
             # need to free to before bwd to avoid peaking memory
             # pyrefly: ignore[unsupported-delete]
             del (latent_noise_pred, noise, target)
-            loss.backward()
+
+            if self.grad_scaler is not None:
+                self.grad_scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
         return loss
 
@@ -229,6 +233,9 @@ class FluxTrainer(Trainer):
 
         loss = self.forward_backward_step(input_dict=input_dict, labels=labels)
 
+        if self.grad_scaler is not None:
+            self.grad_scaler.unscale_(self.optimizers)
+
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
             self.job_config.training.max_norm,
@@ -237,7 +244,13 @@ class FluxTrainer(Trainer):
             ep_enabled=parallel_dims.ep_enabled,
         )
         self.checkpointer.maybe_wait_for_staging()
-        self.optimizers.step()
+
+        if self.grad_scaler is not None:
+            self.grad_scaler.step(self.optimizers)
+            self.grad_scaler.update()
+        else:
+            self.optimizers.step()
+
         self.lr_schedulers.step()
 
         # log metrics
@@ -269,6 +282,8 @@ class FluxTrainer(Trainer):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+        if self.grad_scaler is not None:
+            extra_metrics["grad_scaler/scale"] = self.grad_scaler.get_scale()
         self.metrics_processor.log(
             self.step,
             global_avg_loss,

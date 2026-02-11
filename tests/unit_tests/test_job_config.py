@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 import tomli_w
+import torch
 from torchtitan.config import ConfigManager, JobConfig
 
 
@@ -335,6 +336,42 @@ class TestJobConfig(unittest.TestCase):
                 )
             config_manager = ConfigManager()
             config_manager.parse_args(["--job.config_file", fp.name])
+
+    def test_fp16_config_accepted(self):
+        """Test that float16 is accepted for dtype and mixed_precision_param."""
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(["--training.mixed_precision_param=float16"])
+        assert config.training.mixed_precision_param == "float16"
+
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(["--training.dtype=float16"])
+        assert config.training.dtype == "float16"
+
+    def test_fp16_grad_scaler_creation(self):
+        """Test that build_grad_scaler returns a GradScaler for FP16 and None otherwise."""
+        from torchtitan.distributed.utils import build_grad_scaler
+
+        # BF16 (default) -> no scaler
+        config = JobConfig()
+        assert build_grad_scaler(config, "cpu") is None
+
+        # FP32 explicit -> no scaler
+        config = JobConfig()
+        config.training.mixed_precision_param = "float32"
+        assert build_grad_scaler(config, "cpu") is None
+
+        # FP16 mixed_precision_param -> scaler
+        config = JobConfig()
+        config.training.mixed_precision_param = "float16"
+        scaler = build_grad_scaler(config, "cpu")
+        assert scaler is not None
+        assert isinstance(scaler, torch.amp.GradScaler)
+
+        # FP16 dtype -> scaler
+        config = JobConfig()
+        config.training.dtype = "float16"
+        scaler = build_grad_scaler(config, "cpu")
+        assert scaler is not None
 
 
 if __name__ == "__main__":

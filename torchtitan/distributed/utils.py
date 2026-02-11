@@ -21,7 +21,12 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
+from torchtitan.config import (
+    Comm as CommConfig,
+    Debug as DebugConfig,
+    JobConfig,
+    TORCH_DTYPE_MAP,
+)
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -261,6 +266,27 @@ def maybe_enable_amp(
                 device_type,
                 dtype=TORCH_DTYPE_MAP[mixed_precision_param],
             )
+
+
+def build_grad_scaler(
+    job_config: JobConfig,
+    device_type: str,
+) -> torch.amp.GradScaler | None:
+    """Build a GradScaler if FP16 mixed precision is configured.
+
+    FP16 has only 5 exponent bits, so gradients can underflow to zero.
+    GradScaler applies dynamic loss scaling to prevent this.
+    Returns None if FP16 is not in use (i.e., BF16 or FP32).
+    """
+    fp16_in_use = (
+        job_config.training.mixed_precision_param == "float16"
+        or job_config.training.dtype == "float16"
+    )
+    if not fp16_in_use:
+        return None
+
+    logger.info("FP16 training enabled - creating GradScaler for loss scaling")
+    return torch.amp.GradScaler(device=device_type)
 
 
 def init_fake_mode(world_size: int, comm_mode: str = "fake_backend"):
