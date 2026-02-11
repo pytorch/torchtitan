@@ -20,6 +20,7 @@ import torch.distributed.tensor.parallel
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
+from torch.distributed.tensor._ops.utils import is_tensor_partial
 
 from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -44,14 +45,16 @@ def _dist_reduce(
             Defaults to None. If provided, this all_reduce will be called for the extra
             process group, and then the result will be all_reduced for the mesh.
     """
+    is_partial = False
     if isinstance(x, DTensor):
         # functional collectives do not support DTensor inputs
+        is_partial = is_tensor_partial(x._spec)
         x = x.full_tensor()
 
     if extra_pg is not None:
         x = funcol.all_reduce(x, reduceOp=reduceOp, group=extra_pg)
 
-    if mesh is None:
+    if mesh is None or is_partial:
         return x.item()
 
     assert x.numel() == 1  # required by `.item()`
