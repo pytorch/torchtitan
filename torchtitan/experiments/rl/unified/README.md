@@ -14,9 +14,10 @@ The integration consists of two main components:
 ## Quick Start
 ### Prerequisites
 
-1. Install PyTorch nightly for torchtitan:
-```
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
+1. Install PyTorch nightly & Monarch for torchtitan:
+```bash
+uv pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
+uv pip install torchmonarch
 ```
 
 
@@ -33,7 +34,7 @@ uv pip install --no-build-isolation -e .
 
 NOTE: If `flash_attn_varlen_func` hits error "torch.AcceleratorError: CUDA error: the provided PTX was compiled with an unsupported toolchain" during forward path, this is due to GPU driver version is not compatible with vLLM/PyTorch compiled version. Use the following command to recompile vLLM.
 
-```
+```bash
 # Set CUDA version environment variable
 export CUDA_HOME=/usr/local/cuda-12.4
 export PATH=/usr/local/cuda-12.4/bin:$PATH
@@ -49,23 +50,23 @@ uv pip install -e .
 ```
 
 3. Download Qwen/Qwen3-0.6B checkpoint from HuggingFace and put into `torchtitan/experiments/rl/example_checkpoint` folder.
-```
+```bash
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torchtitan/experiments/rl/example_checkpoint --all --hf_token=...
 ```
 
 4. Run inference:
-```
+```bash
 python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint>
 ```
 
 Run with TP: (work in progress)
-```
+```bash
 python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint> --tensor-parallel-size 2
 
 ```
 
 5. Run simple rl loop
-```
+```bash
 VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
 ```
 Right now we only support VLLM_COMPAT mode, which could achieve trainer and generator bitwise identical. We are working on support UNIFIED mode,

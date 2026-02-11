@@ -7,10 +7,12 @@ on:
       - ciflow/8gpu/*
     paths:
       - 'torchtitan/experiments/compiler_toolkit/**'
+      - 'torchtitan/experiments/simple_fsdp/**'
       - '.github/workflows/integration_test_8gpu_compiler_toolkit.yaml'
   pull_request:
     paths:
       - 'torchtitan/experiments/compiler_toolkit/**'
+      - 'torchtitan/experiments/simple_fsdp/**'
       - '.github/workflows/integration_test_8gpu_compiler_toolkit.yaml'
   schedule:
     # Runs every 12 hours

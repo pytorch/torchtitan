@@ -246,19 +246,17 @@ class FluxTrainer(Trainer):
 
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
-            ft_pg = self.ft_manager.loss_sync_pg
             loss_mesh = parallel_dims.get_optional_mesh("loss")
 
             # NOTE: the loss returned by train
             global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_sum(loss, loss_mesh, ft_pg),
-                dist_utils.dist_max(loss, loss_mesh, ft_pg),
+                dist_utils.dist_sum(loss, loss_mesh),
+                dist_utils.dist_max(loss, loss_mesh),
                 dist_utils.dist_sum(
                     torch.tensor(
                         self.ntokens_seen, dtype=torch.int64, device=self.device
                     ),
                     loss_mesh,
-                    ft_pg,
                 ),
             )
         else:
