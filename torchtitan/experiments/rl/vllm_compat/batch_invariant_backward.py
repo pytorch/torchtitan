@@ -22,7 +22,7 @@ Usage:
     from batch_invariant_backward import enable_batch_invariant_backward_mode
 
     # Initialize vLLM's deterministic mode first
-    init_batch_invariance()
+    init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 
     # Then enable gradient support
     enable_batch_invariant_backward_mode()
@@ -313,7 +313,7 @@ def enable_batch_invariant_backward_mode():
     ):
         raise RuntimeError(
             "vLLM's batch_invariant mode is not initialized. "
-            "Call init_batch_invariance() first."
+            "Call init_batch_invariance(AttentionBackendEnum.FLASH_ATTN) first."
         )
 
     # Use vLLM's existing library - don't destroy it!
