@@ -121,7 +121,10 @@ class ParallelDims:
                     backend_override[name] = "fake"
 
             return world_mesh._unflatten(
-                0, dim_degrees, dim_names, backend_override=backend_override
+                0,
+                dim_degrees,
+                dim_names,
+                backend_override=backend_override,
             )
 
         logger.info(

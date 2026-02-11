@@ -28,6 +28,8 @@ from torchtitan.experiments.rl.vllm_compat.simple_rl import (
 )
 from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_to_vllm
 from vllm import LLM, SamplingParams
+from vllm.config import AttentionConfig
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +212,9 @@ class VLLMRolloutEngine:
                 seed=42,  # Fixed seed for determinism
                 enforce_eager=True,
                 tensor_parallel_size=self.tp_size,  # Explicitly single GPU
+                attention_config=AttentionConfig(
+                    backend=AttentionBackendEnum.FLASH_ATTN,
+                ),
             )
             logger.info("Created new vLLM engine")
         else:
