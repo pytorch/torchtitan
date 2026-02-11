@@ -36,7 +36,16 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
 
         class LoRALinear(parent_cls):  # type: ignore[valid-type, misc]
             def __init__(self, *args: Any, **kwargs: Any) -> None:
-                raise RuntimeError("LoRALinear should not be instantiated directly. ")
+                raise RuntimeError("LoRALinear should not be instantiated directly.")
+
+            @classmethod
+            def from_linear(
+                cls, linear: nn.Linear, rank: int, alpha: float
+            ) -> "LoRALinear":
+                """Convert an existing Linear to LoRALinear in-place."""
+                linear.__class__ = cls
+                linear._init_lora(rank, alpha)  # type: ignore[attr-defined]
+                return linear  # type: ignore[return-value]
 
             def _init_lora(
                 self,
@@ -77,11 +86,7 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
         LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
         _lora_class_cache[parent_cls] = LoRALinear
 
-    # Change class in-place to avoid re-initializing the Linear
-    linear.__class__ = _lora_class_cache[parent_cls]
-    # Initialize LoRA adapters as post-init
-    linear._init_lora(rank, alpha)  # type: ignore[attr-defined]
-    return linear
+    return _lora_class_cache[parent_cls].from_linear(linear, rank, alpha)
 
 
 class LoRAConverter:
