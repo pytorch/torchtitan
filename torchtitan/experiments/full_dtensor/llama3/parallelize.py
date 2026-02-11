@@ -91,7 +91,7 @@ def parallelize_tok_embeddings(
 ) -> None:
     # NOTE: The repeat code here and other parallelize_* is left here
     # by intention. We want to understand the code pieces that can be used
-    # and provid them as util functions once we enabled more parallelisms.
+    # and provide them as util functions once we enabled more parallelisms.
     mesh = get_dense_spmd_mesh(parallel_dims)
     placements, _ = get_dp_placements(parallel_dims)
     distribute_state(module, "weight", mesh, placements)
