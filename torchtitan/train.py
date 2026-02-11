@@ -46,7 +46,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
     # swappable training components in TrainSpec
     tokenizer: train_spec_module.BaseTokenizer | None
-    dataloader: train_spec_module.BaseDataLoader
+    dataloader: train_spec_module.BaseDataLoader | None
     # TODO: we should make this list[ModelProtocol] but this will affect many components.
     # will do this in a separate PR
     model_parts: list[torch.nn.Module]
