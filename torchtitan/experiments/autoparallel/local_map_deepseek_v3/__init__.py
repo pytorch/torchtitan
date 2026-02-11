@@ -14,21 +14,18 @@ from torchtitan.components.optimizer import build_optimizers_with_moe_load_balan
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-
-from torchtitan.models.deepseek_v3 import deepseekv3_args
+from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.model.state_dict_adapter import (
     DeepSeekV3StateDictAdapter,
 )
 from torchtitan.protocols.train_spec import TrainSpec
 
-from .args import DeepSeekV3ModelArgs, get_sample_config
-
-from .model import DeepSeekV3Model
+from .args import get_sample_config
 from .parallelize_deepseekv3 import parallelize_deepseekv3
 
 
-def get_model_args() -> DeepSeekV3ModelArgs:
-    model_args = copy.deepcopy(deepseekv3_args)
+def get_model_args():
+    model_args = copy.deepcopy(deepseekv3_configs)
     # TODO: Align configs between AP and Titan
     for config in model_args.keys():
         # Just override the configs
@@ -44,8 +41,7 @@ def get_train_spec() -> TrainSpec:
     model_args = get_model_args()
 
     return TrainSpec(
-        model_cls=DeepSeekV3Model,
-        model_args=model_args,
+        model_configs=model_args,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,

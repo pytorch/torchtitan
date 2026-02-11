@@ -23,7 +23,8 @@ from torchtitan.config import ActivationCheckpoint, Parallelism, Training
 from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
-from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
+from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.train_spec import ParallelizeFunction
 from torchtitan.tools.logging import logger
 
 # NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
@@ -291,20 +292,18 @@ def pipeline_hf_transformers(
     experimental: Experimental,
     dump_folder: str,
     device: torch.device,
-    model_args: BaseModelArgs,
+    model_config: BaseModel.Config,
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.get_mesh("pp")
 
     # Determine the number of virtual stages based on schedule type
-    schedule_class = get_schedule_class(
-        parallelism.pipeline_parallel_schedule
-    )
+    schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
     is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
     layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
-    if hasattr(model_args, "n_layers"):
-        num_layers = model_args.n_layers
+    if hasattr(model_config, "n_layers"):
+        num_layers = model_config.n_layers
     else:
         raise ValueError("Model does not have n_layers attribute.")
 
@@ -395,7 +394,12 @@ def pipeline_hf_transformers(
         #       in case the model is modified e.g. by torch.compile
         stages[i].submod = m
 
-    pp_schedule = build_pipeline_schedule(parallelism=parallelism, local_batch_size=training.local_batch_size, stages=stages, loss_fn=loss_fn)
+    pp_schedule = build_pipeline_schedule(
+        parallelism=parallelism,
+        local_batch_size=training.local_batch_size,
+        stages=stages,
+        loss_fn=loss_fn,
+    )
 
     # This is used in the train loop to determine whether to pass in the input_ids and labels
     has_first_stage = False

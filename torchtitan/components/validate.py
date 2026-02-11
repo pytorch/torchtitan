@@ -19,7 +19,7 @@ from torchtitan.config import Parallelism, Validation
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
-from torchtitan.protocols import ModelProtocol
+from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
@@ -153,7 +153,7 @@ class Validator(BaseValidator):
 
         try:
             extra_kwargs["attention_masks"] = cast(
-                ModelProtocol, model_parts[0]
+                BaseModel, model_parts[0]
             ).get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
@@ -191,10 +191,7 @@ class Validator(BaseValidator):
         num_steps = 0
 
         for input_dict, labels in self.validation_dataloader:
-            if (
-                self.validation.steps != -1
-                and num_steps >= self.validation.steps
-            ):
+            if self.validation.steps != -1 and num_steps >= self.validation.steps:
                 break
 
             self.metrics_processor.ntokens_since_last_log += labels.numel()

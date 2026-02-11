@@ -33,30 +33,29 @@ def register_torchtitan_model_from_train_spec(
     Args:
         train_spec: TorchTitan TrainSpec containing model components
         model_name: Name to register in vLLM (e.g., "Qwen3TorchTitanForCausalLM")
-        model_flavor: Model flavor key (e.g., "0.6B") to select from qwen3_args
+        model_flavor: Model flavor key (e.g., "0.6B") to select from qwen3_configs
 
     """
     from vllm.model_executor.models.registry import ModelRegistry
 
-    # Get model_args directly from TrainSpec.model_args dict using flavor key
-    if isinstance(train_spec.model_args, dict):
-        if model_flavor not in train_spec.model_args:
+    # Get model_args directly from TrainSpec.model_configs dict using flavor key
+    if isinstance(train_spec.model_configs, dict):
+        if model_flavor not in train_spec.model_configs:
             raise ValueError(
-                f"Model flavor '{model_flavor}' not found in train_spec.model_args. "
-                f"Available flavors: {list(train_spec.model_args.keys())}"
+                f"Model flavor '{model_flavor}' not found in train_spec.model_configs. "
+                f"Available flavors: {list(train_spec.model_configs.keys())}"
             )
-        model_args = train_spec.model_args[model_flavor]
+        model_config = train_spec.model_configs[model_flavor]
     else:
         raise ValueError(
-            "train_spec.model_args must be a dict mapping flavor names to ModelArgs"
+            "train_spec.model_configs must be a dict mapping flavor names to Config"
         )
 
     # Create dynamic model class directly from TrainSpec components
     class TorchTitanVLLMModelFromSpec(TorchTitanVLLMModelWrapper):
         def __init__(self, *, vllm_config, prefix=""):
             super().__init__(
-                model_cls=train_spec.model_cls,
-                model_args=model_args,
+                model_config=model_config,
                 state_dict_adapter=train_spec.state_dict_adapter,
                 # NOTE: This should be replaced with qwen3 parallelization plan in torchtitan core
                 parallelize_fn=parallelize_qwen3,
@@ -73,7 +72,7 @@ def register_torchtitan_model_from_train_spec(
 
     logger.info(
         f"Successfully registered {model_name} with vLLM using TrainSpec "
-        f"(model_cls={train_spec.model_cls.__name__}, flavor={model_flavor})"
+        f"(flavor={model_flavor})"
     )
 
 

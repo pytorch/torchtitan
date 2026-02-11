@@ -779,17 +779,11 @@ class Debug:
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
 
 
-# Backward-compatible aliases: the canonical Config classes now live inside
-# their owning component classes. These imports are placed here (after
-# FaultTolerance is defined) to avoid circular imports:
-# optimizer.py -> ft/manager.py -> job_config.FaultTolerance.
+# These imports are placed here (after FaultTolerance is defined) to avoid
+# circular imports: optimizer.py -> ft/manager.py -> job_config.FaultTolerance.
 from torchtitan.components.lr_scheduler import LRSchedulersContainer  # noqa: E402
 from torchtitan.components.metrics import MetricsProcessor  # noqa: E402
 from torchtitan.components.optimizer import OptimizersContainer  # noqa: E402
-
-Metrics = MetricsProcessor.Config
-Optimizer = OptimizersContainer.Config
-LRScheduler = LRSchedulersContainer.Config
 
 
 @dataclass
@@ -800,11 +794,15 @@ class JobConfig:
 
     job: Job = field(default_factory=Job)
     profiling: Profiling = field(default_factory=Profiling)
-    metrics: Metrics = field(default_factory=Metrics)
+    metrics: MetricsProcessor.Config = field(default_factory=MetricsProcessor.Config)
     model: Model = field(default_factory=Model)
     model_converters: ModelConverters = field(default_factory=ModelConverters)
-    optimizer: Optimizer = field(default_factory=Optimizer)
-    lr_scheduler: LRScheduler = field(default_factory=LRScheduler)
+    optimizer: OptimizersContainer.Config = field(
+        default_factory=OptimizersContainer.Config
+    )
+    lr_scheduler: LRSchedulersContainer.Config = field(
+        default_factory=LRSchedulersContainer.Config
+    )
     training: Training = field(default_factory=Training)
     parallelism: Parallelism = field(default_factory=Parallelism)
     checkpoint: Checkpoint = field(default_factory=Checkpoint)

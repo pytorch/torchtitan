@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from dataclasses import dataclass, field
 from typing import cast
 
 import torch
@@ -18,211 +19,45 @@ from torchtitan.models.attention import (
     get_document_mask_mod,
     ScaledDotProductAttentionWrapper,
 )
-from torchtitan.models.moe import build_moe, FeedForward, MoE
-from torchtitan.models.utils import trunc_normal_
-from torchtitan.protocols.model import AttentionMasksType
-from torchtitan.protocols.train_spec import ModelProtocol
-
-from .args import DeepSeekV3ModelArgs
-
-
-# Adapted from https://github.com/DeepSeek-ai/DeepSeek-V3/blob/main/inference/model.py#L294
-def precompute_freqs_cis(args: DeepSeekV3ModelArgs) -> torch.Tensor:
-    """
-    Precomputes frequency-based complex exponential values for rotary positional embeddings.
-
-    Args:
-        args (DeepSeekV3ModelArgs): Model arguments containing positional embedding parameters.
-
-    Returns:
-        torch.Tensor: Precomputed complex exponential values for positional embeddings.
-    """
-    dim = args.qk_rope_head_dim
-    seqlen = args.max_seq_len
-    beta_fast = args.beta_fast
-    beta_slow = args.beta_slow
-    base = args.rope_theta
-    factor = args.rope_factor
-
-    def find_correction_dim(
-        num_rotations: float, dim: int, base: float, max_seq_len: int
-    ) -> float:
-        """
-        Computes the correction dimension for a given number of rotations in the rotary positional embedding.
-
-        Args:
-            num_rotations (float): Number of rotations to compute the correction for.
-            dim (int): Dimensionality of the embedding space.
-            base (float): Base value for the exponential computation.
-            max_seq_len (int): Maximum sequence length.
-
-        Returns:
-            float: The correction dimension based on the input parameters.
-        """
-        return (
-            dim
-            * math.log(max_seq_len / (num_rotations * 2 * math.pi))
-            / (2 * math.log(base))
-        )
-
-    def find_correction_range(
-        low_rot: float, high_rot: float, dim: int, base: float, max_seq_len: int
-    ) -> tuple[int, int]:
-        """
-        Computes the range of correction dimensions for rotary positional embeddings.
-
-        Args:
-            low_rot (float): Lower bound for the number of rotations.
-            high_rot (float): Upper bound for the number of rotations.
-            dim (int): Dimensionality of the embedding space.
-            base (float): Base value for the exponential computation.
-            max_seq_len (int): Maximum sequence length.
-
-        Returns:
-            tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
-        """
-        low = math.floor(find_correction_dim(low_rot, dim, base, max_seq_len))
-        high = math.ceil(find_correction_dim(high_rot, dim, base, max_seq_len))
-        return max(low, 0), min(high, dim - 1)
-
-    def linear_ramp_factor(min: float, max: float, dim: int) -> torch.Tensor:
-        """
-        Computes a linear ramp function used to smooth values between a minimum and maximum range.
-
-        Args:
-            min (float): Minimum value for the ramp function.
-            max (float): Maximum value for the ramp function.
-            dim (int): Dimensionality of the ramp tensor.
-
-        Returns:
-            torch.Tensor: A tensor of shape (dim,) with values linearly interpolated between 0 and 1,
-                clamped to the range [0, 1].
-        """
-        if min == max:
-            max += 0.001
-        linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
-        ramp_func = torch.clamp(linear_func, 0, 1)
-        return ramp_func
-
-    # Basic RoPE frequency calculation
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
-
-    # YaRN scaling for extended context. YaRN is used to extend the context length after pre-training.
-    if seqlen > args.original_seq_len:
-        low, high = find_correction_range(
-            beta_fast, beta_slow, dim, base, args.original_seq_len
-        )
-        smooth = 1 - linear_ramp_factor(low, high, dim // 2)
-        freqs = freqs / factor * (1 - smooth) + freqs * smooth
-
-    # Create position indices
-    t = torch.arange(seqlen)
-
-    # Outer product: [positions] × [frequencies]
-    freqs = torch.outer(t, freqs)
-
-    # Convert to complex exponentials: e^(i*freq*pos)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
-    return freqs_cis
-
-
-def reshape_for_broadcast(
-    freqs_cis: torch.Tensor, x: torch.Tensor, positions: torch.Tensor | None = None
-) -> torch.Tensor:
-    """
-    Reshape frequency tensor for broadcasting it with another tensor.
-
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    The input freqs_cis tensor is assumed to be of shape (max_seqlen, dim // 2),
-    and the first seqlen elements will be sliced, but dim must match x.
-
-    Args:
-        freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
-        x (torch.Tensor): Target tensor for broadcasting compatibility.
-        positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache.
-            Shape is (1, seqlen) or (bz, seqlen). Defaults to None.
-
-    Returns:
-        torch.Tensor: Reshaped frequency tensor.
-    """
-    ndim = x.ndim
-    assert ndim > 1
-    seqlen = x.shape[1]
-    if positions is None:
-        freqs_cis = freqs_cis[0:seqlen]
-        assert freqs_cis.shape == (seqlen, x.shape[-1])
-        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-        return freqs_cis.view(*shape)
-    elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
-        freqs_cis = freqs_cis[positions.squeeze(0)]
-        assert freqs_cis.shape == (seqlen, x.shape[-1])
-        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-        return freqs_cis.view(*shape)
-    else:
-        assert positions.shape == (x.shape[0], seqlen)
-        freqs_cis_expanded = freqs_cis[None, :, None, :].expand(x.shape[0], -1, -1, -1)
-        freqs_cis = torch.gather(
-            freqs_cis_expanded,
-            dim=1,
-            index=positions.view(x.shape[0], seqlen, 1, 1).expand(
-                x.shape[0], seqlen, 1, freqs_cis_expanded.shape[-1]
-            ),
-        )
-        return freqs_cis
-
-
-def apply_rotary_emb(
-    x: torch.Tensor, freqs_cis: torch.Tensor, positions: torch.Tensor | None = None
-) -> torch.Tensor:
-    """
-    Applies rotary positional embeddings to the input tensor.
-
-    Args:
-        x (torch.Tensor): Input tensor with positional embeddings to be applied.
-        freqs_cis (torch.Tensor): Precomputed complex exponential values for positional embeddings.
-        positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache. Defaults to None.
-
-    Returns:
-        torch.Tensor: Tensor with rotary embeddings applied.
-    """
-    dtype = x.dtype
-    x = torch.view_as_complex(x.float().view(*x.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, x, positions)
-    y = torch.view_as_real(x * freqs_cis).flatten(3)
-    return y.to(dtype)
+from torchtitan.models.common import FeedForward, RoPE
+from torchtitan.models.common.moe import build_moe, MoE
+from torchtitan.models.common.rope import apply_rotary_emb_single_complex
+from torchtitan.models.utils import get_moe_model_nparams_and_flops, trunc_normal_
+from torchtitan.protocols.model import AttentionMasksType, BaseModel
+from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import has_cuda_capability
 
 
 class Attention(nn.Module):
     """
-    Multi-head attention (MLA) module.
+    Multi-head latent attention (MLA) module.
+
+    This is DeepSeek V3-specific and NOT shared with other models.
     """
 
-    def __init__(self, model_args: DeepSeekV3ModelArgs):
+    def __init__(self, config: "DeepSeekV3Model.Config"):
         super().__init__()
-        self.dim = model_args.dim
-        self.n_heads = model_args.n_heads
-        self.q_lora_rank = model_args.q_lora_rank
-        self.kv_lora_rank = model_args.kv_lora_rank
-        self.qk_nope_head_dim = model_args.qk_nope_head_dim
-        self.qk_rope_head_dim = model_args.qk_rope_head_dim
-        self.qk_head_dim = model_args.qk_nope_head_dim + model_args.qk_rope_head_dim
-        self.v_head_dim = model_args.v_head_dim
+        self.dim = config.dim
+        self.n_heads = config.n_heads
+        self.q_lora_rank = config.q_lora_rank
+        self.kv_lora_rank = config.kv_lora_rank
+        self.qk_nope_head_dim = config.qk_nope_head_dim
+        self.qk_rope_head_dim = config.qk_rope_head_dim
+        self.qk_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
+        self.v_head_dim = config.v_head_dim
 
         if self.q_lora_rank == 0:
             self.wq = nn.Linear(self.dim, self.n_heads * self.qk_head_dim, bias=False)
         else:
             self.wq_a = nn.Linear(self.dim, self.q_lora_rank, bias=False)
-            self.q_norm = nn.RMSNorm(self.q_lora_rank, eps=model_args.norm_eps)
+            self.q_norm = nn.RMSNorm(self.q_lora_rank, eps=config.norm_eps)
             self.wq_b = nn.Linear(
                 self.q_lora_rank, self.n_heads * self.qk_head_dim, bias=False
             )
         self.wkv_a = nn.Linear(
             self.dim, self.kv_lora_rank + self.qk_rope_head_dim, bias=False
         )
-        self.kv_norm = nn.RMSNorm(self.kv_lora_rank, eps=model_args.norm_eps)
+        self.kv_norm = nn.RMSNorm(self.kv_lora_rank, eps=config.norm_eps)
         self.wkv_b = nn.Linear(
             self.kv_lora_rank,
             self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
@@ -231,11 +66,13 @@ class Attention(nn.Module):
         self.wo = nn.Linear(self.n_heads * self.v_head_dim, self.dim, bias=False)
         self.softmax_scale = self.qk_head_dim**-0.5
 
-        if model_args.max_seq_len > model_args.original_seq_len:
-            mscale = 0.1 * model_args.mscale * math.log(model_args.rope_factor) + 1.0
+        if config.max_seq_len > config.rope_config.original_seq_len:
+            mscale = (
+                0.1 * config.mscale * math.log(config.rope_config.rope_factor) + 1.0
+            )
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.attn_type = model_args.attn_type
+        self.attn_type = config.attn_type
         self.inner_attention: nn.Module
         match self.attn_type:
             case "flex":
@@ -281,14 +118,14 @@ class Attention(nn.Module):
         q_nope, q_pe = torch.split(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
-        q_pe = apply_rotary_emb(q_pe, freqs_cis, positions)
+        q_pe = apply_rotary_emb_single_complex(q_pe, freqs_cis, positions)
         q = torch.cat([q_nope, q_pe], dim=-1)  # (bsz, seqlen, n_heads, qk_head_dim)
 
         # Key-value projection
         kv = self.wkv_a(x)  # (bsz, seqlen, kv_lora_rank + qk_rope_head_dim)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
-        k_pe = apply_rotary_emb(
+        k_pe = apply_rotary_emb_single_complex(
             k_pe.unsqueeze(2), freqs_cis, positions
         )  # (bsz, seqlen, 1, qk_rope_head_dim)
 
@@ -346,23 +183,22 @@ class TransformerBlock(nn.Module):
     Transformer block with attention and feed-forward layers.
     """
 
-    def __init__(self, layer_id: int, model_args: DeepSeekV3ModelArgs):
+    def __init__(self, layer_id: int, config: "DeepSeekV3Model.Config"):
 
         super().__init__()
-        self.attention = Attention(model_args)
-        self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.attention = Attention(config)
+        self.attention_norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
+        self.ffn_norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
 
-        self.moe_enabled = layer_id >= model_args.n_dense_layers
+        self.moe_enabled = layer_id >= config.n_dense_layers
         if self.moe_enabled:
             self.moe = build_moe(
-                args=model_args.moe_args,
-                dim=model_args.dim,
-                hidden_dim=model_args.moe_inter_dim,
-                moe_impl=model_args.moe_impl,
+                config=config.moe_config,
+                dim=config.dim,
+                moe_impl=config.moe_impl,
             )
         else:
-            self.feed_forward = FeedForward(model_args.dim, model_args.inter_dim)
+            self.feed_forward = config.ff_config.build(dim=config.dim)
 
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
@@ -405,36 +241,132 @@ class TransformerBlock(nn.Module):
             self.feed_forward.init_weights(self.weight_init_std)
 
 
-class DeepSeekV3Model(ModelProtocol):
+class DeepSeekV3Model(BaseModel):
     """
     DeepSeek-V3 Transformer model with attention and feed-forward layers.
     """
 
-    def __init__(self, model_args: DeepSeekV3ModelArgs):
-        super().__init__(model_args)
-        self.max_seq_len = model_args.max_seq_len
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
-        self.register_buffer(
-            "freqs_cis", precompute_freqs_cis(model_args), persistent=False
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseModel.Config):
+        dim: int = 2048
+        n_layers: int = 27
+        n_heads: int = 16
+        vocab_size: int = 102400
+        norm_eps: float = 1e-5
+        max_seq_len: int = 4096 * 4
+        attn_mask_type: str = "causal"
+        n_dense_layers: int = 1
+
+        # MoE
+        moe_config: MoE.Config = field(default_factory=MoE.Config)
+
+        # Expert parallel communication backend (set dynamically in update_from_config)
+        moe_impl: str = "standard"
+
+        # Multi-Head Latent Attention (MLA)
+        q_lora_rank: int = 0
+        kv_lora_rank: int = 512
+        qk_nope_head_dim: int = 128
+        qk_rope_head_dim: int = 64
+        v_head_dim: int = 128
+        attn_type: str = "sdpa"
+        mscale: float = 1.0
+
+        # Sub-component configs
+        ff_config: FeedForward.Config = field(
+            default_factory=lambda: FeedForward.Config(hidden_dim=10944)
+        )
+        rope_config: RoPE.Config = field(
+            default_factory=lambda: RoPE.Config(
+                dim=64,
+                max_seq_len=4096 * 4,
+                theta=10000.0,
+                format="complex",
+                scaling="yarn",
+                rope_factor=40.0,
+                beta_fast=32.0,
+                beta_slow=1.0,
+                original_seq_len=4096,
+            )
         )
 
-        self.layers = torch.nn.ModuleDict()
-        for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
+        def update_from_config(
+            self,
+            *,
+            job_config,
+            **kwargs,
+        ) -> None:
+            training = job_config.training
+            parallelism = job_config.parallelism
+            debug = job_config.debug
+            seq_len = training.seq_len
+            if seq_len > self.max_seq_len:
+                logger.warning(
+                    f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+                )
+            self.max_seq_len = seq_len
 
-        self.norm = nn.RMSNorm(model_args.dim)
+            # Sync rope_config max_seq_len
+            import dataclasses as _dc
+
+            self.rope_config = _dc.replace(self.rope_config, max_seq_len=seq_len)
+
+            if self.moe_config.use_grouped_mm and not has_cuda_capability(9, 0):
+                logger.warning(
+                    "Failed to use grouped mm, which is only supported on SM90 or later",
+                )
+                self.moe_config.use_grouped_mm = False
+
+            if parallelism.context_parallel_degree > 1 and self.attn_type != "sdpa":
+                raise NotImplementedError(
+                    f"Context Parallel only supports SDPA attention. "
+                    f"Got attn_type='{self.attn_type}'. "
+                    f"FlexAttention and varlen attention are not supported with CP."
+                )
+
+            self.moe_config._debug_force_load_balance = debug.moe_force_load_balance
+
+            # Configure expert parallel communication backend from config
+            self.moe_impl = parallelism.expert_parallel_comm_backend
+
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, int]:
+            return get_moe_model_nparams_and_flops(
+                self,
+                model,
+                self.n_heads,
+                self.qk_nope_head_dim + self.qk_rope_head_dim + self.v_head_dim,
+                seq_len,
+            )
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.config = config
+        self.max_seq_len = config.max_seq_len
+        self.tok_embeddings = nn.Embedding(config.vocab_size, config.dim)
+
+        self.rope = config.rope_config.build()
+        self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
+
+        self.layers = torch.nn.ModuleDict()
+        for layer_id in range(config.n_layers):
+            self.layers[str(layer_id)] = TransformerBlock(layer_id, config)
+
+        self.norm = nn.RMSNorm(config.dim)
         self.output = nn.Linear(
-            model_args.dim,
-            model_args.vocab_size,
+            config.dim,
+            config.vocab_size,
             dtype=torch.get_default_dtype(),
             bias=False,
         )
-        self.model_args = model_args
 
-    def init_weights(self, buffer_device: torch.device | None = None) -> None:
+    def init_weights(
+        self, *, buffer_device: torch.device | None = None, **kwargs
+    ) -> None:
         buffer_device = buffer_device or self.freqs_cis.device
-        with torch.device(buffer_device):
-            self.freqs_cis = precompute_freqs_cis(self.model_args)
+        self.rope.init_weights(buffer_device=buffer_device)
+        self.freqs_cis = self.rope.cache
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
@@ -442,7 +374,7 @@ class DeepSeekV3Model(ModelProtocol):
                 cast(TransformerBlock, layer).init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_std = self.model_args.dim**-0.5
+        final_out_std = self.config.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
             trunc_normal_(
@@ -460,7 +392,7 @@ class DeepSeekV3Model(ModelProtocol):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
-        match self.model_args.attn_mask_type:
+        match self.config.attn_mask_type:
             case "causal":
                 B = 1
             case "block_causal":
@@ -469,7 +401,7 @@ class DeepSeekV3Model(ModelProtocol):
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.model_args.attn_mask_type}"
+                    f"Unknown attention mask type: {self.config.attn_mask_type}"
                 )
         return create_attention_mask(
             and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]

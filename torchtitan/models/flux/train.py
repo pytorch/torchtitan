@@ -47,7 +47,7 @@ class FluxTrainer(Trainer):
         )
 
         # load components
-        model_args = self.train_spec.model_args[job_config.model.flavor]
+        model_args = self.train_spec.model_configs[job_config.model.flavor]
 
         self.autoencoder = load_ae(
             # pyrefly: ignore [missing-attribute]

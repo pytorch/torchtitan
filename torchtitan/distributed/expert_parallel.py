@@ -24,7 +24,7 @@ from torch.distributed.tensor import (
 )
 from torch.distributed.tensor.parallel import ParallelStyle
 
-from torchtitan.models.moe.utils import _permute, _unpermute
+from torchtitan.models.common.moe.utils import _permute, _unpermute
 
 
 class BaseExpertParallel(ParallelStyle, ABC):

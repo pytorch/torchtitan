@@ -94,8 +94,8 @@ init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 enable_batch_invariant_backward_mode()
 
 # 2. Load model
-from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
-model_args = Qwen3ModelArgs(
+from torchtitan.models.qwen3.model.model import Qwen3Model
+model_args = Qwen3Model.Config(
     dim=2048,
     n_layers=24,
     n_heads=16,

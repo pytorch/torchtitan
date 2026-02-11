@@ -69,10 +69,10 @@ def forward_tt(config_path, checkpoint_path, test_set):
 
     train_spec = get_train_spec(config.model.name)
 
-    model_args = train_spec.model_args[config.model.flavor]
-    model_args.update_from_config(config)
+    model_args = train_spec.model_configs[config.model.flavor]
+    model_args.update_from_config(job_config=config)
 
-    model = train_spec.model_cls(model_args)
+    model = model_args.build()
 
     # materalize model
     device = torch.device(device_type)

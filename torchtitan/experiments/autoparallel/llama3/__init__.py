@@ -14,7 +14,7 @@ from torchtitan.components.validate import Validator
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 
-from torchtitan.models.llama3 import llama3_args, Transformer
+from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.protocols.train_spec import TrainSpec
 
@@ -23,8 +23,7 @@ from .parallelize_llama import parallelize_llama
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        model_cls=Transformer,
-        model_args=llama3_args,
+        model_configs=llama3_configs,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers,

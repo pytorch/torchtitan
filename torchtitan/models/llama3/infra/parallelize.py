@@ -24,7 +24,13 @@ from torch.distributed.tensor.parallel import (
 )
 
 from torchtitan.components.quantization.float8 import find_float8_linear_config
-from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training, TORCH_DTYPE_MAP
+from torchtitan.config import (
+    ActivationCheckpoint,
+    ModelConverters,
+    Parallelism,
+    TORCH_DTYPE_MAP,
+    Training,
+)
 from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -84,9 +90,9 @@ def parallelize_llama(
     if parallel_dims.tp_enabled:
         float8_config = find_float8_linear_config(model_converters.converter_configs)
         enable_float8_linear = float8_config is not None
-        float8_is_rowwise = (
-            float8_config is not None
-            and float8_config.recipe_name in ("rowwise", "rowwise_with_gw_hp")
+        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
+            "rowwise",
+            "rowwise_with_gw_hp",
         )
 
         # For now, float8 all-gather with TP is only supported for tensorwise
@@ -104,7 +110,7 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
-    attn_type = getattr(model.model_args, "attn_type", "sdpa")
+    attn_type = getattr(model.config, "attn_type", "sdpa")
     if parallel_dims.cp_enabled:
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]

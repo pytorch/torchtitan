@@ -67,7 +67,7 @@ class Trainer(ForgeEngine):
             job_config=job_config,
         )
 
-        model_args = self.model_args
+        model_args = self.model_config
         logger.info(
             f"Built {job_config.model.name} {job_config.model.flavor} with {model_args}"
         )

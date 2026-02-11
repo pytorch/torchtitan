@@ -10,12 +10,12 @@ from typing import Any
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torchtitan.models.utils import MoEStateDictAdapter
 
-from .args import GptOssModelArgs
+from .model import GptOssModel
 
 
 class GptOssStateDictAdapter(MoEStateDictAdapter):
-    def __init__(self, model_args: GptOssModelArgs, hf_assets_path: str | None):
-        super().__init__(model_args, hf_assets_path)
+    def __init__(self, model_config: GptOssModel.Config, hf_assets_path: str | None):
+        super().__init__(model_config, hf_assets_path)
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention module

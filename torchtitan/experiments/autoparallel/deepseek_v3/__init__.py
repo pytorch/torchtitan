@@ -15,8 +15,7 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 
-from torchtitan.models.deepseek_v3 import deepseekv3_args, DeepSeekV3Model
-from torchtitan.models.deepseek_v3.model.args import DeepSeekV3ModelArgs
+from torchtitan.models.deepseek_v3 import deepseekv3_configs, DeepSeekV3Model
 from torchtitan.models.deepseek_v3.model.state_dict_adapter import (
     DeepSeekV3StateDictAdapter,
 )
@@ -26,9 +25,9 @@ from .parallelize_deepseekv3 import parallelize_deepseekv3
 
 
 def get_train_spec() -> TrainSpec:
-    model_args = copy.deepcopy(deepseekv3_args)
+    model_args = copy.deepcopy(deepseekv3_configs)
 
-    default_args = DeepSeekV3ModelArgs()
+    default_args = DeepSeekV3Model.Config()
     for config, args in model_args.items():
         if "flex_attn" in config:
             continue
@@ -37,8 +36,7 @@ def get_train_spec() -> TrainSpec:
         args.attn_mask_type = default_args.attn_mask_type
 
     return TrainSpec(
-        model_cls=DeepSeekV3Model,
-        model_args=model_args,
+        model_configs=model_args,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,

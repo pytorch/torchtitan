@@ -16,7 +16,7 @@ from torchtitan.components.loss import rescale_accumulated_loss
 from torchtitan.config import TORCH_DTYPE_MAP
 
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.protocols import BaseModelArgs
+from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 
 from .job_config import ForgeJobConfig
@@ -51,7 +51,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
     dp_degree: int
     dp_rank: int
     # for logging
-    model_args: BaseModelArgs
+    model_config: BaseModel.Config
     num_flops_per_token: float
     model_param_count: int
     global_batch_size: int
@@ -109,14 +109,11 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
         self.train_spec = get_train_spec(job_config.model.name)
 
         # build model (using meta init)
-        self.model_args = model_args = self.train_spec.model_args[
+        self.model_config = model_config = self.train_spec.model_configs[
             job_config.model.flavor
         ]
         # set the model args from training job configs
-        model_args.update_from_config(
-            training=job_config.training,
-            parallelism=job_config.parallelism,
-            debug=job_config.debug,
+        model_config.update_from_config(
             job_config=job_config,
         )
 
@@ -124,13 +121,13 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
             torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
         ):
-            model = self.train_spec.model_cls(model_args)
+            model = model_config.build()
 
         # calculate model size and flops per token
         (
             self.model_param_count,
             self.num_flops_per_token,
-        ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
+        ) = model_config.get_nparams_and_flops(model, job_config.training.seq_len)
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
         if job_config.training.enable_cpu_offload:
@@ -192,7 +189,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 experimental=job_config.experimental,
                 dump_folder=job_config.job.dump_folder,
                 device=self.device,
-                model_args=model_args,
+                model_config=model_config,
                 parallelize_fn=self.train_spec.parallelize_fn,
                 loss_fn=self.loss_fn,
             )
@@ -243,7 +240,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
                 self.train_spec.state_dict_adapter(
-                    model_args, job_config.model.hf_assets_path
+                    model_config, job_config.model.hf_assets_path
                 )
                 if self.train_spec.state_dict_adapter
                 else None

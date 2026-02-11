@@ -20,14 +20,11 @@ import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.metrics import (
-    ensure_pp_loss_visible,
-    MetricsProcessor,
-)
+from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.config import ConfigManager, JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.protocols import ModelProtocol
+from torchtitan.protocols import BaseModel
 
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
@@ -46,7 +43,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # swappable training components in TrainSpec
     tokenizer: train_spec_module.BaseTokenizer | None
     dataloader: train_spec_module.BaseDataLoader | None
-    # TODO: we should make this list[ModelProtocol] but this will affect many components.
+    # TODO: we should make this list[BaseModel] but this will affect many components.
     # will do this in a separate PR
     model_parts: list[torch.nn.Module]
     loss_fn: train_spec_module.LossFunction
@@ -54,7 +51,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     lr_schedulers: train_spec_module.LRSchedulersContainer
     validator: train_spec_module.BaseValidator
     metrics_processor: "MetricsProcessor"
-    model_args: train_spec_module.BaseModelArgs
+    model_config: BaseModel.Config
 
     # non-swappable training components
     checkpointer: CheckpointManager
@@ -136,25 +133,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         # build model (using meta init)
-        model_args = self.train_spec.model_args[job_config.model.flavor]
+        model_config = self.train_spec.model_configs[job_config.model.flavor]
         # set the model args from training job configs
-        model_args.update_from_config(
-            training=job_config.training,
-            parallelism=job_config.parallelism,
-            debug=job_config.debug,
+        model_config.update_from_config(
             job_config=job_config,
         )
-        self.model_args = model_args
+        self.model_config = model_config
 
         logger.info(
             f"Building {job_config.model.name} {job_config.model.flavor}"
-            f"with {json.dumps(dataclasses.asdict(model_args), indent=2, ensure_ascii=False)}"
+            f"with {json.dumps(dataclasses.asdict(model_config), indent=2, ensure_ascii=False)}"
         )
         with (
             torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
         ):
-            model = self.train_spec.model_cls(model_args)
+            model = model_config.build()
 
         # Build the collection of model converters. No-op if converter_configs empty
         model_compile_enabled = (
@@ -181,7 +175,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         (
             model_param_count,
             self.metrics_processor.num_flops_per_token,
-        ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
+        ) = model_config.get_nparams_and_flops(model, job_config.training.seq_len)
 
         logger.info(
             f"{color.blue}Model {job_config.model.name} {job_config.model.flavor} "
@@ -251,7 +245,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 experimental=job_config.experimental,
                 dump_folder=job_config.job.dump_folder,
                 device=self.device,
-                model_args=model_args,
+                model_config=model_config,
                 parallelize_fn=self.train_spec.parallelize_fn,
                 loss_fn=self.loss_fn,
             )
@@ -262,7 +256,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    cast(ModelProtocol, m).init_weights(buffer_device=buffer_device)
+                    cast(BaseModel, m).init_weights(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
@@ -287,7 +281,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
             model.to_empty(device=init_device)
             with torch.no_grad():
-                cast(ModelProtocol, model).init_weights(buffer_device=buffer_device)
+                cast(BaseModel, model).init_weights(buffer_device=buffer_device)
             model.train()
 
             self.model_parts = [model]
@@ -335,7 +329,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
                 self.train_spec.state_dict_adapter(
-                    model_args, job_config.model.hf_assets_path
+                    model_config, job_config.model.hf_assets_path
                 )
                 if self.train_spec.state_dict_adapter
                 else None
@@ -488,12 +482,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
-        attn_type = getattr(self.model_args, "attn_type", "sdpa")
+        attn_type = getattr(self.model_config, "attn_type", "sdpa")
         if attn_type in ["flex", "varlen"]:
             assert (
                 self.tokenizer is not None
             ), "tokenizer is required for flex/varlen attention"
-            model = cast(ModelProtocol, self.model_parts[0])
+            model = cast(BaseModel, self.model_parts[0])
             extra_kwargs["attention_masks"] = model.get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,

@@ -14,7 +14,7 @@ from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from torchtitan.tools.logging import logger
 
-from .model import BaseModelArgs
+from .model import BaseModel
 
 
 class BaseStateDictAdapter(ABC):
@@ -23,7 +23,7 @@ class BaseStateDictAdapter(ABC):
     This class defines the interface for converting between native model
     state dict format and other model state dict formats.
     Args:
-        model_args: for initializing the model's memory space
+        model_config: for initializing the model's memory space
         hf_assets_path: path to HF assets folder containing tokenizer, model weights, etc.
     """
 
@@ -33,7 +33,7 @@ class BaseStateDictAdapter(ABC):
     @abstractmethod
     def __init__(
         self,
-        model_args: BaseModelArgs,
+        model_config: BaseModel.Config,
         hf_assets_path: str | None,
     ):
         pass
@@ -83,7 +83,7 @@ class StateDictAdapter(BaseStateDictAdapter):
 
     def __init__(
         self,
-        model_args: BaseModelArgs,
+        model_config: BaseModel.Config,
         hf_assets_path: str | None,
     ):
         self.hf_assets_path = hf_assets_path

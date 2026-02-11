@@ -14,7 +14,7 @@ from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
 
 from torchtitan.config.configurable import Configurable
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.moe.utils import set_token_group_alignment_size_m
+from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -34,9 +34,9 @@ class Float8LinearConverter(Configurable):
         precompute_float8_dynamic_scale_for_fsdp: bool = False
         """Whether precompute float8 scales dynamically for FSDP, recommended for tensorwise scaling"""
 
-        recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = (
-            None
-        )
+        recipe_name: Literal[
+            "tensorwise", "rowwise", "rowwise_with_gw_hp"
+        ] | None = None
         """If specified, creates float8 config from recipe name"""
 
         filter_fqns: list[str] = field(default_factory=list)
@@ -233,12 +233,12 @@ class Float8GroupedMMConverter(Configurable):
             )
 
         # Validate MoE training prototype limitations.
-        assert not parallel_dims.pp_enabled, (
-            "Float8 MoE training prototype does not yet support pipeline parallelism"
-        )
-        assert not parallel_dims.cp_enabled, (
-            "Float8 MoE training prototype does not yet support context parallelism"
-        )
+        assert (
+            not parallel_dims.pp_enabled
+        ), "Float8 MoE training prototype does not yet support pipeline parallelism"
+        assert (
+            not parallel_dims.cp_enabled
+        ), "Float8 MoE training prototype does not yet support context parallelism"
 
         # For fp8 grouped GEMM, token group sizes must be multiples of 16
         # (16 byte alignment / 1 byte per elem = 16 elements)
