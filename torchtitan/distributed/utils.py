@@ -255,7 +255,7 @@ def maybe_enable_amp(
             logger.info("Mixed precision training is disabled")
             return contextlib.nullcontext()
         else:
-            # the following code will only be executed for DDP or single-device training
+            # the following code will only be executed for single-device training
             logger.info("Mixed precision training is handled by AMP")
             return torch.autocast(
                 device_type,

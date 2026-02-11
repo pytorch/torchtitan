@@ -641,6 +641,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             global_avg_loss = global_max_loss = loss.detach().item()
             global_ntokens_seen = self.ntokens_seen
 
+        print(global_avg_loss)
+
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,

@@ -144,11 +144,9 @@ def parallelize_llama(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        names = ["dp_replicate"]
-        dp_mesh = parallel_dims.get_mesh(names)
         apply_replicate(
             model,
-            dp_mesh,
+            parallel_dims.get_mesh("dp_replicate"),
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
