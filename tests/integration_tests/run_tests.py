@@ -7,9 +7,11 @@
 import argparse
 import os
 import subprocess
+import tempfile
 import time
 
 from torchtitan.tools.logging import logger
+from torchtitan.tools.loss_utils import compare_losses, extract_losses_from_log
 
 from tests.integration_tests import OverrideDefinitions
 
@@ -71,6 +73,82 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
             )
 
 
+def run_determinism_test(
+    test_flavor: OverrideDefinitions, full_path: str, output_dir: str
+):
+    """Run a test twice and verify losses are identical (run-to-run determinism).
+
+    This runs the same configuration twice with deterministic settings enabled,
+    then compares the losses from both runs to ensure they match exactly.
+    """
+    test_name = test_flavor.test_name
+    all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
+
+    # Build the base command with determinism flags
+    override_arg = test_flavor.override_args[0] if test_flavor.override_args else []
+    override_str = " ".join(override_arg) if override_arg else ""
+
+    base_cmd = (
+        f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+        f"./run_train.sh --job.dump_folder {output_dir}/{test_name}_determinism "
+        f"--debug.deterministic --debug.seed=42 --training.steps=10"
+    )
+    if override_str:
+        base_cmd += " " + override_str
+
+    logger.info(
+        f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} Determinism test, flavor : {test_flavor.test_descr} ====="
+    )
+
+    # Create temp files for logs
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix="_run1.log", delete=False
+    ) as log1_file:
+        log1_path = log1_file.name
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix="_run2.log", delete=False
+    ) as log2_file:
+        log2_path = log2_file.name
+
+    try:
+        # Run 1
+        logger.info(f"Determinism test run 1: {base_cmd}")
+        cmd1 = f"{base_cmd} 2>&1 | tee {log1_path}"
+        result1 = _run_cmd(cmd1)
+        if result1.returncode != 0:
+            raise Exception(
+                f"Determinism test run 1 failed, flavor : {test_flavor.test_descr}"
+            )
+
+        # Run 2
+        logger.info(f"Determinism test run 2: {base_cmd}")
+        cmd2 = f"{base_cmd} 2>&1 | tee {log2_path}"
+        result2 = _run_cmd(cmd2)
+        if result2.returncode != 0:
+            raise Exception(
+                f"Determinism test run 2 failed, flavor : {test_flavor.test_descr}"
+            )
+
+        # Extract and compare losses
+        losses1 = extract_losses_from_log(log1_path)
+        losses2 = extract_losses_from_log(log2_path)
+
+        success, message = compare_losses(losses1, losses2, "run1", "run2")
+        if not success:
+            raise Exception(
+                f"Determinism test failed for {test_flavor.test_descr}: {message}"
+            )
+
+        logger.info(f"Determinism test passed for {test_flavor.test_descr}: {message}")
+
+    finally:
+        # Clean up temp files
+        if os.path.exists(log1_path):
+            os.remove(log1_path)
+        if os.path.exists(log2_path):
+            os.remove(log2_path)
+
+
 def run_tests(args, test_list: list[OverrideDefinitions]):
     """Run all integration tests to test the core features of TorchTitan"""
 
@@ -105,6 +183,13 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
         else:
             run_single_test(test_flavor, args.config_path, args.output_dir)
             ran_any_test = True
+
+            # Run determinism test if enabled (CUDA only)
+            if (
+                test_flavor.determinism_test
+                and getattr(args, "gpu_arch_type", "cuda") == "cuda"
+            ):
+                run_determinism_test(test_flavor, args.config_path, args.output_dir)
 
     if not ran_any_test:
         available_tests = [t.test_name for t in test_list if not t.disabled]

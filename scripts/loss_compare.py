@@ -69,6 +69,8 @@ import sys
 import unittest
 from typing import Any
 
+from torchtitan.tools.loss_utils import extract_losses_from_log
+
 # =============================================================================
 # GLOBAL CONFIGURATION
 # =============================================================================
@@ -186,6 +188,7 @@ def validate_arguments(
     assert_equal: bool,
     export_result: str | None,
     import_result: str | None,
+    run_to_run_determinism: bool = False,
 ) -> bool:
     """Validate command line arguments.
 
@@ -193,6 +196,10 @@ def validate_arguments(
         True if baseline-only mode (all settings identical with import_result),
         False otherwise.
     """
+    # Skip identical settings check for run-to-run determinism testing
+    if run_to_run_determinism:
+        return False  # Not baseline-only mode
+
     # Validate that we are comparing different settings
     commits_differ = baseline_commit != test_commit
     configs_differ = baseline_config != test_config
@@ -224,8 +231,8 @@ def validate_arguments(
             "or options"
         )
         log_print(
-            "       Or use --import-result with --assert-equal "
-            "or --export-result to run baseline-only mode"
+            "       Or use --import-result with --assert-equal, "
+            "--export-result, or --run-to-run-determinism"
         )
         sys.exit(1)
 
@@ -509,24 +516,6 @@ def run_training(
 # =============================================================================
 # LOG PROCESSING AND ANALYSIS
 # =============================================================================
-
-
-def extract_losses_from_log(log_file: str) -> dict[int, float]:
-    """Extract step and loss pairs from a log file."""
-    losses = {}
-    step_loss_pattern = re.compile(r"step:\s*(\d+)\s*loss:\s*(\d+\.\d+)")
-    ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
-
-    with open(log_file, "r") as f:
-        for line in f:
-            # Strip ANSI codes before matching
-            clean_line = ansi_escape.sub("", line)
-            match = step_loss_pattern.search(clean_line)
-            if match:
-                step, loss = match.groups()
-                losses[int(step)] = float(loss)
-
-    return losses
 
 
 def read_losses_from_file(loss_file: str) -> dict[int, float]:
@@ -1002,8 +991,36 @@ Examples:
         default=8,
         help="Number of GPUs for test run (default: 8)",
     )
+    parser.add_argument(
+        "--run-to-run-determinism",
+        action="store_true",
+        help=(
+            "Test run-to-run determinism by running the same configuration twice. "
+            "Implies --assert-equal. Only baseline options should be provided; "
+            "test-specific options (--test-config, --test-options, etc.) are not allowed."
+        ),
+    )
 
     args = parser.parse_args()
+
+    # Handle run-to-run determinism mode (must be before defaults are set)
+    if args.run_to_run_determinism:
+        # Validate that no test-specific options are provided
+        has_test_opts = (
+            args.test_config
+            or args.test_options
+            or args.test_train_file
+            or args.test_ngpus != args.baseline_ngpus
+        )
+        if has_test_opts:
+            raise ValueError(
+                "--run-to-run-determinism cannot be used with test-specific options "
+                "(--test-config, --test-options, --test-train-file, --test-ngpus)"
+            )
+
+        # Force assert_equal and copy baseline options to test
+        args.assert_equal = True
+        args.test_options = args.baseline_options
 
     # Set default values if not provided
     if not args.test_config:
@@ -1090,6 +1107,7 @@ def main() -> None:
         args.assert_equal,
         args.export_result,
         args.import_result,
+        args.run_to_run_determinism,
     )
 
     # Setup environment
