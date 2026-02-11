@@ -11,23 +11,20 @@ from torchtitan.components.optimizer import build_optimizers
 from torchtitan.models.flux.flux_datasets import build_flux_dataloader
 from torchtitan.protocols.train_spec import TrainSpec
 from .infra.parallelize import parallelize_flux
-from .model.args import FluxModelArgs
 from .model.autoencoder import AutoEncoderParams
 from .model.model import FluxModel
 from .model.state_dict_adapter import FluxStateDictAdapter
 from .validate import FluxValidator
 
 __all__ = [
-    "FluxModelArgs",
     "FluxModel",
-    # pyrefly: ignore [missing-module-attribute]
     "flux_configs",
     "parallelize_flux",
 ]
 
 
-flux_args = {
-    "flux-dev": FluxModelArgs(
+flux_configs = {
+    "flux-dev": FluxModel.Config(
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,
@@ -52,7 +49,7 @@ flux_args = {
             shift_factor=0.1159,
         ),
     ),
-    "flux-schnell": FluxModelArgs(
+    "flux-schnell": FluxModel.Config(
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,
@@ -77,7 +74,7 @@ flux_args = {
             shift_factor=0.1159,
         ),
     ),
-    "flux-debug": FluxModelArgs(
+    "flux-debug": FluxModel.Config(
         in_channels=64,
         out_channels=64,
         vec_in_dim=768,
@@ -107,8 +104,7 @@ flux_args = {
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        model_cls=FluxModel,
-        model_args=flux_args,
+        model_configs=flux_configs,
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
         build_optimizers_fn=build_optimizers,

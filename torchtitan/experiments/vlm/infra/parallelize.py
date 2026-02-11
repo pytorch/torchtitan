@@ -13,7 +13,13 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
-from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training, TORCH_DTYPE_MAP
+from torchtitan.config import (
+    ActivationCheckpoint,
+    ModelConverters,
+    Parallelism,
+    TORCH_DTYPE_MAP,
+    Training,
+)
 from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -56,7 +62,7 @@ def parallelize_vlm(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-    attn_type = getattr(model.model_args, "attn_type", "sdpa")
+    attn_type = getattr(model.config, "attn_type", "sdpa")
     if parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
         raise NotImplementedError("CP support is only supported for SDPA.")
 

@@ -18,12 +18,12 @@ from typing import Any
 from torch.distributed.tensor import DTensor
 from torchtitan.models.utils import MoEStateDictAdapter
 
-from .args import Qwen3ModelArgs
+from .model import Qwen3Model
 
 
 class Qwen3StateDictAdapter(MoEStateDictAdapter):
-    def __init__(self, model_args: Qwen3ModelArgs, hf_assets_path: str | None):
-        super().__init__(model_args, hf_assets_path)
+    def __init__(self, model_config: Qwen3Model.Config, hf_assets_path: str | None):
+        super().__init__(model_config, hf_assets_path)
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention module
@@ -89,11 +89,11 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     split_values = self._split_experts_weights(
                         value,
                         # pyrefly: ignore [missing-attribute]
-                        self.model_args.moe_args.num_experts,
+                        self.model_config.moe_config.num_experts,
                     )
 
                     # pyrefly: ignore [missing-attribute]
-                    for expert_num in range(self.model_args.moe_args.num_experts):
+                    for expert_num in range(self.model_config.moe_config.num_experts):
                         new_key = new_abstract_key.format(layer_num, expert_num)
                         hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
@@ -111,7 +111,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                 if key not in to_hf_map:
                     continue
                 # pyrefly: ignore [missing-attribute]
-                if self.model_args.enable_weight_tying and key == "output.weight":
+                if self.model_config.enable_weight_tying and key == "output.weight":
                     continue
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
@@ -129,7 +129,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
 
         if (
             # pyrefly: ignore [missing-attribute]
-            self.model_args.enable_weight_tying
+            self.model_config.enable_weight_tying
             and "lm_head.weight" not in hf_state_dict
         ):
             assert "model.embed_tokens.weight" in hf_state_dict
@@ -166,7 +166,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                         titan_abstract_key,
                         layer_num,
                         # pyrefly: ignore [missing-attribute]
-                        self.model_args.moe_args.num_experts,
+                        self.model_config.moe_config.num_experts,
                     )
 
                 if stacked_value is not None:

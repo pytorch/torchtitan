@@ -26,14 +26,14 @@ def convert_to_hf(
 ):
     # load model and model args so that we can get the state dict shape
     train_spec = train_spec_module.get_train_spec(model_name)
-    model_args = train_spec.model_args[model_flavor]
+    model_config = train_spec.model_configs[model_flavor]
 
     with torch.device("cpu"):
-        model = train_spec.model_cls(model_args)
+        model = model_config.build()
     model = ModelWrapper(model)
 
     # pyrefly: ignore[bad-instantiation, not-callable]
-    sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
+    sd_adapter = train_spec.state_dict_adapter(model_config, hf_assets_path)
     assert (
         sd_adapter is not None
     ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."

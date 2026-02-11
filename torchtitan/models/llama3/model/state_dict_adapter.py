@@ -12,18 +12,18 @@ logger = logging.getLogger()
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
-from .args import TransformerModelArgs
+from .model import Transformer
 
 
 class Llama3StateDictAdapter(StateDictAdapter):
     def __init__(
         self,
-        model_args: TransformerModelArgs,
+        model_config: Transformer.Config,
         hf_assets_path: str | None,
     ):
-        super().__init__(model_args, hf_assets_path)
+        super().__init__(model_config, hf_assets_path)
 
-        self.model_args = model_args
+        self.model_config = model_config
         self.hf_assets_path = hf_assets_path
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
@@ -68,13 +68,13 @@ class Llama3StateDictAdapter(StateDictAdapter):
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
-        n_heads = self.model_args.n_heads
+        n_heads = self.model_config.attn_config.n_heads
         n_kv_heads = (
-            self.model_args.n_kv_heads
-            if self.model_args.n_kv_heads is not None
+            self.model_config.attn_config.n_kv_heads
+            if self.model_config.attn_config.n_kv_heads is not None
             else n_heads
         )
-        dim = self.model_args.dim
+        dim = self.model_config.dim
         head_dim = dim // n_heads
         hf_state_dict = {}
 
@@ -103,13 +103,13 @@ class Llama3StateDictAdapter(StateDictAdapter):
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        n_heads = self.model_args.n_heads
+        n_heads = self.model_config.attn_config.n_heads
         n_kv_heads = (
-            self.model_args.n_kv_heads
-            if self.model_args.n_kv_heads is not None
+            self.model_config.attn_config.n_kv_heads
+            if self.model_config.attn_config.n_kv_heads is not None
             else n_heads
         )
-        dim = self.model_args.dim
+        dim = self.model_config.dim
         head_dim = dim // n_heads
         state_dict = {}
 

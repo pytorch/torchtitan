@@ -11,101 +11,217 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import Validator
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.models.moe import MoEArgs
+from torchtitan.models.common import (
+    compute_ffn_hidden_dim,
+    FeedForward,
+    GQAttention,
+    RoPE,
+)
+from torchtitan.models.common.moe import MoE
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .infra.parallelize import parallelize_llama
-from .model.args import RoPEScalingArgs, TransformerModelArgs
-from .model.model import Transformer
+from .model.model import compute_moe_hidden_dim, Transformer
 from .model.state_dict_adapter import Llama4StateDictAdapter
 
 __all__ = [
-    "TransformerModelArgs",
     "Transformer",
-    "llama4_args",
+    "llama4_configs",
 ]
 
 
-llama4_args = {
-    "debugmodel": TransformerModelArgs(
+llama4_configs = {
+    "debugmodel": Transformer.Config(
         dim=256,
         n_layers=6,
-        n_heads=16,
         vocab_size=2048,
-        rope_theta=500000,
-        rope_scaling_args=RoPEScalingArgs(),
+        ff_config=FeedForward.Config(hidden_dim=compute_ffn_hidden_dim(256)),
+        rope_config=RoPE.Config(
+            dim=256 // 16,
+            max_seq_len=1048576,
+            theta=500000,
+            format="complex",
+            scaling="llama",
+            scaling_factor=16.0,
+            high_freq_factor=1.0,
+        ),
+        attn_config=GQAttention.Config(
+            n_heads=16,
+            attn_type="sdpa",
+            rope_format="complex",
+        ),
+        moe_config=MoE.Config(hidden_dim=compute_moe_hidden_dim(256)),
     ),
-    "17bx16e": TransformerModelArgs(
+    "17bx16e": Transformer.Config(
         dim=5120,
         n_layers=48,
-        n_heads=40,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.2,
-        multiple_of=2048,
-        rope_theta=500000,
-        rope_scaling_args=RoPEScalingArgs(),
         max_seq_len=10485760,
-        moe_args=MoEArgs(num_experts=16),
+        moe_config=MoE.Config(
+            num_experts=16,
+            hidden_dim=compute_moe_hidden_dim(
+                5120,
+                multiple_of=2048,
+                ffn_dim_multiplier=1.2,
+                top_k=1,
+                num_shared_experts=1,
+            ),
+        ),
         interleave_moe_layer_step=1,
+        ff_config=FeedForward.Config(
+            hidden_dim=compute_ffn_hidden_dim(
+                5120, multiple_of=2048, ffn_dim_multiplier=1.2
+            ),
+        ),
+        rope_config=RoPE.Config(
+            dim=5120 // 40,
+            max_seq_len=10485760,
+            theta=500000,
+            format="complex",
+            scaling="llama",
+            scaling_factor=16.0,
+            high_freq_factor=1.0,
+        ),
+        attn_config=GQAttention.Config(
+            n_heads=40,
+            n_kv_heads=8,
+            attn_type="sdpa",
+            rope_format="complex",
+        ),
     ),
-    "17bx128e": TransformerModelArgs(
+    "17bx128e": Transformer.Config(
         dim=5120,
         n_layers=48,
-        n_heads=40,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.2,
-        multiple_of=2048,
-        rope_theta=500000,
-        moe_args=MoEArgs(num_experts=128),
+        moe_config=MoE.Config(
+            num_experts=128,
+            hidden_dim=compute_moe_hidden_dim(
+                5120,
+                multiple_of=2048,
+                ffn_dim_multiplier=1.2,
+                top_k=1,
+                num_shared_experts=1,
+            ),
+        ),
+        ff_config=FeedForward.Config(
+            hidden_dim=compute_ffn_hidden_dim(
+                5120, multiple_of=2048, ffn_dim_multiplier=1.2
+            ),
+        ),
+        rope_config=RoPE.Config(
+            dim=5120 // 40,
+            max_seq_len=1048576,
+            theta=500000,
+            format="complex",
+            scaling="none",
+        ),
+        attn_config=GQAttention.Config(
+            n_heads=40,
+            n_kv_heads=8,
+            attn_type="sdpa",
+            rope_format="complex",
+        ),
     ),
-    "debugmodel_irope": TransformerModelArgs(
+    "debugmodel_irope": Transformer.Config(
         dim=256,
         n_layers=6,
-        n_heads=16,
         vocab_size=2048,
-        rope_theta=500000,
-        rope_scaling_args=RoPEScalingArgs(),
         every_n_layers_nope=4,
         fixed_attn_block_size=256,
-        attn_type="flex",
         attn_mask_type="block_causal",
+        ff_config=FeedForward.Config(hidden_dim=compute_ffn_hidden_dim(256)),
+        rope_config=RoPE.Config(
+            dim=256 // 16,
+            max_seq_len=1048576,
+            theta=500000,
+            format="complex",
+            scaling="llama",
+            scaling_factor=16.0,
+            high_freq_factor=1.0,
+        ),
+        attn_config=GQAttention.Config(
+            n_heads=16,
+            attn_type="flex",
+            rope_format="complex",
+        ),
+        moe_config=MoE.Config(hidden_dim=compute_moe_hidden_dim(256)),
     ),
-    "17bx16e_irope": TransformerModelArgs(
+    "17bx16e_irope": Transformer.Config(
         dim=5120,
         n_layers=48,
-        n_heads=40,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.2,
-        multiple_of=2048,
-        rope_theta=500000,
-        rope_scaling_args=RoPEScalingArgs(),
         max_seq_len=10485760,
-        moe_args=MoEArgs(num_experts=16),
+        moe_config=MoE.Config(
+            num_experts=16,
+            hidden_dim=compute_moe_hidden_dim(
+                5120,
+                multiple_of=2048,
+                ffn_dim_multiplier=1.2,
+                top_k=1,
+                num_shared_experts=1,
+            ),
+        ),
         interleave_moe_layer_step=1,
         every_n_layers_nope=4,
-        attn_type="flex",
         attn_mask_type="block_causal",
+        ff_config=FeedForward.Config(
+            hidden_dim=compute_ffn_hidden_dim(
+                5120, multiple_of=2048, ffn_dim_multiplier=1.2
+            ),
+        ),
+        rope_config=RoPE.Config(
+            dim=5120 // 40,
+            max_seq_len=10485760,
+            theta=500000,
+            format="complex",
+            scaling="llama",
+            scaling_factor=16.0,
+            high_freq_factor=1.0,
+        ),
+        attn_config=GQAttention.Config(
+            n_heads=40,
+            n_kv_heads=8,
+            attn_type="flex",
+            rope_format="complex",
+        ),
     ),
-    "17bx128e_irope": TransformerModelArgs(
+    "17bx128e_irope": Transformer.Config(
         dim=5120,
         n_layers=48,
-        n_heads=40,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.2,
-        multiple_of=2048,
-        rope_theta=500000,
-        moe_args=MoEArgs(num_experts=128),
+        moe_config=MoE.Config(
+            num_experts=128,
+            hidden_dim=compute_moe_hidden_dim(
+                5120,
+                multiple_of=2048,
+                ffn_dim_multiplier=1.2,
+                top_k=1,
+                num_shared_experts=1,
+            ),
+        ),
         every_n_layers_nope=4,
-        attn_type="flex",
         attn_mask_type="block_causal",
+        ff_config=FeedForward.Config(
+            hidden_dim=compute_ffn_hidden_dim(
+                5120, multiple_of=2048, ffn_dim_multiplier=1.2
+            ),
+        ),
+        rope_config=RoPE.Config(
+            dim=5120 // 40,
+            max_seq_len=1048576,
+            theta=500000,
+            format="complex",
+            scaling="none",
+        ),
+        attn_config=GQAttention.Config(
+            n_heads=40,
+            n_kv_heads=8,
+            attn_type="flex",
+            rope_format="complex",
+        ),
     ),
 }
 
 
 def get_train_spec() -> TrainSpec:
     return TrainSpec(
-        model_cls=Transformer,
-        model_args=llama4_args,
+        model_configs=llama4_configs,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,

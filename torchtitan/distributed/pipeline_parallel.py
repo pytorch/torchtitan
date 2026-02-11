@@ -26,11 +26,17 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training
+from torchtitan.config import (
+    ActivationCheckpoint,
+    ModelConverters,
+    Parallelism,
+    Training,
+)
 from torchtitan.config.job_config import Compile, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.dual_pipe_v import overlap_callback
-from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
+from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.train_spec import ParallelizeFunction
 from torchtitan.tools.logging import logger
 
 __all__ = [
@@ -53,20 +59,18 @@ def pipeline_llm(
     experimental: Experimental,
     dump_folder: str,
     device: torch.device,
-    model_args: BaseModelArgs,
+    model_config: BaseModel.Config,
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.get_mesh("pp")
 
     # Determine the number of virtual stages based on schedule type
-    schedule_class = get_schedule_class(
-        parallelism.pipeline_parallel_schedule
-    )
+    schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
     is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
     layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
-    if hasattr(model_args, "n_layers"):
-        num_layers = model_args.n_layers
+    if hasattr(model_config, "n_layers"):
+        num_layers = model_config.n_layers
     else:
         raise ValueError("Model does not have n_layers attribute.")
 
@@ -159,7 +163,12 @@ def pipeline_llm(
         #       in case the model is modified e.g. by torch.compile
         stages[i].submod = m
 
-    pp_schedule = build_pipeline_schedule(parallelism=parallelism, local_batch_size=training.local_batch_size, stages=stages, loss_fn=loss_fn)
+    pp_schedule = build_pipeline_schedule(
+        parallelism=parallelism,
+        local_batch_size=training.local_batch_size,
+        stages=stages,
+        loss_fn=loss_fn,
+    )
 
     # This is used in the train loop to determine whether to pass in the input_ids and labels
     has_first_stage = False
@@ -201,9 +210,7 @@ def build_pipeline_schedule(
             )
         schedule_class = _PipelineScheduleRuntime
     else:
-        schedule_class = get_schedule_class(
-            parallelism.pipeline_parallel_schedule
-        )
+        schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
     microbatch_size = parallelism.pipeline_parallel_microbatch_size
