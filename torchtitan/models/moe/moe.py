@@ -73,8 +73,10 @@ class FeedForward(nn.Module):
             trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
-# NOTE: keeping this for-loop implementation for comparison
-#       and readability, may remove later
+# Compile-friendly padded batched matmul implementation (replaces the original
+# for-loop which used .tolist() / sum() that create unbacked symbolic integers).
+# All intermediate shapes are static: (E, T, D) and (E, T, H).
+# Data-dependent routing is expressed through index *values*, not shapes.
 def _run_experts_for_loop(
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -82,30 +84,35 @@ def _run_experts_for_loop(
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
-    # NOTE: this would incur a synchronization between device and host
-    num_tokens_per_expert_list = num_tokens_per_expert.tolist()
+    num_experts = w1.shape[0]
+    total_tokens = x.shape[0]
+    dim = x.shape[1]
 
-    # side-effect code due to the usage of generate_permute_indices
-    num_padding = x.shape[0] - sum(num_tokens_per_expert_list)
+    # Compute per-expert offsets (all tensor ops, no D2H sync)
+    offsets = torch.zeros(num_experts + 1, dtype=torch.long, device=x.device)
+    offsets[1:] = torch.cumsum(num_tokens_per_expert.to(torch.long), dim=0)
 
-    # a tuple of tensors indexed by experts
-    # each with shape (tokens_per_expert(varying), dim)
-    x_splits = torch.split(
-        x[: sum(num_tokens_per_expert_list)],
-        split_size_or_sections=num_tokens_per_expert_list,
-        dim=0,
-    )
-    out_experts_splits = []
-    for expert_idx, x_expert in enumerate(x_splits):
-        h = F.silu(torch.matmul(x_expert, w1[expert_idx].transpose(-2, -1)))
-        h = h * torch.matmul(x_expert, w3[expert_idx].transpose(-2, -1))
-        h = torch.matmul(h, w2[expert_idx].transpose(-2, -1))
-        # h shape (tokens_per_expert(varying), dim)
-        out_experts_splits.append(h)
-    out = torch.cat(out_experts_splits, dim=0)
+    # Build gather indices and validity mask
+    token_range = torch.arange(total_tokens, device=x.device)
+    counts = num_tokens_per_expert.long().unsqueeze(1)  # (E, 1)
+    starts = offsets[:-1].unsqueeze(1)  # (E, 1)
 
-    # side-effect code due to the usage of generate_permute_indices
-    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
+    valid = token_range.unsqueeze(0) < counts  # (E, T) bool
+    idx = (starts + token_range.unsqueeze(0)).clamp(max=total_tokens - 1)  # (E, T)
+
+    # Gather tokens per expert, zero out padding: (E, T, D)
+    x_batched = x[idx] * valid.unsqueeze(-1).to(x.dtype)
+
+    # Batched matmul through all experts simultaneously
+    h = F.silu(torch.bmm(x_batched, w1.transpose(-2, -1)))
+    h = h * torch.bmm(x_batched, w3.transpose(-2, -1))
+    out_batched = torch.bmm(h, w2.transpose(-2, -1))  # (E, T, D)
+
+    # Zero out padding and scatter results back
+    out_batched = out_batched * valid.unsqueeze(-1).to(out_batched.dtype)
+    out = torch.zeros(total_tokens, dim, dtype=x.dtype, device=x.device)
+    scatter_idx = idx.unsqueeze(-1).expand_as(out_batched)
+    out.scatter_add_(0, scatter_idx.reshape(-1, dim), out_batched.reshape(-1, dim))
 
     return out
 
