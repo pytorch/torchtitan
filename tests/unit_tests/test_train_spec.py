@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
 from functools import partial
 
 import pytest
@@ -14,11 +15,10 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers, OptimizersContainer
 from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.config import Optimizer as OptimizerConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.models.llama3 import parallelize_llama
-from torchtitan.protocols import BaseModelArgs, ModelProtocol
+from torchtitan.protocols import BaseModel
 from torchtitan.protocols.train_spec import (
     get_train_spec,
     register_train_spec,
@@ -26,10 +26,20 @@ from torchtitan.protocols.train_spec import (
 )
 
 
-class FakeModel(ModelProtocol):
-    def __init__(self, model_args: BaseModelArgs) -> None:
-        super().__init__(model_args)
-        self.linear = nn.Linear(8, 8)
+class FakeModel(BaseModel):
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseModel.Config):
+        hidden: int = 8
+
+        def update_from_config(self, *, job_config, **kwargs):
+            pass
+
+        def get_nparams_and_flops(self, model, seq_len):
+            return 0, 0
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.linear = nn.Linear(config.hidden, config.hidden)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
@@ -40,7 +50,7 @@ class FakeModel(ModelProtocol):
 
 def fake_build_optimizers(
     model_parts: list[nn.Module],
-    optimizer_config: OptimizerConfig,
+    optimizer_config: OptimizersContainer.Config,
     parallel_dims: ParallelDims,
     ft_manager: FTManager,
 ) -> OptimizersContainer:
@@ -60,7 +70,7 @@ def fake_build_optimizers(
 
 def fake_build_optimizers_with_hook(
     model_parts: list[nn.Module],
-    optimizer_config: OptimizerConfig,
+    optimizer_config: OptimizersContainer.Config,
     parallel_dims: ParallelDims,
     ft_manager: FTManager,
     optimizer_hook,
@@ -74,10 +84,9 @@ def fake_build_optimizers_with_hook(
 
 class TestTrainSpec:
     def test_register_train_spec(self):
-        fake_config = {"fake": BaseModelArgs()}
+        fake_config = {"fake": FakeModel.Config()}
         spec = TrainSpec(
-            model_cls=FakeModel,
-            model_args=fake_config,
+            model_configs=fake_config,
             parallelize_fn=parallelize_llama,
             pipelining_fn=None,
             build_optimizers_fn=build_optimizers,
@@ -94,11 +103,10 @@ class TestTrainSpec:
             new_spec = get_train_spec("fake2")
 
     def test_optim_hook(self):
-        fake_config = {"fake": BaseModelArgs()}
+        fake_config = {"fake": FakeModel.Config()}
 
         spec = TrainSpec(
-            model_cls=FakeModel,
-            model_args=fake_config,
+            model_configs=fake_config,
             parallelize_fn=parallelize_llama,
             pipelining_fn=None,
             build_optimizers_fn=fake_build_optimizers_with_hook,
@@ -110,7 +118,7 @@ class TestTrainSpec:
         register_train_spec("fake2", spec)
         new_spec = get_train_spec("fake2")
 
-        model = new_spec.model_cls(BaseModelArgs())
+        model = FakeModel.Config().build()
         model_parts = [model]
 
         # Demonstrate how to register a optimizer hook for all model specs

@@ -14,7 +14,7 @@ from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor
 from torchtitan.models.utils import MoEStateDictAdapter
 
-from .args import DeepSeekV3ModelArgs
+from .model import DeepSeekV3Model
 
 
 class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
@@ -24,10 +24,10 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
     def __init__(
         self,
-        model_args: DeepSeekV3ModelArgs,
+        model_config: DeepSeekV3Model.Config,
         hf_assets_path: str | None,
     ):
-        super().__init__(model_args, hf_assets_path)
+        super().__init__(model_config, hf_assets_path)
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention Module
@@ -56,7 +56,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         }
 
         # Adjustments for from_hf_map based on model architecture
-        if model_args.q_lora_rank != 0:
+        if model_config.q_lora_rank != 0:
             self.from_hf_map.update(
                 {
                     "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
@@ -132,11 +132,13 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     split_values = self._split_experts_weights(
                         value,
                         # pyrefly: ignore [missing-attribute]
-                        self.model_args.moe_args.num_experts,
+                        self.model_config.moe_config.num_experts,
                     )
 
                     # pyrefly: ignore [missing-attribute]
-                    for expert_num in range(0, self.model_args.moe_args.num_experts):
+                    for expert_num in range(
+                        0, self.model_config.moe_config.num_experts
+                    ):
                         new_key = new_abstract_key.format(layer_num, expert_num)
                         hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
@@ -194,7 +196,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                         titan_abstract_key,
                         layer_num,
                         # pyrefly: ignore [missing-attribute]
-                        self.model_args.moe_args.num_experts,
+                        self.model_config.moe_config.num_experts,
                     )
 
                 if stacked_value is not None:

@@ -15,14 +15,14 @@ logger = logging.getLogger()
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
-from .args import TransformerModelArgs
+from .model import Transformer
 
 
 class Llama4StateDictAdapter(StateDictAdapter):
-    def __init__(self, model_args: TransformerModelArgs, hf_assets_path: str | None):
-        super().__init__(model_args, hf_assets_path)
+    def __init__(self, model_config: Transformer.Config, hf_assets_path: str | None):
+        super().__init__(model_config, hf_assets_path)
 
-        self.model_args = model_args
+        self.model_config = model_config
         self.hf_assets_path = hf_assets_path
         self.from_hf_map = {
             "language_model.model.embed_tokens.weight": "tok_embeddings.weight",

@@ -18,9 +18,8 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
-from torchtitan.config import LRScheduler
 
-from .model import BaseModelArgs, ModelProtocol
+from .model import BaseModel
 from .state_dict_adapter import BaseStateDictAdapter
 
 
@@ -32,15 +31,14 @@ DataLoaderBuilder: TypeAlias = Callable[..., BaseDataLoader]
 TokenizerBuilder: TypeAlias = Callable[..., BaseTokenizer]
 OptimizersBuilder: TypeAlias = Callable[..., OptimizersContainer]
 LRSchedulersBuilder: TypeAlias = Callable[
-    [OptimizersContainer, LRScheduler, int], LRSchedulersContainer
+    [OptimizersContainer, LRSchedulersContainer.Config, int], LRSchedulersContainer
 ]
 LossFunctionBuilder: TypeAlias = Callable[..., LossFunction]
 
 
 @dataclass
 class TrainSpec:
-    model_cls: type[ModelProtocol]
-    model_args: Mapping[str, BaseModelArgs]
+    model_configs: Mapping[str, BaseModel.Config]
     parallelize_fn: ParallelizeFunction
     pipelining_fn: PipeliningFunction | None
     build_optimizers_fn: OptimizersBuilder

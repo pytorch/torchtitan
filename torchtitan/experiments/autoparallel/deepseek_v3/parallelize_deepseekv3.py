@@ -16,11 +16,16 @@ from autoparallel.api import AutoParallel
 from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 
 from torch.distributed.tensor.placement_types import Replicate, Shard
-from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training
+from torchtitan.config import (
+    ActivationCheckpoint,
+    ModelConverters,
+    Parallelism,
+    Training,
+)
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.job_config import Experimental
-from torchtitan.models.moe.moe import _run_experts_grouped_mm
+from torchtitan.models.common.moe.moe import _run_experts_grouped_mm
 
 from torchtitan.tools.logging import logger
 
@@ -217,7 +222,7 @@ def monkey_patch_local_map_moe(model, sparse_mesh):
     """
     from torch.distributed._tensor.experimental import local_map
 
-    # from torchtitan.models.moe import moe
+    # from torchtitan.models.common.moe import moe
     global _moe_forward
     _moe_forward = local_map(
         _moe_forward,
@@ -285,9 +290,7 @@ def parallelize_deepseekv3(
     torch._inductor.config.allow_buffer_reuse = False
 
     # allow configuring inductor comms optimizations from torchtitan commandline
-    configure_inductor_for_autobucketing(
-        experimental.comms_bucket_reorder_strategy
-    )
+    configure_inductor_for_autobucketing(experimental.comms_bucket_reorder_strategy)
 
     sparse_names = ["dp_replicate", "efsdp", "ep", "etp"]
     sparse_names = [
@@ -307,7 +310,7 @@ def parallelize_deepseekv3(
         return (
             torch.randint(
                 0,
-                model.model_args.vocab_size,
+                model.config.vocab_size,
                 (global_batch_size, training.seq_len),
                 device=torch.device("cuda"),
             ),
@@ -366,8 +369,7 @@ def parallelize_deepseekv3(
         )
         out_sharding = x_sharding
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled
-            and not parallelism.disable_loss_parallel
+            parallel_dims.tp_enabled and not parallelism.disable_loss_parallel
         )
         if loss_parallel_enabled:
             out_sharding = tuple(

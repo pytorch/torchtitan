@@ -23,7 +23,13 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torchtitan.components.quantization.float8 import find_float8_linear_config
-from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training, TORCH_DTYPE_MAP
+from torchtitan.config import (
+    ActivationCheckpoint,
+    ModelConverters,
+    Parallelism,
+    TORCH_DTYPE_MAP,
+    Training,
+)
 from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -41,11 +47,11 @@ from torchtitan.distributed.expert_parallel import (
     TensorParallel,
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.common.moe import moe as moe_module
 from torchtitan.models.llama3.infra.parallelize import (
     apply_ddp,
     disable_fsdp_gradient_division,
 )
-from torchtitan.models.moe import moe as moe_module
 from torchtitan.tools.logging import logger
 
 # for selective op activation checkpointing
@@ -100,9 +106,9 @@ def parallelize_llama(
     if parallel_dims.tp_enabled:
         float8_config = find_float8_linear_config(model_converters.converter_configs)
         enable_float8_linear = float8_config is not None
-        float8_is_rowwise = (
-            float8_config is not None
-            and float8_config.recipe_name in ("rowwise", "rowwise_with_gw_hp")
+        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
+            "rowwise",
+            "rowwise_with_gw_hp",
         )
 
         # For now, float8 all-gather with TP is only supported for tensorwise
@@ -144,7 +150,9 @@ def parallelize_llama(
         use_deepep = False
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        dual_pipe_v = get_dual_pipe_v_flag(parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims)
+        dual_pipe_v = get_dual_pipe_v_flag(
+            parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims
+        )
 
         apply_moe_ep_tp(
             model,
@@ -156,7 +164,7 @@ def parallelize_llama(
             use_deepep=use_deepep,
         )
 
-    attn_type = getattr(model.model_args, "attn_type", "sdpa")
+    attn_type = getattr(model.config, "attn_type", "sdpa")
     if parallel_dims.cp_enabled:
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]

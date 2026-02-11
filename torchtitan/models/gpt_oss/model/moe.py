@@ -5,16 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 
+from __future__ import annotations
+
 from typing import Callable
 
 import torch
 from torch import nn
 from torch.distributed.tensor import DTensor
-from torchtitan.models.moe.moe import MoE
-from torchtitan.models.moe.utils import _permute, _unpermute
+from torchtitan.models.common.moe.moe import MoE
+from torchtitan.models.common.moe.utils import _permute, _unpermute
 from torchtitan.models.utils import trunc_normal_
-
-from .args import GptOssModelArgs
 
 
 class ScaleBiasForward(torch.autograd.Function):
@@ -271,19 +271,16 @@ class GptOssGroupedExperts(nn.Module):
 class GptOssMoE(MoE):
     """GptOss MoE implementation that inherits from the base MoE class."""
 
-    def __init__(self, model_args: GptOssModelArgs, dim: int, hidden_dim: int):
-        # Convert GptOssModelArgs to MoEArgs for base class compatibility
-        moe_args = model_args.moe_args
-
+    def __init__(self, config: MoE.Config, *, dim: int, swiglu_limit: float):
         # Initialize the base MoE class
-        super().__init__(moe_args, dim, hidden_dim)
+        super().__init__(config, dim=dim)
 
         # Override the base GroupedExperts with GptOssGroupedExperts
         # pyrefly: ignore [bad-assignment]
         self.experts = GptOssGroupedExperts(
             dim=dim,
-            hidden_dim=hidden_dim,
-            num_experts=moe_args.num_experts,
-            swiglu_limit=model_args.swiglu_limit,
-            use_grouped_mm=moe_args.use_grouped_mm,
+            hidden_dim=config.hidden_dim,
+            num_experts=config.num_experts,
+            swiglu_limit=swiglu_limit,
+            use_grouped_mm=config.use_grouped_mm,
         )

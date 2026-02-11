@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Mapping
 
-from torchtitan.protocols import BaseModelArgs, BaseStateDictAdapter, ModelProtocol
+from torchtitan.protocols import BaseModel, BaseStateDictAdapter
 from torchtitan.protocols.train_spec import (
     LossFunctionBuilder,
     LRSchedulersBuilder,
@@ -21,8 +21,7 @@ from torchtitan.protocols.train_spec import (
 
 @dataclass
 class ForgeTrainSpec:
-    model_cls: type[ModelProtocol]
-    model_args: Mapping[str, BaseModelArgs]
+    model_configs: Mapping[str, BaseModel.Config]
     parallelize_fn: ParallelizeFunction
     pipelining_fn: PipeliningFunction | None
     build_optimizers_fn: OptimizersBuilder
@@ -38,8 +37,7 @@ def _transform_train_spec(original_spec: TrainSpec):
     """Transform the original train spec to ForgeTrainSpec format."""
     # Create a new TrainSpec with only the fields we need in forge
     return ForgeTrainSpec(
-        model_cls=original_spec.model_cls,
-        model_args=original_spec.model_args,
+        model_configs=original_spec.model_configs,
         parallelize_fn=original_spec.parallelize_fn,
         pipelining_fn=original_spec.pipelining_fn,
         build_optimizers_fn=original_spec.build_optimizers_fn,

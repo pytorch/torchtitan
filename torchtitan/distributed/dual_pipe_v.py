@@ -181,7 +181,7 @@ class SyncHook(torch.autograd.Function):
 
 def _count_moe_modules(model):
     """Count MoE modules directly"""
-    from torchtitan.models.moe import MoE
+    from torchtitan.models.common.moe import MoE
 
     moe_count = 0
     for _, module in model.named_modules():

@@ -11,7 +11,12 @@ from autoparallel.api import AutoParallel
 from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 
 from torch.distributed.tensor.placement_types import Shard
-from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training
+from torchtitan.config import (
+    ActivationCheckpoint,
+    ModelConverters,
+    Parallelism,
+    Training,
+)
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.job_config import Experimental
@@ -53,9 +58,7 @@ def parallelize_deepseekv3(
     torch._inductor.config.allow_buffer_reuse = False
 
     # allow configuring inductor comms optimizations from torchtitan commandline
-    configure_inductor_for_autobucketing(
-        experimental.comms_bucket_reorder_strategy
-    )
+    configure_inductor_for_autobucketing(experimental.comms_bucket_reorder_strategy)
 
     # Build the sparse mesh for MoE expert parallelism
     # Filter to only include enabled mesh dimensions
@@ -86,7 +89,7 @@ def parallelize_deepseekv3(
         return (
             torch.randint(
                 0,
-                model.model_args.vocab_size,
+                model.config.vocab_size,
                 (global_batch_size, training.seq_len),
                 device=torch.device("cuda"),
             ),
@@ -111,8 +114,7 @@ def parallelize_deepseekv3(
 
         x_sharding = (Shard(0), Shard(0))
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled
-            and not parallelism.disable_loss_parallel
+            parallel_dims.tp_enabled and not parallelism.disable_loss_parallel
         )
         assert not loss_parallel_enabled
         autop.add_input_constraints([x_sharding])

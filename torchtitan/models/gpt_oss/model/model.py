@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -17,153 +18,27 @@ from torchtitan.models.attention import (
     get_document_mask_mod,
     get_sliding_window_mask_mod,
 )
-from torchtitan.models.utils import trunc_normal_
-from torchtitan.protocols.model import AttentionMasksType
-from torchtitan.protocols.train_spec import ModelProtocol
+from torchtitan.models.common import RoPE
+from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
+from torchtitan.models.utils import get_moe_model_nparams_and_flops, trunc_normal_
+from torchtitan.protocols.model import AttentionMasksType, BaseModel
+from torchtitan.tools.logging import logger
+from torchtitan.tools.utils import has_cuda_capability
 
-from .args import GptOssModelArgs
 from .moe import GptOssMoE
-
-
-def precompute_rope_cache(
-    dim: int,
-    max_seq_len: int,
-    base: float = 1_000_000.0,
-    rope_factor: float = 1.0,
-    ntk_alpha: float = 1.0,
-    ntk_beta: float = 32.0,
-    original_seq_len: int = 4096,
-) -> torch.Tensor:
-    """
-    Precompute RoPE cache with optional YaRN scaling for extended context.
-
-    YaRN (Yet another RoPE extensioN) allows extending context length beyond
-    the original training length by applying frequency scaling corrections
-    and mscale (concentration) for attention magnitude preservation.
-
-    Args:
-        dim: Embedding dimension (head_dim)
-        max_seq_len: Maximum sequence length to precompute
-        base: RoPE theta base frequency
-        rope_factor: YaRN scaling factor (1.0 = no scaling)
-        ntk_alpha: NTK-by-parts alpha (slow correction, used for high freq bound)
-        ntk_beta: NTK-by-parts beta (fast correction, used for low freq bound)
-        original_seq_len: Original pretrained context length
-
-    Returns:
-        Precomputed RoPE cache: [max_seq_len, dim * 2] (cos and sin concatenated)
-    """
-    freq = base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
-    mscale = 1.0
-
-    # YaRN scaling applies when rope_factor > 1.0
-    if rope_factor > 1.0:
-        # YaRN mscale (concentration) for attention magnitude preservation
-        mscale = 0.1 * math.log(rope_factor) + 1.0
-
-        # Compute correction range (NTK by parts)
-        d_half = dim / 2
-        low = (
-            d_half
-            * math.log(original_seq_len / (ntk_beta * 2 * math.pi))
-            / math.log(base)
-        )
-        high = (
-            d_half
-            * math.log(original_seq_len / (ntk_alpha * 2 * math.pi))
-            / math.log(base)
-        )
-        assert (
-            0 < low < high < d_half - 1
-        ), f"Invalid YaRN params: 0 < {low} < {high} < {d_half - 1}"
-
-        # Linear ramp for smooth interpolation between low and high
-        ramp = (torch.arange(d_half, dtype=torch.float32) - low) / (high - low)
-        mask = 1 - ramp.clamp(0, 1)
-
-        # Blend interpolated and extrapolated frequencies
-        interpolation = 1.0 / (rope_factor * freq)
-        extrapolation = 1.0 / freq
-        inv_freq = interpolation * (1 - mask) + extrapolation * mask
-    else:
-        inv_freq = 1.0 / freq
-
-    # Compute position embeddings
-    t = torch.arange(max_seq_len, dtype=inv_freq.dtype, device=inv_freq.device)
-    freqs = torch.outer(t, inv_freq).float()
-    theta = torch.cat([freqs, freqs], dim=-1)
-
-    # Apply mscale to cos/sin. Both Q and K are rotated with scaled
-    # cos/sin, so attention logits are scaled by mscale².
-    cos = theta.cos() * mscale
-    sin = theta.sin() * mscale
-    return torch.cat([cos, sin], dim=-1)
-
-
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    """
-    Reshape frequency tensor (represented by cos, sin) for broadcasting it with another tensor.
-
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    The input freqs_cis tensor is assumed to be of shape (max_seqlen, head_dim * 2),
-    and the first seqlen elements will be sliced, but dim must match x.
-
-    Args:
-        rope_cache (torch.Tensor): RoPE tensor (cos and sin) to be reshaped.
-        x (torch.Tensor): Target tensor for broadcasting compatibility.
-
-    Returns:
-        torch.Tensor: Reshaped frequency tensor.
-    """
-    ndim = x.ndim
-    assert ndim > 1
-    _, seqlen, _, head_dim = x.shape
-    rope_cache = rope_cache[0:seqlen]
-    # The shape of rope_cache is (seqlen, head_dim * 2) because we concate cos and sin
-    assert rope_cache.shape == (seqlen, head_dim * 2)
-    shape = [-1, seqlen, 1, head_dim * 2]
-    return rope_cache.view(*shape)
-
-
-def apply_rotary_emb(
-    xq: torch.Tensor, xk: torch.Tensor, rope_cache: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # input tensor x has shape [bsz, seq_len, n_heads, head_dim]
-    head_dim = xq.shape[-1]
-
-    # reshape for broadcast
-    rope_cache = reshape_for_broadcast(rope_cache, xq)
-
-    # [bsz, seq_len, 1, head_dim]
-    cos = rope_cache[..., :head_dim].to(dtype=xq.dtype, device=xq.device)
-    sin = rope_cache[..., head_dim:].to(dtype=xq.dtype, device=xq.device)
-
-    # xq:  [bsz, seq_len, n_heads, head_dim]
-    # xk:  [bsz, seq_len, n_kv_heads, head_dim]
-    xq_out = (xq * cos) + (rotate_half(xq) * sin)
-    xk_out = (xk * cos) + (rotate_half(xk) * sin)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 class Attention(nn.Module):
     """
-    Multi-head attention (MLA) module.
+    Multi-head attention (MLA) module with sink attention.
     """
 
-    def __init__(self, model_args: GptOssModelArgs):
+    def __init__(self, config: "GptOssModel.Config"):
         super().__init__()
-        self.head_dim = model_args.head_dim
-        self.n_heads = model_args.n_heads
-        self.n_kv_heads = model_args.n_kv_heads
+        self.head_dim = config.head_dim
+        self.n_heads = config.n_heads
+        self.n_kv_heads = config.n_kv_heads
         self.enable_gqa = self.n_heads > self.n_kv_heads
 
         self.n_rep = self.n_heads // self.n_kv_heads
@@ -172,26 +47,26 @@ class Attention(nn.Module):
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
         self.wq = nn.Linear(
-            model_args.dim,
-            model_args.n_heads * model_args.head_dim,
+            config.dim,
+            config.n_heads * config.head_dim,
             bias=True,
         )
         self.wk = nn.Linear(
-            model_args.dim,
-            model_args.n_kv_heads * model_args.head_dim,
+            config.dim,
+            config.n_kv_heads * config.head_dim,
             bias=True,
         )
         self.wv = nn.Linear(
-            model_args.dim,
-            model_args.n_kv_heads * model_args.head_dim,
+            config.dim,
+            config.n_kv_heads * config.head_dim,
             bias=True,
         )
         self.wo = nn.Linear(
-            model_args.n_heads * model_args.head_dim,
-            model_args.dim,
+            config.n_heads * config.head_dim,
+            config.dim,
             bias=True,
         )
-        self.sinks = nn.Parameter(torch.empty(model_args.n_heads))
+        self.sinks = nn.Parameter(torch.empty(config.n_heads))
         self.inner_attention = FlexAttentionWrapper()
 
     def init_weights(self, init_std: float):
@@ -220,6 +95,7 @@ class Attention(nn.Module):
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
             rope_cache (torch.Tensor): Precomputed cosine and sine frequencies for rope embedding.
+            attention_masks: Attention mask (BlockMask).
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -231,7 +107,7 @@ class Attention(nn.Module):
         k = self.wk(x).view(hidden_shape)
         v = self.wv(x).view(hidden_shape)
 
-        q, k = apply_rotary_emb(q, k, rope_cache)
+        q, k = apply_rotary_emb_cos_sin(q, k, rope_cache)
 
         xq = q.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xk = k.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
@@ -248,7 +124,7 @@ class Attention(nn.Module):
             enable_gqa=self.enable_gqa,
         )
 
-        # Apply attention sink rescaling: rescale by σ(lse - w[h])
+        # Apply attention sink rescaling: rescale by sigma(lse - w[h])
         # This is mathematically equivalent to concatenating learnable sink weights
         sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
         output = output * sink_scale.to(output.dtype)
@@ -268,16 +144,16 @@ class TransformerBlock(nn.Module):
     Transformer block with attention and feed-forward layers.
     """
 
-    def __init__(self, layer_id: int, model_args: GptOssModelArgs):
+    def __init__(self, layer_id: int, config: "GptOssModel.Config"):
 
         super().__init__()
         self.use_sliding_attention = layer_id % 2 == 0
-        self.attention = Attention(model_args)
-        self.attention_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.attention = Attention(config)
+        self.attention_norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
+        self.ffn_norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
 
         self.moe = GptOssMoE(
-            model_args, dim=model_args.dim, hidden_dim=model_args.moe_inter_dim
+            config.moe_config, dim=config.dim, swiglu_limit=config.swiglu_limit
         )
         self.moe_enabled = True  # for composability with load balancing
 
@@ -321,39 +197,113 @@ class TransformerBlock(nn.Module):
         self.moe.init_weights(self.weight_init_std, buffer_device)
 
 
-class GptOssModel(ModelProtocol):
+class GptOssModel(BaseModel):
     """
     GPT-OSS Transformer model with attention and feed-forward layers.
     """
 
-    def __init__(self, model_args: GptOssModelArgs):
-        super().__init__(model_args)
-        self.model_args = model_args
-        self.max_seq_len = model_args.max_seq_len
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
-        self.register_buffer(
-            "rope_cache", self._precompute_rope_cache(), persistent=False
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseModel.Config):
+        dim: int = 2880
+        n_layers: int = 24
+        n_heads: int = 64
+        n_kv_heads: int = 8
+        vocab_size: int = 201088
+        norm_eps: float = 1e-5
+        max_seq_len: int = 131072
+        attn_mask_type: str = "causal"
+        attn_type: str = "flex"  # NOTE: gpt-oss only supports FlexAttention
+        head_dim: int = 64
+        sliding_window_size: int = 128
+
+        # MoE
+        moe_config: MoE.Config = field(default_factory=MoE.Config)
+        swiglu_limit: float = 7.0
+
+        # Sub-component configs
+        rope_config: RoPE.Config = field(
+            default_factory=lambda: RoPE.Config(
+                dim=64,
+                max_seq_len=131072,
+                theta=150000.0,
+                format="cos_sin",
+                scaling="yarn",
+                rope_factor=32,
+                beta_slow=32.0,
+                beta_fast=1.0,
+                original_seq_len=4096,
+            )
         )
 
+        def update_from_config(
+            self,
+            *,
+            job_config,
+            **kwargs,
+        ) -> None:
+            training = job_config.training
+            parallelism = job_config.parallelism
+            seq_len = training.seq_len
+            if seq_len > self.max_seq_len:
+                logger.warning(
+                    f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+                )
+            self.max_seq_len = seq_len
+
+            # Sync rope_config max_seq_len
+            import dataclasses as _dc
+
+            self.rope_config = _dc.replace(self.rope_config, max_seq_len=seq_len)
+
+            if self.moe_config.use_grouped_mm and not has_cuda_capability(9, 0):
+                logger.warning(
+                    "Failed to use grouped mm, which is only supported on SM90 or later",
+                )
+                self.moe_config.use_grouped_mm = False
+
+            if parallelism.context_parallel_degree > 1:
+                raise NotImplementedError(
+                    "CP support for gpt-oss model is still in progress."
+                )
+
+        # pyrefly: ignore [bad-override]
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, float]:
+            return get_moe_model_nparams_and_flops(
+                self, model, self.n_heads, 2 * self.head_dim, seq_len
+            )
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.config = config
+        self.max_seq_len = config.max_seq_len
+
+        self.tok_embeddings = nn.Embedding(config.vocab_size, config.dim)
+
+        self.rope = config.rope_config.build()
+        self.register_buffer("rope_cache", self.rope.cache, persistent=False)
+
         self.layers = torch.nn.ModuleDict()
-        for layer_id in range(model_args.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args).to(
+        for layer_id in range(config.n_layers):
+            self.layers[str(layer_id)] = TransformerBlock(layer_id, config).to(
                 torch.bfloat16
             )
 
-        self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
         self.output = nn.Linear(
-            model_args.dim,
-            model_args.vocab_size,
+            config.dim,
+            config.vocab_size,
             dtype=torch.get_default_dtype(),
             bias=False,
         )
-        self.model_args = model_args
 
-    def init_weights(self, buffer_device: torch.device | None = None) -> None:
+    def init_weights(
+        self, *, buffer_device: torch.device | None = None, **kwargs
+    ) -> None:
         buffer_device = buffer_device or self.rope_cache.device
-        with torch.device(buffer_device):
-            self.rope_cache = self._precompute_rope_cache()
+        self.rope.init_weights(buffer_device=buffer_device)
+        self.rope_cache = self.rope.cache
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
@@ -362,7 +312,7 @@ class GptOssModel(ModelProtocol):
                 layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_std = self.model_args.dim**-0.5
+        final_out_std = self.config.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
             trunc_normal_(
@@ -373,17 +323,6 @@ class GptOssModel(ModelProtocol):
                 b=cutoff_factor * final_out_std,
             )
 
-    def _precompute_rope_cache(self) -> torch.Tensor:
-        return precompute_rope_cache(
-            self.model_args.head_dim,
-            self.model_args.max_seq_len,
-            self.model_args.rope_theta,
-            self.model_args.rope_factor,
-            self.model_args.ntk_alpha,
-            self.model_args.ntk_beta,
-            self.model_args.original_seq_len,
-        )
-
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
@@ -393,9 +332,9 @@ class GptOssModel(ModelProtocol):
 
         basic_mask_mods = []
         sliding_window_mask_mods = [
-            get_sliding_window_mask_mod(self.model_args.sliding_window_size)
+            get_sliding_window_mask_mod(self.config.sliding_window_size)
         ]
-        match self.model_args.attn_mask_type:
+        match self.config.attn_mask_type:
             case "causal":
                 B = 1
                 basic_mask_mods.append(get_causal_mask_mod())
@@ -407,7 +346,7 @@ class GptOssModel(ModelProtocol):
                 )
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.model_args.attn_mask_type}"
+                    f"Unknown attention mask type: {self.config.attn_mask_type}"
                 )
 
         # create basic attention mask: causal or block_causal

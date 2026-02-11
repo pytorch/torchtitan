@@ -12,65 +12,12 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
+from torchtitan.config.configurable import Module
+from torchtitan.models.common import FeedForward
 from torchtitan.models.utils import trunc_normal_
-
 from torchtitan.tools.logging import logger
+
 from .utils import indices_padding_wrapper
-
-
-@dataclass
-class MoEArgs:
-    num_experts: int = 8
-    num_shared_experts: int = 1
-
-    # router
-    score_func: Literal["softmax", "sigmoid"] = "sigmoid"
-    route_norm: bool = False
-    route_scale: float = 1.0
-    gate_bias: bool = False
-    score_before_experts: bool = True
-
-    # token-choice with optional node limited routing
-    top_k: int = 1
-    num_expert_groups: int | None = None  # must be a divisor of num_experts
-    num_limited_groups: int | None = None
-    use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
-    load_balance_coeff: float | None = 1e-3
-
-    _debug_force_load_balance: bool = False
-    # if True, we force each experts get same amount of token via round-robin
-
-
-# can be used as dense FFN layer or shared experts in MoE layers
-class FeedForward(nn.Module):
-    """
-    Args:
-        dim (int): Input dimension.
-        hidden_dim (int): Hidden dimension of the feedforward layer.
-
-    Attributes:
-        w1 (Linear): Linear transformation for the first layer.
-        w2 (Linear): Linear transformation for the second layer.
-        w3 (Linear): Linear transformation for the third layer.
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-    ):
-        super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-    def init_weights(self, init_std: float = 0.02):
-        trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
-        for linear in (self.w2, self.w3):
-            trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
 # NOTE: keeping this for-loop implementation for comparison
@@ -418,42 +365,72 @@ class TokenReorderer(nn.Module):
         )
 
 
-class MoE(nn.Module):
-    def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
+class MoE(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        num_experts: int = 8
+        num_shared_experts: int = 1
+
+        # router
+        score_func: Literal["softmax", "sigmoid"] = "sigmoid"
+        route_norm: bool = False
+        route_scale: float = 1.0
+        gate_bias: bool = False
+        score_before_experts: bool = True
+
+        # token-choice with optional node limited routing
+        top_k: int = 1
+        num_expert_groups: int | None = None  # must be a divisor of num_experts
+        num_limited_groups: int | None = None
+        use_grouped_mm: bool = (
+            True  # grouped mm or for-loop for the experts computation
+        )
+        load_balance_coeff: float | None = 1e-3
+
+        _debug_force_load_balance: bool = False
+        # if True, we force each experts get same amount of token via round-robin
+
+        # Expert hidden dimension (replaces old moe_inter_dim)
+        hidden_dim: int = 0
+
+    def __init__(self, config: Config, *, dim: int):
         super().__init__()
 
-        num_experts = moe_args.num_experts
+        num_experts = config.num_experts
+        hidden_dim = config.hidden_dim
         self.experts = GroupedExperts(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
-            use_grouped_mm=moe_args.use_grouped_mm,
+            use_grouped_mm=config.use_grouped_mm,
         )
         self.router = TokenChoiceTopKRouter(
             dim=dim,
             num_experts=num_experts,
-            num_expert_groups=moe_args.num_expert_groups,
-            num_limited_groups=moe_args.num_limited_groups,
-            top_k=moe_args.top_k,
-            score_func=moe_args.score_func,
-            route_norm=moe_args.route_norm,
-            route_scale=moe_args.route_scale,
-            gate_bias=moe_args.gate_bias,
-            _debug_force_load_balance=moe_args._debug_force_load_balance,
+            num_expert_groups=config.num_expert_groups,
+            num_limited_groups=config.num_limited_groups,
+            top_k=config.top_k,
+            score_func=config.score_func,
+            route_norm=config.route_norm,
+            route_scale=config.route_scale,
+            gate_bias=config.gate_bias,
+            _debug_force_load_balance=config._debug_force_load_balance,
         )
-        self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
+        self.reorderer = TokenReorderer(num_experts=num_experts, top_k=config.top_k)
         self.shared_experts = (
-            FeedForward(dim=dim, hidden_dim=hidden_dim * moe_args.num_shared_experts)
-            if moe_args.num_shared_experts > 0
+            FeedForward.Config(hidden_dim=hidden_dim * config.num_shared_experts).build(
+                dim=dim
+            )
+            if config.num_shared_experts > 0
             else None
         )
-        self.score_before_experts = moe_args.score_before_experts
+        self.score_before_experts = config.score_before_experts
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert is accumulated in the model forward pass.
         #       expert_bias is updated outside the model in an optimizer step pre hook
         #       to work with gradient accumulation.
-        self.load_balance_coeff = moe_args.load_balance_coeff
+        self.load_balance_coeff = config.load_balance_coeff
         if self.load_balance_coeff is not None:
             assert self.load_balance_coeff > 0.0
             self.register_buffer(
@@ -555,10 +532,20 @@ class MoE(nn.Module):
         return (out + out_experts).reshape(bs, slen, dim)
 
     def init_weights(
-        self,
-        init_std: float,
-        buffer_device: torch.device,
-    ):
+        self, init_std: float, buffer_device: torch.device, **kwargs
+    ) -> None:
+        self.router.init_weights(init_std)
+        self.experts.init_weights(init_std)
+        self.reorderer = self.reorderer.to(buffer_device)
+        if self.shared_experts is not None:
+            self.shared_experts.init_weights(init_std)
+
+        with torch.device(buffer_device):
+            self.tokens_per_expert = torch.zeros(
+                self.experts.num_experts, dtype=torch.float32
+            )
+            if self.load_balance_coeff is not None:
+                self.expert
         self.experts.init_weights(init_std)
         self.router.init_weights(init_std)
         if self.shared_experts is not None:
@@ -575,18 +562,18 @@ class MoE(nn.Module):
 
 
 def build_moe(
-    args: MoEArgs, dim: int, hidden_dim: int, moe_impl: str = "standard"
+    config: "MoE.Config", *, dim: int, moe_impl: str = "standard"
 ) -> nn.Module:
     """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP)."""
     if moe_impl == "deepep":
         from .moe_deepep import DeepEPMoE
 
         logger.info(
-            f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
+            f"DeepEP MoE: num_experts={config.num_experts}, top_k={config.top_k}, dim={dim}, hidden_dim={config.hidden_dim}"
         )
-        return DeepEPMoE(moe_args=args, dim=dim, hidden_dim=hidden_dim)
+        return DeepEPMoE(config=config, dim=dim)
 
     logger.info(
-        f"Standard MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
+        f"Standard MoE: num_experts={config.num_experts}, top_k={config.top_k}, dim={dim}, hidden_dim={config.hidden_dim}"
     )
-    return MoE(args, dim=dim, hidden_dim=hidden_dim)
+    return config.build(dim=dim)

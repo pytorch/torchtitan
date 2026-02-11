@@ -81,11 +81,8 @@ def estimate_memory(job_config: JobConfig):
     train_context = dist_utils.get_train_context(loss_parallel_enabled)
 
     # build model (using meta init)
-    model_args = train_spec.model_args[job_config.model.flavor]
-    model_args.update_from_config(
-        training=job_config.training,
-        parallelism=job_config.parallelism,
-        debug=job_config.debug,
+    model_config = train_spec.model_configs[job_config.model.flavor]
+    model_config.update_from_config(
         job_config=job_config,
     )
 
@@ -95,10 +92,10 @@ def estimate_memory(job_config: JobConfig):
         else contextlib.nullcontext()
     ):
         logger.info(
-            f"Building {job_config.model.name} {job_config.model.flavor} with {model_args}"
+            f"Building {job_config.model.name} {job_config.model.flavor} with {model_config}"
         )
         with torch.device("meta"):
-            model = train_spec.model_cls(model_args)
+            model = model_config.build()
 
         # Build the collection of model converters. No-op if converter_configs empty
         model_compile_enabled = (
@@ -144,23 +141,23 @@ def estimate_memory(job_config: JobConfig):
         )
 
         # pyrefly: ignore [missing-attribute]
-        logger.info(f"Vocab size: {model_args.vocab_size}")
+        logger.info(f"Vocab size: {model_config.vocab_size}")
         # Create a dummy batch instead of loading from a dataset
         batch = (
             torch.randint(
                 0,
                 # pyrefly: ignore [missing-attribute]
-                model_args.vocab_size,
+                model_config.vocab_size,
                 # pyrefly: ignore [missing-attribute]
-                (job_config.training.local_batch_size, model_args.max_seq_len),
+                (job_config.training.local_batch_size, model_config.max_seq_len),
                 device="cuda",
             ),
             torch.randint(
                 0,
                 # pyrefly: ignore [missing-attribute]
-                model_args.vocab_size,
+                model_config.vocab_size,
                 # pyrefly: ignore [missing-attribute]
-                (job_config.training.local_batch_size, model_args.max_seq_len),
+                (job_config.training.local_batch_size, model_config.max_seq_len),
                 device="cuda",
             ),
         )

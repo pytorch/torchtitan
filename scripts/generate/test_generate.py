@@ -109,13 +109,13 @@ def test_generate(
     # pyrefly: ignore [not-callable]
     tokenizer = train_spec.build_tokenizer_fn(config)
 
-    model_args = train_spec.model_args[config.model.flavor]
-    model_args.update_from_config(config)
+    model_config = train_spec.model_configs[config.model.flavor]
+    model_config.update_from_config(job_config=config)
 
     init_device = "meta" if world_size > 1 else device
     with torch.device(init_device):
         logger.info(f"Init model on init_device: {init_device}")
-        model = train_spec.model_cls(model_args)
+        model = model_config.build()
 
     parallel_dims = None
     # Init distributed env
