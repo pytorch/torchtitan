@@ -62,12 +62,13 @@ class Trainer(Actor):
 
         # apply PT-D Parallelism
         # TODO: right now it only works for qwen3 model, need to formalize this to use parallize_fn from train_spec
-        from torchtitan.models.llama3.infra.parallelize import apply_ddp
+        from torchtitan.models.llama3.infra.parallelize import apply_replicate
 
-        apply_ddp(
+        apply_replicate(
             self.model,
             self.parallel_dims.get_mesh("dp_replicate"),
-            enable_compile=False,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
         )
 
         self.model = self.model.to(device)
