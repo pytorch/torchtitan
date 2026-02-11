@@ -71,5 +71,7 @@ jobs:
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
         # Enable CPP stacktraces for debugging symmetric memory initialization errors.
-        TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        # Disable Nvlink Sharp. The CI machine seems to be unstable state to support
+        # NLVS according to several CI runs.
+        NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 python -m tests.integration_tests.run_tests --test_suite h100 $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

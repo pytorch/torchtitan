@@ -8,6 +8,8 @@
 
 import torch
 
+from torchtitan.distributed.deepep import sync_combine
+
 from .moe import MoE, MoEArgs
 
 
@@ -17,6 +19,16 @@ class DeepEPMoE(MoE):
 
     Inherits from MoE but overrides forward() to pass routing info to experts,
     letting DeepEPExpertParallel hooks handle dispatch/combine.
+
+    The forward pass is structured to overlap shared_experts computation with
+    the DeepEP combine communication:
+    1. Router computes expert assignments
+    2. DeepEP dispatches tokens to experts (sync)
+    3. Experts process tokens
+    4. DeepEP combine starts (async) - returns immediately
+    5. shared_experts runs IN PARALLEL with combine communication
+    6. sync_combine() waits for combine to complete
+    7. Addition of shared_experts output and routed_output
     """
 
     def __init__(self, moe_args: MoEArgs, dim: int, hidden_dim: int):
@@ -26,10 +38,12 @@ class DeepEPMoE(MoE):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass with DeepEP communication.
+        Forward pass with DeepEP communication and overlapped shared_experts.
 
         DeepEPExpertParallel hooks intercept experts() call and handle
-        dispatch/combine via deepep functions.
+        dispatch/combine via deepep functions. The combine operation runs
+        asynchronously, allowing shared_experts to overlap with the
+        combine all-to-all communication.
         """
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
@@ -42,7 +56,9 @@ class DeepEPMoE(MoE):
             with torch.no_grad():
                 self.tokens_per_expert.add_(num_tokens_per_expert)
 
-        # Call experts with routing info - hooks handle DeepEP dispatch/combine
+        # Call experts with routing info - hooks handle DeepEP dispatch/combine.
+        # The combine operation returns asynchronously, allowing overlap with
+        # shared_experts computation below.
         routed_output = self.experts(
             x,
             num_tokens_per_expert,
@@ -51,7 +67,14 @@ class DeepEPMoE(MoE):
             self.experts.num_experts,
         )
 
+        # shared_experts runs in parallel with combine communication.
+        # This is the key optimization - we overlap compute with communication.
         out = self.shared_experts(x) if self.shared_experts is not None else None
+
+        # Sync the combine operation before using routed_output.
+        # This inserts a CUDA stream wait, ensuring combine is complete before
+        # the subsequent addition or reshape operations read routed_output.
+        sync_combine()
 
         if out is None:
             return routed_output.reshape(bs, slen, dim)
