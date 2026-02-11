@@ -40,8 +40,8 @@ def get_dense_spmd_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
 
 def get_dp_placements(
     parallel_dims: ParallelDims,
-) -> tuple[list[Placement], list[Placement]]:
-    placements = []
+) -> tuple[tuple[Placement, ...], tuple[Placement, ...]]:
+    placements: list[Placement] = []
     if parallel_dims.dp_replicate_enabled:
         if parallel_dims.dp_shard_enabled:
             placements = [Replicate(), Shard(0)]
@@ -50,8 +50,8 @@ def get_dp_placements(
     elif parallel_dims.dp_shard_enabled:
         placements = [Shard(0)]
 
-    buffer_placements = [Replicate() for _ in range(len(placements))]
-    return placements, buffer_placements
+    buffer_placements = tuple(Replicate() for _ in range(len(placements)))
+    return tuple(placements), buffer_placements
 
 
 def distribute_state(
@@ -62,11 +62,9 @@ def distribute_state(
 ) -> None:
     try:
         state = module.get_parameter(name)
-        is_parameter = True
     except AttributeError:
         try:
             state = module.get_buffer(name)
-            is_parameter = False
         except AttributeError as err:
             raise AttributeError(
                 f"Module {module} does not have parameter or buffer {name}"
@@ -91,6 +89,9 @@ def parallelize_tok_embeddings(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ) -> None:
+    # NOTE: The repeat code here and other parallelize_* is left here
+    # by intention. We want to understand the code pieces that can be used
+    # and provid them as util functions once we enabled more parallelisms.
     mesh = get_dense_spmd_mesh(parallel_dims)
     placements, _ = get_dp_placements(parallel_dims)
     distribute_state(module, "weight", mesh, placements)
