@@ -35,7 +35,8 @@ from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-from torchtitan.train import main, Trainer
+from torchtitan.train import main
+from torchtitan.trainer import Trainer
 
 
 class FTTrainer(Trainer):
@@ -334,11 +335,11 @@ class FTTrainer(Trainer):
         )
 
     def init_distributed(self) -> ParallelDims:
-        job_config = self.job_config
+        config = self.config
 
         # determine the global ranks when fault tolerance is enabled
         global_ranks = []
-        ft_config = job_config.fault_tolerance
+        ft_config = config.fault_tolerance
         if ft_config.enable:
             group_size = ft_config.group_size
             replica_id = ft_config.replica_id
@@ -348,14 +349,14 @@ class FTTrainer(Trainer):
 
         # init distributed and build meshes
         dist_utils.init_distributed(
-            job_config.comm,
-            enable_cpu_backend=job_config.training.enable_cpu_offload,
-            base_folder=job_config.job.dump_folder,
+            config.comm,
+            enable_cpu_backend=config.training.enable_cpu_offload,
+            base_folder=config.job.dump_folder,
             ranks=global_ranks,
         )
 
         world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = job_config.parallelism
+        parallelism_config = config.parallelism
 
         return ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,

@@ -4,15 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.config import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager
 from torchtitan.models.flux.job_config import JobConfig as FluxJobConfig
+from torchtitan.trainer import Trainer
 
-MergedJobConfig = ConfigManager._merge_configs(JobConfig, FluxJobConfig)
+MergedConfig = ConfigManager._merge_configs(Trainer.Config, FluxJobConfig)
 
 # Start from defaults, then override
-default_config = MergedJobConfig()
+default_config = MergedConfig()
 
-# [job]
+# [training]
 default_config.job.description = "Flux-dev model"
 
 # [metrics]

@@ -14,10 +14,16 @@ from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
 
-from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training, TORCH_DTYPE_MAP
-from torchtitan.config.job_config import Compile as CompileConfig
+from torchtitan.config import (
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.job_config import Experimental
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from torchtitan.tools.logging import logger
 
@@ -26,11 +32,11 @@ def parallelize_llama(
     model,
     parallel_dims: ParallelDims,
     *,
-    training: Training,
-    model_converters: ModelConverters,
-    parallelism: Parallelism,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpoint,
+    ac_config: ActivationCheckpointConfig,
     experimental: Experimental,
     dump_folder: str,
 ):
@@ -49,9 +55,7 @@ def parallelize_llama(
     torch._inductor.config.allow_buffer_reuse = False
 
     # allow configuring inductor comms optimizations from torchtitan commandline
-    configure_inductor_for_autobucketing(
-        experimental.comms_bucket_reorder_strategy
-    )
+    configure_inductor_for_autobucketing(experimental.comms_bucket_reorder_strategy)
 
     dense_names = ["dp_replicate", "fsdp", "tp"]
     dense_names = [
@@ -129,8 +133,7 @@ def parallelize_llama(
         )
         out_sharding = x_sharding
         loss_parallel_enabled = (
-            parallel_dims.tp_enabled
-            and not parallelism.disable_loss_parallel
+            parallel_dims.tp_enabled and not parallelism.disable_loss_parallel
         )
         if loss_parallel_enabled:
             out_sharding = tuple(

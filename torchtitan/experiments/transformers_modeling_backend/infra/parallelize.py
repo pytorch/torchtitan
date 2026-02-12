@@ -17,8 +17,13 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torchtitan.components.quantization.float8 import find_float8_linear_config
-from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training, TORCH_DTYPE_MAP
-from torchtitan.config.job_config import Compile as CompileConfig, Experimental
+from torchtitan.config import (
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed import NoParallel, ParallelDims
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
@@ -29,6 +34,7 @@ from torchtitan.models.llama3.infra.parallelize import (
     apply_ddp,
     disable_fsdp_gradient_division,
 )
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -36,12 +42,11 @@ def parallelize_hf_transformers(
     model: nn.Module,
     parallel_dims: ParallelDims,
     *,
-    training: Training,
-    model_converters: ModelConverters,
-    parallelism: Parallelism,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpoint,
-    experimental: Experimental,
+    ac_config: ActivationCheckpointConfig,
     dump_folder: str,
 ):
     """
@@ -62,11 +67,11 @@ def parallelize_hf_transformers(
         """
 
     if parallel_dims.tp_enabled:
-        float8_config = find_float8_linear_config(model_converters.converter_configs)
+        float8_config = find_float8_linear_config(model_converters.converters)
         enable_float8_linear = float8_config is not None
-        float8_is_rowwise = (
-            float8_config is not None
-            and float8_config.recipe_name in ("rowwise", "rowwise_with_gw_hp")
+        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
+            "rowwise",
+            "rowwise_with_gw_hp",
         )
 
         # For now, float8 all-gather with TP is only supported for tensorwise

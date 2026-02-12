@@ -19,8 +19,13 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 from torchtitan.components.quantization.float8 import find_float8_linear_config
-from torchtitan.config import ActivationCheckpoint, ModelConverters, Parallelism, Training, TORCH_DTYPE_MAP
-from torchtitan.config.job_config import Compile as CompileConfig, Experimental
+from torchtitan.config import (
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.dual_pipe_v import (
@@ -34,6 +39,7 @@ from torchtitan.distributed.expert_parallel import (
 )
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama4.infra.parallelize import apply_fsdp
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 from .expert_parallel import GptossExpertTensorParallel, GptossTensorParallel
@@ -63,12 +69,11 @@ def parallelize_gptoss(
     model: nn.Module,
     parallel_dims: ParallelDims,
     *,
-    training: Training,
-    model_converters: ModelConverters,
-    parallelism: Parallelism,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpoint,
-    experimental: Experimental,
+    ac_config: ActivationCheckpointConfig,
     dump_folder: str,
 ):
     assert (
@@ -83,17 +88,14 @@ def parallelize_gptoss(
     )
 
     if parallel_dims.tp_enabled:
-        if (
-            parallelism.enable_async_tensor_parallel
-            and not model_compile_enabled
-        ):
+        if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
             raise RuntimeError("Async TP requires torch.compile")
 
-        float8_config = find_float8_linear_config(model_converters.converter_configs)
+        float8_config = find_float8_linear_config(model_converters.converters)
         enable_float8_linear = float8_config is not None
-        float8_is_rowwise = (
-            float8_config is not None
-            and float8_config.recipe_name in ("rowwise", "rowwise_with_gw_hp")
+        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
+            "rowwise",
+            "rowwise_with_gw_hp",
         )
 
         # For now, float8 all-gather with TP is only supported for tensorwise
@@ -110,7 +112,9 @@ def parallelize_gptoss(
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-        dual_pipe_v = get_dual_pipe_v_flag(parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims)
+        dual_pipe_v = get_dual_pipe_v_flag(
+            parallelism=parallelism, ac_config=ac_config, parallel_dims=parallel_dims
+        )
 
         apply_moe_ep_tp(
             model,

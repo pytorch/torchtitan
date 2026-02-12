@@ -12,7 +12,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.config import ConfigManager, JobConfig
 from torchtitan.models.flux.inference.sampling import generate_image, save_image
 from torchtitan.models.flux.tokenizer import build_flux_tokenizer
-from torchtitan.models.flux.train import FluxTrainer
+from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.tools.logging import init_logger, logger
 
 

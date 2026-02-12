@@ -6,7 +6,7 @@
 import pytest
 
 from torchtitan.components.quantization.float8 import Float8LinearConverter
-from torchtitan.config import ConfigManager, ModelConverters
+from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
@@ -47,8 +47,8 @@ def test_build_model_converters_float8_converter():
     config_manager = ConfigManager()
     config = config_manager.parse_args([])
     # Set converter config directly (not via CLI)
-    config.model_converters = ModelConverters(
-        converter_configs=[Float8LinearConverter.Config(emulate=True)],
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[Float8LinearConverter.Config(emulate=True)],
     )
     parallel_dims = build_parallel_dims(config, 1)
 

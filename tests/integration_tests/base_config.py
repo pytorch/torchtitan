@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.config import JobConfig
+from torchtitan.trainer import Trainer
 
 
 def apply_base_settings(config):
@@ -25,5 +25,5 @@ def apply_base_settings(config):
     config.activation_checkpoint.mode = "selective"
 
 
-default_config = JobConfig()
+default_config = Trainer.Config()
 apply_base_settings(default_config)

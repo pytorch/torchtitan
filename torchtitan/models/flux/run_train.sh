@@ -17,4 +17,4 @@ CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/flux/train_configs/debug_model.p
 PYTORCH_ALLOC_CONF="expandable_segments:True" \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
--m torchtitan.models.flux.train --job.config_file ${CONFIG_FILE} "$@"
+-m torchtitan.models.flux.trainer --job.config_file ${CONFIG_FILE} "$@"

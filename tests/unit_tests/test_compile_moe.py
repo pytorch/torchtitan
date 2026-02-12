@@ -9,7 +9,7 @@ import unittest
 import torch
 import torch.nn as nn
 
-from torchtitan.config.job_config import Compile as CompileConfig
+from torchtitan.config import CompileConfig
 from torchtitan.models.llama4.infra.parallelize import apply_compile
 
 

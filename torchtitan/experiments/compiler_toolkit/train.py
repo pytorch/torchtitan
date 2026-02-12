@@ -6,7 +6,8 @@
 
 import gc
 
-from torchtitan.train import main, Trainer
+from torchtitan.train import main
+from torchtitan.trainer import Trainer
 
 
 class CompilerToolkitTrainer(Trainer):

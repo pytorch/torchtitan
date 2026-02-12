@@ -186,7 +186,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 parallelism=job_config.parallelism,
                 compile_config=job_config.compile,
                 ac_config=job_config.activation_checkpoint,
-                experimental=job_config.experimental,
                 dump_folder=job_config.job.dump_folder,
                 device=self.device,
                 model_config=model_config,
@@ -212,7 +211,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 parallelism=job_config.parallelism,
                 compile_config=job_config.compile,
                 ac_config=job_config.activation_checkpoint,
-                experimental=job_config.experimental,
                 dump_folder=job_config.job.dump_folder,
             )
 
@@ -224,11 +222,17 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
             self.model_parts = [model]
 
         # build optimizer after applying parallelisms to the model
-        self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config.optimizer, parallel_dims
+        self.optimizers = job_config.optimizer.build(
+            model_parts=self.model_parts,
+            parallel_dims=parallel_dims,
         )
-        self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
-            self.optimizers, job_config.lr_scheduler, job_config.training.steps
+        if self.train_spec.post_optimizer_build_fn is not None:
+            self.train_spec.post_optimizer_build_fn(
+                self.optimizers, self.model_parts, parallel_dims
+            )
+        self.lr_schedulers = job_config.lr_scheduler.build(
+            optimizers=self.optimizers,
+            training_steps=job_config.training.steps,
         )
 
         self.checkpointer = CheckpointManager(
