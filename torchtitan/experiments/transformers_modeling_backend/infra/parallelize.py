@@ -18,14 +18,12 @@ from torch.distributed.tensor.parallel import (
 )
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import NoParallel, ParallelDims
-
 from torchtitan.distributed.activation_checkpoint import apply_ac
-
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.experiments.transformers_modeling_backend.job_config import JobConfig
 from torchtitan.models.llama3.infra.parallelize import (
     apply_compile,
-    apply_ddp,
+    apply_replicate,
     disable_fsdp_gradient_division,
 )
 from torchtitan.tools.logging import logger
@@ -113,13 +111,11 @@ def parallelize_hf_transformers(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_replicate_mesh = parallel_dims.get_mesh("dp_replicate")
-        if parallel_dims.world_size != dp_replicate_mesh.size():
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_replicate_mesh,
-            enable_compile=model_compile_enabled,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
 
     return model
