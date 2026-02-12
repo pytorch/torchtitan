@@ -42,6 +42,49 @@ class FluxModel(BaseModel):
         qkv_bias: bool = True
         autoencoder_params: AutoEncoderParams = field(default_factory=AutoEncoderParams)
 
+        # Sub-component configs
+        pe_config: EmbedND.Config = field(
+            default_factory=lambda: EmbedND.Config(
+                dim=128,
+                theta=10_000,
+                axes_dim=(16, 56, 56),
+            )
+        )
+        time_in_config: MLPEmbedder.Config = field(
+            default_factory=lambda: MLPEmbedder.Config(
+                in_dim=256,
+                hidden_dim=3072,
+            )
+        )
+        vector_in_config: MLPEmbedder.Config = field(
+            default_factory=lambda: MLPEmbedder.Config(
+                in_dim=768,
+                hidden_dim=3072,
+            )
+        )
+        double_block_config: DoubleStreamBlock.Config = field(
+            default_factory=lambda: DoubleStreamBlock.Config(
+                hidden_size=3072,
+                num_heads=24,
+                mlp_ratio=4.0,
+                qkv_bias=True,
+            )
+        )
+        single_block_config: SingleStreamBlock.Config = field(
+            default_factory=lambda: SingleStreamBlock.Config(
+                hidden_size=3072,
+                num_heads=24,
+                mlp_ratio=4.0,
+            )
+        )
+        final_layer_config: LastLayer.Config = field(
+            default_factory=lambda: LastLayer.Config(
+                hidden_size=3072,
+                patch_size=1,
+                out_channels=64,
+            )
+        )
+
         def update_from_config(self, *, job_config, **kwargs) -> None:
             pass
 
@@ -73,38 +116,24 @@ class FluxModel(BaseModel):
             )
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_heads
-        self.pe_embedder = EmbedND(
-            dim=pe_dim,
-            theta=config.theta,
-            axes_dim=config.axes_dim,
-        )
+        self.pe_embedder = config.pe_config.build()
         self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=True)
-        self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
-        self.vector_in = MLPEmbedder(config.vec_in_dim, self.hidden_size)
+        self.time_in = config.time_in_config.build()
+        self.vector_in = config.vector_in_config.build()
         self.txt_in = nn.Linear(config.context_in_dim, self.hidden_size)
 
         self.double_blocks = nn.ModuleList(
-            [
-                DoubleStreamBlock(
-                    self.hidden_size,
-                    self.num_heads,
-                    mlp_ratio=config.mlp_ratio,
-                    qkv_bias=config.qkv_bias,
-                )
-                for _ in range(config.depth)
-            ]
+            [config.double_block_config.build() for _ in range(config.depth)]
         )
 
         self.single_blocks = nn.ModuleList(
             [
-                SingleStreamBlock(
-                    self.hidden_size, self.num_heads, mlp_ratio=config.mlp_ratio
-                )
+                config.single_block_config.build()
                 for _ in range(config.depth_single_blocks)
             ]
         )
 
-        self.final_layer = LastLayer(self.hidden_size, 1, self.out_channels)
+        self.final_layer = config.final_layer_config.build()
 
     def init_weights(self, *, buffer_device=None, **kwargs):
         # Adapted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189

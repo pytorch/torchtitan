@@ -6,6 +6,8 @@
 
 """MoE with DeepEP backend for efficient expert-parallel communication."""
 
+from dataclasses import dataclass
+
 import torch
 
 from torchtitan.distributed.deepep import sync_combine
@@ -31,7 +33,11 @@ class DeepEPMoE(MoE):
     7. Addition of shared_experts output and routed_output
     """
 
-    def __init__(self, config: MoE.Config, *, dim: int):
+    @dataclass(kw_only=True, slots=True)
+    class Config(MoE.Config):
+        pass
+
+    def __init__(self, config: Config, *, dim: int):
         super().__init__(config, dim=dim)
         # DeepEP doesn't use reorderer - routing handled by DeepEPExpertParallel
         self.reorderer = None  # pyrefly: ignore [bad-assignment]

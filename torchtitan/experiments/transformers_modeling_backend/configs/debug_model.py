@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.config import ConfigManager
+
+from torchtitan.experiments.transformers_modeling_backend import model_registry
 from torchtitan.experiments.transformers_modeling_backend.job_config import (
     JobConfig as TMBJobConfig,
 )
@@ -26,8 +28,7 @@ default_config.profiling.profile_freq = 5
 default_config.metrics.log_freq = 1
 
 # [model]
-default_config.model.name = "transformers_modeling_backend"
-default_config.model.flavor = "debugmodel"
+default_config.model_spec = model_registry("debugmodel")
 
 # [hf_transformers]
 default_config.hf_transformers.model = "Qwen/Qwen3-4B-Instruct-2507"
@@ -44,7 +45,7 @@ default_config.lr_scheduler.min_lr_factor = 0.0
 # [training]
 default_config.training.local_batch_size = 2
 default_config.training.steps = 10
-default_config.training.dataset_path = "./tests/assets/c4_test"
+default_config.dataloader.dataset_path = "./tests/assets/c4_test"
 
 # [parallelism]
 default_config.parallelism.pipeline_parallel_schedule = "1F1B"

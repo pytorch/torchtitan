@@ -392,7 +392,7 @@ def build_mm_dataloader(
     Returns:
         DataLoader with appropriate parallelism handling.
     """
-    dataset_path = job_config.training.dataset_path
+    dataset_path = job_config.dataloader.dataset_path
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
 
@@ -406,7 +406,7 @@ def build_mm_dataloader(
     special_tokens = SpecialTokens.from_tokenizer(tokenizer)
 
     dataset = HuggingFaceMultiModalDataset(
-        dataset_name=job_config.training.dataset,
+        dataset_name=job_config.dataloader.dataset,
         dataset_path=dataset_path,
         tokenizer=tokenizer,
         batch_size=batch_size,

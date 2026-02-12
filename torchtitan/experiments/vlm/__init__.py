@@ -8,12 +8,12 @@ from dataclasses import fields
 from typing import Any
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.components.validate import Validator
 from torchtitan.models.llama3 import llama3_configs
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.protocols.model_spec import ModelSpec
 
-from .datasets.mm_datasets import build_mm_dataloader
+# TODO: should refactor into a DataLoader with Config
+#       and be used in config_registry.py
+# from .datasets.mm_datasets import build_mm_dataloader
 from .infra.parallelize import parallelize_vlm
 from .model.args import Siglip2Config
 from .model.model import Llama3Siglip2Transformer
@@ -43,13 +43,12 @@ llama3_siglip2_configs = {
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_configs=llama3_siglip2_configs,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="vlm",
+        flavor=flavor,
+        model=llama3_siglip2_configs[flavor],
         parallelize_fn=parallelize_vlm,
         pipelining_fn=None,
-        build_dataloader_fn=build_mm_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
-        validator_cls=Validator,
     )

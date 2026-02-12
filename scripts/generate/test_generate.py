@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import importlib
 import json
 import os
 import sys
@@ -27,7 +28,6 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.components.metrics import build_device_memory_monitor
 from torchtitan.config import ConfigManager, DebugConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.utils import device_module, device_type
@@ -72,7 +72,8 @@ def apply_tp_minus_sp(model: nn.Module, tp_mesh: DeviceMesh):
 
 @record
 def test_generate(
-    config_path: str,
+    model_name: str,
+    config_name: str,
     checkpoint_path: str,
     prompt: str,
     *,
@@ -86,9 +87,9 @@ def test_generate(
     init_logger()
     color = utils.Color
 
-    # Load configuration from toml file
+    # Load configuration from config_registry
     config_manager = ConfigManager()
-    config = config_manager.parse_args([f"--job.config_file={config_path}"])
+    config = config_manager.parse_args(["--model", model_name, "--config", config_name])
 
     if len(args.prompt) == 0:
         logger.warning(
@@ -101,15 +102,19 @@ def test_generate(
     device_module.set_device(device)
     device_memory_monitor = build_device_memory_monitor()
 
-    train_spec = get_train_spec(config.model.name)
+    model_module = importlib.import_module(
+        f"torchtitan.models.{config.model_spec.name}"
+    )
+    train_spec = model_module.model_registry(config.model_spec.flavor)
 
     logger.info(f"World Size: {world_size}, Local Rank: {local_rank} on {device}")
 
     # Tokenizer setup
-    # pyrefly: ignore [not-callable]
-    tokenizer = train_spec.build_tokenizer_fn(config)
+    from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-    model_config = train_spec.model_configs[config.model.flavor]
+    tokenizer = HuggingFaceTokenizer(config.job.hf_assets_path)
+
+    model_config = train_spec.model
     model_config.update_from_config(job_config=config)
 
     init_device = "meta" if world_size > 1 else device
@@ -259,7 +264,13 @@ def test_generate(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test generation")
     parser.add_argument(
-        "--config", type=str, required=True, help="TOML config file path (required)"
+        "--model", type=str, required=True, help="Model name (e.g., llama3)"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Config registry function name (e.g., llama3_debugmodel)",
     )
     parser.add_argument(
         "--checkpoint",
@@ -304,7 +315,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     test_generate(
-        config_path=args.config,
+        model_name=args.model,
+        config_name=args.config,
         checkpoint_path=args.checkpoint,
         prompt=args.prompt,
         temperature=args.temperature,

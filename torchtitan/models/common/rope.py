@@ -9,16 +9,15 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
-
-from torchtitan.config.configurable import Module
+from torchtitan.protocols.module import Module
 
 
 class RoPE(Module):
     """Shared Rotary Position Embedding module.
 
     Supports multiple formats and scaling methods:
-    - format="complex": Complex exponential (Llama3/4, DeepSeek V3)
-    - format="cos_sin": Cosine/sine concatenation (Qwen3, GPT-OSS)
+    - backend="complex": Complex exponential (Llama3/4, DeepSeek V3)
+    - backend="cos_sin": Cosine/sine concatenation (Qwen3, GPT-OSS)
 
     - scaling="none": No scaling applied
     - scaling="llama": Llama3/4-style low/high frequency scaling
@@ -33,7 +32,7 @@ class RoPE(Module):
         dim: int
         max_seq_len: int
         theta: float = 10000.0
-        format: Literal["complex", "cos_sin"] = "complex"
+        backend: Literal["complex", "cos_sin"] = "complex"
         scaling: Literal["none", "llama", "yarn"] = "none"
         # llama scaling params
         scaling_factor: float = 8.0
@@ -55,7 +54,7 @@ class RoPE(Module):
 
     def _precompute(self) -> torch.Tensor:
         cfg = self.config
-        if cfg.format == "complex":
+        if cfg.backend == "complex":
             return self._precompute_complex()
         else:
             return self._precompute_cos_sin()
@@ -147,6 +146,9 @@ class RoPE(Module):
         freq = base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
         mscale = 1.0
 
+        if cfg.scaling == "llama":
+            raise NotImplementedError("Cos/sin RoPE does not support Llama scaling.")
+
         if cfg.scaling == "yarn" and cfg.rope_factor > 1.0:
             rope_factor = cfg.rope_factor
             # YaRN mscale for attention magnitude preservation
@@ -191,7 +193,7 @@ class RoPE(Module):
         """Return the precomputed cache tensor (slicing is done by apply_rotary_emb)."""
         return self.cache
 
-    def init_weights(self, buffer_device: torch.device | None = None) -> None:
+    def init_weights(self, buffer_device: torch.device | None = None, **kwargs) -> None:
         if buffer_device is not None:
             with torch.device(buffer_device):
                 self.cache = self._precompute()

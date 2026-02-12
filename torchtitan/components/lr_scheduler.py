@@ -240,7 +240,7 @@ def build_lr_schedulers(
     **Note**
     Users who want to customize the lr scheduler behavior can create their own
     ``LRSchedulersContainer`` subclass and ``build_lr_scheduler``. Passing the
-    customized ``build_lr_schedulers`` to ``TrainSpec`` will create the customized
+    customized ``build_lr_schedulers`` to ``ModelSpec`` will create the customized
     ``LRSchedulersContainer``.
 
     Args:

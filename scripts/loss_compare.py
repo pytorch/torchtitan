@@ -902,11 +902,10 @@ Examples:
     parser.add_argument("test_commit", help="Git commit hash for test")
     parser.add_argument(
         "--baseline-config",
-        default="./torchtitan/models/llama3/train_configs/debug_model.py",
+        default="./torchtitan/models/llama3/config_registry.py",
         help=(
             "Config file for baseline run "
-            "(default: ./torchtitan/models/llama3/train_configs/"
-            "debug_model.py)"
+            "(default: ./torchtitan/models/llama3/config_registry.py)"
         ),
     )
     parser.add_argument(

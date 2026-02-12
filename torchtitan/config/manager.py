@@ -4,10 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import importlib.util
+import importlib
 import os
 import sys
-
 from dataclasses import field, fields, is_dataclass, make_dataclass
 from typing import Type
 
@@ -18,81 +17,112 @@ from torchtitan.tools.logging import logger
 
 class ConfigManager:
     """
-    Parses, merges, and validates a config from Python config files and CLI sources.
+    Parses, merges, and validates a config from --model/--config and CLI sources.
 
     Configuration precedence:
-        CLI args > Python config file > config defaults
+        CLI args > config_registry function defaults
 
-    Python config files define a `default_config` variable.
+    --model selects the model (e.g., llama3, deepseek_v3).
+    --config selects a config_registry function (e.g., llama3_debugmodel).
     CLI arguments use the format <section>.<key> to override config values.
     """
 
-    def __init__(self, config_cls: Type | None = None):
-        if config_cls is None:
-            from torchtitan.trainer import Trainer
-
-            config_cls = Trainer.Config
-        self.config_cls = config_cls
-        self.config = config_cls()
+    def __init__(self):
         self.register_tyro_rules(custom_registry)
 
     def parse_args(self, args: list[str] = sys.argv[1:]):
-        loaded_config = self._maybe_load_python_config(args)
-
-        if loaded_config:
-            # Use the loaded config's type (which may already be a merged type
-            # if the Python config did its own merge)
-            config_cls = type(loaded_config)
-            base_config = loaded_config
-        else:
-            config_cls = self.config_cls
-            base_config = config_cls()
+        loaded_config, args = self._load_config(args)
+        config_cls = type(loaded_config)
 
         self.config = tyro.cli(
-            config_cls, args=args, default=base_config, registry=custom_registry
+            config_cls, args=args, default=loaded_config, registry=custom_registry
         )
 
         self._validate_config()
 
         return self.config
 
-    def _maybe_load_python_config(self, args: list[str]):
-        """Load a Python config file that defines a `default_config` variable.
+    def _load_config(self, args: list[str]) -> tuple[object, list[str]]:
+        """Parse --model and --config from args, load config from config_registry.
 
-        If multiple --job.config_file args are present, the last one wins
-        (consistent with standard CLI override behavior).
+        Both --model and --config are required.
+        Returns (loaded_config, filtered_args) with --model/--config stripped.
         """
-        valid_keys = {
-            "--job.config-file",
-            "--job.config_file",
-        }
-        file_path = None
-        for i, arg in enumerate(args):
-            if "=" in arg:
-                key, value = arg.split("=", 1)
-                if key in valid_keys:
-                    file_path = value
-            elif i < len(args) - 1 and arg in valid_keys:
-                file_path = args[i + 1]
+        model_name = None
+        config_name = None
+        filtered_args = []
 
-        if file_path is None:
-            return None
+        i = 0
+        while i < len(args):
+            arg = args[i]
 
-        try:
-            spec = importlib.util.spec_from_file_location("_user_config", file_path)
-            if spec is None or spec.loader is None:
-                raise ImportError(f"Cannot load config file: {file_path}")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-        except Exception as e:
-            logger.exception(f"Error while loading config file: {file_path}")
-            raise e
+            # Handle --model=X and --model X forms
+            if arg.startswith("--model="):
+                model_name = arg.split("=", 1)[1]
+            elif arg == "--model":
+                if i + 1 < len(args):
+                    model_name = args[i + 1]
+                    i += 1
+                else:
+                    raise ValueError("--model requires a value")
+            # Handle --config=X and --config X forms
+            elif arg.startswith("--config="):
+                config_name = arg.split("=", 1)[1]
+            elif arg == "--config":
+                if i + 1 < len(args):
+                    config_name = args[i + 1]
+                    i += 1
+                else:
+                    raise ValueError("--config requires a value")
+            else:
+                filtered_args.append(arg)
 
-        if not hasattr(module, "default_config"):
+            i += 1
+
+        if model_name is None:
             raise ValueError(
-                f"Config file {file_path} must define a 'default_config' variable"
+                "--model is required. Example: --model llama3 --config llama3_debugmodel"
             )
-        return module.default_config
+        if config_name is None:
+            raise ValueError(
+                "--config is required. Example: --model llama3 --config llama3_debugmodel"
+            )
+
+        # Validate model name
+        from torchtitan.models import _supported_models
+
+        if model_name not in _supported_models:
+            raise ValueError(
+                f"Unknown model '{model_name}'. "
+                f"Supported models: {sorted(_supported_models)}"
+            )
+
+        # Import config_registry module
+        module_path = f"torchtitan.models.{model_name}.config_registry"
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as e:
+            raise ImportError(
+                f"Cannot import config_registry for model '{model_name}': {e}"
+            ) from e
+
+        # Get the config function
+        config_fn = getattr(module, config_name, None)
+        if config_fn is None or not callable(config_fn):
+            available = [
+                name
+                for name in dir(module)
+                if not name.startswith("_")
+                and callable(getattr(module, name))
+                and name[0].islower()
+            ]
+            raise ValueError(
+                f"Config function '{config_name}' not found in {module_path}. "
+                f"Available config functions: {available}"
+            )
+
+        loaded_config = config_fn()
+        return loaded_config, filtered_args
 
     @staticmethod
     def _merge_configs(base, custom) -> Type:
@@ -139,31 +169,22 @@ class ConfigManager:
     def _validate_config(self) -> None:
         # TODO: temporary mitigation of BC breaking change in hf_assets_path
         #       tokenizer default path, need to remove later
-        if (
-            hasattr(self.config.model, "tokenizer_path")
-            and self.config.model.tokenizer_path
-        ):
+        if not os.path.exists(self.config.job.hf_assets_path):
             logger.warning(
-                "tokenizer_path is deprecated, use model.hf_assets_path instead. "
-                "Setting hf_assets_path to tokenizer_path temporarily."
-            )
-            self.config.model.hf_assets_path = self.config.model.tokenizer_path
-        if not os.path.exists(self.config.model.hf_assets_path):
-            logger.warning(
-                f"HF assets path {self.config.model.hf_assets_path} does not exist!"
+                f"HF assets path {self.config.job.hf_assets_path} does not exist!"
             )
             old_tokenizer_path = (
                 "torchtitan/datasets/tokenizer/original/tokenizer.model"
             )
             if os.path.exists(old_tokenizer_path):
-                self.config.model.hf_assets_path = old_tokenizer_path
+                self.config.job.hf_assets_path = old_tokenizer_path
                 logger.warning(
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
                     "Please download the new tokenizer files (python scripts/download_hf_assets.py) and update your config."
                 )
         else:
             # Check if we are using tokenizer.model, if so then we need to alert users to redownload the tokenizer
-            if self.config.model.hf_assets_path.endswith("tokenizer.model"):
+            if self.config.job.hf_assets_path.endswith("tokenizer.model"):
                 raise Exception(
                     "You are using the old tokenizer.model, please redownload the tokenizer ",
                     "(python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer) ",
@@ -195,11 +216,11 @@ if __name__ == "__main__":
     # Run this module directly to debug or inspect configuration parsing.
     #
     # Examples:
-    #   Show help message:
-    #     > python -m torchtitan.config.manager --help
-    #
     #   Parse and print a config with CLI arguments:
-    #     > python -m torchtitan.config.manager --profiling.enable_memory_snapshot
+    #     > python -m torchtitan.config.manager --model llama3 --config llama3_debugmodel
+    #
+    #   Show help message:
+    #     > python -m torchtitan.config.manager --model llama3 --config llama3_debugmodel --help
     #
     # -----------------------------------------------------------------------------
 

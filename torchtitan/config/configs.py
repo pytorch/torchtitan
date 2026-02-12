@@ -24,22 +24,6 @@ from typing import Literal
 
 
 @dataclass
-class ModelConfig:
-    name: str = "llama3"
-    """Which model to train"""
-
-    flavor: str = "debugmodel"
-    """Which model config to train"""
-
-    hf_assets_path: str = "./tests/assets/tokenizer"
-    """
-    Path to HF assets folder. This folder contains local copies of Hugging Face assets,
-    including model weights in .safetensors format, the model.safetensor.index.json file
-    (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
-    """
-
-
-@dataclass
 class DataLoaderConfig:
     """
     Configuration for PyTorch DataLoader settings.
@@ -48,18 +32,6 @@ class DataLoaderConfig:
 
     Note:
         persistent_workers and prefetch_factor are only valid if num_workers > 0.
-
-    Example (Python config file):
-        default_config = JobConfig(
-            training=TrainingConfig(
-                dataloader=DataLoaderConfig(
-                    num_workers=4,
-                    pin_memory=True,
-                    persistent_workers=True,
-                    prefetch_factor=2,
-                ),
-            ),
-        )
     """
 
     num_workers: int = 0
@@ -80,15 +52,6 @@ class DataLoaderConfig:
 
 @dataclass
 class TrainingConfig:
-    dataset: str = "c4_test"
-    """Dataset to use"""
-
-    dataset_path: str | None = None
-    """
-    Path to the dataset in the file system. If provided, data will be
-    loaded from this path instead of downloaded.
-    """
-
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""
 
@@ -149,8 +112,12 @@ class TrainingConfig:
 
 @dataclass
 class JobConfig:
-    config_file: str | None = None
-    """Python config file to load defaults from"""
+    hf_assets_path: str = "./tests/assets/tokenizer"
+    """
+    Path to HF assets folder. This folder contains local copies of Hugging Face assets,
+    including model weights in .safetensors format, the model.safetensor.index.json file
+    (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
+    """
 
     dump_folder: str = "./outputs"
     """Folder to dump job outputs"""
@@ -499,41 +466,6 @@ class FaultToleranceConfig:
     torchft are supported
     (https://github.com/pytorch/torchft/blob/360c5c534bdeac959507e9d238ba9f3902d3fda9/torchft/local_sgd.py#L41)
     """
-
-
-@dataclass
-class ValidationConfig:
-    enable: bool = False
-    """Enable validation to default run validation after each training loop"""
-
-    dataset: str = "c4_validation"
-    """Dataset to use for validation"""
-
-    dataset_path: str | None = None
-    """Path to dataset to use for validation"""
-
-    local_batch_size: int = 8
-    """Batch size for validation"""
-
-    seq_len: int = 2048
-    """Sequence length for validation"""
-
-    freq: int = 10
-    """Frequency of validation"""
-
-    steps: int = -1
-    """
-    Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset
-    WARNING: When setting to -1 there could be hangs due to mismatch among ranks
-    """
-
-    dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
-    """DataLoader configuration"""
-
-    def __post_init__(self):
-        assert (
-            self.steps > 0 or self.steps == -1
-        ), "validation steps must be positive or -1"
 
 
 @dataclass

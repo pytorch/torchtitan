@@ -51,5 +51,5 @@ class Siglip2Config:
     spatial_merge_size: int = 1
 
     layer_norm_eps: float = 1e-6
-    attn_type: str = "flex"
+    attn_backend: str = "flex"
     attn_mask_type: str = "causal"

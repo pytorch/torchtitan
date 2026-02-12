@@ -6,16 +6,13 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.models.common import RoPE
-from torchtitan.models.common.moe import MoE
+from torchtitan.protocols.model_spec import ModelSpec
+from .model import GptOssModel
 
-from torchtitan.protocols.train_spec import TrainSpec
-
-from .infra.parallelize import parallelize_gptoss
-from .model.model import GptOssModel
-from .model.state_dict_adapter import GptOssStateDictAdapter
+from .moe import GptOssMoE
+from .parallelize import parallelize_gptoss
+from .state_dict_adapter import GptOssStateDictAdapter
 
 __all__ = [
     "parallelize_gptoss",
@@ -26,9 +23,10 @@ __all__ = [
 
 gptoss_configs = {
     "debugmodel": GptOssModel.Config(
+        vocab_size=2048,
         dim=256,
         n_layers=4,
-        moe_config=MoE.Config(
+        moe_config=GptOssMoE.Config(
             hidden_dim=2880,
             num_experts=8,
             num_shared_experts=0,
@@ -41,12 +39,11 @@ gptoss_configs = {
             use_grouped_mm=True,
             load_balance_coeff=1e-3,
         ),
-        attn_mask_type="causal",
         rope_config=RoPE.Config(
             dim=64,
             max_seq_len=131072,
             theta=150000.0,
-            format="cos_sin",
+            backend="cos_sin",
             scaling="yarn",
             rope_factor=32,
             beta_slow=32.0,
@@ -56,7 +53,7 @@ gptoss_configs = {
     ),
     "20b": GptOssModel.Config(
         n_layers=24,
-        moe_config=MoE.Config(
+        moe_config=GptOssMoE.Config(
             hidden_dim=2880,
             num_experts=32,
             num_shared_experts=0,
@@ -73,7 +70,7 @@ gptoss_configs = {
             dim=64,
             max_seq_len=131072,
             theta=150000.0,
-            format="cos_sin",
+            backend="cos_sin",
             scaling="yarn",
             rope_factor=32,
             beta_slow=32.0,
@@ -83,7 +80,7 @@ gptoss_configs = {
     ),
     "120b": GptOssModel.Config(
         n_layers=36,
-        moe_config=MoE.Config(
+        moe_config=GptOssMoE.Config(
             hidden_dim=2880,
             num_experts=128,
             num_shared_experts=0,
@@ -100,7 +97,7 @@ gptoss_configs = {
             dim=64,
             max_seq_len=131072,
             theta=150000.0,
-            format="cos_sin",
+            backend="cos_sin",
             scaling="yarn",
             rope_factor=32,
             beta_slow=32.0,
@@ -111,13 +108,13 @@ gptoss_configs = {
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_configs=gptoss_configs,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="gpt_oss",
+        flavor=flavor,
+        model=gptoss_configs[flavor],
         parallelize_fn=parallelize_gptoss,
         pipelining_fn=None,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=GptOssStateDictAdapter,

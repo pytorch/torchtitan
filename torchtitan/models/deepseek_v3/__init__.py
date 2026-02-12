@@ -6,16 +6,14 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.models.common import FeedForward, RoPE
 from torchtitan.models.common.moe import MoE
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.protocols.model_spec import ModelSpec
+from .model import Attention, DeepSeekV3Model
 
-from .infra.parallelize import parallelize_deepseekv3
-from .model.model import DeepSeekV3Model
-from .model.state_dict_adapter import DeepSeekV3StateDictAdapter
+from .parallelize import parallelize_deepseekv3
+from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 __all__ = [
     "parallelize_deepseekv3",
@@ -30,7 +28,6 @@ deepseekv3_configs = {
         dim=256,
         n_layers=6,
         n_dense_layers=1,
-        n_heads=16,
         moe_config=MoE.Config(
             hidden_dim=256,
             num_experts=8,
@@ -40,18 +37,21 @@ deepseekv3_configs = {
             route_norm=False,
             score_before_experts=False,
         ),
-        q_lora_rank=0,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        v_head_dim=128,
-        mscale=0.70,
+        attn_config=Attention.Config(
+            n_heads=16,
+            q_lora_rank=0,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            mscale=0.70,
+        ),
         ff_config=FeedForward.Config(hidden_dim=1024),
         rope_config=RoPE.Config(
             dim=64,
             max_seq_len=4096 * 4,
             theta=10000.0,
-            format="complex",
+            backend="complex",
             scaling="yarn",
             rope_factor=40.0,
             beta_fast=32.0,
@@ -64,7 +64,6 @@ deepseekv3_configs = {
         dim=256,
         n_layers=6,
         n_dense_layers=1,
-        n_heads=16,
         moe_config=MoE.Config(
             hidden_dim=256,
             num_experts=8,
@@ -74,20 +73,23 @@ deepseekv3_configs = {
             route_norm=False,
             score_before_experts=False,
         ),
-        q_lora_rank=0,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        v_head_dim=128,
-        mscale=0.70,
-        attn_type="flex",
-        attn_mask_type="block_causal",
+        attn_config=Attention.Config(
+            n_heads=16,
+            q_lora_rank=0,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            mscale=0.70,
+            attn_backend="flex",
+            attn_mask_type="block_causal",
+        ),
         ff_config=FeedForward.Config(hidden_dim=1024),
         rope_config=RoPE.Config(
             dim=64,
             max_seq_len=4096 * 4,
             theta=10000.0,
-            format="complex",
+            backend="complex",
             scaling="yarn",
             rope_factor=40.0,
             beta_fast=32.0,
@@ -100,7 +102,6 @@ deepseekv3_configs = {
         dim=2048,
         n_layers=27,
         n_dense_layers=1,
-        n_heads=16,
         moe_config=MoE.Config(
             hidden_dim=1408,
             num_experts=64,
@@ -110,20 +111,23 @@ deepseekv3_configs = {
             route_norm=False,
             score_before_experts=False,
         ),
-        q_lora_rank=0,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        v_head_dim=128,
-        mscale=0.70,
-        attn_type="flex",
-        attn_mask_type="block_causal",
+        attn_config=Attention.Config(
+            n_heads=16,
+            q_lora_rank=0,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            mscale=0.70,
+            attn_backend="flex",
+            attn_mask_type="block_causal",
+        ),
         ff_config=FeedForward.Config(hidden_dim=10944),
         rope_config=RoPE.Config(
             dim=64,
             max_seq_len=4096 * 4,
             theta=10000.0,
-            format="complex",
+            backend="complex",
             scaling="yarn",
             rope_factor=40.0,
             beta_fast=32.0,
@@ -136,7 +140,6 @@ deepseekv3_configs = {
         dim=5120,
         n_layers=60,
         n_dense_layers=1,
-        n_heads=128,
         moe_config=MoE.Config(
             hidden_dim=1536,
             num_experts=160,
@@ -149,19 +152,22 @@ deepseekv3_configs = {
             route_scale=16.0,
             score_before_experts=False,
         ),
-        q_lora_rank=1536,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        v_head_dim=128,
-        attn_type="flex",
-        attn_mask_type="block_causal",
+        attn_config=Attention.Config(
+            n_heads=128,
+            q_lora_rank=1536,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            attn_backend="flex",
+            attn_mask_type="block_causal",
+        ),
         ff_config=FeedForward.Config(hidden_dim=12288),
         rope_config=RoPE.Config(
             dim=64,
             max_seq_len=4096 * 4,
             theta=10000.0,
-            format="complex",
+            backend="complex",
             scaling="yarn",
             rope_factor=40.0,
             beta_fast=32.0,
@@ -174,7 +180,6 @@ deepseekv3_configs = {
         dim=7168,
         n_layers=61,
         n_dense_layers=3,
-        n_heads=128,
         moe_config=MoE.Config(
             hidden_dim=2048,
             num_experts=256,
@@ -187,19 +192,22 @@ deepseekv3_configs = {
             route_scale=2.5,
             score_before_experts=False,
         ),
-        q_lora_rank=1536,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        v_head_dim=128,
-        attn_type="flex",
-        attn_mask_type="block_causal",
+        attn_config=Attention.Config(
+            n_heads=128,
+            q_lora_rank=1536,
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+            attn_backend="flex",
+            attn_mask_type="block_causal",
+        ),
         ff_config=FeedForward.Config(hidden_dim=18432),
         rope_config=RoPE.Config(
             dim=64,
             max_seq_len=4096 * 4,
             theta=10000.0,
-            format="complex",
+            backend="complex",
             scaling="yarn",
             rope_factor=40.0,
             beta_fast=32.0,
@@ -210,13 +218,13 @@ deepseekv3_configs = {
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_configs=deepseekv3_configs,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="deepseek_v3",
+        flavor=flavor,
+        model=deepseekv3_configs[flavor],
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,

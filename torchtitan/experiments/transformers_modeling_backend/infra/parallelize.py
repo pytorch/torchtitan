@@ -29,7 +29,7 @@ from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.llama3.infra.parallelize import (
+from torchtitan.models.llama3.parallelize import (
     apply_compile,
     apply_ddp,
     disable_fsdp_gradient_division,

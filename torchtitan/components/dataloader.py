@@ -9,6 +9,7 @@
 import inspect
 import pickle
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Iterator
 
 import torch
@@ -16,6 +17,7 @@ import torch
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
+from torchtitan.config.configurable import Configurable
 from torchtitan.tools.logging import logger
 
 
@@ -32,12 +34,17 @@ class DataloaderExhaustedError(Exception):
     pass
 
 
-class BaseDataLoader(Stateful, ABC):
+class BaseDataLoader(Stateful, ABC, Configurable):
     """Base class for all dataloaders.
 
     This is used to enforce that all dataloaders have the methods defined in ``Stateful``,
     ``state_dict()`` and ``load_state_dict()``.
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        dataset: str = ""
+        dataset_path: str | None = None
 
     @abstractmethod
     def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
