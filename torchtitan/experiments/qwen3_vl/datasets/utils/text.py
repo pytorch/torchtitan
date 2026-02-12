@@ -12,30 +12,28 @@ import torch
 def pad_text_batch(
     input_ids: torch.Tensor,
     labels: torch.Tensor,
-    seq_len: int,
+    target_len: int,
     padding_idx: int = 0,
     ignore_idx: int = -100,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pad input_ids and labels to desired sequence length."""
     B, L = input_ids.shape
 
-    if L < seq_len:
-        padding_length = seq_len - L
+    if L < target_len:
+        padding_length = target_len - L
         padding_input = torch.full(
             (B, padding_length), padding_idx, dtype=torch.long, device=input_ids.device
         )
-        padding_labels = torch.ones(
-            (B, padding_length), dtype=torch.long, device=labels.device
+        padding_labels = torch.full(
+            (B, padding_length), ignore_idx, dtype=torch.long, device=labels.device
         )
 
         input_ids = torch.cat([input_ids, padding_input], dim=1)
         labels = torch.cat([labels, padding_labels], dim=1)
 
-    elif L > seq_len:
-        input_ids = input_ids[:, :seq_len]
-        labels = labels[:, :seq_len]
-
-    labels[labels == padding_idx] = ignore_idx
+    elif L > target_len:
+        input_ids = input_ids[:, :target_len]
+        labels = labels[:, :target_len]
 
     return input_ids, labels
 
@@ -57,13 +55,11 @@ def pad_input_ids_and_labels_to_target_batch_size(
         (padding_needed, L), padding_idx, dtype=torch.long, device=input_ids.device
     )
     padding_labels = torch.full(
-        (padding_needed, L), padding_idx, dtype=torch.long, device=labels.device
+        (padding_needed, L), ignore_idx, dtype=torch.long, device=labels.device
     )
 
     input_ids = torch.cat([input_ids, padding_input], dim=0)
     labels = torch.cat([labels, padding_labels], dim=0)
-
-    labels[labels == padding_idx] = ignore_idx
 
     return input_ids, labels
 
@@ -91,10 +87,11 @@ def process_text_with_images(
     image_idx = 0
 
     for part in text:
-        if part == special_tokens.img_token and image_idx < len(image_tokens):
+        if part is None and image_idx < len(image_tokens):
             num_image_tokens, _, _ = image_tokens[image_idx]
 
             # Qwen3-VL uses <|vision_start|> and <|vision_end|> markers
+            # Insert image tokens (placeholders) between these markers
             parts.extend(
                 [
                     special_tokens.vision_start_token,
