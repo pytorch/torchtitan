@@ -13,7 +13,7 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 
-from torchtitan.models.attention import ScaledDotProductAttentionWrapper
+from torchtitan.models.common.attention import ScaledDotProductAttentionWrapper
 
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:

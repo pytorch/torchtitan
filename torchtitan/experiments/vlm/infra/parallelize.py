@@ -23,7 +23,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
-from torchtitan.models.llama3.infra.parallelize import (
+from torchtitan.models.llama3.parallelize import (
     _op_sac_save_list,
     apply_compile,
     apply_ddp,

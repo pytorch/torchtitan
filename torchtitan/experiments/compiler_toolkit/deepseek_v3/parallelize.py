@@ -34,8 +34,8 @@ from torchtitan.experiments.simple_fsdp.deepseek_v3.parallelize import (
 
 def annotate_deepseekv3() -> None:
     from torchtitan.distributed.expert_parallel import ExpertParallel
-    from torchtitan.models.attention import FlexAttentionWrapper
-    from torchtitan.models.moe.moe import MoE
+    from torchtitan.models.common.attention import FlexAttentionWrapper
+    from torchtitan.models.common.moe.moe import MoE
 
     # annotate the MoE with dispatch, compute and combine
     ExpertParallel._token_dispatch = annotate_fn({"EP": "dispatch"})(

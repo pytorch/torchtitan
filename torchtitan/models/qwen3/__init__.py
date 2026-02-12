@@ -7,16 +7,13 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.components.validate import Validator
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.models.common import FeedForward, GQAttention, RoPE
 from torchtitan.models.common.moe import MoE
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.protocols.model_spec import ModelSpec
+from .model import Qwen3Model
 
-from .infra.parallelize import parallelize_qwen3
-from .model.model import Qwen3Model
-from .model.state_dict_adapter import Qwen3StateDictAdapter
+from .parallelize import parallelize_qwen3
+from .state_dict_adapter import Qwen3StateDictAdapter
 
 __all__ = [
     "parallelize_qwen3",
@@ -29,7 +26,6 @@ __all__ = [
 qwen3_configs = {
     "debugmodel": Qwen3Model.Config(
         vocab_size=2048,
-        max_seq_len=4096,
         dim=256,
         n_layers=8,
         enable_weight_tying=True,
@@ -52,7 +48,6 @@ qwen3_configs = {
     ),
     "0.6B": Qwen3Model.Config(
         vocab_size=151936,
-        max_seq_len=4096,
         dim=1024,
         n_layers=28,
         enable_weight_tying=True,
@@ -75,7 +70,6 @@ qwen3_configs = {
     ),
     "1.7B": Qwen3Model.Config(
         vocab_size=151936,
-        max_seq_len=4096,
         dim=2048,
         n_layers=28,
         enable_weight_tying=True,
@@ -98,7 +92,6 @@ qwen3_configs = {
     ),
     "4B": Qwen3Model.Config(
         vocab_size=151936,
-        max_seq_len=4096,
         dim=2560,
         n_layers=36,
         enable_weight_tying=True,
@@ -121,7 +114,6 @@ qwen3_configs = {
     ),
     "8B": Qwen3Model.Config(
         vocab_size=151936,
-        max_seq_len=4096,
         dim=4096,
         n_layers=36,
         ff_config=FeedForward.Config(hidden_dim=12288),
@@ -143,7 +135,6 @@ qwen3_configs = {
     ),
     "14B": Qwen3Model.Config(
         vocab_size=151936,
-        max_seq_len=4096,
         dim=5120,
         n_layers=40,
         ff_config=FeedForward.Config(hidden_dim=17408),
@@ -165,7 +156,6 @@ qwen3_configs = {
     ),
     "32B": Qwen3Model.Config(
         vocab_size=151936,
-        max_seq_len=4096,
         dim=5120,
         n_layers=64,
         ff_config=FeedForward.Config(hidden_dim=25600),
@@ -188,7 +178,6 @@ qwen3_configs = {
     # Qwen3-MoE models
     "debugmodel_moe": Qwen3Model.Config(
         vocab_size=2048,
-        max_seq_len=4096,
         dim=256,
         n_layers=8,
         moe_enabled=True,
@@ -221,7 +210,6 @@ qwen3_configs = {
     ),
     "30B-A3B": Qwen3Model.Config(
         vocab_size=151936,
-        max_seq_len=262144,
         dim=2048,
         n_layers=48,
         moe_enabled=True,
@@ -254,7 +242,6 @@ qwen3_configs = {
     ),
     "235B-A22B": Qwen3Model.Config(
         vocab_size=151936,
-        max_seq_len=4096,
         dim=4096,
         n_layers=94,
         moe_enabled=True,
@@ -288,14 +275,13 @@ qwen3_configs = {
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_configs=qwen3_configs,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="qwen3",
+        flavor=flavor,
+        model=qwen3_configs[flavor],
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=None,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
-        validator_cls=Validator,
         state_dict_adapter=Qwen3StateDictAdapter,
     )

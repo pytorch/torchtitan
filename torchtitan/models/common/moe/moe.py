@@ -14,7 +14,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.config.configurable import Module
 from torchtitan.models.common import FeedForward
-from torchtitan.models.utils import trunc_normal_
+from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.tools.logging import logger
 
 from .utils import indices_padding_wrapper

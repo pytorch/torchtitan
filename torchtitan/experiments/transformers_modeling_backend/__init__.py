@@ -6,9 +6,7 @@
 from dataclasses import dataclass
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.protocols.model_spec import ModelSpec
 
 from .infra.parallelize import parallelize_hf_transformers
 from .infra.pipeline import pipeline_hf_transformers
@@ -53,12 +51,12 @@ flavors = {
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_configs=flavors,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="transformers_modeling_backend",
+        flavor=flavor,
+        model=flavors[flavor],
         parallelize_fn=parallelize_hf_transformers,
         pipelining_fn=pipeline_hf_transformers,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
     )

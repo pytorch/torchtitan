@@ -36,7 +36,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.dual_pipe_v import overlap_callback
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
-from torchtitan.protocols.train_spec import ParallelizeFunction
+from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.tools.logging import logger
 
 __all__ = [

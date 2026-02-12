@@ -9,9 +9,8 @@ import unittest
 import torch
 from datasets import load_dataset
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import ConfigManager
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader, DATASETS
+from torchtitan.hf_datasets.text_datasets import DATASETS, HuggingFaceTextDataLoader
 
 
 class TestDatasetCheckpointing(unittest.TestCase):
@@ -60,21 +59,16 @@ class TestDatasetCheckpointing(unittest.TestCase):
 
     def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
         tokenizer = HuggingFaceTokenizer("./tests/assets/tokenizer")
-        config_manager = ConfigManager()
-        config = config_manager.parse_args(
-            [
-                "--training.dataset",
-                dataset_name,
-                "--training.local_batch_size",
-                str(batch_size),
-                "--training.seq_len",
-                str(seq_len),
-            ]
+
+        dl_config = HuggingFaceTextDataLoader.Config(
+            dataset=dataset_name,
+            local_batch_size=batch_size,
+            seq_len=seq_len,
         )
 
-        return build_text_dataloader(
-            tokenizer=tokenizer,
+        return HuggingFaceTextDataLoader(
+            dl_config,
             dp_world_size=world_size,
             dp_rank=rank,
-            training=config.training,
+            tokenizer=tokenizer,
         )

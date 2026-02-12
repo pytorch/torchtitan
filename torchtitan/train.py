@@ -13,12 +13,8 @@ from torchtitan.tools.logging import init_logger, logger
 from torchtitan.trainer import Trainer
 
 
-def main(trainer_class: type[Trainer]) -> None:
-    """Main entry point for training with a specified trainer class.
-
-    Args:
-        trainer_class: The trainer class to instantiate (e.g., Trainer, FluxTrainer, TorchCommsTrainer)
-    """
+def main() -> None:
+    """Main entry point for training."""
     init_logger()
 
     import torchtitan
@@ -28,7 +24,7 @@ def main(trainer_class: type[Trainer]) -> None:
         torchtitan.__version__,
     )
 
-    config_manager = ConfigManager(Trainer.Config)
+    config_manager = ConfigManager()
     config = config_manager.parse_args()
     trainer: Trainer | None = None
 
@@ -65,4 +61,4 @@ def main(trainer_class: type[Trainer]) -> None:
 
 
 if __name__ == "__main__":
-    main(Trainer)
+    main()

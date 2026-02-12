@@ -11,15 +11,14 @@ from typing import Any, Iterable
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
-import torchtitan.protocols.train_spec as train_spec_module
-from torchtitan.components.dataloader import DataloaderExhaustedError
+from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.tokenizer import build_hf_tokenizer
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.components.validate import Validator
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
+from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiling import (
@@ -33,9 +32,9 @@ from .engine import ForgeEngine
 
 
 class Trainer(ForgeEngine):
-    tokenizer: train_spec_module.BaseTokenizer | None
-    dataloader: train_spec_module.BaseDataLoader
-    validator: train_spec_module.BaseValidator
+    tokenizer: HuggingFaceTokenizer | None
+    dataloader: BaseDataLoader
+    validator: Validator
     metrics_processor: MetricsProcessor
 
     # additional training states
@@ -53,19 +52,19 @@ class Trainer(ForgeEngine):
         super().__init__(job_config)
 
         # build tokenizer
-        self.tokenizer = build_hf_tokenizer(job_config)
+        self.tokenizer = HuggingFaceTokenizer(job_config.job.hf_assets_path)
 
         # build dataloader
-        self.dataloader = build_text_dataloader(
+        self.dataloader = HuggingFaceTextDataLoader(
+            job_config.dataloader,
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
-            job_config=job_config,
         )
 
         model_args = self.model_config
         logger.info(
-            f"Built {job_config.model.name} {job_config.model.flavor} with {model_args}"
+            f"Built {job_config.model_spec.name} {job_config.model_spec.flavor} with {model_args}"
         )
 
         # metrics logging
@@ -82,7 +81,7 @@ class Trainer(ForgeEngine):
         self.metrics_processor.num_flops_per_token = self.num_flops_per_token
 
         logger.info(
-            f"{color.blue}Model {job_config.model.name} {job_config.model.flavor} "
+            f"{color.blue}Model {job_config.model_spec.name} {job_config.model_spec.flavor} "
             f"{color.red}size: {self.model_param_count:,} total parameters{color.reset}"
         )
 

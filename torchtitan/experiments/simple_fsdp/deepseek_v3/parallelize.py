@@ -20,10 +20,7 @@ from torchtitan.distributed import ParallelDims
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.deepseek_v3.infra.parallelize import (
-    apply_moe_ep_tp,
-    apply_non_moe_tp,
-)
+from torchtitan.models.deepseek_v3.parallelize import apply_moe_ep_tp, apply_non_moe_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 

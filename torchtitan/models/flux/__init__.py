@@ -5,17 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.loss import build_mse_loss
+from torchtitan.models.flux.flux_datasets import FluxDataLoader
+from torchtitan.protocols.model_spec import ModelSpec
 
-from torchtitan.models.flux.flux_datasets import build_flux_dataloader
-from torchtitan.protocols.train_spec import TrainSpec
 from .infra.parallelize import parallelize_flux
 from .model.autoencoder import AutoEncoderParams
 from .model.model import FluxModel
 from .model.state_dict_adapter import FluxStateDictAdapter
-from .validate import FluxValidator
 
 __all__ = [
     "FluxModel",
+    "FluxDataLoader",
     "flux_configs",
     "parallelize_flux",
 ]
@@ -100,14 +100,13 @@ flux_configs = {
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_configs=flux_configs,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="flux",
+        flavor=flavor,
+        model=flux_configs[flavor],
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
-        build_dataloader_fn=build_flux_dataloader,
-        build_tokenizer_fn=None,
         build_loss_fn=build_mse_loss,
-        validator_cls=FluxValidator,
         state_dict_adapter=FluxStateDictAdapter,
     )

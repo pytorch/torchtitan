@@ -4,19 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from abc import abstractmethod
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import Module
-from torchtitan.config.configurable import Configurable
-from torchtitan.models.attention import VarlenMetadata
+from torchtitan.protocols.configurable import Configurable
+from torchtitan.protocols.module import Module
 
-
-AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+if TYPE_CHECKING:
+    from torchtitan.models.common.attention import AttentionMasksType
 
 
 class BaseModel(Module):

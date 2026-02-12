@@ -11,14 +11,14 @@ from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.attention import (
+from torchtitan.models.common import trunc_normal_
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
     create_attention_mask,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.models.utils import trunc_normal_
-from torchtitan.protocols.model import AttentionMasksType
 
 from .args import Siglip2Config
 

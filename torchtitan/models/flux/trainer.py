@@ -10,7 +10,6 @@ import torch
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
-
 from torchtitan.models.flux.infra.parallelize import parallelize_encoders
 from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
@@ -19,7 +18,6 @@ from torchtitan.models.flux.utils import (
     pack_latents,
     preprocess_data,
 )
-from torchtitan.train import main
 from torchtitan.trainer import Trainer
 
 
@@ -48,7 +46,7 @@ class FluxTrainer(Trainer):
         )
 
         # load components
-        model_args = self.train_spec.model_configs[config.model.flavor]
+        model_args = config.model_spec.model
 
         self.autoencoder = load_ae(
             # pyrefly: ignore [missing-attribute]
@@ -83,7 +81,7 @@ class FluxTrainer(Trainer):
             training=config.training,
         )
 
-        if config.validation.enable:
+        if config.validator.enable:
             # pyrefly: ignore [missing-attribute]
             self.validator.flux_init(
                 device=self.device,
@@ -275,7 +273,3 @@ class FluxTrainer(Trainer):
             grad_norm.item(),
             extra_metrics=extra_metrics,
         )
-
-
-if __name__ == "__main__":
-    main(FluxTrainer)

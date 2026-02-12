@@ -6,10 +6,7 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.components.validate import Validator
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
     FeedForward,
@@ -17,24 +14,26 @@ from torchtitan.models.common import (
     RoPE,
 )
 from torchtitan.models.common.moe import MoE
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.protocols.model_spec import ModelSpec
+from .model import compute_moe_hidden_dim, Llama4Model
 
-from .infra.parallelize import parallelize_llama
-from .model.model import compute_moe_hidden_dim, Transformer
-from .model.state_dict_adapter import Llama4StateDictAdapter
+from .parallelize import parallelize_llama
+from .state_dict_adapter import Llama4StateDictAdapter
 
 __all__ = [
-    "Transformer",
+    "Llama4Model",
     "llama4_configs",
 ]
 
 
 llama4_configs = {
-    "debugmodel": Transformer.Config(
+    "debugmodel": Llama4Model.Config(
         dim=256,
         n_layers=6,
         vocab_size=2048,
-        ff_config=FeedForward.Config(hidden_dim=compute_ffn_hidden_dim(256)),
+        ff_config=FeedForward.Config(
+            hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
+        ),
         rope_config=RoPE.Config(
             dim=256 // 16,
             max_seq_len=1048576,
@@ -51,10 +50,9 @@ llama4_configs = {
         ),
         moe_config=MoE.Config(hidden_dim=compute_moe_hidden_dim(256)),
     ),
-    "17bx16e": Transformer.Config(
+    "17bx16e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
-        max_seq_len=10485760,
         moe_config=MoE.Config(
             num_experts=16,
             hidden_dim=compute_moe_hidden_dim(
@@ -87,7 +85,7 @@ llama4_configs = {
             rope_format="complex",
         ),
     ),
-    "17bx128e": Transformer.Config(
+    "17bx128e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
         moe_config=MoE.Config(
@@ -119,14 +117,16 @@ llama4_configs = {
             rope_format="complex",
         ),
     ),
-    "debugmodel_irope": Transformer.Config(
+    "debugmodel_irope": Llama4Model.Config(
         dim=256,
         n_layers=6,
         vocab_size=2048,
         every_n_layers_nope=4,
         fixed_attn_block_size=256,
         attn_mask_type="block_causal",
-        ff_config=FeedForward.Config(hidden_dim=compute_ffn_hidden_dim(256)),
+        ff_config=FeedForward.Config(
+            hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
+        ),
         rope_config=RoPE.Config(
             dim=256 // 16,
             max_seq_len=1048576,
@@ -143,10 +143,9 @@ llama4_configs = {
         ),
         moe_config=MoE.Config(hidden_dim=compute_moe_hidden_dim(256)),
     ),
-    "17bx16e_irope": Transformer.Config(
+    "17bx16e_irope": Llama4Model.Config(
         dim=5120,
         n_layers=48,
-        max_seq_len=10485760,
         moe_config=MoE.Config(
             num_experts=16,
             hidden_dim=compute_moe_hidden_dim(
@@ -181,7 +180,7 @@ llama4_configs = {
             rope_format="complex",
         ),
     ),
-    "17bx128e_irope": Transformer.Config(
+    "17bx128e_irope": Llama4Model.Config(
         dim=5120,
         n_layers=48,
         moe_config=MoE.Config(
@@ -218,15 +217,14 @@ llama4_configs = {
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_configs=llama4_configs,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="llama4",
+        flavor=flavor,
+        model=llama4_configs[flavor],
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
-        validator_cls=Validator,
         state_dict_adapter=Llama4StateDictAdapter,
     )

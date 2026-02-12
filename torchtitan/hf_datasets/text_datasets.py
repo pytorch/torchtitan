@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from functools import partial
 from typing import Any, Callable
 
@@ -15,9 +15,9 @@ from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 
-from torchtitan.components.dataloader import ParallelAwareDataloader
+from torchtitan.components.dataloader import BaseDataLoader, ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import TrainingConfig, ValidationConfig
+from torchtitan.config import DataLoaderConfig
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
@@ -166,90 +166,53 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         return _state_dict
 
 
-def build_text_dataloader(
-    dp_world_size: int,
-    dp_rank: int,
-    tokenizer: BaseTokenizer,
-    training: TrainingConfig,
-    infinite: bool = True,
-    **kwargs,
-) -> ParallelAwareDataloader:
-    """Build a data loader for HuggingFace datasets.
+class HuggingFaceTextDataLoader(ParallelAwareDataloader):
+    """Configurable text dataloader that wraps HuggingFaceTextDataset.
 
-    Args:
-        dp_world_size: Data parallelism world size.
-        dp_rank: Data parallelism rank.
-        tokenizer: Tokenizer to use for encoding text.
-        training: TrainingConfig configuration containing dataset and DataLoader settings.
-        infinite: Whether to loop the dataset infinitely.
+    This dataloader can be used for both training and validation by
+    configuring the appropriate dataset, seq_len, batch_size, etc.
     """
-    dataset_name = training.dataset
-    dataset_path = training.dataset_path
-    batch_size = training.local_batch_size
-    seq_len = training.seq_len
 
-    hf_ds = HuggingFaceTextDataset(
-        dataset_name=dataset_name,
-        dataset_path=dataset_path,
-        tokenizer=tokenizer,
-        seq_len=seq_len,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=infinite,
-    )
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseDataLoader.Config):
+        dataset: str = "c4_test"
+        """Dataset to use"""
 
-    dataloader_kwargs = {
-        **asdict(training.dataloader),
-        "batch_size": batch_size,
-    }
+        infinite: bool = True
+        """Whether to loop the dataset infinitely"""
 
-    return ParallelAwareDataloader(
-        hf_ds,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        **dataloader_kwargs,
-    )
+        dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
+        """DataLoader configuration"""
 
+    def __init__(
+        self,
+        config: "HuggingFaceTextDataLoader.Config",
+        *,
+        dp_world_size: int,
+        dp_rank: int,
+        tokenizer: BaseTokenizer,
+        seq_len: int,
+        local_batch_size: int,
+        **kwargs,
+    ):
+        hf_ds = HuggingFaceTextDataset(
+            dataset_name=config.dataset,
+            dataset_path=config.dataset_path,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=config.infinite,
+        )
 
-def build_text_validation_dataloader(
-    dp_world_size: int,
-    dp_rank: int,
-    tokenizer: BaseTokenizer,
-    validation: ValidationConfig,
-    infinite: bool = False,
-) -> ParallelAwareDataloader:
-    """Build a validation data loader for HuggingFace datasets.
+        dataloader_kwargs = {
+            **asdict(config.dataloader),
+            "batch_size": local_batch_size,
+        }
 
-    Args:
-        dp_world_size: Data parallelism world size.
-        dp_rank: Data parallelism rank.
-        tokenizer: Tokenizer to use for encoding text.
-        validation: ValidationConfig configuration containing dataset and DataLoader settings.
-        infinite: Whether to loop the dataset infinitely.
-    """
-    dataset_name = validation.dataset
-    dataset_path = validation.dataset_path
-    batch_size = validation.local_batch_size
-    seq_len = validation.seq_len
-
-    hf_ds = HuggingFaceTextDataset(
-        dataset_name=dataset_name,
-        dataset_path=dataset_path,
-        tokenizer=tokenizer,
-        seq_len=seq_len,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=infinite,
-    )
-
-    dataloader_kwargs = {
-        **asdict(validation.dataloader),
-        "batch_size": batch_size,
-    }
-
-    return ParallelAwareDataloader(
-        hf_ds,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        **dataloader_kwargs,
-    )
+        super().__init__(
+            hf_ds,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            **dataloader_kwargs,
+        )

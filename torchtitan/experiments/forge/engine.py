@@ -10,30 +10,31 @@ from typing import Generator
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
-import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import rescale_accumulated_loss
+from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import TORCH_DTYPE_MAP
 
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols import BaseModel
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
 from .job_config import ForgeJobConfig
-from .train_spec import ForgeTrainSpec, get_train_spec
 
 
 class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
     # core configs
     job_config: ForgeJobConfig
     parallel_dims: ParallelDims
-    train_spec: ForgeTrainSpec
+    train_spec: ModelSpec
 
-    # swappable training components in ForgeTrainSpec
+    # swappable training components in ModelSpec
     model_parts: list[torch.nn.Module]
-    loss_fn: train_spec_module.LossFunction
-    optimizers: train_spec_module.OptimizersContainer
-    lr_schedulers: train_spec_module.LRSchedulersContainer
+    loss_fn: LossFunction
+    optimizers: OptimizersContainer
+    lr_schedulers: LRSchedulersContainer
 
     # non-swappable training components
     checkpointer: CheckpointManager
@@ -106,12 +107,10 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
             job_config.debug,
             distinct_seed_mesh_dims=["pp"],  # same as `torchtitan/train.py`
         )
-        self.train_spec = get_train_spec(job_config.model.name)
+        self.train_spec = job_config.model_spec
 
         # build model (using meta init)
-        self.model_config = model_config = self.train_spec.model_configs[
-            job_config.model.flavor
-        ]
+        self.model_config = model_config = self.train_spec.model
         # set the model args from training job configs
         model_config.update_from_config(
             job_config=job_config,
@@ -168,7 +167,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
                 raise RuntimeError(
-                    f"Pipeline Parallel is enabled but {job_config.model.name} "
+                    f"Pipeline Parallel is enabled but {self.train_spec.name} "
                     f"does not support pipelining"
                 )
 
@@ -244,7 +243,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
                 self.train_spec.state_dict_adapter(
-                    model_config, job_config.model.hf_assets_path
+                    model_config, job_config.job.hf_assets_path
                 )
                 if self.train_spec.state_dict_adapter
                 else None

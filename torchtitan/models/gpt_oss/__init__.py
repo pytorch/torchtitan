@@ -6,16 +6,14 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.models.common import RoPE
 from torchtitan.models.common.moe import MoE
 
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.protocols.model_spec import ModelSpec
+from .model import GptOssModel
 
-from .infra.parallelize import parallelize_gptoss
-from .model.model import GptOssModel
-from .model.state_dict_adapter import GptOssStateDictAdapter
+from .parallelize import parallelize_gptoss
+from .state_dict_adapter import GptOssStateDictAdapter
 
 __all__ = [
     "parallelize_gptoss",
@@ -111,13 +109,13 @@ gptoss_configs = {
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_configs=gptoss_configs,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="gpt_oss",
+        flavor=flavor,
+        model=gptoss_configs[flavor],
         parallelize_fn=parallelize_gptoss,
         pipelining_fn=None,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=GptOssStateDictAdapter,
