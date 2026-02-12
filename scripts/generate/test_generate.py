@@ -25,7 +25,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 from torchtitan.components.metrics import build_device_memory_monitor
-from torchtitan.config import ConfigManager, Debug as DebugConfig
+from torchtitan.config import ConfigManager, DebugConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools import utils

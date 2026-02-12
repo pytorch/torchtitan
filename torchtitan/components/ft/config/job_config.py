@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass, field
 
-from torchtitan.config.job_config import FaultTolerance as BaseFaultTolerance
+from torchtitan.config.configs import FaultToleranceConfig as BaseFaultTolerance
 
 
 @dataclass

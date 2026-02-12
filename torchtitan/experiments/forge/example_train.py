@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import importlib
 import time
 from datetime import timedelta
 from typing import Any, Iterable
@@ -18,7 +17,6 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import Validator
-from torchtitan.config import JobConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
@@ -29,6 +27,7 @@ from torchtitan.tools.profiling import (
     maybe_enable_profiling,
 )
 from torchtitan.train import main
+from torchtitan.trainer import Trainer as TitanTrainer
 
 from .engine import ForgeEngine
 
@@ -44,14 +43,11 @@ class Trainer(ForgeEngine):
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
-    def __init__(self, job_config: JobConfig):
+    def __init__(self, job_config: TitanTrainer.Config):
         logger.info(f"Starting job: {job_config.job.description}")
 
         if job_config.job.print_config:
             logger.info(f"Running with args: {job_config.to_dict()}")
-
-        if job_config.experimental.custom_import:
-            importlib.import_module(job_config.experimental.custom_import)
 
         # NOTE: Here we are passing in JobConfig as a superset of ForgeJobConfig
         super().__init__(job_config)

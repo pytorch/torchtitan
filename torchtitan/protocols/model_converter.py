@@ -3,12 +3,12 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from dataclasses import dataclass, field
 from typing import List, Protocol, Union
 
 import torch.nn as nn
 
 from torchtitan.config.configurable import Configurable
-from torchtitan.config.job_config import ModelConverters
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
@@ -36,26 +36,36 @@ class ModelConvertersContainer(Configurable, ModelConverter):
 
     Builds converters from their Config objects and applies them
     to the model sequentially.
-
-    Config is ModelConverters from job_config.py (auto-wired via __init_subclass__).
     """
 
-    Config = ModelConverters
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        """Configuration for model converters (quantization, etc.).
+
+        Each entry in converters should be a Configurable.Config instance
+        (e.g. Float8LinearConverter.Config) whose build() constructs the converter.
+        """
+
+        converters: list = field(default_factory=list)
+        """List of converter Config objects to apply to the model."""
+
+        print_after_conversion: bool = False
+        """If true, model definition will be printed after converters are applied."""
 
     def __init__(
         self,
-        config: ModelConverters,
+        config: Config,
         *,
         parallel_dims: ParallelDims,
         model_compile_enabled: bool,
     ):
-        _validate_quantization(config.converter_configs)
+        _validate_quantization(config.converters)
         self.converters: list[ModelConverter] = [
             cc.build(
                 parallel_dims=parallel_dims,
                 model_compile_enabled=model_compile_enabled,
             )
-            for cc in config.converter_configs
+            for cc in config.converters
         ]
         self.print_after_conversion = config.print_after_conversion
 
@@ -70,14 +80,14 @@ class ModelConvertersContainer(Configurable, ModelConverter):
             mh.post_optimizer_hook(model)
 
 
-def _validate_quantization(converter_configs: list[Configurable.Config]):
+def _validate_quantization(converters: list[Configurable.Config]):
     """Validates that all quantization converters use the same quantization type.
 
     Each quantization converter Config defines a `_quantization_type` ClassVar
     (e.g. "float8" or "mx"). This function asserts they are all the same.
     """
     existing_type: str | None = None
-    for config in converter_configs:
+    for config in converters:
         qt = getattr(config, "_quantization_type", None)
         if qt is not None:
             if existing_type is None:

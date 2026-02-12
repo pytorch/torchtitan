@@ -23,13 +23,12 @@ from torch.distributed.tensor.parallel import (
 
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
-    ActivationCheckpoint,
-    ModelConverters,
-    Parallelism,
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
     TORCH_DTYPE_MAP,
-    Training,
+    TrainingConfig,
 )
-from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
@@ -40,6 +39,7 @@ from torchtitan.models.llama4.infra.parallelize import (
     apply_fsdp,
     apply_moe_ep_tp,
 )
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -66,12 +66,11 @@ def parallelize_qwen3(
     model: nn.Module,
     parallel_dims: ParallelDims,
     *,
-    training: Training,
-    model_converters: ModelConverters,
-    parallelism: Parallelism,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpoint,
-    experimental: Experimental,
+    ac_config: ActivationCheckpointConfig,
     dump_folder: str,
 ):
     assert (
@@ -96,7 +95,7 @@ def parallelize_qwen3(
         if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
             raise RuntimeError("Async TP requires torch.compile")
 
-        float8_config = find_float8_linear_config(model_converters.converter_configs)
+        float8_config = find_float8_linear_config(model_converters.converters)
         enable_float8_linear = float8_config is not None
         float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
             "rowwise",

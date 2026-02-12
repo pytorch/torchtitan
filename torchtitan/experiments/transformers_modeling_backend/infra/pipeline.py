@@ -19,8 +19,12 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import ActivationCheckpoint, Parallelism, Training
-from torchtitan.config.job_config import Compile as CompileConfig, Experimental
+from torchtitan.config import (
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import build_pipeline_schedule
 from torchtitan.protocols.model import BaseModel
@@ -284,12 +288,11 @@ def pipeline_hf_transformers(
     model: nn.Module,
     parallel_dims: ParallelDims,
     *,
-    training: Training,
+    training: TrainingConfig,
     model_converters: list,
-    parallelism: Parallelism,
+    parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpoint,
-    experimental: Experimental,
+    ac_config: ActivationCheckpointConfig,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,

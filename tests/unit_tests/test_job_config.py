@@ -10,7 +10,8 @@ import unittest
 from dataclasses import dataclass
 
 import pytest
-from torchtitan.config import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager
+from torchtitan.trainer import Trainer
 
 
 def _write_python_config(fp, code: str):
@@ -38,17 +39,15 @@ class TestJobConfig(unittest.TestCase):
     def test_job_file_does_not_exist(self):
         with pytest.raises(Exception):
             config_manager = ConfigManager()
-            config = config_manager.parse_args(
-                ["--job.config_file", "ohno.py"]
-            )
+            _ = config_manager.parse_args(["--job.config_file", "ohno.py"])
 
     def test_empty_config_file(self):
         with tempfile.NamedTemporaryFile(suffix=".py") as fp:
             _write_python_config(
                 fp,
                 """\
-                from torchtitan.config import JobConfig
-                default_config = JobConfig()
+                from torchtitan.trainer import Trainer
+                default_config = Trainer.Config()
                 """,
             )
             config_manager = ConfigManager()
@@ -93,9 +92,10 @@ class TestJobConfig(unittest.TestCase):
             _write_python_config(
                 fp,
                 f"""\
-                from torchtitan.config import JobConfig, Parallelism
-                default_config = JobConfig(
-                    parallelism=Parallelism(
+                from torchtitan.config import ParallelismConfig
+                from torchtitan.trainer import Trainer
+                default_config = Trainer.Config(
+                    parallelism=ParallelismConfig(
                         module_fqns_per_model_part={toml_chunks!r},
                     ),
                 )
@@ -112,9 +112,10 @@ class TestJobConfig(unittest.TestCase):
             _write_python_config(
                 fp,
                 f"""\
-                from torchtitan.config import JobConfig, Parallelism
-                default_config = JobConfig(
-                    parallelism=Parallelism(
+                from torchtitan.config import ParallelismConfig
+                from torchtitan.trainer import Trainer
+                default_config = Trainer.Config(
+                    parallelism=ParallelismConfig(
                         module_fqns_per_model_part={cmdline_chunks!r},
                     ),
                 )
@@ -132,9 +133,10 @@ class TestJobConfig(unittest.TestCase):
             _write_python_config(
                 fp,
                 f"""\
-                from torchtitan.config import JobConfig, Parallelism
-                default_config = JobConfig(
-                    parallelism=Parallelism(
+                from torchtitan.config import ParallelismConfig
+                from torchtitan.trainer import Trainer
+                default_config = Trainer.Config(
+                    parallelism=ParallelismConfig(
                         module_fqns_per_model_part={empty_chunks!r},
                     ),
                 )
@@ -178,9 +180,10 @@ class TestJobConfig(unittest.TestCase):
             _write_python_config(
                 fp,
                 f"""\
-                from torchtitan.config import JobConfig, Checkpoint
-                default_config = JobConfig(
-                    checkpoint=Checkpoint(
+                from torchtitan.components.checkpoint import CheckpointManager
+                from torchtitan.trainer import Trainer
+                default_config = Trainer.Config(
+                    checkpoint=CheckpointManager.Config(
                         exclude_from_loading={config_splits!r},
                     ),
                 )
@@ -197,9 +200,10 @@ class TestJobConfig(unittest.TestCase):
             _write_python_config(
                 fp,
                 f"""\
-                from torchtitan.config import JobConfig, Checkpoint
-                default_config = JobConfig(
-                    checkpoint=Checkpoint(
+                from torchtitan.components.checkpoint import CheckpointManager
+                from torchtitan.trainer import Trainer
+                default_config = Trainer.Config(
+                    checkpoint=CheckpointManager.Config(
                         exclude_from_loading={config_splits!r},
                     ),
                 )
@@ -221,7 +225,7 @@ class TestJobConfig(unittest.TestCase):
     def test_job_config_model_converters_default(self):
         config_manager = ConfigManager()
         config = config_manager.parse_args([])
-        assert config.model_converters.converter_configs == []
+        assert config.model_converters.converters == []
 
     def test_print_help(self):
         from tyro.extras import get_parser
@@ -239,7 +243,7 @@ class TestJobConfig(unittest.TestCase):
         class CustomJobConfig:
             checkpoint: CustomCheckpoint
 
-        MergedJobConfig = ConfigManager._merge_configs(JobConfig, CustomJobConfig)
+        MergedJobConfig = ConfigManager._merge_configs(Trainer.Config, CustomJobConfig)
 
         cli_args = [
             "--checkpoint.convert_path=/override/path",
@@ -262,24 +266,24 @@ class TestJobConfig(unittest.TestCase):
                 fp,
                 f"""\
                 import importlib
-                from torchtitan.config import ConfigManager, JobConfig
+                from torchtitan.config import ConfigManager
+                from torchtitan.trainer import Trainer
+                JobConfig = Trainer.Config
                 custom_module = importlib.import_module("{path}")
                 MergedJobConfig = ConfigManager._merge_configs(
                     JobConfig, custom_module.JobConfig
                 )
                 default_config = MergedJobConfig()
                 default_config.custom_config.how_is_your_day = "really good"
-                default_config.model_converters.converter_configs = ["float8", "mxfp"]
+                default_config.model_converters.converters = ["float8", "mxfp"]
                 """,
             )
 
             config_manager = ConfigManager()
-            config = config_manager.parse_args(
-                [f"--job.config_file={fp.name}"]
-            )
+            config = config_manager.parse_args([f"--job.config_file={fp.name}"])
 
             assert config.custom_config.how_is_your_day == "really good"
-            assert config.model_converters.converter_configs == ["float8", "mxfp"]
+            assert config.model_converters.converters == ["float8", "mxfp"]
             result = config.to_dict()
             assert isinstance(result, dict)
 
@@ -289,7 +293,9 @@ class TestJobConfig(unittest.TestCase):
                 fp,
                 f"""\
                 import importlib
-                from torchtitan.config import ConfigManager, JobConfig
+                from torchtitan.config import ConfigManager
+                from torchtitan.trainer import Trainer
+                JobConfig = Trainer.Config
                 custom_module = importlib.import_module("{path}")
                 MergedJobConfig = ConfigManager._merge_configs(
                     JobConfig, custom_module.JobConfig
@@ -315,7 +321,9 @@ class TestJobConfig(unittest.TestCase):
                 fp,
                 f"""\
                 import importlib
-                from torchtitan.config import ConfigManager, JobConfig
+                from torchtitan.config import ConfigManager
+                from torchtitan.trainer import Trainer
+                JobConfig = Trainer.Config
                 custom_module = importlib.import_module("{path}")
                 MergedJobConfig = ConfigManager._merge_configs(
                     JobConfig, custom_module.JobConfig
@@ -338,16 +346,17 @@ class TestJobConfig(unittest.TestCase):
             _write_python_config(
                 fp,
                 """\
-                from torchtitan.config import JobConfig, Model
-                default_config = JobConfig(
-                    model=Model(
+                from torchtitan.config import ModelConfig
+                from torchtitan.trainer import Trainer
+                default_config = Trainer.Config(
+                    model=ModelConfig(
                         name="llama3",
                         fake_field=0,
                     ),
                 )
                 """,
             )
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(TypeError, "fake_field"):
                 config_manager = ConfigManager()
                 config_manager.parse_args(["--job.config_file", fp.name])
 

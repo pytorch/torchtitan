@@ -8,7 +8,7 @@ from typing import Iterable
 
 import torch
 
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 
 from torchtitan.models.flux.infra.parallelize import parallelize_encoders
@@ -19,12 +19,13 @@ from torchtitan.models.flux.utils import (
     pack_latents,
     preprocess_data,
 )
-from torchtitan.train import main, Trainer
+from torchtitan.train import main
+from torchtitan.trainer import Trainer
 
 
 class FluxTrainer(Trainer):
-    def __init__(self, job_config: JobConfig):
-        super().__init__(job_config)
+    def __init__(self, config: "Trainer.Config"):
+        super().__init__(config)
 
         # Set random seed, and maybe enable deterministic mode
         # (mainly for debugging, expect perf loss).
@@ -32,7 +33,7 @@ class FluxTrainer(Trainer):
         dist_utils.set_determinism(
             self.parallel_dims,
             self.device,
-            job_config.debug,
+            config.debug,
             distinct_seed_mesh_dims=["fsdp", "dp_replicate"],
         )
 
@@ -41,36 +42,36 @@ class FluxTrainer(Trainer):
         # the dtype for encoders is torch.float32 (default dtype for Flux Model).
         # Otherwise, we use the same dtype as mixed precision training process.
         self._dtype = (
-            TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
+            TORCH_DTYPE_MAP[config.training.mixed_precision_param]
             if self.parallel_dims.dp_shard_enabled
             else torch.float32
         )
 
         # load components
-        model_args = self.train_spec.model_configs[job_config.model.flavor]
+        model_args = self.train_spec.model_configs[config.model.flavor]
 
         self.autoencoder = load_ae(
             # pyrefly: ignore [missing-attribute]
-            job_config.encoder.autoencoder_path,
+            config.encoder.autoencoder_path,
             # pyrefly: ignore [missing-attribute]
             model_args.autoencoder_params,
             device=self.device,
             dtype=self._dtype,
             # pyrefly: ignore [missing-attribute]
-            random_init=job_config.training.test_mode,
+            random_init=config.training.test_mode,
         )
 
         self.clip_encoder = FluxEmbedder(
             # pyrefly: ignore [missing-attribute]
-            version=job_config.encoder.clip_encoder,
+            version=config.encoder.clip_encoder,
             # pyrefly: ignore [missing-attribute]
-            random_init=job_config.training.test_mode,
+            random_init=config.training.test_mode,
         ).to(device=self.device, dtype=self._dtype)
         self.t5_encoder = FluxEmbedder(
             # pyrefly: ignore [missing-attribute]
-            version=job_config.encoder.t5_encoder,
+            version=config.encoder.t5_encoder,
             # pyrefly: ignore [missing-attribute]
-            random_init=job_config.training.test_mode,
+            random_init=config.training.test_mode,
         ).to(device=self.device, dtype=self._dtype)
 
         # Apply FSDP to the T5 model / CLIP model
@@ -79,10 +80,10 @@ class FluxTrainer(Trainer):
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
             parallel_dims=self.parallel_dims,
-            training=job_config.training,
+            training=config.training,
         )
 
-        if job_config.validation.enable:
+        if config.validation.enable:
             # pyrefly: ignore [missing-attribute]
             self.validator.flux_init(
                 device=self.device,
@@ -231,7 +232,7 @@ class FluxTrainer(Trainer):
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
-            self.job_config.training.max_norm,
+            self.config.training.max_norm,
             foreach=True,
             pp_mesh=parallel_dims.get_optional_mesh("pp"),
             ep_enabled=parallel_dims.ep_enabled,

@@ -27,15 +27,15 @@ from torch.distributed.pipelining.schedules import (
 
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import (
-    ActivationCheckpoint,
-    ModelConverters,
-    Parallelism,
-    Training,
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TrainingConfig,
 )
-from torchtitan.config.job_config import Compile, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.dual_pipe_v import overlap_callback
 from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.train_spec import ParallelizeFunction
 from torchtitan.tools.logging import logger
 
@@ -51,12 +51,11 @@ def pipeline_llm(
     model: nn.Module,
     parallel_dims: ParallelDims,
     *,
-    training: Training,
-    model_converters: ModelConverters,
-    parallelism: Parallelism,
-    compile_config: Compile,
-    ac_config: ActivationCheckpoint,
-    experimental: Experimental,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpointConfig,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
@@ -155,7 +154,6 @@ def pipeline_llm(
             parallelism=parallelism,
             compile_config=compile_config,
             ac_config=ac_config,
-            experimental=experimental,
             dump_folder=dump_folder,
         )
         model_parts[i] = m
@@ -184,7 +182,7 @@ def pipeline_llm(
 
 def build_pipeline_schedule(
     *,
-    parallelism: Parallelism,
+    parallelism: ParallelismConfig,
     local_batch_size: int,
     stages: list[PipelineStage],
     loss_fn: Callable,
@@ -192,7 +190,7 @@ def build_pipeline_schedule(
     """Builds a pipeline schedule for the given job configuration and stages.
 
     Args:
-        parallelism (Parallelism): The parallelism configuration.
+        parallelism (ParallelismConfig): The parallelism configuration.
         local_batch_size (int): The local batch size for computing microbatches.
         stages (list[PipelineStage]): The stages to be scheduled.
         loss_fn (Callable): The loss function.

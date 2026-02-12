@@ -4,15 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.config import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager
 from torchtitan.experiments.vlm.job_config import JobConfig as VLMJobConfig
+from torchtitan.trainer import Trainer
 
-MergedJobConfig = ConfigManager._merge_configs(JobConfig, VLMJobConfig)
+MergedConfig = ConfigManager._merge_configs(Trainer.Config, VLMJobConfig)
 
 # Start from defaults, then override
-default_config = MergedJobConfig()
+default_config = MergedConfig()
 
-# [job]
+# [training]
 default_config.job.description = "Llama 3 Siglip2 VLM debug training"
 
 # [metrics]

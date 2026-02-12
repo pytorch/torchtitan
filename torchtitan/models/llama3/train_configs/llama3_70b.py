@@ -6,50 +6,49 @@
 
 # NOTE: this config is a preset for 64 A100 GPUs.
 
+from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
-    ActivationCheckpoint,
-    Checkpoint,
-    Job,
+    ActivationCheckpointConfig,
     JobConfig,
-    LRScheduler,
-    Metrics,
-    Model,
-    Optimizer,
-    Parallelism,
-    Profiling,
-    Training,
-    Validation,
+    ModelConfig,
+    ParallelismConfig,
+    TrainingConfig,
+    ValidationConfig,
 )
+from torchtitan.tools.profiling import ProfilingConfig
+from torchtitan.trainer import Trainer
 
-default_config = JobConfig(
-    job=Job(
+default_config = Trainer.Config(
+    job=JobConfig(
         description="Llama 3 70B training",
     ),
-    profiling=Profiling(
+    profiling=ProfilingConfig(
         enable_profiling=True,
         profile_freq=100,
     ),
-    metrics=Metrics(
+    metrics=MetricsProcessor.Config(
         enable_tensorboard=True,
     ),
-    model=Model(
+    model=ModelConfig(
         name="llama3",
         flavor="70B",
         hf_assets_path="./assets/hf/Llama-3.1-70B",
     ),
-    optimizer=Optimizer(lr=1.5e-4),
-    training=Training(
+    optimizer=OptimizersContainer.Config(lr=1.5e-4),
+    training=TrainingConfig(
         local_batch_size=8,
         seq_len=8192,
         steps=1000,
         dataset="c4",
     ),
-    parallelism=Parallelism(
+    parallelism=ParallelismConfig(
         tensor_parallel_degree=8,
     ),
-    checkpoint=Checkpoint(interval=500),
-    activation_checkpoint=ActivationCheckpoint(mode="full"),
-    validation=Validation(
+    checkpoint=CheckpointManager.Config(interval=500),
+    activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+    validation=ValidationConfig(
         dataset="c4_validation",
         freq=500,
         steps=1200,

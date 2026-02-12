@@ -20,7 +20,7 @@ For example, given the following in your Python config file:
 
 ```python
 default_config = JobConfig(
-    profiling=Profiling(enable_memory_snapshot=True),
+    profiling=ProfilingConfig(enable_memory_snapshot=True),
 )
 ```
 You can override it at runtime via CLI with:

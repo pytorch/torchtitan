@@ -16,7 +16,7 @@ from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import ValidationContext, Validator
-from torchtitan.config import Parallelism, Validation
+from torchtitan.config import ParallelismConfig, ValidationConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.models.flux.flux_datasets import build_flux_validation_dataloader
 from torchtitan.models.flux.inference.sampling import generate_image, save_image
@@ -55,8 +55,8 @@ class FluxValidator(Validator):
     def __init__(
         self,
         *,
-        validation: Validation,
-        parallelism: Parallelism,
+        validation: ValidationConfig,
+        parallelism: ParallelismConfig,
         job_config,
         dp_world_size: int,
         dp_rank: int,

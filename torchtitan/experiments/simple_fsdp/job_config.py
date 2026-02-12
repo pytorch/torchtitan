@@ -9,7 +9,7 @@ from typing import Literal
 
 
 @dataclass
-class Compile:
+class CompileConfig:
     graph_passes: Literal["auto_bucketing", "transformer_block_bucketing"] | None = None
     """
     Bucketing and overlapping passes in simplefsdp. Additional passes include:
@@ -19,4 +19,4 @@ class Compile:
 
 @dataclass
 class JobConfig:
-    compile: Compile = field(default_factory=Compile)
+    compile: CompileConfig = field(default_factory=CompileConfig)

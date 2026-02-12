@@ -15,7 +15,7 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import Parallelism, Validation
+from torchtitan.config import ParallelismConfig, ValidationConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
@@ -30,8 +30,8 @@ class BaseValidator:
     def __init__(
         self,
         *,
-        validation: Validation,
-        parallelism: Parallelism,
+        validation: ValidationConfig,
+        parallelism: ParallelismConfig,
         **kwargs,
     ):
         self.validation = validation
@@ -49,8 +49,8 @@ class Validator(BaseValidator):
     Simple validator focused on correctness and integration.
 
     Args:
-        validation: Validation configuration
-        parallelism: Parallelism configuration
+        validation: ValidationConfig configuration
+        parallelism: ParallelismConfig configuration
         dp_world_size: Data parallel world size
         dp_rank: Data parallel rank
         tokenizer: Tokenizer
@@ -69,8 +69,8 @@ class Validator(BaseValidator):
     def __init__(
         self,
         *,
-        validation: Validation,
-        parallelism: Parallelism,
+        validation: ValidationConfig,
+        parallelism: ParallelismConfig,
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
