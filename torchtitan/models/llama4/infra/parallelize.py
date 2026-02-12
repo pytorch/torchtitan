@@ -41,7 +41,7 @@ from torchtitan.distributed.expert_parallel import (
 )
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.models.llama3.infra.parallelize import (
-    apply_ddp,
+    apply_replicate,
     disable_fsdp_gradient_division,
 )
 from torchtitan.models.moe import moe as moe_module
@@ -214,13 +214,11 @@ def parallelize_llama(
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if parallel_dims.world_size != dp_mesh.size():
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_mesh,
-            enable_compile=model_compile_enabled,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
         )
 
     return model
