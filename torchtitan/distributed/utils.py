@@ -24,6 +24,7 @@ from torch.distributed.tensor._ops.utils import is_tensor_partial
 
 from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.sharding_utils import ShardingDebugContext
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
 
@@ -231,12 +232,38 @@ class TrainContext(Protocol):
         pass
 
 
-def get_train_context(enable_loss_parallel: bool) -> TrainContext:
+def get_train_context(
+    enable_loss_parallel: bool,
+    model_parts: list[torch.nn.Module] | None = None,
+    debug_config: DebugConfig | None = None,
+    dump_folder: str = "./outputs",
+) -> TrainContext:
+    # Track whether sharding info has been recorded for this training run.
+    # Using a list instead of a bool allows the nested closure to mutate
+    # the value.
+    step_recorded = [False]
+
     @contextlib.contextmanager
     def context():
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
+
+            # Enter sharding info context only on first step
+            if (
+                debug_config is not None
+                and debug_config.log_sharding_info
+                and model_parts is not None
+                and not step_recorded[0]
+            ):
+                stack.enter_context(
+                    ShardingDebugContext(
+                        model_parts=model_parts,
+                        dump_folder=dump_folder,
+                        collapse_layers=debug_config.collapse_identical_layers,
+                    )
+                )
+                step_recorded[0] = True
 
             yield
 
