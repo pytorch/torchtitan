@@ -10,7 +10,8 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import ConfigManager
+from torchtitan.config import DataLoaderConfig
+from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 
 
 class DummyDataset(IterableDataset):
@@ -120,29 +121,20 @@ class TestParallelAwareDataloader(unittest.TestCase):
 
     def test_build_dataloader_with_job_config(self):
         """Verify batch_size from job_config.training.local_batch_size is correctly used."""
-        from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-
         tokenizer = DummyTokenizer()
 
-        config_manager = ConfigManager()
-        config = config_manager.parse_args(
-            [
-                "--training.dataset",
-                "c4_test",
-                "--training.local_batch_size",
-                "8",
-                "--training.seq_len",
-                "512",
-                "--training.dataloader.num_workers",
-                "2",
-            ]
+        dl_config = HuggingFaceTextDataLoader.Config(
+            dataset="c4_test",
+            local_batch_size=8,
+            seq_len=512,
+            dataloader=DataLoaderConfig(num_workers=2),
         )
 
-        dataloader = build_text_dataloader(
-            tokenizer=tokenizer,
+        dataloader = HuggingFaceTextDataLoader(
+            dl_config,
             dp_world_size=1,
             dp_rank=0,
-            training=config.training,
+            tokenizer=tokenizer,
         )
 
         self.assertEqual(dataloader.batch_size, 8)

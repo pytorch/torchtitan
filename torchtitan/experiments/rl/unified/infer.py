@@ -70,7 +70,7 @@ def infer():
 
     # Initialize vLLM with custom TorchTitan model
     # The LLM initialization will internally:
-    # 1. Load TrainSpec for Qwen3 (from models/__init__.py register())
+    # 1. Load ModelSpec for Qwen3 (from models/__init__.py register())
     # 2. Create TorchTitanVLLMModel instance
     # 3. Create JobConfig and ParallelDims from vLLM config
     # 4. Apply parallelization using parallelize_qwen3

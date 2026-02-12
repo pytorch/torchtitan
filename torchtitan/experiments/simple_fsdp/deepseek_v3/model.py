@@ -16,7 +16,7 @@ class SimpleFSDPDeepSeekV3Model(DeepSeekV3Model):
     class Config(DeepSeekV3Model.Config):
         pass
 
-    def __init__(self, config: "SimpleFSDPDeepSeekV3Model.Config"):
+    def __init__(self, config: Config):
         super().__init__(config)
 
     def init_weights(self, *args, **kwargs):

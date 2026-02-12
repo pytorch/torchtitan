@@ -34,7 +34,7 @@ from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
-from torchtitan.models.qwen3.model.model import Qwen3Model
+from torchtitan.models.qwen3.model import Qwen3Model
 from transformers import AutoConfig, AutoTokenizer
 
 from vllm import LLM, SamplingParams

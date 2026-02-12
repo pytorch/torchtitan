@@ -4,19 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from abc import abstractmethod
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import Module
-from torchtitan.config.configurable import Configurable
-from torchtitan.models.attention import VarlenMetadata
+from torchtitan.protocols.module import Module
 
-
-AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+if TYPE_CHECKING:
+    from torchtitan.models.common.attention import AttentionMasksType
 
 
 class BaseModel(Module):
@@ -30,13 +30,13 @@ class BaseModel(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(Module.Config):
         """Base config for all models.
 
         Subclasses define model-specific hyperparameters.
         """
 
-        # TODO(lty): This function violates encapsulation;
+        # TODO: This function violates encapsulation;
         # maybe replace it with config passes from outside.
         @abstractmethod
         def update_from_config(

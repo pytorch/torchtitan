@@ -6,17 +6,17 @@
 
 from dataclasses import dataclass
 
-from torchtitan.models.llama3 import Transformer
+from torchtitan.models.llama3 import Llama3Model
 
 from ..simple_fsdp import disable_active_parametrization
 
 
-class SimpleFSDPTransformer(Transformer):
+class SimpleFSDPTransformer(Llama3Model):
     @dataclass(kw_only=True, slots=True)
-    class Config(Transformer.Config):
+    class Config(Llama3Model.Config):
         pass
 
-    def __init__(self, config: "SimpleFSDPTransformer.Config"):
+    def __init__(self, config: Config):
         super().__init__(config)
 
     def init_weights(self, *args, **kwargs):

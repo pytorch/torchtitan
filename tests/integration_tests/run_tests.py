@@ -29,7 +29,7 @@ def _run_cmd(cmd):
     return subprocess.run([cmd], text=True, shell=True)
 
 
-def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
+def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
@@ -37,13 +37,13 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
+        cmd = f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
 
         if test_name == "fsdp2_memory_estimation":
             cmd = (
-                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+                f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
                 "./scripts/estimate/run_memory_estimation.sh"
             )
 
@@ -57,7 +57,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
         # save checkpoint (idx == 0) and load it for generation (idx == 1)
         if test_name == "test_generate" and idx == 1:
             cmd = (
-                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+                f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
                 f"CHECKPOINT_DIR={output_dir}/{test_name}/checkpoint/step-10 "
                 "PROMPT='What is the meaning of life?' "
                 f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
@@ -73,12 +73,6 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
 
 def run_tests(args, test_list: list[OverrideDefinitions]):
     """Run all integration tests to test the core features of TorchTitan"""
-
-    # Check if config file exists
-    assert args.config_path.endswith(".py"), "Base config path must end with .py"
-    assert os.path.exists(
-        args.config_path
-    ), f"Base config path {args.config_path} does not exist"
 
     ran_any_test = False
     for test_flavor in test_list:
@@ -103,7 +97,7 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
                 f" because --ngpu arg is {args.ngpu}"
             )
         else:
-            run_single_test(test_flavor, args.config_path, args.output_dir)
+            run_single_test(test_flavor, args.output_dir)
             ran_any_test = True
 
     if not ran_any_test:
@@ -136,11 +130,6 @@ def main():
         default="features",
         choices=["features", "models", "h100"],
         help="Which test suite to run. If not specified, torchtitan composability tests will be run",
-    )
-    parser.add_argument(
-        "--config_path",
-        default="./tests/integration_tests/base_config.py",
-        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
     )
     parser.add_argument(
         "--test_name",

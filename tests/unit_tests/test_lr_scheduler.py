@@ -41,6 +41,10 @@ class TestLRScheduler(unittest.TestCase):
     ):
         # Create a job config with the specified parameters
         args = [
+            "--model",
+            "llama3",
+            "--config",
+            "llama3_debugmodel",
             "--training.steps",
             str(training_steps),
         ]

@@ -22,7 +22,7 @@ def build_vlm_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--model.name vlm",
-                    "--training.dataset cc12m-test",
+                    "--dataloader.dataset cc12m-test",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--data.max_patches_per_image 1024",
                     "--data.max_images_per_batch 64",

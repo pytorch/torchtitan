@@ -13,7 +13,8 @@ tensor parallelism to TorchTitan models in vLLM using TorchTitan's ParallelDims.
 
 
 import torch.distributed as dist
-from torchtitan.config import CommConfig, ModelConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CommConfig, ParallelismConfig, TrainingConfig
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
 JobConfig = Trainer.Config
@@ -117,11 +118,8 @@ def create_job_config_from_vllm_config(
     # Create JobConfig with defaults
     job_config = JobConfig()
 
-    model_config = vllm_config.model_config
-    job_config.model = ModelConfig(
-        name=model_name,
-        hf_assets_path=hf_assets_path,
-    )
+    job_config.model_spec = ModelSpec(name=model_name)
+    job_config.job.hf_assets_path = hf_assets_path
 
     parallel_config = vllm_config.parallel_config
     job_config.parallelism = ParallelismConfig(

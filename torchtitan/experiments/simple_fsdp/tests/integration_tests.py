@@ -90,7 +90,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp",
+                    "--model.name simple_fsdp.llama3",
                     "--compile.enable",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.enable_async_tensor_parallel",

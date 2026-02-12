@@ -11,7 +11,8 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from torch.nn import init
-from torchtitan.models.utils import get_dense_model_nparams_and_flops, trunc_normal_
+from torchtitan.models.common import trunc_normal_
+from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModel
 from torchtitan.tools.logging import logger
 from transformers import AutoConfig

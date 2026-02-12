@@ -14,7 +14,7 @@ import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any, cast, Literal, TYPE_CHECKING
+from typing import Any, cast, Literal
 
 import torch
 import torch.distributed as dist
@@ -42,11 +42,10 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.config.configurable import Configurable
+
+from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
-
-if TYPE_CHECKING:
-    from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 
 
 MODEL = "model"

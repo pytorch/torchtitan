@@ -23,7 +23,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
-from torchtitan.models.llama3.infra.parallelize import (
+from torchtitan.models.llama3.parallelize import (
     _op_sac_save_list,
     apply_compile,
     apply_ddp,
@@ -61,8 +61,8 @@ def parallelize_vlm(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-    attn_type = getattr(model.config, "attn_type", "sdpa")
-    if parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
+    attn_backend = getattr(model.config, "attn_backend", "sdpa")
+    if parallelism.context_parallel_degree > 1 and attn_backend != "sdpa":
         raise NotImplementedError("CP support is only supported for SDPA.")
 
     if parallel_dims.tp_enabled:

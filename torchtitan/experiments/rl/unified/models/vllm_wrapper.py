@@ -27,10 +27,10 @@ from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
 )
 
 from torchtitan.experiments.rl.unified.models.utils import replace_with_vllm_attention
-from torchtitan.models.qwen3.model.model import precompute_rope_cache
+from torchtitan.models.qwen3.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
-from torchtitan.protocols.train_spec import ParallelizeFunction
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger

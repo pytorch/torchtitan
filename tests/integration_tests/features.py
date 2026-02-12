@@ -323,9 +323,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--model llama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode='full'",
-                    "--model.flavor=debugmodel_flex_attn",
                 ]
             ],
             "FSDP+FLEX_ATTN",
@@ -335,10 +335,10 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--model llama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
                     "--activation_checkpoint.selective_ac_option=op",
-                    "--model.flavor=debugmodel_flex_attn",
                 ]
             ],
             "FSDP + FLEX + per op SAC",
@@ -348,10 +348,10 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--model llama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
                     "--activation_checkpoint.selective_ac_option=op",
-                    "--model.flavor=debugmodel_varlen_attn",
                 ]
             ],
             "FSDP+VARLEN_ATTN + per op SAC",
@@ -505,7 +505,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--job.config_file ./tests/integration_tests/base_config_float8_emulate.py",
+                    "--model llama3 --config llama3_debugmodel_float8_emulate",
                 ],
             ],
             "Float8 emulation test",
@@ -529,8 +529,8 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--validation.enable",
-                    "--validation.dataset c4_test",
+                    "--validator.enable",
+                    "--validator.dataloader.dataset c4_test",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
                     "--parallelism.pipeline_parallel_degree=2",

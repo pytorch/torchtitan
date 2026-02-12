@@ -20,10 +20,7 @@ from torchtitan.distributed import ParallelDims
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.deepseek_v3.infra.parallelize import (
-    apply_moe_ep_tp,
-    apply_non_moe_tp,
-)
+from torchtitan.models.deepseek_v3.parallelize import apply_moe_ep_tp, apply_non_moe_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
@@ -78,7 +75,10 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
-    if parallelism.context_parallel_degree > 1 and model.config.attn_type != "sdpa":
+    if (
+        parallelism.context_parallel_degree > 1
+        and model.config.attn_config.attn_backend != "sdpa"
+    ):
         raise NotImplementedError("CP support is only supported for SDPA.")
 
     if parallel_dims.tp_enabled:

@@ -35,7 +35,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--job.config_file ./tests/integration_tests/base_config_float8.py",
+                    "--model llama3 --config llama3_debugmodel_float8",
                 ],
             ],
             "Float8 test",
@@ -45,7 +45,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--job.config_file ./tests/integration_tests/base_config_float8.py",
+                    "--model llama3 --config llama3_debugmodel_float8",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -61,7 +61,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--job.config_file ./tests/integration_tests/base_config_float8.py",
+                    "--model llama3 --config llama3_debugmodel_float8",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",

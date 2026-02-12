@@ -24,7 +24,7 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.models.llama3.infra.parallelize import disable_fsdp_gradient_division
+from torchtitan.models.llama3.parallelize import disable_fsdp_gradient_division
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 

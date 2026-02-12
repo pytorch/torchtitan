@@ -10,20 +10,22 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from typing import Any, cast, Iterable, Iterator
+from typing import Annotated, Any, cast, Iterable, Iterator
 
 import torch
 import torch.distributed.checkpoint.stateful
+import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
-import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.dataloader import DataloaderExhaustedError
+from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
-from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
+from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     ActivationCheckpointConfig,
@@ -32,16 +34,15 @@ from torchtitan.config.configs import (
     DebugConfig,
     FaultToleranceConfig,
     JobConfig,
-    ModelConfig,
     ParallelismConfig,
     TrainingConfig,
-    ValidationConfig,
 )
 from torchtitan.config.configurable import Configurable
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiling import (
@@ -58,12 +59,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         Default container for training configuration.
         """
 
+        model_spec: Annotated[ModelSpec, tyro.conf.Suppress] = field(
+            default_factory=ModelSpec
+        )
         job: JobConfig = field(default_factory=JobConfig)
         profiling: ProfilingConfig = field(default_factory=ProfilingConfig)
         metrics: MetricsProcessor.Config = field(
             default_factory=MetricsProcessor.Config
         )
-        model: ModelConfig = field(default_factory=ModelConfig)
+        tokenizer: BaseTokenizer.Config | None = field(
+            default_factory=HuggingFaceTokenizer.Config
+        )
+        dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
         model_converters: ModelConvertersContainer.Config = field(
             default_factory=ModelConvertersContainer.Config
         )
@@ -86,11 +93,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         fault_tolerance: FaultToleranceConfig = field(
             default_factory=FaultToleranceConfig
         )
-        validation: ValidationConfig = field(default_factory=ValidationConfig)
+        validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
 
         def to_dict(self) -> dict[str, Any]:
-            return asdict(self)
+            d = {}
+            for f in dataclasses.fields(self):
+                if f.name == "model_spec":
+                    # ModelSpec contains callables that can't be serialized
+                    d["model_spec"] = {
+                        "name": self.model_spec.name,
+                        "flavor": self.model_spec.flavor,
+                    }
+                else:
+                    d[f.name] = (
+                        asdict(getattr(self, f.name))
+                        if dataclasses.is_dataclass(getattr(self, f.name))
+                        else getattr(self, f.name)
+                    )
+            return d
 
         def maybe_log(self) -> None:
             if self.job.print_config:
@@ -116,18 +137,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # core configs
     config: Config
     parallel_dims: ParallelDims
-    train_spec: train_spec_module.TrainSpec
 
-    # swappable training components in TrainSpec
-    tokenizer: train_spec_module.BaseTokenizer | None
-    dataloader: train_spec_module.BaseDataLoader
+    # swappable training components
+    tokenizer: BaseTokenizer | None
+    dataloader: BaseDataLoader
     # TODO: we should make this list[BaseModel] but this will affect many components.
     # will do this in a separate PR
     model_parts: list[torch.nn.Module]
-    loss_fn: train_spec_module.LossFunction
-    optimizers: train_spec_module.OptimizersContainer
+    loss_fn: LossFunction
+    optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
-    validator: train_spec_module.BaseValidator
+    validator: BaseValidator
     metrics_processor: "MetricsProcessor"
     model_config: BaseModel.Config
 
@@ -153,6 +173,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.config = config
+        model_spec = config.model_spec
 
         logger.info(f"Starting job: {config.job.description}")
 
@@ -190,25 +211,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
-        self.train_spec = train_spec_module.get_train_spec(config.model.name)
 
-        # build tokenizer and dataloader
+        # build tokenizer
         self.tokenizer = (
-            self.train_spec.build_tokenizer_fn(config.model.hf_assets_path)
-            if self.train_spec.build_tokenizer_fn is not None
+            config.tokenizer.build(tokenizer_path=config.job.hf_assets_path)
+            if config.tokenizer is not None
             else None
         )
 
-        self.dataloader = self.train_spec.build_dataloader_fn(
+        # build dataloader
+        self.dataloader = config.dataloader.build(
             dp_world_size=batch_degree,
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
-            training=config.training,
-            job_config=config,
+            seq_len=config.training.seq_len,
+            local_batch_size=config.training.local_batch_size,
         )
 
         # build model (using meta init)
-        model_config = self.train_spec.model_configs[config.model.flavor]
+        model_config = model_spec.model
         # set the model args from training job configs
         model_config.update_from_config(
             job_config=config,
@@ -216,7 +237,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.model_config = model_config
 
         logger.info(
-            f"Building {config.model.name} {config.model.flavor}"
+            f"Building {model_spec.name} {model_spec.flavor} "
             f"with {json.dumps(dataclasses.asdict(model_config), indent=2, ensure_ascii=False)}"
         )
         with (
@@ -253,7 +274,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
 
         logger.info(
-            f"{color.blue}Model {config.model.name} {config.model.flavor} "
+            f"{color.blue}Model {model_spec.name} {model_spec.flavor} "
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
         )
 
@@ -269,7 +290,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = self.train_spec.build_loss_fn(
+        self.loss_fn = model_spec.build_loss_fn(
             config.compile, parallel_dims=parallel_dims, ft_manager=self.ft_manager
         )
 
@@ -296,9 +317,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
-            if not self.train_spec.pipelining_fn:
+            if not model_spec.pipelining_fn:
                 raise RuntimeError(
-                    f"Pipeline Parallel is enabled but {config.model.name} "
+                    f"Pipeline Parallel is enabled but {model_spec.name} "
                     f"does not support pipelining"
                 )
 
@@ -308,7 +329,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.model_parts,
                 self.pp_has_first_stage,
                 self.pp_has_last_stage,
-            ) = self.train_spec.pipelining_fn(
+            ) = model_spec.pipelining_fn(
                 model,
                 parallel_dims,
                 training=config.training,
@@ -319,7 +340,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 dump_folder=config.job.dump_folder,
                 device=self.device,
                 model_config=model_config,
-                parallelize_fn=self.train_spec.parallelize_fn,
+                parallelize_fn=model_spec.parallelize_fn,
                 loss_fn=self.loss_fn,
             )
             # when PP is enabled, `model` obj is no longer used after this point,
@@ -340,7 +361,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             )
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-            model = self.train_spec.parallelize_fn(
+            model = model_spec.parallelize_fn(
                 model,
                 parallel_dims,
                 training=config.training,
@@ -377,8 +398,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             parallel_dims=parallel_dims,
             ft_manager=self.ft_manager,
         )
-        if self.train_spec.post_optimizer_build_fn is not None:
-            self.train_spec.post_optimizer_build_fn(
+        if model_spec.post_optimizer_build_fn is not None:
+            model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, parallel_dims
             )
         self.lr_schedulers = config.lr_scheduler.build(
@@ -409,10 +430,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             states={"train_state": self},
             checkpoint_config=config.checkpoint,
             sd_adapter=(
-                self.train_spec.state_dict_adapter(
-                    model_config, config.model.hf_assets_path
-                )
-                if self.train_spec.state_dict_adapter
+                model_spec.state_dict_adapter(model_config, config.job.hf_assets_path)
+                if model_spec.state_dict_adapter
                 else None
             ),
             base_folder=config.job.dump_folder,
@@ -430,9 +449,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # Build validator if validation is configured
-        if config.validation.enable:
-            assert self.train_spec.validator_cls is not None
-
+        if config.validator.enable:
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
                 (
                     self.pp_schedule,
@@ -443,8 +460,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 else (None, None, None)
             )
 
-            self.validator = self.train_spec.validator_cls(
-                validation=config.validation,
+            self.validator = config.validator.build(
                 parallelism=config.parallelism,
                 job_config=config,
                 dp_world_size=batch_degree,
@@ -455,6 +471,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
                 metrics_processor=self.metrics_processor,
+                seq_len=config.training.seq_len,
+                local_batch_size=config.training.local_batch_size,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -563,8 +581,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # extra_kwargs are.
         extra_kwargs: dict[str, Any] = {}
 
-        attn_type = getattr(self.model_config, "attn_type", "sdpa")
-        if attn_type in ["flex", "varlen"]:
+        # TODO: improve the logic on obtaining attention masks
+        attn_config = getattr(self.model_config, "attn_config", None)
+        attn_backend = getattr(attn_config, "attn_backend", "sdpa")
+        if attn_backend in ["flex", "varlen"]:
             assert (
                 self.tokenizer is not None
             ), "tokenizer is required for flex/varlen attention"
@@ -794,8 +814,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 ),
                 optimizer=self.optimizers,
                 fragment_fn=(
-                    self.train_spec.fragment_fn
-                    if hasattr(self.train_spec, "fragment_fn")
+                    config.model_spec.fragment_fn
+                    if hasattr(config.model_spec, "fragment_fn")
                     else None
                 ),
             ),
@@ -815,7 +835,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
                 # Run validation if validator is available
-                if self.config.validation.enable and self.validator.should_validate(
+                if self.config.validator.enable and self.validator.should_validate(
                     self.step
                 ):
                     self.validator.validate(self.model_parts, self.step)

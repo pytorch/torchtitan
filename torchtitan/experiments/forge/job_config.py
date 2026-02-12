@@ -15,16 +15,19 @@ from torchtitan.config import (
     CommConfig,
     CompileConfig,
     DebugConfig,
-    ModelConfig,
+    JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.protocols.model_converter import ModelConvertersContainer
+from torchtitan.protocols.model_spec import ModelSpec
 
 
 # Parity w/ TorchTitan commit: 8ec37d2bca7ac9d3f7517ba70ac10e75e22a7bcb
 @dataclass
 class ForgeJobConfig:
-    model: ModelConfig = field(default_factory=ModelConfig)
+    job: JobConfig = field(default_factory=JobConfig)
+    model_spec: ModelSpec = field(default_factory=ModelSpec)
     optimizer: OptimizersContainer.Config = field(
         default_factory=OptimizersContainer.Config
     )
@@ -40,6 +43,9 @@ class ForgeJobConfig:
         default_factory=ActivationCheckpointConfig
     )
     compile: CompileConfig = field(default_factory=CompileConfig)
+    model_converters: ModelConvertersContainer.Config = field(
+        default_factory=ModelConvertersContainer.Config
+    )
     comm: CommConfig = field(default_factory=CommConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
 

@@ -12,10 +12,9 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config.configurable import Module
 from torchtitan.models.common import FeedForward
-from torchtitan.models.utils import trunc_normal_
-from torchtitan.tools.logging import logger
+from torchtitan.models.common.utils import trunc_normal_
+from torchtitan.protocols.module import Module
 
 from .utils import indices_padding_wrapper
 
@@ -534,18 +533,6 @@ class MoE(Module):
     def init_weights(
         self, init_std: float, buffer_device: torch.device, **kwargs
     ) -> None:
-        self.router.init_weights(init_std)
-        self.experts.init_weights(init_std)
-        self.reorderer = self.reorderer.to(buffer_device)
-        if self.shared_experts is not None:
-            self.shared_experts.init_weights(init_std)
-
-        with torch.device(buffer_device):
-            self.tokens_per_expert = torch.zeros(
-                self.experts.num_experts, dtype=torch.float32
-            )
-            if self.load_balance_coeff is not None:
-                self.expert
         self.experts.init_weights(init_std)
         self.router.init_weights(init_std)
         if self.shared_experts is not None:
@@ -559,21 +546,3 @@ class MoE(Module):
                 self.expert_bias = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
                 )
-
-
-def build_moe(
-    config: "MoE.Config", *, dim: int, moe_impl: str = "standard"
-) -> nn.Module:
-    """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP)."""
-    if moe_impl == "deepep":
-        from .moe_deepep import DeepEPMoE
-
-        logger.info(
-            f"DeepEP MoE: num_experts={config.num_experts}, top_k={config.top_k}, dim={dim}, hidden_dim={config.hidden_dim}"
-        )
-        return DeepEPMoE(config=config, dim=dim)
-
-    logger.info(
-        f"Standard MoE: num_experts={config.num_experts}, top_k={config.top_k}, dim={dim}, hidden_dim={config.hidden_dim}"
-    )
-    return config.build(dim=dim)

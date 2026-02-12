@@ -12,8 +12,8 @@ from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.llama3 import Transformer as Llama3
-from torchtitan.protocols.model import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.llama3 import Llama3Model as Llama3
 
 from .args import Siglip2Config, SpecialTokens
 from .siglip2 import VisionTransformer

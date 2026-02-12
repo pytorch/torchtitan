@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.config import CompileConfig
-from torchtitan.models.llama4.infra.parallelize import apply_compile
+from torchtitan.models.llama4.parallelize import apply_compile
 
 
 class TransformerBlock(nn.Module):

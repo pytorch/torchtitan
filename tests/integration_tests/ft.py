@@ -25,7 +25,11 @@ def build_ft_test_list() -> list[OverrideDefinitions]:
     integration_tests_flavors = [
         OverrideDefinitions(
             [
-                ["--training.steps 10", "--checkpoint.enable"],
+                [
+                    "--model llama3_ft --config llama3_ft_debugmodel",
+                    "--training.steps 10",
+                    "--checkpoint.enable",
+                ],
             ],
             "Default TorchFT integration test",
             "default_torchft",
@@ -40,7 +44,7 @@ def _run_cmd(cmd):
     return subprocess.run([cmd], text=True, shell=True)
 
 
-def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
+def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
@@ -58,9 +62,8 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
             cmd = (
                 f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" '
                 + f"CUDA_VISIBLE_DEVICES={ranks} "
-                + "TRAIN_FILE=torchtitan.experiments.ft.train "
-                + f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} ./run_train.sh "
-                + "--model.name=llama3_ft "
+                + "TRAIN_FILE=torchtitan.experiments.ft.trainer "
+                + f"NGPU={test_flavor.ngpu} ./run_train.sh "
                 + "--fault_tolerance.enable "
                 + f"--fault_tolerance.replica_id={replica_id} --fault_tolerance.group_size={test_flavor.ngpu}"
             )
@@ -100,14 +103,6 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
 
-        # Check if config file exists
-        assert args.config_path.endswith(
-            ".py"
-        ), "Base config path must end with .py"
-        assert os.path.exists(
-            args.config_path
-        ), f"Base config path {args.config_path} does not exist"
-
         # Check if we have enough GPUs
         if args.ngpu < test_flavor.ngpu:
             logger.info(
@@ -115,17 +110,12 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
                 f" because --ngpu arg is {args.ngpu}"
             )
         else:
-            run_single_test(test_flavor, args.config_path, args.output_dir)
+            run_single_test(test_flavor, args.output_dir)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
-    parser.add_argument(
-        "--config_path",
-        default="./tests/integration_tests/base_config.py",
-        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
-    )
     parser.add_argument(
         "--test_name",
         default="all",

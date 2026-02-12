@@ -31,7 +31,7 @@ from torchtitan.experiments.simple_fsdp.llama3.parallelize import (
 
 
 def annotate_llama() -> None:
-    from torchtitan.models.attention import FlexAttentionWrapper
+    from torchtitan.models.common.attention import FlexAttentionWrapper
 
     # annotate flex_attention with compile_with_inductor
     FlexAttentionWrapper.forward = annotate_fn(

@@ -20,11 +20,13 @@ class TestFluxDataLoader(unittest.TestCase):
         from torchtitan.models.flux.flux_datasets import (
             _cc12m_wds_data_processor,
             DATASETS,
+            FluxDataLoader,
         )
 
         # Store reference for use in tearDown
         self._DATASETS = DATASETS
         self._cc12m_wds_data_processor = _cc12m_wds_data_processor
+        self._FluxDataLoader = FluxDataLoader
 
         self._DATASETS["cc12m-test-iterable"] = DatasetConfig(
             path="tests/assets/cc12m_test",
@@ -38,7 +40,7 @@ class TestFluxDataLoader(unittest.TestCase):
         del self._DATASETS["cc12m-test-iterable"]
 
     def test_load_dataset(self):
-        from torchtitan.models.flux.flux_datasets import build_flux_dataloader
+        from torchtitan.models.flux.tokenizer import FluxTokenizer
 
         # The test checks for the correct tensor shapes during the first num_steps
         # The next num_steps ensure the loaded from checkpoint dataloader generates tokens and labels correctly
@@ -53,14 +55,17 @@ class TestFluxDataLoader(unittest.TestCase):
                 # in the dataset, then the test will fail, due to huggingface's
                 # non-resumption when checkpointing after the first epoch
 
+                # Load flux config via --model/--config
                 config_manager = ConfigManager()
                 config = config_manager.parse_args(
                     [
-                        "--job.config_file",
-                        "./torchtitan/models/flux/train_configs/debug_model.py",
+                        "--model",
+                        "flux",
+                        "--config",
+                        "flux_debugmodel",
                         "--training.img_size",
                         str(256),
-                        "--training.dataset",
+                        "--dataloader.dataset",
                         dataset_name,
                         "--training.local_batch_size",
                         str(batch_size),
@@ -74,12 +79,20 @@ class TestFluxDataLoader(unittest.TestCase):
                     ]
                 )
 
-                dl = build_flux_dataloader(
+                flux_tokenizer = FluxTokenizer(config)
+
+                dl_config = self._FluxDataLoader.Config(
+                    dataset=dataset_name,
+                )
+
+                dl = self._FluxDataLoader(
+                    dl_config,
                     dp_world_size=world_size,
                     dp_rank=rank,
+                    t5_tokenizer=flux_tokenizer.t5_tokenizer,
+                    clip_tokenizer=flux_tokenizer.clip_tokenizer,
+                    local_batch_size=batch_size,
                     job_config=config,
-                    tokenizer=None,
-                    infinite=True,
                 )
 
                 it = iter(dl)
@@ -103,12 +116,14 @@ class TestFluxDataLoader(unittest.TestCase):
                 state = dl.state_dict()
 
                 # Create new dataloader, restore checkpoint, and check if next data yielded is the same as above
-                dl_resumed = build_flux_dataloader(
+                dl_resumed = self._FluxDataLoader(
+                    dl_config,
                     dp_world_size=world_size,
                     dp_rank=rank,
+                    t5_tokenizer=flux_tokenizer.t5_tokenizer,
+                    clip_tokenizer=flux_tokenizer.clip_tokenizer,
+                    local_batch_size=batch_size,
                     job_config=config,
-                    tokenizer=None,
-                    infinite=True,
                 )
                 dl_resumed.load_state_dict(state)
                 it_resumed = iter(dl_resumed)

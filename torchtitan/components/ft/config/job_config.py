@@ -71,7 +71,7 @@ class FaultTolerance(BaseFaultTolerance):
     """
     Number of fragments to split the model into. This is only used when "semi_sync_method" is "diloco".
     This is used to automatically split the model into fragments provided that the model
-    implements FaultTolerantTrainSpec
+    implements FaultTolerantModelSpec
     """
 
 

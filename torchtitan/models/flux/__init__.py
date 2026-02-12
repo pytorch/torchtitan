@@ -5,17 +5,24 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.loss import build_mse_loss
+from torchtitan.models.flux.flux_datasets import FluxDataLoader
+from torchtitan.protocols.model_spec import ModelSpec
 
-from torchtitan.models.flux.flux_datasets import build_flux_dataloader
-from torchtitan.protocols.train_spec import TrainSpec
 from .infra.parallelize import parallelize_flux
 from .model.autoencoder import AutoEncoderParams
+from .model.layers import (
+    DoubleStreamBlock,
+    EmbedND,
+    LastLayer,
+    MLPEmbedder,
+    SingleStreamBlock,
+)
 from .model.model import FluxModel
 from .model.state_dict_adapter import FluxStateDictAdapter
-from .validate import FluxValidator
 
 __all__ = [
     "FluxModel",
+    "FluxDataLoader",
     "flux_configs",
     "parallelize_flux",
 ]
@@ -46,6 +53,25 @@ flux_configs = {
             scale_factor=0.3611,
             shift_factor=0.1159,
         ),
+        pe_config=EmbedND.Config(dim=128, theta=10_000, axes_dim=(16, 56, 56)),
+        time_in_config=MLPEmbedder.Config(in_dim=256, hidden_dim=3072),
+        vector_in_config=MLPEmbedder.Config(in_dim=768, hidden_dim=3072),
+        double_block_config=DoubleStreamBlock.Config(
+            hidden_size=3072,
+            num_heads=24,
+            mlp_ratio=4.0,
+            qkv_bias=True,
+        ),
+        single_block_config=SingleStreamBlock.Config(
+            hidden_size=3072,
+            num_heads=24,
+            mlp_ratio=4.0,
+        ),
+        final_layer_config=LastLayer.Config(
+            hidden_size=3072,
+            patch_size=1,
+            out_channels=64,
+        ),
     ),
     "flux-schnell": FluxModel.Config(
         in_channels=64,
@@ -70,6 +96,25 @@ flux_configs = {
             z_channels=16,
             scale_factor=0.3611,
             shift_factor=0.1159,
+        ),
+        pe_config=EmbedND.Config(dim=128, theta=10_000, axes_dim=(16, 56, 56)),
+        time_in_config=MLPEmbedder.Config(in_dim=256, hidden_dim=3072),
+        vector_in_config=MLPEmbedder.Config(in_dim=768, hidden_dim=3072),
+        double_block_config=DoubleStreamBlock.Config(
+            hidden_size=3072,
+            num_heads=24,
+            mlp_ratio=4.0,
+            qkv_bias=True,
+        ),
+        single_block_config=SingleStreamBlock.Config(
+            hidden_size=3072,
+            num_heads=24,
+            mlp_ratio=4.0,
+        ),
+        final_layer_config=LastLayer.Config(
+            hidden_size=3072,
+            patch_size=1,
+            out_channels=64,
         ),
     ),
     "flux-debug": FluxModel.Config(
@@ -96,18 +141,36 @@ flux_configs = {
             scale_factor=0.3611,
             shift_factor=0.1159,
         ),
+        pe_config=EmbedND.Config(dim=128, theta=10_000, axes_dim=(16, 56, 56)),
+        time_in_config=MLPEmbedder.Config(in_dim=256, hidden_dim=1536),
+        vector_in_config=MLPEmbedder.Config(in_dim=768, hidden_dim=1536),
+        double_block_config=DoubleStreamBlock.Config(
+            hidden_size=1536,
+            num_heads=12,
+            mlp_ratio=4.0,
+            qkv_bias=True,
+        ),
+        single_block_config=SingleStreamBlock.Config(
+            hidden_size=1536,
+            num_heads=12,
+            mlp_ratio=4.0,
+        ),
+        final_layer_config=LastLayer.Config(
+            hidden_size=1536,
+            patch_size=1,
+            out_channels=64,
+        ),
     ),
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_configs=flux_configs,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="flux",
+        flavor=flavor,
+        model=flux_configs[flavor],
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
-        build_dataloader_fn=build_flux_dataloader,
-        build_tokenizer_fn=None,
         build_loss_fn=build_mse_loss,
-        validator_cls=FluxValidator,
         state_dict_adapter=FluxStateDictAdapter,
     )

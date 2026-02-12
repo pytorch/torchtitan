@@ -18,11 +18,12 @@ from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
     silu_and_mul_with_gradients,
 )
 
-# Import from main torchtitan
-from torchtitan.models.qwen3.model.model import Qwen3Model
+from torchtitan.models.common import trunc_normal_
+from torchtitan.models.common.attention import AttentionMasksType
 
-from torchtitan.models.utils import trunc_normal_
-from torchtitan.protocols.model import AttentionMasksType, BaseModel
+# Import from main torchtitan
+from torchtitan.models.qwen3.model import Qwen3Model
+from torchtitan.protocols.model import BaseModel
 
 # Import from local experiment's models
 from ..attention import VLLMCompatibleFlashAttention
