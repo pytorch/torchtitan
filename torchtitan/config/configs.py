@@ -4,69 +4,27 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import json
-import os
-from dataclasses import asdict, dataclass, field
-from typing import Any, Literal
+"""
+Shared configuration dataclasses for torchtitan.
 
-import torch
+Some configs live near their owner instead of here:
+  - ProfilingConfig                 (in tools/profiling.py)
+  - OptimizersContainer.Config      (in components/optimizer.py)
+  - LRSchedulersContainer.Config    (in components/lr_scheduler.py)
+  - MetricsProcessor.Config         (in components/metrics.py)
+  - ModelConvertersContainer.Config  (in protocols/model_converter.py)
+  - CheckpointManager.Config        (in components/checkpoint.py)
 
-from torchtitan.config.configurable import Configurable
-from torchtitan.tools.logging import logger
+Configs without a clear single owner (or with circular-import constraints)
+live here.
+"""
 
-
-@dataclass
-class Job:
-    config_file: str | None = None
-    """Python config file to load defaults from"""
-
-    dump_folder: str = "./outputs"
-    """Folder to dump job outputs"""
-
-    description: str = "default job"
-    """Description of the job"""
-
-    print_config: bool = False
-    """Print the job configs to terminal"""
-
-    save_config_file: str | None = None
-    """Path to save job config into"""
+from dataclasses import dataclass, field
+from typing import Literal
 
 
 @dataclass
-class Profiling:
-    enable_profiling: bool = False
-    """Whether to enable pytorch profile"""
-
-    save_traces_folder: str = "profile_traces"
-    """Trace files location"""
-
-    profile_freq: int = 10
-    """How often to collect profile traces, in iterations"""
-
-    profiler_active: int = 1
-    """
-    The steps profiler is active for.
-
-    This is used to configure torch.profile.schedule.
-    """
-
-    profiler_warmup: int = 3
-    """
-    The number of warmup steps before the active step in each profiling cycle.
-
-    This is used to configure torch.profile.schedule.
-    """
-
-    enable_memory_snapshot: bool = False
-    """Whether to dump memory snapshot"""
-
-    save_memory_snapshot_folder: str = "memory_snapshot"
-    """Memory snapshot files location"""
-
-
-@dataclass
-class Model:
+class ModelConfig:
     name: str = "llama3"
     """Which model to train"""
 
@@ -80,28 +38,9 @@ class Model:
     (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
     """
 
-    tokenizer_path: str | None = None
-    """DEPRECATED: Use hf_assets_path instead."""
-    """Tokenizer path"""
-
-
-@dataclass(kw_only=True, slots=True)
-class ModelConverters(Configurable.Config):
-    """Configuration for model converters (quantization, etc.).
-
-    Each entry in converter_configs should be a Configurable.Config instance
-    (e.g. Float8LinearConverter.Config) whose build() constructs the converter.
-    """
-
-    converter_configs: list = field(default_factory=list)
-    """List of converter Config objects to apply to the model."""
-
-    print_after_conversion: bool = False
-    """If true, model definition will be printed after converters are applied."""
-
 
 @dataclass
-class DataLoader:
+class DataLoaderConfig:
     """
     Configuration for PyTorch DataLoader settings.
 
@@ -112,8 +51,8 @@ class DataLoader:
 
     Example (Python config file):
         default_config = JobConfig(
-            training=Training(
-                dataloader=DataLoader(
+            training=TrainingConfig(
+                dataloader=DataLoaderConfig(
                     num_workers=4,
                     pin_memory=True,
                     persistent_workers=True,
@@ -140,7 +79,7 @@ class DataLoader:
 
 
 @dataclass
-class Training:
+class TrainingConfig:
     dataset: str = "c4_test"
     """Dataset to use"""
 
@@ -204,12 +143,30 @@ class Training:
     many temporary files.
     """
 
-    dataloader: DataLoader = field(default_factory=DataLoader)
+    dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
     """DataLoader configuration"""
 
 
 @dataclass
-class Parallelism:
+class JobConfig:
+    config_file: str | None = None
+    """Python config file to load defaults from"""
+
+    dump_folder: str = "./outputs"
+    """Folder to dump job outputs"""
+
+    description: str = "default job"
+    """Description of the job"""
+
+    print_config: bool = False
+    """Print the job configs to terminal"""
+
+    save_config_file: str | None = None
+    """Path to save job config into"""
+
+
+@dataclass
+class ParallelismConfig:
     data_parallel_replicate_degree: int = 1
     """
     The `data_parallel_replicate_degree` argument specifies the degree of
@@ -384,171 +341,7 @@ class Parallelism:
 
 
 @dataclass
-class Checkpoint:
-    enable: bool = False
-    """Whether to enable checkpoint"""
-
-    enable_ft_dataloader_checkpoints: bool = True
-    """
-    Warning: Disabling this can have fault tolerant replicas training
-    over the same data multiple times. Use it with caution if training
-    over the same data is acceptable.
-
-    Used to enable checkpointing the dataloader index for fault tolerant training with torchft.
-
-    Fault tolerant training stores data loader index in the checkpoints, so that training can resume
-    without going over the same batch twice.
-
-    If enabled, data loader state is checkpointed. Otherwise, replicas
-    will train over the same data multiple times, which can result in
-    overfitting.
-
-    The failed replcia will still recover other state e.g. model
-    parameters from other replcias.
-
-    Note, if regular checkpointing is enabled, we also checkpoint the
-    data loader state. But when not using fault tolerance, the entire training starts from scratch.
-    """
-
-    folder: str = "checkpoint"
-    """
-    The folder to store the checkpoints.
-    When enable is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
-    """
-
-    interval: int = 500
-    """Checkpointing interval in steps."""
-
-    initial_load_path: str | None = None
-    """
-    This option specifies the path to the initial checkpoint to load, which is
-    particularly useful for resuming training from a previous run with a
-    different output path or when loading a checkpoint from a pre-trained model.
-    If the checkpoint folder for the current run is not empty,
-    located at {--job.dump_folder}/{--checkpoint.folder}, this option will be ignored.
-    This feature allows users to load an initial checkpoint from a different folder and
-    continue training, saving new checkpoints to the specified folder without affecting
-    the existing ones.
-
-    Note that the path should contain the full path to the checkpoint folder,
-    including the step number, if any; for example,
-    "//pre_train/checkpoints/llama3/llama3_8b/step_10000".
-    """
-
-    initial_load_model_only: bool = True
-    """
-    This option specifies if only the model should be loaded during the initial
-    checkpoint load. The option is only used when `initial_load_path` is specified.
-    If False, the checkpoint at `initial_load_path` is treated as a standard training
-    checkpoint, including optimizer, lr scheduler, training states, etc.
-    The default setting for this option is True. Note that you will have to use
-    `--checkpoint.no_initial_load_model_only` to override the default setting.
-    """
-
-    initial_load_in_hf: bool = False
-    """
-    Enable the use of HuggingFace's safetensors format for checkpointing. The option
-    is only used when `initial_load_path` is specified. This will load checkpoints
-    in HF's model definition and safetensors format instead of the default torchtitan
-    model definition and DCP format, after necessary model state dict transformation.
-    `initial_load_model_only` must be true because safetensors doesn't support saving
-    non-tensors. The default value is False.
-    """
-
-    initial_load_in_hf_quantized: bool = False
-    """
-    Enable loading of HuggingFace's safetensors format with quantized state dict keys. The option
-    is only used when `initial_load_path` and `initial_load_path_in_hf` is specified. This will load
-    checkpoints in HF's model definition and dequantize on model weights if necessary. To support
-    this parameter, the model need to define proper HuggingFaceStorageReader to perform dequantize.
-    """
-
-    last_save_model_only: bool = True
-    """
-    When last_save_model_only=True, only the model will be saved at the end of training,
-    the last save.  With this, checkpoints can be loaded using `torch.load(..., weights_only=True)`
-    after conversion.  When last_save_model_only=False, the full checkpoint will be saved.
-    A full checkpoint includes model, optimizer and train_state, which can be used to resume training.
-    The default value is True.
-    """
-
-    last_save_in_hf: bool = False
-    """
-    Enable the use of Hugging Face's safetensors format for checkpointing. This will save the
-    final checkpoints in safetensors format instead of the default DCP format, after necessary
-    model state dict transformation. There will be a performance cost in using this as we need
-    to consolidate the sharded tensors to full tensors as a separate step.
-    last_save_model_only must be true because safetensors doesn't support saving
-    non-tensors. On load, this argument isn't needed as we will detect whether the loaded
-    checkpoint is in safetensors format or not. The default value is False.
-    """
-
-    export_dtype: Literal["float16", "bfloat16", "float32"] = "float32"
-    """
-    Converts to the specified precision when training completes and last_save_model_only=true.
-    """
-
-    async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
-    """
-    Which async checkpoint mode to use. Currently there are 3 different modes.
-
-    - "disabled": synchronized checkpointing will be used.
-    - "async": torch.distributed.checkpoint.async_save will be used.
-    - "async_with_pinned_mem": this option utilizes a dedicated pinned memory space and creates a
-      separate process for faster GPU->CPU transfer performance and eliminating GIL contention.
-      The cost is increased CPU memory usage. If insufficient CPU memory is available, performance
-      may degrade due to memory paging. For most users, "async" should suffice as the performance
-      overhead is typically small (on the order of tens of seconds) compared to checkpointing
-      frequency. This mode can be employed to pursue near-zero checkpointing times
-      (e.g., < 1 second) given appropriate hardware support such as ample CPU memory and fast PCIe.
-
-    "disabled" is the default mode.
-    """
-
-    keep_latest_k: int = 10
-    """
-    Keeps only the latest k checkpoints, and purging older ones. If 0, keep all checkpoints.
-    K cannot be 1 as the last one may be in the process of being saved. As a result,
-    the metadata of the last one may not be ready yet. The default value is 10 to avoid
-    filling up the disk.
-    """
-
-    load_step: int = -1
-    """Load the checkpoint at the specified step. If -1, load the latest checkpoint."""
-
-    exclude_from_loading: list[str] = field(default_factory=list)
-    """
-    Exclude specific keys from being loaded from the checkpoint.
-    Provide a comma-separated list of keys to exclude, e.g. 'optimizer,lr_scheduler,dataloader'.
-    This will load the model only, excluding the specified keys.
-    """
-
-    enable_first_step_checkpoint: bool = False
-    """
-    Enable the checkpoint save at first step. This will save a checkpoint immediately
-    after the first step to ensure checkpointing functions correctly. This is useful
-    when running on a new cluster or storage to verify checkpointing without waiting
-    for many steps or checkpointing too frequently. The default value is False.
-    """
-
-    create_seed_checkpoint: bool = False
-    """
-    Initializes the full model without applying parallelisms, and then saves it as a seed checkpoint.
-    Note: requires user to call train.py without specifying any parallelisms, e.g. NGPU=1.
-    Could be implemented as a separate script, but this way shares more code.
-    """
-
-    load_only: bool = False
-    """
-    In certain scenarios, you may only need to load checkpoints for verification or debugging
-    purposes, without saving any new checkpoints. For example, you might use seed checkpoints
-    to validate model correctness. Enabling this option allows checkpoints to be loaded
-    without saving any during the training.
-    """
-
-
-@dataclass
-class ActivationCheckpoint:
+class ActivationCheckpointConfig:
     mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
 
@@ -618,17 +411,18 @@ class ActivationCheckpoint:
 
 
 @dataclass
-class Compile:
+class CompileConfig:
     enable: bool = False
     """Whether to apply torch.compile"""
 
     components: list[str] = field(default_factory=lambda: ["model", "loss"])
     """Which components to compile"""
+
     backend: str = "inductor"
 
 
 @dataclass
-class Comm:
+class CommConfig:
     init_timeout_seconds: int = 300
     """Timeout for communication operations, during initialization and first train step."""
 
@@ -665,16 +459,7 @@ class Comm:
 
 
 @dataclass
-class MemoryEstimation:
-    enable: bool = False
-    """Whether to estimate memory usage for FSDP"""
-
-    disable_fake_mode: bool = False
-    """Whether to estimate memory under FakeTensorMode"""
-
-
-@dataclass
-class FaultTolerance:
+class FaultToleranceConfig:
     enable: bool = False
     """
     Enable TorchFT integration. When TorchFT is enabled, HSDP will be used.
@@ -717,20 +502,7 @@ class FaultTolerance:
 
 
 @dataclass
-class Experimental:
-    custom_import: str = ""
-    """
-    This option enables the importation of external modules.
-    Currently, it only supports dotted import modules (e.g., some_package.model_x).
-    It is the user's responsibility to ensure that the specified path can be
-    successfully imported. One method to achieve this, you can place your module
-    inside the ``torchtitan/torchtitan`` folder and execute ``pip install -e .`` to
-    make it available for import.
-    """
-
-
-@dataclass
-class Validation:
+class ValidationConfig:
     enable: bool = False
     """Enable validation to default run validation after each training loop"""
 
@@ -755,7 +527,7 @@ class Validation:
     WARNING: When setting to -1 there could be hangs due to mismatch among ranks
     """
 
-    dataloader: DataLoader = field(default_factory=DataLoader)
+    dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
     """DataLoader configuration"""
 
     def __post_init__(self):
@@ -765,7 +537,7 @@ class Validation:
 
 
 @dataclass
-class Debug:
+class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
 
@@ -777,64 +549,3 @@ class Debug:
 
     moe_force_load_balance: bool = False
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
-
-
-# These imports are placed here (after FaultTolerance is defined) to avoid
-# circular imports: optimizer.py -> ft/manager.py -> job_config.FaultTolerance.
-from torchtitan.components.lr_scheduler import LRSchedulersContainer  # noqa: E402
-from torchtitan.components.metrics import MetricsProcessor  # noqa: E402
-from torchtitan.components.optimizer import OptimizersContainer  # noqa: E402
-
-
-@dataclass
-class JobConfig:
-    """
-    Default container for training configuration.
-    """
-
-    job: Job = field(default_factory=Job)
-    profiling: Profiling = field(default_factory=Profiling)
-    metrics: MetricsProcessor.Config = field(default_factory=MetricsProcessor.Config)
-    model: Model = field(default_factory=Model)
-    model_converters: ModelConverters = field(default_factory=ModelConverters)
-    optimizer: OptimizersContainer.Config = field(
-        default_factory=OptimizersContainer.Config
-    )
-    lr_scheduler: LRSchedulersContainer.Config = field(
-        default_factory=LRSchedulersContainer.Config
-    )
-    training: Training = field(default_factory=Training)
-    parallelism: Parallelism = field(default_factory=Parallelism)
-    checkpoint: Checkpoint = field(default_factory=Checkpoint)
-    activation_checkpoint: ActivationCheckpoint = field(
-        default_factory=ActivationCheckpoint
-    )
-    compile: Compile = field(default_factory=Compile)
-    comm: Comm = field(default_factory=Comm)
-    memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
-    fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
-    experimental: Experimental = field(default_factory=Experimental)
-    validation: Validation = field(default_factory=Validation)
-    debug: Debug = field(default_factory=Debug)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    def maybe_log(self) -> None:
-        if self.job.print_config:
-            logger.info(
-                f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
-            )
-
-        if self.job.save_config_file is not None:
-            config_file = os.path.join(self.job.dump_folder, self.job.save_config_file)
-            if torch.distributed.is_initialized():
-                if torch.distributed.get_rank() == 0:
-                    os.makedirs(os.path.dirname(config_file), exist_ok=True)
-                    with open(config_file, "w") as f:
-                        json.dump(self.to_dict(), f, indent=2)
-                logger.info(f"Saved job configs to {config_file}")
-            else:
-                logger.warning(
-                    "Job configs logging is disabled due to torch.distributed not initialized."
-                )

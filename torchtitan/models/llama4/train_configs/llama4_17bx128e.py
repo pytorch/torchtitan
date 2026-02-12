@@ -6,55 +6,51 @@
 
 # TODO: this config is still under development
 
+from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.quantization.float8 import Float8LinearConverter
+from torchtitan.components.quantization.mx import MXLinearConverter
 from torchtitan.config import (
-    ActivationCheckpoint,
-    Checkpoint,
-    Job,
+    ActivationCheckpointConfig,
     JobConfig,
-    LRScheduler,
-    Metrics,
-    Model,
-    Optimizer,
-    Parallelism,
-    Quantize,
-    Training,
+    ModelConfig,
+    ParallelismConfig,
+    TrainingConfig,
 )
-from torchtitan.config.job_config import (
-    Float8Linear,
-    MXLinear,
-    QuantizedLinear,
-)
+from torchtitan.protocols.model_converter import ModelConvertersContainer
+from torchtitan.trainer import Trainer
 
-default_config = JobConfig(
-    job=Job(description="Llama 4 Maverick 17Bx128E training"),
-    model=Model(
+default_config = Trainer.Config(
+    job=JobConfig(description="Llama 4 Maverick 17Bx128E training"),
+    model=ModelConfig(
         name="llama4",
         flavor="17bx128e",
         hf_assets_path="./assets/hf/Llama-4-Maverick-17B-128E",
     ),
-    optimizer=Optimizer(lr=4e-3, eps=1e-15),
-    lr_scheduler=LRScheduler(
+    optimizer=OptimizersContainer.Config(lr=4e-3, eps=1e-15),
+    lr_scheduler=LRSchedulersContainer.Config(
         warmup_steps=600,
         min_lr_factor=0.1,
     ),
-    training=Training(
+    training=TrainingConfig(
         local_batch_size=1,
         seq_len=8192,
         steps=3000,
         dataset="c4",
     ),
-    parallelism=Parallelism(
+    parallelism=ParallelismConfig(
         tensor_parallel_degree=8,
         pipeline_parallel_degree=4,
         expert_parallel_degree=1,
         expert_tensor_parallel_degree=8,
     ),
-    checkpoint=Checkpoint(interval=500),
-    activation_checkpoint=ActivationCheckpoint(mode="full"),
-    quantize=Quantize(
-        linear=QuantizedLinear(
-            float8=Float8Linear(filter_fqns=["output", "router.gate"]),
-            mx=MXLinear(filter_fqns=["output", "router.gate"]),
-        ),
+    checkpoint=CheckpointManager.Config(interval=500),
+    activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+    model_converters=ModelConvertersContainer.Config(
+        converters=[
+            Float8LinearConverter.Config(filter_fqns=["output", "router.gate"]),
+            MXLinearConverter.Config(filter_fqns=["output", "router.gate"]),
+        ],
     ),
 )

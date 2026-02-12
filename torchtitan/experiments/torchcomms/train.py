@@ -7,7 +7,8 @@
 import os
 
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.train import main, Trainer
+from torchtitan.train import main
+from torchtitan.trainer import Trainer
 
 from .parallel_dims import TorchCommsParallelDims
 

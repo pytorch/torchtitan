@@ -15,26 +15,28 @@ import tyro
 
 from torchtitan.tools.logging import logger
 
-from .job_config import JobConfig
-
 
 class ConfigManager:
     """
-    Parses, merges, and validates a JobConfig from Python config files and CLI sources.
+    Parses, merges, and validates a config from Python config files and CLI sources.
 
     Configuration precedence:
-        CLI args > Python config file > JobConfig defaults
+        CLI args > Python config file > config defaults
 
-    Python config files define a `default_config` variable of type JobConfig.
+    Python config files define a `default_config` variable.
     CLI arguments use the format <section>.<key> to override config values.
     """
 
-    def __init__(self, config_cls: Type[JobConfig] = JobConfig):
+    def __init__(self, config_cls: Type | None = None):
+        if config_cls is None:
+            from torchtitan.trainer import Trainer
+
+            config_cls = Trainer.Config
         self.config_cls = config_cls
-        self.config: JobConfig = config_cls()
+        self.config = config_cls()
         self.register_tyro_rules(custom_registry)
 
-    def parse_args(self, args: list[str] = sys.argv[1:]) -> JobConfig:
+    def parse_args(self, args: list[str] = sys.argv[1:]):
         loaded_config = self._maybe_load_python_config(args)
 
         if loaded_config:
@@ -54,13 +56,16 @@ class ConfigManager:
 
         return self.config
 
-    def _maybe_load_python_config(self, args: list[str]) -> JobConfig | None:
+    def _maybe_load_python_config(self, args: list[str]):
         """Load a Python config file that defines a `default_config` variable.
 
         If multiple --job.config_file args are present, the last one wins
         (consistent with standard CLI override behavior).
         """
-        valid_keys = {"--job.config-file", "--job.config_file"}
+        valid_keys = {
+            "--job.config-file",
+            "--job.config_file",
+        }
         file_path = None
         for i, arg in enumerate(args):
             if "=" in arg:
@@ -92,10 +97,10 @@ class ConfigManager:
     @staticmethod
     def _merge_configs(base, custom) -> Type:
         """
-        Merges a base JobConfig class with user-defined extensions.
+        Merges a base config class with user-defined extensions.
 
         This method creates a new dataclass type that combines fields from both `base` and `custom`,
-        allowing users to extend or override JobConfig configuration structure.
+        allowing users to extend or override configuration structure.
 
         Merge behavior:
         - If a field exists in both `base` and `custom`:
@@ -134,7 +139,10 @@ class ConfigManager:
     def _validate_config(self) -> None:
         # TODO: temporary mitigation of BC breaking change in hf_assets_path
         #       tokenizer default path, need to remove later
-        if self.config.model.tokenizer_path:
+        if (
+            hasattr(self.config.model, "tokenizer_path")
+            and self.config.model.tokenizer_path
+        ):
             logger.warning(
                 "tokenizer_path is deprecated, use model.hf_assets_path instead. "
                 "Setting hf_assets_path to tokenizer_path temporarily."

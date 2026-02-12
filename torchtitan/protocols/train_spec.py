@@ -14,10 +14,10 @@ from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import BaseValidator
+from torchtitan.distributed import ParallelDims
 
 from .model import BaseModel
 from .state_dict_adapter import BaseStateDictAdapter
@@ -29,11 +29,10 @@ PipeliningFunction: TypeAlias = Callable[
 ]
 DataLoaderBuilder: TypeAlias = Callable[..., BaseDataLoader]
 TokenizerBuilder: TypeAlias = Callable[..., BaseTokenizer]
-OptimizersBuilder: TypeAlias = Callable[..., OptimizersContainer]
-LRSchedulersBuilder: TypeAlias = Callable[
-    [OptimizersContainer, LRSchedulersContainer.Config, int], LRSchedulersContainer
-]
 LossFunctionBuilder: TypeAlias = Callable[..., LossFunction]
+PostOptimizerBuildFn: TypeAlias = Callable[
+    [OptimizersContainer, list[nn.Module], ParallelDims], None
+]
 
 
 @dataclass
@@ -41,11 +40,10 @@ class TrainSpec:
     model_configs: Mapping[str, BaseModel.Config]
     parallelize_fn: ParallelizeFunction
     pipelining_fn: PipeliningFunction | None
-    build_optimizers_fn: OptimizersBuilder
-    build_lr_schedulers_fn: LRSchedulersBuilder
     build_dataloader_fn: DataLoaderBuilder
     build_tokenizer_fn: TokenizerBuilder | None
     build_loss_fn: LossFunctionBuilder
+    post_optimizer_build_fn: PostOptimizerBuildFn | None = None
     validator_cls: type[BaseValidator] | None = None
     state_dict_adapter: type[BaseStateDictAdapter] | None = None
 

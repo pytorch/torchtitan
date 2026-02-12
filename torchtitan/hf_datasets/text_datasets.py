@@ -17,7 +17,7 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import Training, Validation
+from torchtitan.config import TrainingConfig, ValidationConfig
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
@@ -170,7 +170,7 @@ def build_text_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
-    training: Training,
+    training: TrainingConfig,
     infinite: bool = True,
     **kwargs,
 ) -> ParallelAwareDataloader:
@@ -180,7 +180,7 @@ def build_text_dataloader(
         dp_world_size: Data parallelism world size.
         dp_rank: Data parallelism rank.
         tokenizer: Tokenizer to use for encoding text.
-        training: Training configuration containing dataset and DataLoader settings.
+        training: TrainingConfig configuration containing dataset and DataLoader settings.
         infinite: Whether to loop the dataset infinitely.
     """
     dataset_name = training.dataset
@@ -215,7 +215,7 @@ def build_text_validation_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
-    validation: Validation,
+    validation: ValidationConfig,
     infinite: bool = False,
 ) -> ParallelAwareDataloader:
     """Build a validation data loader for HuggingFace datasets.
@@ -224,7 +224,7 @@ def build_text_validation_dataloader(
         dp_world_size: Data parallelism world size.
         dp_rank: Data parallelism rank.
         tokenizer: Tokenizer to use for encoding text.
-        validation: Validation configuration containing dataset and DataLoader settings.
+        validation: ValidationConfig configuration containing dataset and DataLoader settings.
         infinite: Whether to loop the dataset infinitely.
     """
     dataset_name = validation.dataset

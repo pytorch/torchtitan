@@ -5,8 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.loss import build_mse_loss
-from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers
 
 from torchtitan.models.flux.flux_datasets import build_flux_dataloader
 from torchtitan.protocols.train_spec import TrainSpec
@@ -107,8 +105,6 @@ def get_train_spec() -> TrainSpec:
         model_configs=flux_configs,
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
-        build_optimizers_fn=build_optimizers,
-        build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_flux_dataloader,
         build_tokenizer_fn=None,
         build_loss_fn=build_mse_loss,

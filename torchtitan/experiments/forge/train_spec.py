@@ -11,10 +11,9 @@ from typing import Mapping
 from torchtitan.protocols import BaseModel, BaseStateDictAdapter
 from torchtitan.protocols.train_spec import (
     LossFunctionBuilder,
-    LRSchedulersBuilder,
-    OptimizersBuilder,
     ParallelizeFunction,
     PipeliningFunction,
+    PostOptimizerBuildFn,
     TrainSpec,
 )
 
@@ -24,9 +23,8 @@ class ForgeTrainSpec:
     model_configs: Mapping[str, BaseModel.Config]
     parallelize_fn: ParallelizeFunction
     pipelining_fn: PipeliningFunction | None
-    build_optimizers_fn: OptimizersBuilder
-    build_lr_schedulers_fn: LRSchedulersBuilder
     build_loss_fn: LossFunctionBuilder
+    post_optimizer_build_fn: PostOptimizerBuildFn | None = None
     state_dict_adapter: type[BaseStateDictAdapter] | None = None
 
 
@@ -40,9 +38,8 @@ def _transform_train_spec(original_spec: TrainSpec):
         model_configs=original_spec.model_configs,
         parallelize_fn=original_spec.parallelize_fn,
         pipelining_fn=original_spec.pipelining_fn,
-        build_optimizers_fn=original_spec.build_optimizers_fn,
-        build_lr_schedulers_fn=original_spec.build_lr_schedulers_fn,
         build_loss_fn=original_spec.build_loss_fn,
+        post_optimizer_build_fn=original_spec.post_optimizer_build_fn,
         state_dict_adapter=original_spec.state_dict_adapter,
     )
 

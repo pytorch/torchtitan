@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.distributed_c10d import ReduceOp
 from torchtitan.components.ft.config import FaultTolerance as ExtendedFTConfig
-from torchtitan.config.job_config import FaultTolerance as FTConfig
+from torchtitan.config.configs import FaultToleranceConfig as FTConfig
 from torchtitan.tools.logging import logger
 
 if importlib.util.find_spec("torchft") is not None:

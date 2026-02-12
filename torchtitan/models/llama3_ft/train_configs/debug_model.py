@@ -5,14 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.ft.config.job_config import JobConfig as FTJobConfig
-from torchtitan.config import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager
+from torchtitan.trainer import Trainer
 
-MergedJobConfig = ConfigManager._merge_configs(JobConfig, FTJobConfig)
+MergedConfig = ConfigManager._merge_configs(Trainer.Config, FTJobConfig)
 
 # Start from defaults, then override
-default_config = MergedJobConfig()
+default_config = MergedConfig()
 
-# [job]
+# [training]
 default_config.job.description = "Llama 3 fault-tolerant debug training"
 
 # [profiling]

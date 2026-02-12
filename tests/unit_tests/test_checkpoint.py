@@ -17,7 +17,6 @@ import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.config.job_config import Checkpoint as CheckpointConfig
 
 
 class FakeOptimizersContainer:
@@ -95,7 +94,7 @@ def fake_async_save(*args, **kwargs):
 class DummyJobConfig:
     def __init__(self, job):
         self.job = job
-        self.checkpoint = CheckpointConfig(
+        self.checkpoint = CheckpointManager.Config(
             enable=True,
             async_mode="disabled",
             folder="",
@@ -126,7 +125,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.data_loader = FakeDataLoader()
         self.ft_manager = DummyFTManager()
 
-        ckpt_cfg = CheckpointConfig(
+        ckpt_cfg = CheckpointManager.Config(
             enable=True,
             async_mode="DISABLED",
             folder="",

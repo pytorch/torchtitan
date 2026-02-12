@@ -14,13 +14,12 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
 from torchtitan.config import (
-    ActivationCheckpoint,
-    ModelConverters,
-    Parallelism,
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
     TORCH_DTYPE_MAP,
-    Training,
+    TrainingConfig,
 )
-from torchtitan.config.job_config import Compile as CompileConfig, Experimental
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
@@ -30,6 +29,7 @@ from torchtitan.models.llama3.infra.parallelize import (
     apply_ddp,
     disable_fsdp_gradient_division,
 )
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -37,12 +37,11 @@ def parallelize_vlm(
     model: nn.Module,
     parallel_dims: ParallelDims,
     *,
-    training: Training,
-    model_converters: ModelConverters,
-    parallelism: Parallelism,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpoint,
-    experimental: Experimental,
+    ac_config: ActivationCheckpointConfig,
     dump_folder: str,
 ):
     """

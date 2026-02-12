@@ -464,17 +464,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--memory_estimation.enable",
-                ]
-            ],
-            "FSDP2 Memory Tracking and Estimation",
-            "fsdp2_memory_estimation",
-            ngpu=2,
-            disabled=True,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--checkpoint.enable",
                 ],
                 [

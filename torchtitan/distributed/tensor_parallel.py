@@ -9,12 +9,12 @@ import torch
 import torch._inductor.config
 from torch.distributed.device_mesh import DeviceMesh
 
-from torchtitan.config import Compile, Parallelism
+from torchtitan.config import CompileConfig, ParallelismConfig
 from torchtitan.tools.logging import logger
 
 
 def maybe_enable_async_tp(
-    parallelism: Parallelism, compile_config: Compile, tp_mesh: DeviceMesh
+    parallelism: ParallelismConfig, compile_config: CompileConfig, tp_mesh: DeviceMesh
 ):
     if not parallelism.enable_async_tensor_parallel:
         return

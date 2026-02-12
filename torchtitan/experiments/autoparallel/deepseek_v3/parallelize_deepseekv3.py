@@ -17,15 +17,15 @@ from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torchtitan.config import (
-    ActivationCheckpoint,
-    ModelConverters,
-    Parallelism,
-    Training,
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TrainingConfig,
 )
-from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.job_config import Experimental
 from torchtitan.models.common.moe.moe import _run_experts_grouped_mm
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from torchtitan.tools.logging import logger
 
@@ -268,11 +268,11 @@ def parallelize_deepseekv3(
     model,
     parallel_dims: ParallelDims,
     *,
-    training: Training,
-    model_converters: ModelConverters,
-    parallelism: Parallelism,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
     compile_config: CompileConfig,
-    ac_config: ActivationCheckpoint,
+    ac_config: ActivationCheckpointConfig,
     experimental: Experimental,
     dump_folder: str,
 ):
@@ -330,10 +330,6 @@ def parallelize_deepseekv3(
     # torch._inductor.config.bucket_reduce_scatters_fx_bucket_size_determinator = (
     #     lambda bucket_idx: 1000 / parallel_dims.tp
     # )
-
-    # if job_config.experimental.autop_force_bf16:
-    #     logger.info("Forcing bf16 on model")
-    #     model = model.bfloat16()
 
     # param_dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_param]
     # reduce_dtype = TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce]

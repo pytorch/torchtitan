@@ -6,39 +6,38 @@
 
 # NOTE: this config is a preset for 8 H100 GPUs (with 96GiB memory).
 
+from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
-    ActivationCheckpoint,
-    Checkpoint,
-    Job,
+    ActivationCheckpointConfig,
     JobConfig,
-    LRScheduler,
-    Metrics,
-    Model,
-    Optimizer,
-    Training,
+    ModelConfig,
+    TrainingConfig,
 )
+from torchtitan.trainer import Trainer
 
-default_config = JobConfig(
-    job=Job(description="Qwen3 32B training"),
-    model=Model(
+default_config = Trainer.Config(
+    job=JobConfig(description="Qwen3 32B training"),
+    model=ModelConfig(
         name="qwen3",
         flavor="32B",
         hf_assets_path="./assets/hf/Qwen3-32B",
     ),
-    optimizer=Optimizer(lr=8e-4),
-    lr_scheduler=LRScheduler(warmup_steps=600),
-    training=Training(
+    optimizer=OptimizersContainer.Config(lr=8e-4),
+    lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+    training=TrainingConfig(
         local_batch_size=2,
         seq_len=4096,
         steps=3000,
         dataset="c4",
     ),
-    checkpoint=Checkpoint(
+    checkpoint=CheckpointManager.Config(
         interval=500,
         last_save_model_only=False,
         export_dtype="float16",
     ),
-    activation_checkpoint=ActivationCheckpoint(
+    activation_checkpoint=ActivationCheckpointConfig(
         mode="full",
         selective_ac_option="op",
     ),
