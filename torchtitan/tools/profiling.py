@@ -143,5 +143,6 @@ def maybe_enable_memory_snapshot(
             yield profiler
         except torch.OutOfMemoryError as e:
             profiler.step(exit_ctx=True)
+            raise
     else:
         yield None
