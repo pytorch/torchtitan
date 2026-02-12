@@ -58,7 +58,9 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
             cmd = (
                 f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" '
                 + f"CUDA_VISIBLE_DEVICES={ranks} "
+                + "TRAIN_FILE=torchtitan.experiments.ft.train "
                 + f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} ./run_train.sh "
+                + "--model.name=llama3_ft "
                 + "--fault_tolerance.enable "
                 + f"--fault_tolerance.replica_id={replica_id} --fault_tolerance.group_size={test_flavor.ngpu}"
             )
