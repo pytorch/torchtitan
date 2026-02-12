@@ -112,7 +112,7 @@ def parallelize_gptoss(
             dual_pipe_v=dual_pipe_v,
         )
 
-    if job_config.activation_checkpoint.mode != "none":
+    if job_config.activation_checkpoint.mode != "none" or job_config.activation_checkpoint.cpu_offload:
         apply_ac(
             model,
             job_config.activation_checkpoint,

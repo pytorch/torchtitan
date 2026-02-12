@@ -27,7 +27,7 @@ def parallelize_flux(
     parallel_dims: ParallelDims,
     job_config: JobConfig,
 ):
-    if job_config.activation_checkpoint.mode != "none":
+    if job_config.activation_checkpoint.mode != "none" or job_config.activation_checkpoint.cpu_offload:
         apply_ac(model, job_config.activation_checkpoint)
 
     if parallel_dims.cp_enabled:
