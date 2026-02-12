@@ -1,0 +1,19 @@
+name: torchtitan-rl
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/nightly/cu126
+      - torch
+      - marimo>=0.19.9
+      - transformers>=4.40.0
+      - torchmonarch==0.3.0
+      - accelerate
+      - html5lib
+      - matplotlib>=3.10.8
+      - scipy>=1.15.3
+      - torchshow>=0.5.2
+      - pytest
+      - ruff
