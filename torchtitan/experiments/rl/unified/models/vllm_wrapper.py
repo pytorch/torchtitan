@@ -11,8 +11,6 @@ This module provides TorchTitanVLLMModel: Core model class that adapts
 TorchTitan models for vLLM.
 """
 
-from functools import partial
-
 import torch
 import torch.nn as nn
 from torch.distributed._tensor import DTensor, Replicate
@@ -20,25 +18,45 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-
 from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     create_job_config_from_vllm_config,
     create_parallel_dims_from_vllm_config,
 )
-
 from torchtitan.experiments.rl.unified.models.utils import replace_with_vllm_attention
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.protocols.train_spec import ParallelizeFunction
-
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 
 logger = init_logger(__name__)
 
+from torch.distributed.tensor._ops._pointwise_ops import pointwise_strategy
 
+# Register DTensor sharding strategy for vLLM's _C.weak_ref_tensor custom op.
+# This op is called by vLLM's CUDAGraphWrapper on piecewise subgraph outputs
+# (via weak_ref_tensors()). Without a registered strategy, DTensor dispatch
+# raises RuntimeError when intermediate hidden states are DTensors (e.g. with
+# SequenceParallel / Shard(1) placements under TP).
+# weak_ref_tensor is semantically identity (same data pointer), so pointwise
+# strategy (propagate input placement to output) is correct.
+# We also need a Meta/FakeTensor impl since DTensor's sharding propagation
+# calls the op on FakeTensors to determine output tensor metadata.
+from torch.distributed.tensor._ops.utils import register_op_strategy
+
+torch.library.register_fake(
+    "_C::weak_ref_tensor",
+    lambda tensor: torch.empty_like(tensor),
+)
+register_op_strategy(torch.ops._C.weak_ref_tensor.default)(pointwise_strategy)
+
+
+@support_torch_compile(
+    dynamic_arg_dims={"input_ids": 0, "positions": 0, "inputs_embeds": 0}
+)
 class TorchTitanVLLMModelWrapper(nn.Module):
     """
     Generic vLLM-compatible model wrapper for TorchTitan models. Implemented
@@ -82,13 +100,6 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         logger.info(f"Creating {self.model_cls.__name__} with config: {model_args}")
         self.model = self.model_cls(model_args)
 
-        # Setup RoPE cache extension function if provided
-        self.rope_cache_extension_fn = partial(
-            precompute_rope_cache,
-            dim=self.config.head_dim,
-            base=self.config.rope_theta,
-        )
-
         # Create ParallelDims and JobConfig from vLLM config at runtime
         # vLLM config contains the tensor_parallel_size from command-line args
         # and this will be consistent across all worker processes
@@ -114,67 +125,24 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             job_config=self.parallel_config,
         )
 
-    def _extend_rope_cache_if_needed(
-        self, rope_cache: torch.Tensor, max_position: int
-    ) -> torch.Tensor:
-        """
-        Extend RoPE cache if needed during vLLM profiling stage.
+        # Store compile-friendly TP flag (bool attribute — no graph break)
+        self._tp_enabled = self.parallel_dims.tp > 1
 
-        Args:
-            rope_cache: Current RoPE cache tensor
-            max_position: Maximum position index needed
-
-        Returns:
-            Extended RoPE cache if needed, otherwise original cache
-        """
-        required_len = max_position + 1
-
-        # No extension needed
-        if required_len <= rope_cache.shape[0]:
-            return rope_cache
-
-        # If no extension function provided, return original cache
-        if self.rope_cache_extension_fn is None:
-            logger.warning(
-                f"RoPE cache extension needed (required_len={required_len}, "
-                f"current_len={rope_cache.shape[0]}) but no rope_cache_extension_fn provided. "
-                "Returning original cache."
+        # Pre-extend RoPE cache to vLLM's max model length for compile-friendly forward
+        max_model_len = vllm_config.model_config.max_model_len
+        if (
+            hasattr(self.model, "rope_cache")
+            and self.model.rope_cache.shape[0] < max_model_len
+        ):
+            extended_cache = precompute_rope_cache(
+                dim=self.config.head_dim,
+                max_seq_len=max_model_len,
+                base=self.config.rope_theta,
             )
-            return rope_cache
-
-        # Handle DTensor case
-        is_dtensor = isinstance(rope_cache, DTensor)
-        if is_dtensor:
-            device_mesh = rope_cache.device_mesh
-            local_rope_cache = rope_cache.to_local()
-            device = local_rope_cache.device
-            dtype = local_rope_cache.dtype
-        else:
-            device = rope_cache.device
-            dtype = rope_cache.dtype
-
-        # Use provided extension function
-        try:
-            extended_cache = self.rope_cache_extension_fn(self.config, required_len)
-            extended_cache = extended_cache.to(device=device, dtype=dtype)
-        except Exception as e:
-            logger.warning(
-                f"Failed to extend RoPE cache using rope_cache_extension_fn: {e}. "
-                "Returning original cache."
+            self.model.rope_cache = extended_cache.to(
+                device=self.model.rope_cache.device,
+                dtype=self.model.rope_cache.dtype,
             )
-            return rope_cache
-
-        # Convert back to DTensor if needed
-        if is_dtensor:
-            rope_cache = DTensor.from_local(
-                extended_cache,
-                device_mesh=device_mesh,
-                placements=[Replicate()],
-            )
-        else:
-            rope_cache = extended_cache
-
-        return rope_cache
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings."""
@@ -203,52 +171,28 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         Returns:
             hidden_states: Final hidden states [total_tokens, hidden_size]
         """
-        if inputs_embeds is not None:
-            raise NotImplementedError("inputs_embeds not yet supported")
-
-        if input_ids is None:
-            raise ValueError("Either input_ids or inputs_embeds must be provided")
-
-        # Convert vLLM interface to TorchTitan interface
-        # vLLM: [total_tokens] → TorchTitan: [batch_size, seq_len]
+        # Convert vLLM 1D format to TorchTitan 2D format
         tokens_2d = input_ids.unsqueeze(0)
+        positions_2d = positions.unsqueeze(0)
 
         # Get embeddings
         h = self.model.tok_embeddings(tokens_2d)
 
-        # Get RoPE cache (handle model-specific attribute names)
-        # Use hasattr to avoid ambiguous boolean value error with tensors
-        if hasattr(self.model, "rope_cache"):
-            rope_attr = self.model.rope_cache
-        elif hasattr(self.model, "freqs_cis"):
-            rope_attr = self.model.freqs_cis
-        else:
-            rope_attr = None
-
-        # Extend RoPE cache if needed (vLLM profiling may use 2x max_seq_len)
-        if positions is not None:
-            max_position = positions.max().item()
-        else:
-            max_position = 0
-
-        rope_cache = self._extend_rope_cache_if_needed(rope_attr, max_position)
-        positions = positions.unsqueeze(0)
+        # RoPE cache: always self.model.rope_cache, pre-extended in __init__
+        rope_cache = self.model.rope_cache
 
         # Pass through transformer layers
         for layer in self.model.layers.values():
-            h = layer(h, rope_cache, attention_masks=None, positions=positions)
+            h = layer(h, rope_cache, attention_masks=None, positions=positions_2d)
 
         h = self.model.norm(h)
-        # When parallelism is applied, get full tensor before return to vLLM Engine
-        # The original placement is Shard(1) (shard on sequence dimension, as it will prepare for sequence parallel in `self.norm`).
-        # vLLM's engine expects plain, non-distributed tensors to slice the last token for each request.
-        if isinstance(h, DTensor):
+
+        # When TP enabled, norm output is DTensor Shard(1); gather for vLLM engine
+        if self._tp_enabled:
             h = h.full_tensor()
 
-        # Convert to vLLM format: [total_tokens, hidden_size]
-        if h.dim() == 3:
-            batch_size, seq_len, hidden_size = h.shape
-            h = h.view(batch_size * seq_len, hidden_size)
+        # Flatten to vLLM format: [total_tokens, hidden_size]
+        h = h.view(-1, h.shape[-1])
 
         return h
 
