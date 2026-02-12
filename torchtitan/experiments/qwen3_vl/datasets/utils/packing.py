@@ -10,11 +10,16 @@ from collections import deque
 from typing import Any
 
 import torch
-from torchtitan.tools.logging import logger
 
 
 class SamplePacker:
-    """Packs multiple samples together to maximize sequence length utilization."""
+    """Packs multiple samples together to maximize sequence length utilization.
+
+    Samples are accumulated in a buffer. When the buffer reaches buffer_size,
+    samples are sorted by length and greedily packed into sequences up to
+    max_seq_length. The last (incomplete) group of samples is kept in the
+    buffer to be combined with future samples, avoiding short packed sequences.
+    """
 
     def __init__(
         self,
@@ -26,46 +31,33 @@ class SamplePacker:
         self.buffer_size = buffer_size
         self.batch_size = batch_size
 
-        self.sample_buffer: deque = deque()
-        self.packed_samples: deque = deque()
+        self.sample_buffer: deque = deque()  # raw samples
+        self.packed_samples: deque = deque()  # packed samples ready to be yielded
 
-    def _pack_buffered_samples(self) -> list[dict[str, Any]]:
-        """Pack buffered samples into optimal sequences."""
+    def _pack_buffered_samples(self, flush: bool = False) -> None:
+        """Pack buffered samples into sequences.
+
+        When flush=False, the last incomplete group stays in the buffer
+        to be combined with future samples.
+        """
         if not self.sample_buffer:
-            return []
+            return
 
         samples = sorted(
             self.sample_buffer, key=lambda x: len(x["input_ids"]), reverse=True
         )
+        self.sample_buffer.clear()
 
-        packed_sequences = []
         current_sequence = []
         current_length = 0
 
         for sample in samples:
             sample_length = len(sample["input_ids"])
 
-            if sample_length > self.max_seq_length:
-                logger.warning(
-                    f"Sample length {sample_length} exceeds max_seq_length "
-                    f"{self.max_seq_length}, will be skipped"
-                )
-                continue
-
             if current_sequence and (
                 current_length + sample_length > self.max_seq_length
             ):
-                packed_sequences.append(
-                    {
-                        "input_ids": torch.cat(
-                            [s["input_ids"] for s in current_sequence]
-                        ),
-                        "labels": torch.cat([s["labels"] for s in current_sequence]),
-                        "pixel_values": [
-                            img for s in current_sequence for img in s["pixel_values"]
-                        ],
-                    }
-                )
+                self.packed_samples.append(self._merge_samples(current_sequence))
                 current_sequence = []
                 current_length = 0
 
@@ -73,45 +65,34 @@ class SamplePacker:
             current_length += sample_length
 
         if current_sequence:
-            packed_sequences.append(
-                {
-                    "input_ids": torch.cat([s["input_ids"] for s in current_sequence]),
-                    "labels": torch.cat([s["labels"] for s in current_sequence]),
-                    "pixel_values": [
-                        img for s in current_sequence for img in s["pixel_values"]
-                    ],
-                }
-            )
+            if flush:
+                self.packed_samples.append(self._merge_samples(current_sequence))
+            else:
+                self.sample_buffer.extend(current_sequence)
 
-        self.sample_buffer.clear()
-        return packed_sequences
+    @staticmethod
+    def _merge_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "input_ids": torch.cat([s["input_ids"] for s in samples]),
+            "labels": torch.cat([s["labels"] for s in samples]),
+            "pixel_values": [img for s in samples for img in s["pixel_values"]],
+        }
 
     def add_sample(self, sample: dict[str, Any]) -> None:
-        """Add a sample to the buffer."""
+        """Add a sample to the buffer. Triggers packing when buffer is full."""
         self.sample_buffer.append(sample)
-
         if len(self.sample_buffer) >= self.buffer_size:
-            packed = self._pack_buffered_samples()
-            self.packed_samples.extend(packed)
+            self._pack_buffered_samples()
 
     def has_batch_ready(self) -> bool:
-        """Check if a full batch is ready."""
         return len(self.packed_samples) >= self.batch_size
 
     def get_next_batch(self) -> list[dict[str, Any]] | None:
-        """Get next batch of packed samples if available."""
+        """Get next batch of packed samples if a full batch is available."""
         if not self.has_batch_ready():
-            if self.sample_buffer:
-                packed = self._pack_buffered_samples()
-                self.packed_samples.extend(packed)
+            return None
+        return [self.packed_samples.popleft() for _ in range(self.batch_size)]
 
-            if not self.has_batch_ready():
-                return None
-
-        batch = []
-        for _ in range(self.batch_size):
-            if not self.packed_samples:
-                break
-            batch.append(self.packed_samples.popleft())
-
-        return batch
+    def flush(self) -> None:
+        """Pack and yield all remaining samples, including leftovers."""
+        self._pack_buffered_samples(flush=True)
