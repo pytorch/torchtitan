@@ -67,7 +67,7 @@ def parallelize_llama(
     joint_custom_passes = get_joint_custom_passes_from_config(parallel_dims, job_config)
 
     # Get compiler passes from config
-    compiler_passes = get_compiler_passes_from_config(model, job_config)
+    compiler_passes = get_compiler_passes_from_config(model, job_config, parallel_dims)
 
     # Create compilers with specified passes
     fw_compiler, bw_compiler = make_compiler_with_passes(

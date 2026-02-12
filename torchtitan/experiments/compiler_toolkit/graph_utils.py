@@ -20,7 +20,11 @@ from torch._guards import tracing, TracingContext
 from torch.distributed.tensor import DTensor
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.compiler_toolkit.common_utils import end_with_pass
+from torchtitan.experiments.compiler_toolkit.common_utils import (
+    create_extra_fsdp_pg,
+    end_with_pass,
+    get_extra_fsdp_pg_name,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -388,13 +392,18 @@ def validate_pass_names(pass_names: list[str], joint_pass_names: list[str]) -> N
             )
 
 
-def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfig):
+def get_compiler_passes_from_config(
+    model: torch.nn.Module,
+    job_config: JobConfig,
+    parallel_dims: ParallelDims,
+):
     """
     Extract and validate compiler passes from job config.
 
     Args:
         model: The model being compiled
         job_config: Job configuration containing compile.passes and compile.joint_passes
+        parallel_dims: Parallelism dimensions (required for separate_ag_pg pass)
 
     Returns:
         List of compiler pass functions
@@ -424,6 +433,22 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
                 f"Available compiler passes: {list(AVAILABLE_COMPILER_PASSES.keys())}"
             )
         if pass_name == "transformer_block_bucketing":
+            from torchtitan.experiments.compiler_toolkit.passes import (
+                reassign_to_pg_pass,
+            )
+
+            create_extra_fsdp_pg(parallel_dims)
+            fsdp_mesh = parallel_dims.get_mesh("fsdp")
+            fsdp_pg = fsdp_mesh.get_group()
+            fsdp_pg_name = fsdp_pg.group_name
+            extra_pg_name = get_extra_fsdp_pg_name(fsdp_pg_name)
+            compiler_passes.append(
+                functools.partial(
+                    reassign_to_pg_pass,
+                    source_pg_name=fsdp_pg_name,
+                    target_pg_name=extra_pg_name,
+                )
+            )
             compiler_passes.append(
                 functools.partial(
                     AVAILABLE_COMPILER_PASSES[pass_name],

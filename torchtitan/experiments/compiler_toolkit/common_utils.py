@@ -8,10 +8,13 @@ from contextlib import contextmanager
 from typing import Callable
 
 import torch
+import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate
 from torch.utils._pytree import register_pytree_node, tree_map
 
 from torchtitan.config import JobConfig
+from torchtitan.distributed import ParallelDims
+from torchtitan.tools.logging import logger
 
 
 @contextmanager
@@ -64,3 +67,40 @@ def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
         and (last_pass_name := getattr(passes[-1], "__name__", None))
         and (last_pass_name in names)
     )
+
+
+# Maps original FSDP group_name -> extra PG group_name
+_EXTRA_FSDP_PG_REGISTRY: dict[str, str] = {}
+
+
+def create_extra_fsdp_pg(parallel_dims: ParallelDims) -> None:
+    """Create an extra process group mirroring the FSDP topology.
+
+    This creates a new NCCL process group with the same ranks as each FSDP
+    sub-group but a different communicator, giving it a separate CUDA stream.
+    """
+    if not parallel_dims.fsdp_enabled:
+        logger.info("FSDP not enabled, skipping extra PG creation")
+        return
+
+    fsdp_mesh = parallel_dims.get_mesh("fsdp")
+    fsdp_pg = fsdp_mesh.get_group()
+    original_name = fsdp_pg.group_name
+
+    if original_name in _EXTRA_FSDP_PG_REGISTRY:
+        logger.info("Extra FSDP PG already created, skipping")
+        return
+
+    ranks = dist.get_process_group_ranks(fsdp_pg)
+    pg = dist.new_group(
+        ranks=ranks, group_desc="fsdp_extra", use_local_synchronization=True
+    )
+    _EXTRA_FSDP_PG_REGISTRY[original_name] = pg.group_name
+    logger.info(
+        f"Created extra FSDP PG " f"(original: {original_name}, extra: {pg.group_name})"
+    )
+
+
+def get_extra_fsdp_pg_name(original_pg_name: str) -> str | None:
+    """Look up the extra PG name for a given original FSDP PG name."""
+    return _EXTRA_FSDP_PG_REGISTRY.get(original_pg_name)
