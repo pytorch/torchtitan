@@ -9,7 +9,6 @@
 from dataclasses import dataclass
 from typing import Any
 
-import einops as E
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
@@ -17,6 +16,7 @@ from torchtitan.tools.logging import logger
 
 from ..model.args import SpecialTokens
 
+from .utils.image import image_to_patches
 from .utils.text import pad_input_ids_and_labels_to_target_batch_size, pad_text_batch
 
 
@@ -54,59 +54,29 @@ class MultiModalCollatorNLD:
             all_images: list of image tensors, each of shape (T, H, W, C)
 
         Returns:
-            pixel_values: Padded patches (num_images, max_seq_len, patch_dim) or None
+            pixel_values: Padded patches (num_images, max_num_patch, patch_dim) or None
             grid_thw: Grid dimensions (num_images, 3) with [T, H_patches, W_patches] or None
         """
         if not all_images:
             return None, None
 
-        all_patches = []
-        grid_thw_list = []
-        merge_size = self.spatial_merge_size
-
-        for img in all_images:
-            T, H, W, C = img.shape
-            ps = self.patch_size
-            ts = self.temporal_patch_size
-
-            # Pad temporal dimension if needed
-            if T % ts != 0:
-                pad_t = ts - (T % ts)
-                img = torch.nn.functional.pad(img, (0, 0, 0, 0, 0, 0, 0, pad_t))
-                T = img.shape[0]
-
-            # Calculate grid dimensions (in patches, before merging)
-            T_patches = T // ts
-            H_patches = H // ps
-            W_patches = W // ps
-
-            # Convert to patches in block-order (matching position embedding order)
-            patches = E.rearrange(
-                img,
-                "(t pt) (bh m ph) (bw n pw) c -> (t bh bw m n) (pt ph pw c)",
-                pt=ts,
-                ph=ps,
-                pw=ps,
-                m=merge_size,
-                n=merge_size,
-            )
-
-            all_patches.append(patches)
-            grid_thw_list.append(torch.tensor([T_patches, H_patches, W_patches]))
-
-        if not all_patches:
-            return None, None
+        results = [
+            image_to_patches(img, self.patch_size, self.temporal_patch_size, self.spatial_merge_size)
+            for img in all_images
+        ]
+        all_patches = [r[0] for r in results]
+        grid_thw_list = [r[1] for r in results]
 
         # Pad to same length for batched processing
-        # Ensure max_seq_len is divisible by spatial_merge_size^2 for merger
-        merge_unit = merge_size ** 2
-        max_seq_len = max(p.shape[0] for p in all_patches)
-        if max_seq_len % merge_unit != 0:
-            max_seq_len = ((max_seq_len // merge_unit) + 1) * merge_unit
+        # Ensure max_num_patch is divisible by spatial_merge_size^2 for merger
+        merge_unit = self.spatial_merge_size ** 2
+        max_num_patch = max(p.shape[0] for p in all_patches)
+        if max_num_patch % merge_unit != 0:
+            max_num_patch = ((max_num_patch // merge_unit) + 1) * merge_unit
 
         patch_dim = all_patches[0].shape[1]
 
-        padded_patches = torch.zeros(len(all_patches), max_seq_len, patch_dim)
+        padded_patches = torch.zeros(len(all_patches), max_num_patch, patch_dim)
         for i, patches in enumerate(all_patches):
             padded_patches[i, :patches.shape[0]] = patches
 
@@ -119,6 +89,7 @@ class MultiModalCollatorNLD:
         batch: list[dict[str, Any]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Process text inputs and labels from batch."""
+        # Pad sequences to the longest in the batch
         input_ids = pad_sequence(
             [s["input_ids"] for s in batch],
             batch_first=True,
@@ -127,9 +98,9 @@ class MultiModalCollatorNLD:
         labels = pad_sequence(
             [s["labels"] for s in batch],
             batch_first=True,
-            padding_value=self.special_tokens.pad_id,
+            padding_value=self.special_tokens.ignore_id,
         )
-
+        # Pad or truncate to seq_len + 1
         input_ids, labels = pad_text_batch(
             input_ids,
             labels,
@@ -137,6 +108,7 @@ class MultiModalCollatorNLD:
             padding_idx=self.special_tokens.pad_id,
             ignore_idx=self.special_tokens.ignore_id,
         )
+        # Pad dummy rows to reach target batch size
         input_ids, labels = pad_input_ids_and_labels_to_target_batch_size(
             input_ids,
             labels,

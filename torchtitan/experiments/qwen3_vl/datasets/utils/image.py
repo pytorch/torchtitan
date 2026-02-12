@@ -33,7 +33,7 @@ def process_image(
         image: PIL Image, bytes, or URL string
         patch_size: Size of each spatial patch
         merge_size: Spatial merge size factor
-        temporal_patch_size: Temporal patch size
+        temporal_patch_size: Temporal patch size for videos
         max_patch_per_image: Maximum patches allowed per image
         min_patch_per_image: Minimum patches per image
 
@@ -126,40 +126,16 @@ def _resize_image_by_patch_count(
     original_width, original_height = image.size
     factor = patch_size * merge_size
 
-    current_patches = (original_height * original_width) // (factor * factor)
+    # Ensure both dimensions are at least factor (required by _smart_resize)
+    if original_height < factor or original_width < factor:
+        scale_factor = max(factor / original_width, factor / original_height)
+        original_width = int(original_width * scale_factor)
+        original_height = int(original_height * scale_factor)
 
-    if current_patches < min_patch_per_image:
-        if current_patches == 0:
-            scale_factor = max(factor / original_width, factor / original_height)
-        else:
-            scale_factor = math.sqrt(min_patch_per_image / current_patches)
-
-        new_width = int(original_width * scale_factor)
-        new_height = int(original_height * scale_factor)
-
-        resized_height, resized_width = _smart_resize(
-            new_height,
-            new_width,
-            factor,
-            max_patch_per_image,
-        )
-        return image.resize((resized_width, resized_height))
-
-    elif current_patches <= max_patch_per_image:
-        resized_height, resized_width = _smart_resize(
-            original_height, original_width, factor, max_patch_per_image
-        )
-        return image.resize((resized_width, resized_height))
-
-    else:
-        scale_factor = math.sqrt(max_patch_per_image / current_patches)
-        new_width = int(original_width * scale_factor)
-        new_height = int(original_height * scale_factor)
-
-        resized_height, resized_width = _smart_resize(
-            new_height, new_width, factor, max_patch_per_image
-        )
-        return image.resize((resized_width, resized_height))
+    resized_height, resized_width = _smart_resize(
+        original_height, original_width, factor, max_patch_per_image, min_patch_per_image
+    )
+    return image.resize((resized_width, resized_height))
 
 
 def calculate_image_tokens(
@@ -180,97 +156,58 @@ def calculate_image_tokens(
     return total_tokens, tokens_per_row, num_rows
 
 
-def convert_to_patches(
-    pixel_values: torch.Tensor,
+def image_to_patches(
+    img: torch.Tensor,
     patch_size: int,
-    temporal_patch_size: int = 2,
+    temporal_patch_size: int,
+    merge_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Convert single image/video tensor to patches and generate coordinate grids.
+    """Convert a single image/video tensor to patches in block-order.
 
     Args:
-        pixel_values: Tensor of shape (T, H, W, C)
-        patch_size: Spatial patch size (height and width)
+        img: Image tensor of shape (T, H, W, C)
+        patch_size: Spatial patch size
         temporal_patch_size: Temporal patch size
+        merge_size: Spatial merge size
 
     Returns:
-        patches: Tensor of shape (L, D)
-        grid: Tensor of shape (L, 3) containing (t, h, w) coordinates
+        patches: (num_patches, patch_dim) flattened patch vectors
+        grid_thw: (3,) tensor of [T_patches, H_patches, W_patches]
     """
-    T, H, W, C = pixel_values.shape
+    T, H, W, C = img.shape
     ps = patch_size
     ts = temporal_patch_size
-    device = pixel_values.device
 
     # Pad temporal dimension if needed
     if T % ts != 0:
         pad_t = ts - (T % ts)
-        pixel_values = torch.nn.functional.pad(pixel_values, (0, 0, 0, 0, 0, 0, 0, pad_t))
-        T = pixel_values.shape[0]
+        img = torch.nn.functional.pad(img, (0, 0, 0, 0, 0, 0, 0, pad_t))
+        T = img.shape[0]
 
-    if H % ps != 0 or W % ps != 0:
-        raise ValueError(
-            f"Spatial dimensions {H},{W} must be divisible by patch_size {ps}"
-        )
+    # Calculate grid dimensions (in raw patches, before merging)
+    T_patches = T // ts
+    H_patches = H // ps
+    W_patches = W // ps
 
+    # Convert to patches in block-order (matching position embedding order)
+    # From 4d to 2d
+    # On the left side:
+    #   T = t × pt
+    #   H = bh × m x ph
+    #   W = bw x n x pw
+    #   c = c, channels
+    # On the right side:
+    #   (t bh bw m n), sequence of tokens before merging
+    #   (pt ph pw c), patch dimensions
     patches = E.rearrange(
-        pixel_values,
-        "(t pt) (h ph) (w pw) c -> (t h w) (pt ph pw c)",
+        img,
+        "(t pt) (bh m ph) (bw n pw) c -> (t bh bw m n) (pt ph pw c)",
         pt=ts,
         ph=ps,
         pw=ps,
+        m=merge_size,
+        n=merge_size,
     )
 
-    # Generate coordinate grid
-    coords = torch.meshgrid(
-        torch.arange(T // ts, device=device),
-        torch.arange(H // ps, device=device),
-        torch.arange(W // ps, device=device),
-        indexing="ij",
-    )
-    grid = E.rearrange(torch.stack(coords), "coords t h w -> (t h w) coords")
-
-    return patches, grid
-
-
-def pad_patches(
-    patches: torch.Tensor,
-    grids: torch.Tensor,
-    max_patches: int,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """Pad or truncate patches and grids to max_patches length."""
-    L, D = patches.shape
-
-    if L == max_patches:
-        return patches, grids
-    elif L < max_patches:
-        pad_len = max_patches - L
-        zero_patches = torch.zeros(pad_len, D, device=patches.device)
-        invalid_grids = torch.full((pad_len, 3), -1, device=grids.device)
-        return (
-            torch.cat([patches, zero_patches], 0),
-            torch.cat([grids, invalid_grids], 0),
-        )
-    else:
-        logger.error(
-            f"Truncating Image Patches from {L} to {max_patches} should not happen."
-        )
-        return None, None
-
-
-def pad_empty_images_to_target_batch_size(
-    patches: torch.Tensor,
-    grids: torch.Tensor,
-    max_images: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pad vision encoder batch with blank images if needed."""
-    N, L, D = patches.shape
-    if N >= max_images:
-        return patches, grids
-
-    blank_count = max_images - N
-    blank_patches = torch.zeros(blank_count, L, D, device=patches.device)
-    blank_grids = torch.full((blank_count, L, 3), -1, device=grids.device)
-    return (
-        torch.cat([patches, blank_patches], dim=0),
-        torch.cat([grids, blank_grids], dim=0),
-    )
+    grid_thw = torch.tensor([T_patches, H_patches, W_patches])
+    return patches, grid_thw

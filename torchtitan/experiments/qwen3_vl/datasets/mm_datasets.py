@@ -42,7 +42,33 @@ def _process_mm_sample(
     spatial_merge_size: int,
     special_tokens: SpecialTokens,
 ) -> dict[str, Any] | None:
-    """Common processing logic for multimodal samples."""
+    """Common processing logic for multimodal samples.
+
+    Args:
+        texts: List of strings with None indicating image positions
+        images: List of image bytes with None for text positions
+        tokenizer: Tokenizer for text processing
+        patch_size: Size of image patches
+        max_patch_per_image: Maximum patches per image
+        spatial_merge_size: merge 2D image patches to reduce LLM's sequence length.
+            - if 1 (default): no merge, effectively NoOp
+            - if 2: 2x2=4 image patches will be reduced to 1 LLM visual token
+
+    Returns:
+        Dict with:
+            - input_ids: Tensor of token IDs
+            - labels: Tensor of label IDs
+            - pixel_values: List of processed image tensors
+
+    Example:
+        Interleaved format:
+        texts = [text1, None, text2, None, text3]
+        images = [None, img1, None, img2, None]
+
+        Image-text pair format as a special case of interleaved:
+        texts = [None, text]
+        images = [image, None]
+    """
     try:
         texts = [texts] if isinstance(texts, str) else texts
         images = [images] if isinstance(images, bytes) else images
@@ -52,10 +78,10 @@ def _process_mm_sample(
 
         processed_images = []
         image_dimensions = []
-        texts_list = list(texts)
 
         for idx, img in enumerate(images):
             if img is not None:
+                # Resize (to multiples of patch_size x merge_size) and normalize images
                 processed_img = process_image(
                     img,
                     patch_size=patch_size,
@@ -64,23 +90,26 @@ def _process_mm_sample(
                     max_patch_per_image=max_patch_per_image,
                 )
                 if processed_img is not None:
-                    num_tokens, width, height = calculate_image_tokens(
+                    # Each (patch_size x temporal_patch_size) x (patch_size x temporal_patch_size)
+                    # square block of pixels is mapped to one image token
+                    num_tokens, tokens_per_row, num_rows = calculate_image_tokens(
                         processed_img,
                         patch_size=patch_size,
                         spatial_merge_size=spatial_merge_size,
                     )
                     processed_images.append(processed_img)
-                    image_dimensions.append((num_tokens, width, height))
-                    texts_list[idx] = special_tokens.img_token
+                    image_dimensions.append((num_tokens, tokens_per_row, num_rows))
+                    texts[idx] = None
                 else:
-                    texts_list[idx] = ""
+                    texts[idx] = ""
 
         if len(processed_images) != len([_ for _ in images if _ is not None]):
             logger.warning("Cannot process all images for sample. Dropping")
             return None
 
+        # Replace an image placeholder, i.e., None, by a sequence of image token placeholders
         processed_text = process_text_with_images(
-            texts_list, image_dimensions, tokenizer, special_tokens, add_eos=True
+            texts, image_dimensions, tokenizer, special_tokens, add_eos=True
         )
 
         tokens = tokenizer.encode(processed_text)
@@ -118,7 +147,7 @@ def _process_obelics_sample(
     max_patch_per_image: int,
     special_tokens: SpecialTokens,
 ) -> dict[str, Any] | None:
-    """Process a sample from the OBELICS dataset."""
+    """Process a sample from the OBELICS dataset (interleaved text and images)."""
     return _process_mm_sample(
         texts=sample.get("texts", []),
         images=sample.get("images", []),
@@ -140,7 +169,7 @@ def _process_cc12_wd_sample(
     max_patch_per_image: int,
     special_tokens: SpecialTokens,
 ) -> dict[str, Any] | None:
-    """Process a sample from the CC12-WD dataset."""
+    """Process a sample from the CC12-WD dataset (text-image pairs)."""
     text = sample.get("txt", "")
     image = sample.get("jpg", None)
 
@@ -243,6 +272,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
             )
         self.infinite = infinite
         self._sample_idx = 0
+        self._hf_state_restored = False
 
     def __iter__(self):
         while True:
@@ -282,13 +312,14 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
                     logger.warning(f"Error in iteration: {e}")
                     continue
 
+            # Flush leftovers in packer when raw samples are exhausted
             if self.enable_packing:
-                while True:
-                    batch = self.packer.get_next_batch()
-                    if batch:
-                        yield from batch
-                    else:
-                        break
+                self.packer.flush()
+                while self.packer.has_batch_ready():
+                    yield from self.packer.get_next_batch()
+                # Drain any remainder that doesn't fill a full batch
+                while self.packer.packed_samples:
+                    yield self.packer.packed_samples.popleft()
 
             if not self.infinite:
                 break
@@ -297,15 +328,24 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
 
     def _get_data_iter(self):
         try:
-            if not hasattr(self._data, "iterable_dataset"):
-                if isinstance(self._data, Dataset) and (
-                    self._sample_idx == len(self._data)
-                ):
+            # If HF dataset state was restored, iterator already starts
+            # at the right position — no need to skip.
+            if self._hf_state_restored:
+                self._hf_state_restored = False
+                return iter(self._data)
+
+            # Map-style dataset: use random access to skip directly
+            if isinstance(self._data, Dataset):
+                if self._sample_idx >= len(self._data):
                     return iter([])
+                return iter(self._data.select(range(self._sample_idx, len(self._data))))
 
+            # Streaming dataset without restored state: brute-force skip
             it = iter(self._data)
-
             if self._sample_idx > 0:
+                logger.info(
+                    f"Skipping {self._sample_idx} samples to resume from checkpoint"
+                )
                 for _ in range(self._sample_idx):
                     next(it)
 
@@ -316,6 +356,11 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
 
     def load_state_dict(self, state_dict):
         self._sample_idx = state_dict["sample_idx"]
+
+        # Restore HF dataset state if available, enabling fast resume
+        if "hf_dataset_state" in state_dict and hasattr(self._data, "load_state_dict"):
+            self._data.load_state_dict(state_dict["hf_dataset_state"])
+            self._hf_state_restored = True
 
         if (
             self.enable_packing
@@ -330,6 +375,10 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
 
     def state_dict(self):
         state = {"sample_idx": self._sample_idx}
+
+        # Save HF dataset state for fast resume if supported
+        if hasattr(self._data, "state_dict"):
+            state["hf_dataset_state"] = self._data.state_dict()
 
         if self.enable_packing and hasattr(self, "packer"):
             state["packer_state"] = {
@@ -347,7 +396,18 @@ def build_mm_dataloader(
     job_config: JobConfig,
     infinite: bool = True,
 ) -> ParallelAwareDataloader:
-    """Build a data loader for Qwen3-VL multimodal datasets."""
+    """Build a data loader for Qwen3-VL multimodal datasets.
+
+    Args:
+        dp_world_size: Data parallel world size.
+        dp_rank: Data parallel rank.
+        tokenizer: Tokenizer for text processing.
+        job_config: Job configuration containing dataset and DataLoader settings.
+        infinite: Whether to loop infinitely.
+
+    Returns:
+        DataLoader with appropriate parallelism handling.
+    """
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
