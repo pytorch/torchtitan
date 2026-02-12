@@ -17,6 +17,20 @@ MXFP8_TOKEN_GROUP_ALIGNMENT_SIZE_M = 32
 ValidTokenGroupAlignmentSize = Literal[8, 16, 32]
 
 
+def get_mxfp8_pad_multiple() -> int | None:
+    """Return the pad_multiple needed for MXFP8 grouped GEMMs, or None if not active.
+
+    When TOKEN_GROUP_ALIGN_SIZE_M has been set to the MXFP8 block size (32),
+    dispatch kernels must pad per-expert token groups to that multiple so the
+    quantisation kernel's row-count requirement is satisfied.
+    """
+    return (
+        MXFP8_TOKEN_GROUP_ALIGNMENT_SIZE_M
+        if TOKEN_GROUP_ALIGN_SIZE_M == MXFP8_TOKEN_GROUP_ALIGNMENT_SIZE_M
+        else None
+    )
+
+
 def set_token_group_alignment_size_m(
     alignment_size: ValidTokenGroupAlignmentSize,
 ) -> None:
