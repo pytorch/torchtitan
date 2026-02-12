@@ -577,9 +577,7 @@ class Transformer(ModelProtocol):
             case "sdpa":
                 raise TypeError("SDPA attention does not require attention masks")
             case _:
-                raise ValueError(
-                    f"Unknown attention type: {self.model_args.attn_type}"
-                )
+                raise ValueError(f"Unknown attention type: {self.model_args.attn_type}")
 
     def forward(
         self,
