@@ -699,6 +699,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 ),
             ),
         ):
+            assert self.dataloader is not None, "Dataloader is not initialized"
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():
                 self.step += 1
