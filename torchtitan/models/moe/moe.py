@@ -95,6 +95,12 @@ class MoEArgs:
     # Type is Any to avoid import cycle, runtime type is DeepEP | None
     deepep_config: Any = None
 
+    # Least-Loaded Expert Parallelism (LLEP)
+    use_llep: bool = False
+    llep_max_tokens_factor: float = 1.1  # alpha: max GPU capacity factor
+    llep_min_tokens_per_gemm: int = 1024  # min tokens per GEMM to spill
+    llep_adaptive_threshold: float = 0.0  # lambda: 0 = always use LPT
+
     def validate_deepep_config(self) -> None:
         """Validate DeepEP configuration consistency.
 
@@ -850,6 +856,15 @@ class MoE(nn.Module):
         super().__init__()
 
         num_experts = moe_args.num_experts
+
+        # LLEP state (set by apply_moe_ep_tp when use_llep=True and EP active)
+        self.use_llep = moe_args.use_llep
+        self._llep_enabled = False
+        self._ep_group = None
+        self._llep_max_tokens_factor = moe_args.llep_max_tokens_factor
+        self._llep_min_tokens_per_gemm = moe_args.llep_min_tokens_per_gemm
+        self._llep_adaptive_threshold = moe_args.llep_adaptive_threshold
+
         if peft_config is not None and peft_config.enable_peft:
             # TODO:
             # Update to deepep here
@@ -958,6 +973,32 @@ class MoE(nn.Module):
             self.tokens_per_expert.add_(num_tokens_per_expert)
             if self.log_expert_routing:
                 self.expert_routing_counter.add_(num_tokens_per_expert)
+
+        # LLEP path: bypass standard dispatch/combine, handle routing in llep_moe_forward
+        if self._llep_enabled and self._ep_group is not None:
+            from torchtitan.distributed.llep import llep_moe_forward
+
+            routed_output = llep_moe_forward(
+                hidden_states=x,
+                top_scores=top_scores,
+                selected_experts_indices=selected_experts_indices,
+                w1=self.experts.w1,
+                w2=self.experts.w2,
+                w3=self.experts.w3,
+                ep_group=self._ep_group,
+                num_experts=self.experts.num_experts,
+                score_before_experts=self.score_before_experts,
+                max_tokens_factor=self._llep_max_tokens_factor,
+                min_tokens_per_gemm=self._llep_min_tokens_per_gemm,
+                adaptive_threshold=self._llep_adaptive_threshold,
+            )
+            # shared expert
+            out = self.shared_experts(x) if self.shared_experts is not None else None
+            if out is not None and self.shared_gate is not None:
+                out = F.sigmoid(self.shared_gate(x)) * out
+            if out is None:
+                return routed_output.reshape(bs, slen, dim)
+            return (out + routed_output).reshape(bs, slen, dim)
 
         # top_scores_experts_sorted and token_indices_experts_sorted shape (bs*slen*top_k,)
         # num_tokens_per_expert shape (num_experts,)

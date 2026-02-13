@@ -49,6 +49,7 @@ from torchtitan.distributed.expert_parallel import (
     BaseExpertParallel,
     DeepEPExpertParallel,
     ExpertParallel,
+    ExpertParallelLLEP,
     ExpertTensorParallel,
     ReordererSequenceParallel,
     TensorParallel,
@@ -675,6 +676,10 @@ def apply_moe_ep_tp(
                 parallelize_plan=moe_layer_plan,
             )
 
+        # Check if LLEP is enabled on this MoE layer
+        # pyrefly: ignore [missing-attribute]
+        use_llep = getattr(transformer_block.moe, "use_llep", False)
+
         experts_mesh, experts_plan = None, None
         if ep_mesh is None:
             assert ep_etp_mesh is None
@@ -684,7 +689,17 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
-            if use_deepep:
+            if use_llep:
+                # LLEP: only shard weights, no dispatch/combine hooks
+                experts_plan = ExpertParallelLLEP()
+                # pyrefly: ignore [missing-attribute]
+                transformer_block.moe._llep_enabled = True
+                # pyrefly: ignore [missing-attribute]
+                transformer_block.moe._ep_group = ep_mesh.get_group()
+                logger.info(
+                    "Enabling Least-Loaded Expert Parallelism (LLEP) for expert parallelism"
+                )
+            elif use_deepep:
                 # pyrefly: ignore [missing-attribute]
                 score_before_experts = transformer_block.moe.score_before_experts
 
