@@ -17,6 +17,7 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.compiler_toolkit.common_utils import (
     disable_compile,
+    maybe_disable_eager_ac,
     parallelize_inputs,
     register_blockmask_pytree_node,
 )
@@ -68,6 +69,8 @@ def parallelize_llama(
     annotate_llama()
 
     register_blockmask_pytree_node()
+
+    maybe_disable_eager_ac(compile_config, ac_config)
 
     # Disable torch.compile over the model in the compiler toolkit style workflow
     with disable_compile(compile_config):
