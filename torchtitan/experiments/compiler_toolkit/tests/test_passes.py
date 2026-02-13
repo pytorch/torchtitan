@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import operator
+
 import torch
 import torch.nn as nn
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
@@ -12,11 +14,15 @@ from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
 )
 from torch.testing._internal.common_fsdp import FSDPTest
-from torch.utils.checkpoint import checkpoint
+from torch.testing._internal.common_utils import TestCase
+from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.compiler_toolkit.graph_utils import export_joint
-from torchtitan.experiments.compiler_toolkit.passes import reassign_to_pg_pass
+from torchtitan.experiments.compiler_toolkit.passes import (
+    apply_sac_pass,
+    reassign_to_pg_pass,
+)
 from torchtitan.experiments.simple_fsdp.simple_fsdp import data_parallel
 
 
@@ -198,6 +204,128 @@ class TestReassignToPgPass(FSDPTest):
 
         self.assertEqual(ag_old, 0)
         self.assertEqual(ag_new, ag_before)
+
+
+class TestApplySACPass(TestCase):
+    """Unit tests for the apply_sac_pass joint graph pass."""
+
+    def _build_gm(self, op_targets):
+        """Build a GraphModule with a chain of call_function nodes.
+
+        Each op in op_targets becomes a call_function node. The graph
+        structure is: placeholder(x), placeholder(y) -> op1 -> op2 -> ... -> output.
+        """
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        y = graph.placeholder("y")
+        last = x
+        for target in op_targets:
+            if target is operator.getitem:
+                last = graph.call_function(target, args=(last, 0))
+            else:
+                last = graph.call_function(target, args=(last, y))
+        graph.output(last)
+        return torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    def _get_call_function_nodes(self, gm):
+        """Return all call_function nodes from the graph."""
+        return [n for n in gm.graph.nodes if n.op == "call_function"]
+
+    def test_non_save_ops_marked_recompute(self):
+        """Ops not in the save list should be marked PREFER_RECOMPUTE."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ]
+        )
+        apply_sac_pass(gm)
+        for node in self._get_call_function_nodes(gm):
+            self.assertEqual(node.meta["recompute"], CheckpointPolicy.PREFER_RECOMPUTE)
+
+    def test_save_ops_marked_must_save(self):
+        """Non-mm ops in the save list should be marked MUST_SAVE."""
+        custom_save = {torch.ops.aten.add.Tensor}
+        gm = self._build_gm([torch.ops.aten.add.Tensor])
+        apply_sac_pass(gm, op_list_to_save=custom_save)
+        nodes = self._get_call_function_nodes(gm)
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+    def test_getitem_nodes_skipped(self):
+        """operator.getitem nodes should not receive any annotation."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.add.Tensor,
+                operator.getitem,
+                torch.ops.aten.relu.default,
+            ]
+        )
+        apply_sac_pass(gm)
+        for node in self._get_call_function_nodes(gm):
+            if node.target is operator.getitem:
+                self.assertNotIn("recompute", node.meta)
+                self.assertNotIn("ac_graph_id", node.meta)
+
+    def test_ac_graph_id_set(self):
+        """All annotated nodes should have ac_graph_id = 0."""
+        gm = self._build_gm(
+            [
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.mm.default,
+                torch.ops.aten.relu.default,
+            ]
+        )
+        apply_sac_pass(gm)
+        for node in self._get_call_function_nodes(gm):
+            if node.target is not operator.getitem:
+                self.assertEqual(node.meta["ac_graph_id"], 0)
+
+    def test_custom_op_list_to_save(self):
+        """A custom op_list_to_save should override the defaults."""
+        custom_save = {torch.ops.aten.relu.default}
+        gm = self._build_gm(
+            [
+                torch.ops.aten.add.Tensor,
+                torch.ops.aten.relu.default,
+            ]
+        )
+        apply_sac_pass(gm, op_list_to_save=custom_save)
+        policies = {
+            n.target: n.meta["recompute"] for n in self._get_call_function_nodes(gm)
+        }
+        self.assertEqual(
+            policies[torch.ops.aten.add.Tensor], CheckpointPolicy.PREFER_RECOMPUTE
+        )
+        self.assertEqual(
+            policies[torch.ops.aten.relu.default], CheckpointPolicy.MUST_SAVE
+        )
+
+    def test_mixed_mm_and_save_ops(self):
+        """Graph with both mm and other save ops are annotated correctly."""
+        custom_save = {torch.ops.aten.mm.default, torch.ops.aten.max.default}
+        gm = self._build_gm(
+            [
+                torch.ops.aten.mm.default,  # 1st mm -> MUST_SAVE
+                torch.ops.aten.max.default,  # in save list -> MUST_SAVE
+                torch.ops.aten.mm.default,  # 2nd mm -> PREFER_RECOMPUTE
+                torch.ops.aten.add.Tensor,  # not in save list -> PREFER_RECOMPUTE
+                torch.ops.aten.mm.default,  # 3rd mm -> MUST_SAVE
+            ]
+        )
+        apply_sac_pass(gm, op_list_to_save=custom_save)
+        nodes = self._get_call_function_nodes(gm)
+        expected = [
+            (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
+            (torch.ops.aten.max.default, CheckpointPolicy.MUST_SAVE),
+            (torch.ops.aten.mm.default, CheckpointPolicy.PREFER_RECOMPUTE),
+            (torch.ops.aten.add.Tensor, CheckpointPolicy.PREFER_RECOMPUTE),
+            (torch.ops.aten.mm.default, CheckpointPolicy.MUST_SAVE),
+        ]
+        self.assertEqual(len(nodes), len(expected))
+        for node, (target, policy) in zip(nodes, expected):
+            self.assertEqual(node.target, target)
+            self.assertEqual(node.meta["recompute"], policy, f"node {node.name}")
 
 
 if __name__ == "__main__":
