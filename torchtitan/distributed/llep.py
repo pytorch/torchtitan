@@ -93,7 +93,10 @@ def compute_llep_lpt_plan(
     num_experts = global_expert_counts.size(0)
     device = global_expert_counts.device
 
-    total_tokens = global_expert_counts.sum().item()
+    # Single D2H transfer — avoid per-element .item() syncs
+    expert_counts_cpu = global_expert_counts.cpu().tolist()
+
+    total_tokens = sum(expert_counts_cpu)
     balanced_tokens = total_tokens // ep_size if ep_size > 0 else total_tokens
     max_tokens_per_gpu = (
         int(max_tokens_factor * balanced_tokens) if balanced_tokens > 0 else total_tokens
@@ -104,14 +107,14 @@ def compute_llep_lpt_plan(
     native_load_per_gpu = [0] * ep_size
     for expert_id in range(num_experts):
         native_gpu = expert_id // num_local_experts
-        native_load_per_gpu[native_gpu] += global_expert_counts[expert_id].item()
+        native_load_per_gpu[native_gpu] += expert_counts_cpu[expert_id]
 
     pending_native_load = list(native_load_per_gpu)
     assigned_load = [0] * ep_size
 
     # Sort experts by token count (LPT ordering)
     expert_counts_list = [
-        (e, int(global_expert_counts[e].item())) for e in range(num_experts)
+        (e, expert_counts_cpu[e]) for e in range(num_experts)
     ]
     expert_counts_sorted = sorted(expert_counts_list, key=lambda x: -x[1])
 
@@ -291,11 +294,10 @@ def compute_gpu_imbalance_ratio(
     num_local_experts: int,
 ) -> float:
     """Compute max_gpu_load / mean_gpu_load. Returns 1.0 for perfect balance."""
-    gpu_loads = torch.zeros(ep_size, device=global_expert_counts.device)
-    for expert_id in range(global_expert_counts.size(0)):
-        gpu_id = expert_id // num_local_experts
-        gpu_loads[gpu_id] += global_expert_counts[expert_id]
-    mean_load = gpu_loads.float().mean()
+    # Reshape and sum to get per-GPU loads in one op (no per-element indexing)
+    num_experts = global_expert_counts.size(0)
+    gpu_loads = global_expert_counts.view(ep_size, num_local_experts).sum(dim=1).float()
+    mean_load = gpu_loads.mean()
     if mean_load == 0:
         return 1.0
     return (gpu_loads.max() / mean_load).item()
@@ -327,9 +329,11 @@ def transfer_expert_weights(
     foreign_w2: dict[int, torch.Tensor] = {}
     foreign_w3: dict[int, torch.Tensor] = {}
 
-    handles = []
     w_shape = list(w1_local[0].shape)
     bytes_per_weight = w1_local[0].nelement() * w1_local[0].element_size()
+
+    # Build P2P op list for batch_isend_irecv (uses NCCL backend)
+    p2p_ops = []
 
     # Send native expert weights to helpers
     for expert_id, dst_rank in plan.weights_to_send:
@@ -339,9 +343,9 @@ def transfer_expert_weights(
             f"(local_idx={local_idx}) → rank {dst_rank} "
             f"| 3 tensors x {w_shape} = {3 * bytes_per_weight / 1024:.1f} KB"
         )
-        handles.append(dist.isend(w1_local[local_idx].contiguous(), dst_rank, group=ep_group))
-        handles.append(dist.isend(w2_local[local_idx].contiguous(), dst_rank, group=ep_group))
-        handles.append(dist.isend(w3_local[local_idx].contiguous(), dst_rank, group=ep_group))
+        p2p_ops.append(dist.P2POp(dist.isend, w1_local[local_idx].contiguous(), group_peer=dst_rank, group=ep_group))
+        p2p_ops.append(dist.P2POp(dist.isend, w2_local[local_idx].contiguous(), group_peer=dst_rank, group=ep_group))
+        p2p_ops.append(dist.P2POp(dist.isend, w3_local[local_idx].contiguous(), group_peer=dst_rank, group=ep_group))
 
     # Receive foreign expert weights from owners
     for expert_id, src_rank in plan.weights_to_receive:
@@ -354,16 +358,18 @@ def transfer_expert_weights(
         recv_w1 = torch.empty_like(w1_local[0])
         recv_w2 = torch.empty_like(w2_local[0])
         recv_w3 = torch.empty_like(w3_local[0])
-        handles.append(dist.irecv(recv_w1, src_rank, group=ep_group))
-        handles.append(dist.irecv(recv_w2, src_rank, group=ep_group))
-        handles.append(dist.irecv(recv_w3, src_rank, group=ep_group))
+        p2p_ops.append(dist.P2POp(dist.irecv, recv_w1, group_peer=src_rank, group=ep_group))
+        p2p_ops.append(dist.P2POp(dist.irecv, recv_w2, group_peer=src_rank, group=ep_group))
+        p2p_ops.append(dist.P2POp(dist.irecv, recv_w3, group_peer=src_rank, group=ep_group))
         foreign_w1[expert_id] = recv_w1
         foreign_w2[expert_id] = recv_w2
         foreign_w3[expert_id] = recv_w3
 
-    # Wait for all transfers
-    for h in handles:
-        h.wait()
+    # Execute all P2P ops as a batch (uses NCCL backend)
+    if p2p_ops:
+        handles = dist.batch_isend_irecv(p2p_ops)
+        for h in handles:
+            h.wait()
 
     if plan.weights_to_send or plan.weights_to_receive:
         logger.info(
@@ -621,6 +627,12 @@ def llep_moe_forward(
     num_local_experts = num_experts // ep_size
 
     device = hidden_states.device
+
+    # Ensure weights are on the same device as hidden_states (handles CPU offload)
+    if w1_local.device != device:
+        w1_local = w1_local.to(device)
+        w2_local = w2_local.to(device)
+        w3_local = w3_local.to(device)
     dtype = hidden_states.dtype
     num_tokens, dim = hidden_states.shape
     top_k = selected_experts_indices.shape[1]
@@ -650,10 +662,13 @@ def llep_moe_forward(
     if adaptive_threshold > 0:
         use_lpt = imbalance >= adaptive_threshold
 
+    # Single D2H for logging — reused by compute_llep_lpt_plan too
+    expert_counts_list = global_expert_counts.cpu().tolist()
+
     if ep_rank == 0:
         logger.info(
             f"[LLEP] tokens={num_tokens} top_k={top_k} "
-            f"expert_counts={global_expert_counts.tolist()} "
+            f"expert_counts={expert_counts_list} "
             f"imbalance={imbalance:.2f} use_lpt={use_lpt}"
         )
 
@@ -677,10 +692,10 @@ def llep_moe_forward(
         )
 
     if ep_rank == 0:
-        # Compute naive (before LLEP) GPU loads
+        # Compute naive (before LLEP) GPU loads from CPU list
         naive_loads = [0] * ep_size
         for eid in range(num_experts):
-            naive_loads[eid // num_local_experts] += global_expert_counts[eid].item()
+            naive_loads[eid // num_local_experts] += expert_counts_list[eid]
         naive_max = max(naive_loads)
         naive_mean = sum(naive_loads) / len(naive_loads) if naive_loads else 1
         naive_ratio = naive_max / naive_mean if naive_mean > 0 else 1.0

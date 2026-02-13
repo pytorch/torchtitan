@@ -1,0 +1,92 @@
+# Kimi K2: EP=64 CP=1 SEQ=24K LBS=1 - 16 nodes (128 GPUs, DP_REPLICATE=2)
+# No DeepEP - using standard torch all-to-all for expert parallel
+# Force balance disabled, real v6 dataset, kimi_k2_sft_llep flavor
+
+[job]
+dump_folder = "./outputs/kimi_k2_ep64_cp1_seq24k_lbs1_16n_disable_force_balance_and_v6_dataset_and_use_llep_muon"
+description = "Kimi K2: DP_REPLICATE=2 EP=64 CP=1 SEQ=24K LBS=1 16N (force_bl disabled, v6 dataset, llep, muon)"
+
+[profiling]
+enable_profiling = false
+
+[metrics]
+log_freq = 1
+disable_color_printing = true
+
+[model]
+name = "deepseek_v3"
+flavor = "kimi_k2_sft_llep"
+hf_assets_path = "/mnt/data/shared/Kimi-K2-Base-BF16"
+
+# [optimizer]
+# name = "AdamW"
+# lr = 8e-4
+# eps = 1e-8
+
+[optimizer]
+name = "Muon"
+# LR bumped from 5.5e-6 to 7e-6 for official run
+lr = 7e-6
+eps = 1e-8
+weight_decay = 0.01
+beta1 = 0.9
+beta2 = 0.95
+
+# Muon-specific parameters
+mu = 0.95                    # Momentum factor for Muon
+algorithm = "muon"           # Main algorithm to use for 2D matrices
+nesterov = false             # Whether to use Nesterov momentum
+adjust_lr = "rms_norm"       # How to adjust LR: "spectral_norm", "rms_norm", or null
+flatten = false              # Whether to flatten 3D+ tensors to 2D
+use_triton = true            # Whether to use Triton kernel for Newton-Schulz
+
+# Parameter-specific optimizer selection
+scalar_optimizer = "adamw"        # For 1D parameters (biases, layer norms)
+embedding_optimizer = "adamw"     # For embedding layers
+head_optimizer = "adamw"          # For model head/output layers
+head_lr_scaling = false            # Apply 1/sqrt(dim) scaling to head layers
+
+# Learning rate scaling factors
+scalar_lr_factor = 1            # LR multiplier for scalar parameters
+embedding_lr_factor = 1         # LR multiplier for embedding parameters
+head_lr_factor = 1.0            # LR multiplier for head parameters (after head_lr_scaling)
+routing_lr_factor = 1.0         # LR multiplier for routing parameters
+expert_lr_factor = 1.0
+
+[lr_scheduler]
+warmup_steps = 20
+decay_ratio = 0.8
+decay_type = "linear"
+min_lr_factor = 0.0
+
+[training]
+dtype = "bfloat16"
+local_batch_size = 1
+seq_len = 24576
+max_norm = 1.0
+steps = 1000
+enable_cpu_offload = true
+
+# real data training
+dataset = "hermes45"
+dataset_type = "preprocessed"
+dataset_path = "/mnt/data/shared/Hermes-4.5-v6-24k-KimiK2"
+
+[parallelism]
+data_parallel_shard_degree = -1
+expert_parallel_degree = 64
+context_parallel_degree = 1
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = true
+components = ["loss"]
+
+[debug]
+moe_force_load_balance = false
+
+[comm]
+init_timeout_seconds = 1800
+train_timeout_seconds = 1800
