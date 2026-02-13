@@ -58,12 +58,16 @@ Rewards are assigned per trajectory in `Generator._run_generation`:
 
 The `[ANSWER]` format bonus (+0.2) is only awarded when the answer is also correct, preventing the model from gaming the reward by emitting `[ANSWER]` without doing the work.
 
-### Accuracy Evaluation
+### Evaluation
 
-Accuracy is measured by `extract_answer`, which tries to parse the model's final answer using a fallback chain:
+Evaluation runs on the trainer's model before and after training (`--eval-samples` controls the number of tasks).
+
+**Accuracy** is measured by `extract_answer`, which parses the model's final answer using a fallback chain:
 
 1. `[ANSWER] <number>` tag (preferred)
 2. Patterns like "the answer is <number>" or "= <number>"
 3. Last number in the text (fallback)
 
-If the extracted number matches the correct answer, the trajectory counts as correct. This means a model can get accuracy credit without using `[ANSWER]` formatting, but only gets the full 1.2 reward with the tag.
+If the extracted number matches the correct answer, the trajectory counts as correct. A model can get accuracy credit without using `[ANSWER]` formatting.
+
+**Format compliance** measures the fraction of trajectories where the model emits an `[ANSWER]` tag. A model that learns to use `LOOKUP` tools correctly but never wraps its final answer in `[ANSWER]` will show high accuracy but low format compliance.

@@ -113,16 +113,7 @@ class Generator(Actor):
         # Build model-only text (generated tokens without injected tool results)
         model_only_text = "".join(t.generated_text for t in result.turns)
 
-        # Detect [ANSWER] tag and classify failure mode
         has_answer_tag = bool(_re.search(r'\[ANSWER\]', result.final_text))
-        if result.is_correct:
-            failure_mode = "success"
-        elif not has_answer_tag:
-            failure_mode = "wrong_format"
-        elif result.total_tool_calls > 3:
-            failure_mode = "tool_spam"
-        else:
-            failure_mode = "wrong_answer"
 
         # Pre-tokenize for the trainer: prompt + model_only_text
         messages = [
@@ -156,17 +147,10 @@ class Generator(Actor):
 
         return Trajectory(
             task_question=task.question,
-            task_answer=task.correct_answer,
             response_text=result.final_text,
             reward=reward,
             is_correct=result.is_correct,
-            num_turns=len(result.turns),
-            num_tool_calls=result.total_tool_calls,
-            generator_id=self.rank,
-            policy_version=self.policy_version,
-            model_only_text=model_only_text,
             has_answer_tag=has_answer_tag,
-            failure_mode=failure_mode,
             input_ids=full_ids[0].tolist(),
             prompt_length=prompt_length,
         )

@@ -21,17 +21,10 @@ from monarch.actor import Actor, endpoint, current_rank
 class Trajectory:
     """A single trajectory from generation."""
     task_question: str
-    task_answer: int | str
     response_text: str
     reward: float
     is_correct: bool
-    num_turns: int
-    num_tool_calls: int
-    generator_id: int
-    policy_version: int  # Which version of weights was used
-    model_only_text: str = ""  # Model-generated text only (no tool results)
     has_answer_tag: bool = False  # Whether model emitted [ANSWER]
-    failure_mode: str = ""  # "success", "wrong_format", "tool_spam", "wrong_answer"
     # Pre-tokenized sequence and prompt boundary for training.
     # The generator populates these so the trainer never needs to re-tokenize.
     input_ids: list[int] = field(default_factory=list)
