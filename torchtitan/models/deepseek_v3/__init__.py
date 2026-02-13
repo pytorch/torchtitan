@@ -269,6 +269,38 @@ deepseekv3_args = {
         rope_factor=32.0,
         beta_fast=1,
     ),
+    # Mini Kimi K2 with LLEP: 256 experts, top_k=8, shrunk dim for 8-GPU testing
+    "mini_kimi_k2_llep": DeepSeekV3ModelArgs(
+        vocab_size=2048,
+        dim=3072,
+        inter_dim=12288,
+        moe_inter_dim=2048,
+        n_layers=8,
+        n_dense_layers=1,
+        n_heads=24,
+        norm_eps=1e-6,
+        moe_args=MoEArgs(
+            num_experts=256,
+            num_shared_experts=1,
+            top_k=8,
+            score_func="sigmoid",
+            route_norm=True,
+            route_scale=2.827,
+            score_before_experts=False,
+            use_llep=True,
+            llep_max_tokens_factor=1.1,
+            llep_min_tokens_per_gemm=256,
+            llep_adaptive_threshold=0.0,
+        ),
+        q_lora_rank=0,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        rope_theta=50000.0,
+        rope_factor=32.0,
+        beta_fast=1,
+    ),
     "kimi_k2_llep": DeepSeekV3ModelArgs(
         vocab_size=163840,
         dim=7168,
@@ -347,7 +379,7 @@ def get_train_spec() -> TrainSpec:
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_dataloader,
-        build_tokenizer_fn=build_kimi_tokenizer, # falls back to hf tokenizer if tiktoken.model not found
+        build_tokenizer_fn=build_kimi_tokenizer,  # falls back to hf tokenizer if tiktoken.model not found
         build_loss_fn=build_cross_entropy_loss,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )
