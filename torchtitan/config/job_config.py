@@ -148,6 +148,27 @@ class Optimizer:
     weight_decay: float = 0.1
     """Weight decay to use"""
 
+    is_light: bool = False
+    """Whether to use Scion's light (memory-saving) version"""
+
+    norm_factor: str = "spectral"
+    """Which norm factor to use"""
+
+    zeropower_backend: str = "newtonschulz5"
+    "Which `zeropower_backend` to use."
+
+    backend_steps: int = 5
+    """Number of steps for the Scion backend"""
+
+    momentum: float = 0.95
+    """Scion momentum to use"""
+
+    nesterov: bool = False
+    """Whether to use Nesterov momentum in Scion"""
+
+    extra_param_group_split_rules: list[dict[str, Any]] | None = None
+    """Extra parameter group splitting rules for Scion optimizers"""
+
     implementation: Literal["for-loop", "foreach", "fused"] = "fused"
     """
     Specify which optimizer implementation to use:
