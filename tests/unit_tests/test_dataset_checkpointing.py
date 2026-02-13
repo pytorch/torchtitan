@@ -86,7 +86,7 @@ class TestMultiDatasetCheckpointing(TestDatasetCheckpointing):
     def setUp(self):
         DATASETS_MULTI["c4_test_streaming"] = MultiDatasetConfig(
             paths=["tests/assets/c4_test", "tests/assets/c4_test"],
-            weights=[1, 100],
+            weights=[1, 3],
             loader=lambda path: load_dataset(path, split="train").to_iterable_dataset(
                 num_shards=4
             ),

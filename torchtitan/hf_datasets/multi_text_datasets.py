@@ -35,19 +35,19 @@ def _process_c4_text(sample: dict[str, Any]) -> str:
 DATASETS = {
     "c4": MultiDatasetConfig(
         paths=["allenai/c4", "allenai/c4"],
-        weights=[1, 100],
+        weights=[1, 3],
         loader=partial(_load_c4_dataset, split="train"),
         sample_processor=_process_c4_text,
     ),
     "c4_test": MultiDatasetConfig(
         paths=["tests/assets/c4_test", "tests/assets/c4_test"],
-        weights=[1, 100],
-        loader=lambda path: load_dataset(path, split="train"),
+        weights=[1, 3],
+        loader=lambda path: load_dataset(path, split="train", streaming=True),
         sample_processor=_process_c4_text,
     ),
     "c4_validation": MultiDatasetConfig(
         paths=["allenai/c4", "allenai/c4"],
-        weights=[1, 100],
+        weights=[1, 3],
         loader=partial(_load_c4_dataset, split="validation"),
         sample_processor=_process_c4_text,
     ),
@@ -55,8 +55,10 @@ DATASETS = {
 
 
 def _validate_datasets(
-    dataset_name: str, datasets_paths: list[str] | None = None
-) -> tuple[list[str], Callable, Callable]:
+    dataset_name: str,
+    datasets_paths: list[str] | None = None,
+    datasets_weights: list[float] | None = None,
+) -> tuple[list[str], list[float], Callable, Callable]:
     """Validate datasets name and paths."""
     if dataset_name not in DATASETS:
         raise ValueError(
@@ -69,10 +71,16 @@ def _validate_datasets(
     if datasets_paths:
         paths = [
             dataset_path or config_path
-            for dataset_path, config_path in zip(datasets_paths, config.paths)
+            for dataset_path, config_path in zip(datasets_paths, paths)
+        ]
+    weights = config.weights
+    if datasets_weights:
+        weights = [
+            dataset_weight or config_weight
+            for dataset_weight, config_weight in zip(datasets_weights, weights)
         ]
     logger.info(f"Preparing {dataset_name} dataset from {paths}")
-    return paths, config.loader, config.sample_processor
+    return paths, weights, config.loader, config.sample_processor
 
 
 def create_interleaved_parallel_dataset(
@@ -146,13 +154,13 @@ class HuggingFaceTextMultiDataset(HuggingFaceTextDataset):
         # Force lowercase for consistent comparison
         dataset_name = dataset_name.lower()
 
-        paths, datasets_loader, text_processor = _validate_datasets(
+        paths, weights, datasets_loader, text_processor = _validate_datasets(
             dataset_name, datasets_paths
         )
         self.dataset_name = dataset_name
         self._data = create_interleaved_parallel_dataset(
             datasets_paths=paths,
-            datasets_weights=datasets_weights,
+            datasets_weights=weights,
             datasets_loader=datasets_loader,
             seed=seed,
             dp_rank=dp_rank,
