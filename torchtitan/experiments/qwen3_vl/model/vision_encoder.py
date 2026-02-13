@@ -340,6 +340,15 @@ class Qwen3VLVisionEncoder(nn.Module):
             for _ in range(len(args.deepstack_visual_indexes))
         ])
 
+    def init_weights(self):
+        self.patch_embed.init_weights()
+        nn.init.trunc_normal_(self.pos_embed.weight, mean=0.0, std=0.02)
+        self.merger.init_weights()
+        for merger in self.deepstack_merger_list:
+            merger.init_weights()
+        for block in self.layers.values():
+            block.init_weights()
+
     def compute_position_embeddings(
         self,
         grid_thw: torch.Tensor,
@@ -518,12 +527,3 @@ class Qwen3VLVisionEncoder(nn.Module):
         merged_hidden_states = self.merger(hidden_states)
 
         return merged_hidden_states, deepstack_feature_lists
-
-    def init_weights(self):
-        self.patch_embed.init_weights()
-        nn.init.trunc_normal_(self.pos_embed.weight, mean=0.0, std=0.02)
-        self.merger.init_weights()
-        for merger in self.deepstack_merger_list:
-            merger.init_weights()
-        for block in self.layers.values():
-            block.init_weights()
