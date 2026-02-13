@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
@@ -23,9 +23,12 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.models.llama3.infra.parallelize import (
     _op_sac_save_list,
-    apply_compile,
     apply_ddp,
-    disable_fsdp_gradient_division,
+)
+from torchtitan.models.llama4.infra.parallelize import (
+    apply_compile,
+    apply_fsdp,
+    apply_moe_ep_tp,
 )
 from torchtitan.tools.logging import logger
 
@@ -63,6 +66,16 @@ def parallelize_qwen3_vl(
             "Tensor Parallelism for Qwen3-VL training is still in progress."
         )
 
+    # Apply MoE expert parallelism to decoder layers
+    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+        apply_moe_ep_tp(
+            model,
+            tp_mesh=parallel_dims.get_optional_mesh("tp"),
+            ep_mesh=parallel_dims.get_optional_mesh("ep"),
+            etp_mesh=parallel_dims.get_optional_mesh("etp"),
+            ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
+        )
+
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
@@ -78,24 +91,48 @@ def parallelize_qwen3_vl(
         apply_ac(model.visual, job_config.activation_checkpoint)
 
     # Apply torch.compile after AC wrapping and before FSDP
+    if model_compile_enabled:
+        apply_compile(model, job_config.compile, parallel_dims.ep_enabled)
     if job_config.compile.enable:
-        apply_compile(model, job_config.compile)
-        apply_compile(model.visual, job_config.compile)
+        _apply_compile_to_visual(model.visual, job_config.compile)
 
     # Apply FSDP or HSDP
-    if parallel_dims.fsdp_enabled:
-        names = (
+    if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
+        dp_mesh_names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
+        dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
 
+        # the mesh dim names of which the MoE params are sharded on via FSDP/HSDP
+        edp_mesh_names = (
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
+        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+
+        # FSDP the vision encoder components individually for memory efficiency
+        _apply_fsdp_to_visual(
+            model,
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            pp_enabled=parallel_dims.pp_enabled,
+            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+        )
+
+        # FSDP the decoder with MoE-aware sharding (reuses llama4 apply_fsdp)
         apply_fsdp(
             model,
-            parallel_dims.get_mesh(names),
+            dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
             cpu_offload=job_config.training.enable_cpu_offload,
             reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            ep_degree=parallel_dims.ep,
+            edp_mesh=edp_mesh,
+            gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -122,82 +159,63 @@ def parallelize_qwen3_vl(
     return model
 
 
-def apply_fsdp(
+def _apply_fsdp_to_visual(
     model: nn.Module,
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
     pp_enabled: bool,
-    cpu_offload: bool = False,
     reshard_after_forward_policy: str = "default",
 ):
     """
-    Apply data parallelism (via FSDP2) to the Qwen3-VL model.
+    Apply FSDP to the vision encoder components individually.
 
-    Args:
-        model: The Qwen3-VL model to apply data parallelism to.
-        dp_mesh: The device mesh to use for data parallelism.
-        param_dtype: The data type to use for model parameters.
-        reduce_dtype: The data type to use for reduction operations.
-        pp_enabled: Whether pipeline parallelism is enabled.
-        cpu_offload: Whether to offload model parameters to CPU.
-        reshard_after_forward_policy: The policy for resharding after forward pass.
+    This must be called before the llama4 apply_fsdp so that vision encoder
+    components are individually sharded before the final fully_shard(model).
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
-    if cpu_offload:
-        fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    # Determine reshard_after_forward based on policy
     match reshard_after_forward_policy:
         case "always":
             reshard_after_forward = True
         case "never":
             reshard_after_forward = False
         case "default":
-            # For PP, by default do not reshard after forward to avoid
-            # per-microbatch all-gathers
             reshard_after_forward = not pp_enabled
         case _:
             raise ValueError(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
             )
 
-    # Shard token embeddings
-    if model.tok_embeddings is not None:
+    if not hasattr(model, "visual") or model.visual is None:
+        return
+
+    # Shard patch embedding
+    if hasattr(model.visual, "patch_embed"):
         fully_shard(
-            model.tok_embeddings,
+            model.visual.patch_embed,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
 
-    # Shard vision encoder layers
-    if hasattr(model, "visual") and model.visual is not None:
-        # Shard patch embedding
-        if hasattr(model.visual, "patch_embed"):
-            fully_shard(
-                model.visual.patch_embed,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
-            )
+    # Shard each vision transformer layer
+    for layer_id, transformer_block in model.visual.layers.items():
+        fully_shard(
+            transformer_block,
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward,
+        )
 
-        # Shard each vision transformer layer
-        for layer_id, transformer_block in model.visual.layers.items():
-            fully_shard(
-                transformer_block,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
-            )
+    # Shard merger if present
+    if hasattr(model.visual, "merger"):
+        fully_shard(
+            model.visual.merger,
+            **fsdp_config,
+            reshard_after_forward=reshard_after_forward,
+        )
 
-        # Shard merger if present
-        if hasattr(model.visual, "merger"):
-            fully_shard(
-                model.visual.merger,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
-            )
-
-    # Shard projector
+    # Shard projector if present
     if hasattr(model, "projector") and model.projector is not None:
         fully_shard(
             model.projector,
@@ -205,25 +223,14 @@ def apply_fsdp(
             reshard_after_forward=reshard_after_forward,
         )
 
-    # Shard LLM layers
-    for layer_id, transformer_block in model.layers.items():
-        fully_shard(
+
+def _apply_compile_to_visual(visual: nn.Module, compile_config):
+    """Apply torch.compile to vision encoder transformer blocks."""
+    for layer_id, transformer_block in visual.layers.named_children():
+        transformer_block = torch.compile(
             transformer_block,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
+            backend=compile_config.backend,
+            fullgraph=True,
         )
-
-    # Shard final norm and output layers
-    # As an optimization, do not reshard_after_forward the last layers
-    if model.norm is not None and model.output is not None:
-        fully_shard(
-            [model.norm, model.output],
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward_policy == "always",
-        )
-
-    # Apply FSDP to the entire model
-    fully_shard(model, **fsdp_config)
-
-    # Disable FSDP's automatic gradient division for all FSDP modules
-    disable_fsdp_gradient_division(model)
+        visual.layers.register_module(layer_id, transformer_block)
+    logger.info("Compiling each visual TransformerBlock with torch.compile")

@@ -24,6 +24,7 @@ from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import build_optimizers
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.components.validate import build_validator
+from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .datasets.mm_datasets import build_mm_dataloader
@@ -38,11 +39,6 @@ __all__ = [
     "Qwen3VLModel",
     "qwen3_vl_args",
 ]
-
-
-def _get_dict(obj) -> dict[str, Any]:
-    """Convert dataclass to dict, preserving nested dataclasses (unlike asdict)."""
-    return {field.name: getattr(obj, field.name) for field in fields(obj)}
 
 
 # Model configurations for different Qwen3-VL variants
@@ -60,6 +56,43 @@ qwen3_vl_args = {
         qk_norm=True,
         hidden_dim=512,
         rope_theta=1000000,
+        encoder=Qwen3VLVisionEncoderArgs(
+            dim=256,
+            ffn_dim=512,
+            n_layers=4,
+            n_heads=4,
+            patch_size=14,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            out_hidden_size=256,
+            num_position_embeddings=1024,  # 32x32 grid
+            deepstack_visual_indexes=[1, 2, 3],
+        ),
+        text_config=Qwen3VLTextConfig(mrope_section=[8, 8, 8]),
+    ),
+    # Debug MoE model for testing
+    "debugmodel_moe": Qwen3VLModelArgs(
+        vocab_size=151936,
+        max_seq_len=4096,
+        head_dim=64,
+        dim=256,
+        n_layers=1,
+        n_heads=4,
+        n_kv_heads=2,
+        qk_norm=True,
+        hidden_dim=512,
+        rope_theta=1000000,
+        moe_enabled=True,
+        moe_inter_dim=768,
+        moe_args=MoEArgs(
+            num_experts=64,
+            num_shared_experts=0,
+            top_k=8,
+            score_func="softmax",
+            route_norm=True,
+            route_scale=1.0,
+            score_before_experts=False,
+        ),
         encoder=Qwen3VLVisionEncoderArgs(
             dim=256,
             ffn_dim=512,
