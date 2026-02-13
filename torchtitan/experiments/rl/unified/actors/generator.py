@@ -21,6 +21,7 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.rl import unified  # noqa: F401
 
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
+    build_compilation_config,
     compute_grpo_advantages,
     compute_grpo_advantages_stable,
     math_reward_function,
@@ -76,8 +77,10 @@ class VLLMRolloutEngine:
         model_path: str,
         temp_checkpoint_dir: str = "./converted",
         tp_size: int = 1,
+        vllm_compile_and_cudagraph: bool = True,
     ):
         self.base_model_path = model_path
+        self.vllm_compile_and_cudagraph = vllm_compile_and_cudagraph
         self.temp_model_dir = os.path.abspath(
             os.path.join(temp_checkpoint_dir, "vllm_temp_model")
         )
@@ -210,7 +213,10 @@ class VLLMRolloutEngine:
                 gpu_memory_utilization=0.1,  # Reduced from 0.5
                 distributed_executor_backend="external_launcher",  # vllm do not spawn processes
                 seed=42,  # Fixed seed for determinism
-                enforce_eager=True,
+                enforce_eager=not self.vllm_compile_and_cudagraph,
+                compilation_config=build_compilation_config(
+                    self.vllm_compile_and_cudagraph
+                ),
                 tensor_parallel_size=self.tp_size,  # Explicitly single GPU
                 attention_config=AttentionConfig(
                     backend=AttentionBackendEnum.FLASH_ATTN,
@@ -348,6 +354,7 @@ class Generator(Actor):
         grpo_beta: float = 0.1,
         use_stable_grpo: bool = False,
         tp_size: int = 1,
+        vllm_compile_and_cudagraph: bool = True,
     ):
         self.model_path = model_path
         self.prompt_texts = prompt_texts
@@ -365,7 +372,11 @@ class Generator(Actor):
             Comm(),
         )
         # Initialize vLLM engine
-        self.vllm_engine = VLLMRolloutEngine(model_path, tp_size=self.tp_size)
+        self.vllm_engine = VLLMRolloutEngine(
+            model_path,
+            tp_size=self.tp_size,
+            vllm_compile_and_cudagraph=vllm_compile_and_cudagraph,
+        )
 
         # State machine
         self.state = GeneratorState.READY_TO_UPDATE

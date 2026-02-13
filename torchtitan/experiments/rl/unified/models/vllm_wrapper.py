@@ -20,18 +20,15 @@ from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
-
 from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     create_job_config_from_vllm_config,
     create_parallel_dims_from_vllm_config,
 )
-
 from torchtitan.experiments.rl.unified.models.utils import replace_with_vllm_attention
 from torchtitan.models.qwen3.model.model import precompute_rope_cache
 from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.protocols.train_spec import ParallelizeFunction
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
@@ -115,18 +112,28 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         )
 
     def _extend_rope_cache_if_needed(
-        self, rope_cache: torch.Tensor, max_position: int
+        self, rope_cache: torch.Tensor, max_position: int | torch.Tensor
     ) -> torch.Tensor:
         """
         Extend RoPE cache if needed during vLLM profiling stage.
 
         Args:
             rope_cache: Current RoPE cache tensor
-            max_position: Maximum position index needed
+            max_position: Maximum position index needed (int or 0-d tensor)
 
         Returns:
             Extended RoPE cache if needed, otherwise original cache
         """
+        # For cudagraph compatibility, we need to handle the tensor case specially
+        # During cudagraph recording, we should NOT call .item() or do dynamic extensions
+        # Instead, we assume the cache is already large enough
+        if isinstance(max_position, torch.Tensor):
+            # During cudagraph recording/execution, skip extension check
+            # The cache should already be pre-allocated to sufficient size
+            # We cannot do .item() here as it breaks cudagraph recording
+            return rope_cache
+
+        # Non-cudagraph path: can safely extend if needed
         required_len = max_position + 1
 
         # No extension needed
@@ -226,8 +233,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             rope_attr = None
 
         # Extend RoPE cache if needed (vLLM profiling may use 2x max_seq_len)
+        # Keep max_position as tensor to avoid .item() call during cudagraph recording
         if positions is not None:
-            max_position = positions.max().item()
+            max_position = positions.max()
         else:
             max_position = 0
 
