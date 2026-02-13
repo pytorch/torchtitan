@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Generator actor for RL training.
 
@@ -6,14 +12,11 @@ Weight sync uses load_state_dict from the trainer.
 """
 
 import torch
-
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-from zorplex import ZorplexSpec, Task, generate_with_tools
+from monarch.actor import Actor, current_rank, endpoint
 
 from trainer import Trajectory
-
-from monarch.actor import Actor, endpoint, current_rank
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from zorplex import generate_with_tools, Task, ZorplexSpec
 
 
 class Generator(Actor):
@@ -50,7 +53,9 @@ class Generator(Actor):
         self.policy_version = 0
         self.generations = 0
 
-        print(f"[Generator:{self.rank}] Loading model {self.model_name} on GPU {gpu_id}...")
+        print(
+            f"[Generator:{self.rank}] Loading model {self.model_name} on GPU {gpu_id}..."
+        )
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -104,8 +109,13 @@ class Generator(Actor):
         import re as _re
 
         result = generate_with_tools(
-            self.model, self.tokenizer, self.spec, task, self.device,
-            max_turns=max_turns, max_tokens_per_turn=150,
+            self.model,
+            self.tokenizer,
+            self.spec,
+            task,
+            self.device,
+            max_turns=max_turns,
+            max_tokens_per_turn=150,
         )
 
         self.generations += 1
@@ -113,7 +123,7 @@ class Generator(Actor):
         # Build model-only text (generated tokens without injected tool results)
         model_only_text = "".join(t.generated_text for t in result.turns)
 
-        has_answer_tag = bool(_re.search(r'\[ANSWER\]', result.final_text))
+        has_answer_tag = bool(_re.search(r"\[ANSWER\]", result.final_text))
 
         # Pre-tokenize for the trainer: prompt + model_only_text
         messages = [

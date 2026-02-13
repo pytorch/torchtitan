@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Zorplex RL - A synthetic benchmark for training LLMs on multi-step tool use.
 
@@ -15,11 +21,32 @@ from transformers import StoppingCriteria, StoppingCriteriaList
 
 
 ZORPLEX_WORDS = [
-    "apple", "banana", "cat", "dog", "elephant",
-    "fish", "grape", "house", "ice", "jungle",
-    "kite", "lemon", "moon", "night", "ocean",
-    "piano", "queen", "river", "sun", "tree",
-    "umbrella", "violet", "water", "xray", "yellow", "zebra",
+    "apple",
+    "banana",
+    "cat",
+    "dog",
+    "elephant",
+    "fish",
+    "grape",
+    "house",
+    "ice",
+    "jungle",
+    "kite",
+    "lemon",
+    "moon",
+    "night",
+    "ocean",
+    "piano",
+    "queen",
+    "river",
+    "sun",
+    "tree",
+    "umbrella",
+    "violet",
+    "water",
+    "xray",
+    "yellow",
+    "zebra",
 ]
 
 
@@ -31,7 +58,10 @@ def _make_table(seed: int = 42) -> dict[str, int]:
 
 _SYSTEM_PROMPT = """You are a helpful assistant.
 
-You have access to a LOOKUP tool. To find the zorplex value of a word, simply output LOOKUP[word] on its own line. The system will return the value to you. Do NOT write code - just output the tool call directly and wait for the result.
+You have access to a LOOKUP tool. To find the zorplex value of a word, \
+simply output LOOKUP[word] on its own line. The system will return the value \
+to you. Do NOT write code - just output the tool call directly and wait for \
+the result.
 
 For problems requiring multiple lookups, call LOOKUP once, wait for the result, then call it again.
 
@@ -52,9 +82,11 @@ _TOOL_CALL_RE = re.compile(r"LOOKUP\[['\"]?(\w+)['\"]?\]", re.IGNORECASE)
 # DATA CLASSES
 # =============================================================================
 
+
 @dataclass
 class Task:
     """A single task instance."""
+
     question: str
     correct_answer: int | str
     metadata: dict = field(default_factory=dict)
@@ -63,6 +95,7 @@ class Task:
 @dataclass
 class ToolCall:
     """A parsed tool call from model output."""
+
     tool_name: str
     argument: str
     result: str | int | None = None
@@ -71,6 +104,7 @@ class ToolCall:
 @dataclass
 class Turn:
     """A single turn in the agentic loop."""
+
     generated_text: str
     tool_calls: list[ToolCall]
     tool_results: list[str]
@@ -79,6 +113,7 @@ class Turn:
 @dataclass
 class AgenticResult:
     """Result from agentic evaluation."""
+
     task: Task
     turns: list[Turn]
     final_text: str
@@ -93,6 +128,7 @@ class AgenticResult:
 # =============================================================================
 # ZORPLEX SPEC
 # =============================================================================
+
 
 class ZorplexSpec:
     """Compositional zorplex task: multiple lookups + addition.
@@ -131,14 +167,14 @@ class ZorplexSpec:
 
     def extract_answer(self, text: str) -> int | None:
         # Check for [ANSWER] tag first
-        answer_match = re.findall(r'\[ANSWER\]\s*(-?\d+)', text)
+        answer_match = re.findall(r"\[ANSWER\]\s*(-?\d+)", text)
         if answer_match:
             return int(answer_match[-1])
 
         # Try to find explicit answer patterns
         patterns = [
-            r'(?:the answer is|answer is|answer:)\s*(-?\d+)',
-            r'=\s*(-?\d+)\.?\s*(?:The answer|$)',
+            r"(?:the answer is|answer is|answer:)\s*(-?\d+)",
+            r"=\s*(-?\d+)\.?\s*(?:The answer|$)",
         ]
         for pattern in patterns:
             matches = re.findall(pattern, text, re.IGNORECASE)
@@ -146,13 +182,14 @@ class ZorplexSpec:
                 return int(matches[-1])
 
         # Fallback: last number in the text
-        numbers = re.findall(r'-?\d+', text)
+        numbers = re.findall(r"-?\d+", text)
         return int(numbers[-1]) if numbers else None
 
 
 # =============================================================================
 # AGENTIC GENERATION
 # =============================================================================
+
 
 class _StopAtToolCall(StoppingCriteria):
     """Stop generation when a complete tool call is detected."""
@@ -161,8 +198,10 @@ class _StopAtToolCall(StoppingCriteria):
         self.tokenizer = tokenizer
         self.prompt_length = prompt_length
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
-        new_tokens = input_ids[0, self.prompt_length:]
+    def __call__(
+        self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs
+    ) -> bool:
+        new_tokens = input_ids[0, self.prompt_length :]
         new_text = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
         return bool(_TOOL_CALL_RE.search(new_text))
 
@@ -208,9 +247,9 @@ def generate_with_tools(
         prompt_length = inputs["input_ids"].shape[1]
 
         # Create stopping criteria that halts at tool calls
-        stop_criteria = StoppingCriteriaList([
-            _StopAtToolCall(tokenizer, prompt_length)
-        ])
+        stop_criteria = StoppingCriteriaList(
+            [_StopAtToolCall(tokenizer, prompt_length)]
+        )
 
         # Generate until tool call or max tokens
         with torch.no_grad():
@@ -228,24 +267,25 @@ def generate_with_tools(
 
         # Decode only the new tokens
         new_text = tokenizer.decode(
-            outputs[0][prompt_length:],
-            skip_special_tokens=True
+            outputs[0][prompt_length:], skip_special_tokens=True
         )
 
         # Find tool calls in the new text
         tool_calls = spec.parse_tool_calls(new_text)
 
         # Check if model emitted [ANSWER] tag — treat as final turn
-        has_answer = bool(re.search(r'\[ANSWER\]\s*-?\d+', new_text, re.IGNORECASE))
+        has_answer = bool(re.search(r"\[ANSWER\]\s*-?\d+", new_text, re.IGNORECASE))
 
         if not tool_calls or has_answer:
             # No tool calls - we're done
             all_text += new_text
-            turns.append(Turn(
-                generated_text=new_text,
-                tool_calls=[],
-                tool_results=[],
-            ))
+            turns.append(
+                Turn(
+                    generated_text=new_text,
+                    tool_calls=[],
+                    tool_results=[],
+                )
+            )
             break
 
         # Execute tool calls and build result string
@@ -256,11 +296,13 @@ def generate_with_tools(
             tool_results.append(str(result))
 
         # Record this turn
-        turns.append(Turn(
-            generated_text=new_text,
-            tool_calls=tool_calls,
-            tool_results=tool_results,
-        ))
+        turns.append(
+            Turn(
+                generated_text=new_text,
+                tool_calls=tool_calls,
+                tool_results=tool_results,
+            )
+        )
 
         # Inject results and continue (format matches system prompt examples)
         result_injection = "\n[Result: " + ", ".join(tool_results) + "]\n"

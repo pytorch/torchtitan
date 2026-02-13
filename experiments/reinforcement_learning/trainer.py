@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
 """
 Trainer actor for RL training.
 
@@ -5,21 +11,20 @@ Trains the model on trajectory batches using REINFORCE.
 Exposes get_state_dict for weight distribution to generators.
 """
 
-import torch
-import torch.nn.functional as F
-
 from dataclasses import dataclass, field
 
+import torch
+import torch.nn.functional as F
+from monarch.actor import Actor, current_rank, endpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from zorplex import ZorplexSpec, generate_with_tools
-
-from monarch.actor import Actor, endpoint, current_rank
+from zorplex import generate_with_tools, ZorplexSpec
 
 
 @dataclass
 class Trajectory:
     """A single trajectory from generation."""
+
     task_question: str
     response_text: str
     reward: float
@@ -34,6 +39,7 @@ class Trajectory:
 @dataclass
 class TrainMetrics:
     """Metrics from a training step."""
+
     step: int
     loss: float
     batch_size: int
@@ -112,7 +118,9 @@ class Trainer(Actor):
         return self.policy_version
 
     @endpoint
-    def train_step(self, trajectories: list[Trajectory], baseline: float) -> TrainMetrics:
+    def train_step(
+        self, trajectories: list[Trajectory], baseline: float
+    ) -> TrainMetrics:
         """Train on a batch of trajectories using REINFORCE.
 
         Each trajectory carries pre-tokenized input_ids and a prompt_length
@@ -120,8 +128,11 @@ class Trainer(Actor):
         """
         if len(trajectories) == 0:
             return TrainMetrics(
-                step=self.train_steps, loss=0.0, batch_size=0,
-                avg_reward=0.0, policy_version=self.policy_version,
+                step=self.train_steps,
+                loss=0.0,
+                batch_size=0,
+                avg_reward=0.0,
+                policy_version=self.policy_version,
             )
 
         self.model.train()
@@ -142,14 +153,16 @@ class Trainer(Actor):
                 continue
 
             # Forward pass, then slice at prompt_length for response-only log-probs
-            with torch.amp.autocast('cuda', enabled=self.device == "cuda"):
+            with torch.amp.autocast("cuda", enabled=self.device == "cuda"):
                 logits = self.model(full_ids).logits
 
             # logits[i] predicts token[i+1], so start at prompt_len - 1
-            shift_logits = logits[:, prompt_len - 1:-1, :]
+            shift_logits = logits[:, prompt_len - 1 : -1, :]
             shift_labels = full_ids[:, prompt_len:]
             log_probs = F.log_softmax(shift_logits, dim=-1)
-            token_log_probs = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(-1)
+            token_log_probs = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(
+                -1
+            )
 
             # REINFORCE loss = -log_prob * advantage
             advantage = traj.reward - baseline
@@ -170,7 +183,9 @@ class Trainer(Actor):
 
         avg_reward = sum(t.reward for t in trajectories) / len(trajectories)
         correct_rate = sum(1 for t in trajectories if t.is_correct) / len(trajectories)
-        format_rate = sum(1 for t in trajectories if t.has_answer_tag) / len(trajectories)
+        format_rate = sum(1 for t in trajectories if t.has_answer_tag) / len(
+            trajectories
+        )
 
         return TrainMetrics(
             step=self.train_steps,
@@ -183,9 +198,12 @@ class Trainer(Actor):
         )
 
     @endpoint
-    def evaluate_zorplex(self, num_samples: int = 10, seed: int = 42, max_turns: int = 4) -> dict:
+    def evaluate_zorplex(
+        self, num_samples: int = 10, seed: int = 42, max_turns: int = 4
+    ) -> dict:
         """Evaluate current model on compositional Zorplex tasks."""
         import re as _re
+
         self.model.eval()
         torch.manual_seed(seed)  # Deterministic evaluation
         spec = ZorplexSpec(seed=seed)
@@ -193,18 +211,28 @@ class Trainer(Actor):
         total_turns = 0
         total_tools = 0
         format_ok = 0
-        failure_modes = {"success": 0, "wrong_format": 0, "tool_spam": 0, "wrong_answer": 0}
+        failure_modes = {
+            "success": 0,
+            "wrong_format": 0,
+            "tool_spam": 0,
+            "wrong_answer": 0,
+        }
         for _ in range(num_samples):
             task = spec.generate_task()
             result = generate_with_tools(
-                self.model, self.tokenizer, spec, task,
-                self.device, max_turns=max_turns,
-                temperature=0.0, do_sample=False,
+                self.model,
+                self.tokenizer,
+                spec,
+                task,
+                self.device,
+                max_turns=max_turns,
+                temperature=0.0,
+                do_sample=False,
             )
             correct += int(result.is_correct)
             total_turns += len(result.turns)
             total_tools += result.total_tool_calls
-            has_tag = bool(_re.search(r'\[ANSWER\]', result.final_text))
+            has_tag = bool(_re.search(r"\[ANSWER\]", result.final_text))
             format_ok += int(has_tag)
             if result.is_correct:
                 failure_modes["success"] += 1
