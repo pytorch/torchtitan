@@ -185,9 +185,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         """Convert input token IDs to embeddings (deprecated vLLM interface)."""
         return self.embed_input_ids(input_ids)
 
-    @torch._dynamo.disable
     def _embed_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
         """Embed tokens."""
+        torch._check(tokens.shape[1] >= 2)
         return self.model.tok_embeddings(tokens)
 
     def _run_layers(self, h, rope_cache, positions):
@@ -223,12 +223,11 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Convert vLLM interface to TorchTitan interface
         # vLLM: [total_tokens] → TorchTitan: [batch_size, seq_len]
         tokens_2d = input_ids.unsqueeze(0)
-        torch._dynamo.decorators.mark_dynamic(tokens_2d, 1)
+        torch._dynamo.decorators.mark_unbacked(tokens_2d, 1)
 
         # Get embeddings
-        # fn = torch.compile(self._embed_tokens, backend="aot_eager", fullgraph=True)
-        # h = fn(tokens_2d)
-        h = self._embed_tokens(tokens_2d)
+        fn = torch.compile(self._embed_tokens, backend="aot_eager", fullgraph=True)
+        h = fn(tokens_2d)
 
         # Get RoPE cache (handle model-specific attribute names)
         # Use hasattr to avoid ambiguous boolean value error with tensors
@@ -244,24 +243,18 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             max_position = positions.max().item()
         else:
             max_position = 0
-
         rope_cache = self._extend_rope_cache_if_needed(rope_attr, max_position)
-        positions = positions.unsqueeze(0)
 
-        # Wait on async collectives before mark_unbacked
+        # Wait on async collectives
         if isinstance(h, DTensor) and isinstance(h._local_tensor, torch.distributed._functional_collectives.AsyncCollectiveTensor):
             h._local_tensor = h._local_tensor.wait()
-
         if isinstance(h, DTensor):
             h._local_tensor = h._local_tensor.contiguous()
 
-        h = h.contiguous()
-        positions = positions.contiguous()
+        positions = positions.unsqueeze(0)
         torch._dynamo.decorators.mark_unbacked(h, 1)
         torch._dynamo.decorators.mark_unbacked(positions, 1)
-        
-        # fn = torch.compile(self._run_layers, backend="aot_eager", fullgraph=True)
-        fn = self._run_layers
+        fn = torch.compile(self._run_layers, backend="aot_eager", fullgraph=True)
         h = fn(h, rope_cache, positions)
 
         # When parallelism is applied, get full tensor before return to vLLM Engine
@@ -276,6 +269,11 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             h = h.view(batch_size * seq_len, hidden_size)
 
         return h
+
+    def _compute_logits(self, hidden_states):
+        torch._check(hidden_states.shape[0] >= 2)
+        h = self.model.norm(hidden_states)
+        return self.model.output(h)
 
     def compute_logits(
         self,
@@ -296,10 +294,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
                 ],
             )
 
-        h = self.model.norm(hidden_states)
-        logits = self.model.output(h)
-
-        return logits
+        torch._dynamo.decorators.mark_unbacked(hidden_states, 0)
+        fn = torch.compile(self._compute_logits, backend="aot_eager", fullgraph=True)
+        return fn(hidden_states)
 
     def load_weights(self, weights_iter):
         """

@@ -54,7 +54,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 from torch.profiler import profile, ProfilerActivity, schedule
-from torch.utils._debug_mode import DebugMode
 from torchtitan.experiments.rl import unified  # noqa: F401
 
 
@@ -954,21 +953,11 @@ class BenchmarkRunner:
                         f"  (Profiling mode: running {profile_runs} iteration only, no warmup iterations)"
                     )
                     for i in range(profile_runs):
-                        # Use DebugMode to trace all operations during non-warmup runs
-                        debug_mode = DebugMode(
-                            record_nn_module=True,
-                            record_profiler_context=True,
-                        )
-                        with debug_mode:
-                            metrics = benchmark.run_inference(prompts, use_profiler=True)
+                        # from torch.utils._debug_mode import DebugMode
 
-                        # Save DebugMode output
-                        debug_file = Path(self.config.profile_dir) / key / f"debug_run_{i}.txt"
-                        debug_file.parent.mkdir(parents=True, exist_ok=True)
-                        with open(debug_file, "w") as f:
-                            f.write(debug_mode.debug_string())
-                        print(f"  DebugMode output saved to: {debug_file}")
-
+                        # with DebugMode() as debug_mode:
+                        metrics = benchmark.run_inference(prompts, use_profiler=True)
+                        # print(debug_mode.debug_string())
                         self.results[key].append(metrics)
                         print(
                             f"  Run {i + 1}/{profile_runs} (profiled): "
@@ -985,21 +974,7 @@ class BenchmarkRunner:
                         profiler.__enter__()
 
                     for i in range(self.config.num_runs):
-                        # Use DebugMode to trace all operations during non-warmup runs
-                        debug_mode = DebugMode(
-                            record_nn_module=True,
-                            record_profiler_context=True,
-                        )
-                        with debug_mode:
-                            metrics = benchmark.run_inference(prompts)
-
-                        # Save DebugMode output
-                        debug_file = Path(self.config.profile_dir) / key / f"debug_run_{i}.txt"
-                        debug_file.parent.mkdir(parents=True, exist_ok=True)
-                        with open(debug_file, "w") as f:
-                            f.write(debug_mode.debug_string())
-                        print(f"  DebugMode output saved to: {debug_file}")
-
+                        metrics = benchmark.run_inference(prompts)
                         self.results[key].append(metrics)
                         print(
                             f"  Run {i + 1}/{self.config.num_runs}: "
