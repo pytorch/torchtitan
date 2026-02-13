@@ -15,7 +15,7 @@ disable_color_printing = true
 [model]
 name = "deepseek_v3"
 flavor = "kimi_k2"
-hf_assets_path = "./assets/hf/Kimi-K2-Base"
+hf_assets_path = "/home/shared/models/Kimi-K2-Base-BF16"
 
 [optimizer]
 name = "AdamW"

@@ -1,18 +1,18 @@
 #!/bin/bash
-#SBATCH --job-name=kimi_k2_ep64_8n
+#SBATCH --job-name=kimi_k2_ckpt
 #SBATCH --ntasks=8
 #SBATCH --nodes=8
 #SBATCH --gpus-per-task=8
 #SBATCH --partition=batch
 #SBATCH --time=02:00:00
-#SBATCH --output=/home/phuc/workspace/moe/small_prs/pr008_saleforce_lbs/torchtitan/slurm_logs/kimi_k2_ep64_%j.out
-#SBATCH --error=/home/phuc/workspace/moe/small_prs/pr008_saleforce_lbs/torchtitan/slurm_logs/kimi_k2_ep64_%j.err
+#SBATCH --output=/home/phuc/workspace/moe/small_prs/pr008_saleforce_lbs/torchtitan/slurm_logs/kimi_k2_ckpt_%j.out
+#SBATCH --error=/home/phuc/workspace/moe/small_prs/pr008_saleforce_lbs/torchtitan/slurm_logs/kimi_k2_ckpt_%j.err
 
 set -euo pipefail
 
 source /home/phuc/miniconda3/bin/activate torchtitan
 
-CONFIG_FILE="torchtitan/models/deepseek_v3/train_configs/kimi_k2_ep64_cp1_seq24k_lbs1_16n_disable_force_bl.toml"
+CONFIG_FILE="torchtitan/models/deepseek_v3/train_configs/kimi_k2_ep64_cp1_seq24k_lbs1_16n_load_ckpt.toml"
 
 nodes=( $( scontrol show hostnames $SLURM_JOB_NODELIST ) )
 nodes_array=($nodes)
@@ -24,6 +24,7 @@ echo "Job ID: $SLURM_JOB_ID"
 echo "Nodes: $SLURM_NNODES ($SLURM_NODELIST)"
 echo "Master: $head_node_ip:29500"
 echo "Config: $CONFIG_FILE"
+echo "Checkpoint: /home/emozilla/dcp/hermes3-1t-ep64-cp8-upstream/step-1"
 echo "GPUs total: $(($SLURM_NNODES * 8))"
 echo "================"
 

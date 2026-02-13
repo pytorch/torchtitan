@@ -1,9 +1,10 @@
-# Kimi K2: EP=64 CP=1 SEQ=24K LBS=1 - 16 nodes (128 GPUs, DP_REPLICATE=2)
+# Kimi K2: EP=64 CP=1 SEQ=24K LBS=1 - 8 nodes (64 GPUs)
+# Loads checkpoint from /home/emozilla/dcp/hermes3-1t-ep64-cp8-upstream/step-1
 # No DeepEP - using standard torch all-to-all for expert parallel
 
 [job]
-dump_folder = "./outputs/kimi_k2_ep64_cp1_seq24k_lbs1_16n_disable_force_bl"
-description = "Kimi K2: DP_REPLICATE=2 EP=64 CP=1 SEQ=24K LBS=1 16N (force_bl disabled)"
+dump_folder = "./outputs/kimi_k2_ep64_cp1_seq24k_lbs1_load_ckpt"
+description = "Kimi K2: EP=64 CP=1 SEQ=24K LBS=1 8N - load from hermes3 ckpt"
 
 [profiling]
 enable_profiling = false
@@ -67,6 +68,11 @@ context_parallel_degree = 1
 
 [activation_checkpoint]
 mode = "full"
+
+[checkpoint]
+enable = false
+initial_load_path = "/home/emozilla/dcp/hermes3-1t-ep64-cp8-upstream/step-1"
+initial_load_model_only = true
 
 [compile]
 enable = true
