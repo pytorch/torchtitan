@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from zorplex import get_spec, generate_with_tools
+from zorplex import ZorplexSpec, generate_with_tools
 
 from monarch.actor import Actor, endpoint, current_rank
 
@@ -195,7 +195,7 @@ class Trainer(Actor):
         import re as _re
         self.model.eval()
         torch.manual_seed(seed)  # Deterministic evaluation
-        spec = get_spec("compositional", seed=seed)
+        spec = ZorplexSpec(seed=seed)
         correct = 0
         total_turns = 0
         total_tools = 0

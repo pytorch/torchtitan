@@ -28,25 +28,20 @@ python experiments/reinforcement_learning/main.py --num-steps 40 --num-generator
 |------|---------|-------------|
 | `--num-steps` | 20 | Number of training steps |
 | `--num-generators` | 2 | Number of generator workers |
-| `--eval-samples` | 10 | Number of evaluation samples |
+| `--eval-samples` | 16 | Number of evaluation samples |
 | `--verbose` | off | Print sample generations on each step |
 
 ## Zorplex Task
 
 Zorplex is a synthetic benchmark for training LLMs on multi-step tool use. Each word in a fixed vocabulary (apple, banana, cat, ...) maps to a hidden integer value via a seeded lookup table. The model must use a `LOOKUP[word]` tool to discover values — it cannot know them in advance.
 
-### Task Types
-
-- **Simple**: Single lookup. "What is the zorplex value of 'apple'?" → `LOOKUP[apple]` → `[ANSWER] 82`
-- **Compositional**: Multiple lookups + arithmetic. "What is zorplex('apple') + zorplex('banana')?" → two LOOKUPs, then add the results.
-
-The default task is **compositional** with **easy** difficulty (2 words, addition only).
+Each task picks two words and asks the model to add their zorplex values: "What is zorplex('apple') + zorplex('banana')?" → two LOOKUPs, then add the results.
 
 ### Multi-turn Generation
 
 Each trajectory runs for up to `max_turns` turns (default: 4). On each turn, the model generates text until a tool call (`LOOKUP[word]`) is detected. The tool result is injected back into the context, and the model continues. When no tool call is produced, the turn is treated as the final response.
 
-For compositional-easy, the ideal trajectory is 3 turns:
+The ideal trajectory is 3 turns:
 1. `LOOKUP[apple]` → gets value
 2. `LOOKUP[banana]` → gets value
 3. Computes sum, emits `[ANSWER] <number>`

@@ -81,6 +81,18 @@ def evaluate(actors: dict, num_samples: int = 10, seed: int = 42) -> dict:
     ).get()
 
 
+def _print_eval(label: str, eval_result: dict) -> None:
+    """Print all evaluation stats."""
+    fm = eval_result["failure_modes"]
+    print(f"\n{label}:")
+    print(f"  Accuracy:          {eval_result['accuracy']:.0%} ({eval_result['correct']}/{eval_result['total']})")
+    print(f"  Format compliance: {eval_result['format_rate']:.0%}")
+    print(f"  Avg turns:         {eval_result['avg_turns']:.1f}")
+    print(f"  Avg tool calls:    {eval_result['avg_tools']:.1f}")
+    print(f"  Failure modes:     success={fm['success']} wrong_format={fm['wrong_format']} "
+          f"tool_spam={fm['tool_spam']} wrong_answer={fm['wrong_answer']}")
+
+
 # ---------------------------------------------------------------------------
 # Sync training loop
 # ---------------------------------------------------------------------------
@@ -157,22 +169,6 @@ def run_sync_loop(
     }
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-def _print_eval(label: str, eval_result: dict) -> None:
-    """Print all evaluation stats."""
-    fm = eval_result["failure_modes"]
-    print(f"\n{label}:")
-    print(f"  Accuracy:          {eval_result['accuracy']:.0%} ({eval_result['correct']}/{eval_result['total']})")
-    print(f"  Format compliance: {eval_result['format_rate']:.0%}")
-    print(f"  Avg turns:         {eval_result['avg_turns']:.1f}")
-    print(f"  Avg tool calls:    {eval_result['avg_tools']:.1f}")
-    print(f"  Failure modes:     success={fm['success']} wrong_format={fm['wrong_format']} "
-          f"tool_spam={fm['tool_spam']} wrong_answer={fm['wrong_answer']}")
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Run RL training with Monarch actors.",
@@ -186,7 +182,7 @@ def main():
         help="Number of generator workers (default: 2)",
     )
     parser.add_argument(
-        "--eval-samples", type=int, default=10,
+        "--eval-samples", type=int, default=16,
         help="Number of evaluation samples (default: 10)",
     )
     parser.add_argument(

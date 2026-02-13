@@ -9,7 +9,7 @@ import torch
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from zorplex import get_spec, Task, generate_with_tools
+from zorplex import ZorplexSpec, Task, generate_with_tools
 
 from trainer import Trajectory
 
@@ -26,12 +26,10 @@ class Generator(Actor):
     def __init__(
         self,
         model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
-        difficulty: str = "easy",
         device: str = "cuda",
     ):
         # Lightweight init - just store config
         self.model_name = model_name
-        self.difficulty = difficulty
         self.device_config = device
         self.rank = current_rank().rank
         self._ready = False
@@ -63,7 +61,7 @@ class Generator(Actor):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        self.spec = get_spec("compositional", difficulty=self.difficulty, seed=42 + self.rank)
+        self.spec = ZorplexSpec(seed=42 + self.rank)
 
         self._ready = True
         print(f"[Generator:{self.rank}] Ready on GPU {gpu_id}!")
@@ -128,7 +126,7 @@ class Generator(Actor):
 
         # Pre-tokenize for the trainer: prompt + model_only_text
         messages = [
-            {"role": "system", "content": self.spec.get_system_prompt(with_hint=True)},
+            {"role": "system", "content": self.spec.get_system_prompt()},
             {"role": "user", "content": task.question},
         ]
         prompt_text = self.tokenizer.apply_chat_template(
