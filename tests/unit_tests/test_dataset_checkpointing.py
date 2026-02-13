@@ -12,6 +12,8 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import ConfigManager
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader, DATASETS
+from torchtitan.hf_datasets import MultiDatasetConfig
+from torchtitan.hf_datasets.multi_text_datasets import build_text_dataloader as build_text_dataloader_multi, DATASETS as DATASETS_MULTI
 
 
 class TestDatasetCheckpointing(unittest.TestCase):
@@ -73,6 +75,42 @@ class TestDatasetCheckpointing(unittest.TestCase):
         )
 
         return build_text_dataloader(
+            tokenizer=tokenizer,
+            dp_world_size=world_size,
+            dp_rank=rank,
+            job_config=config,
+        )
+
+
+class TestMultiDatasetCheckpointing(TestDatasetCheckpointing):
+    def setUp(self):
+        DATASETS_MULTI["c4_test_streaming"] = MultiDatasetConfig(
+            paths=["tests/assets/c4_test", "tests/assets/c4_test"],
+            weights=[1, 100],
+            loader=lambda path: load_dataset(path, split="train").to_iterable_dataset(
+                num_shards=4
+            ),
+            sample_processor=lambda sample: sample["text"],
+        )
+
+    def tearDown(self):
+        del DATASETS_MULTI["c4_test_streaming"]
+
+    def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
+        tokenizer = HuggingFaceTokenizer("./tests/assets/tokenizer")
+        config_manager = ConfigManager()
+        config = config_manager.parse_args(
+            [
+                "--training.data.name",
+                dataset_name,
+                "--training.local_batch_size",
+                str(batch_size),
+                "--training.seq_len",
+                str(seq_len),
+            ]
+        )
+
+        return build_text_dataloader_multi(
             tokenizer=tokenizer,
             dp_world_size=world_size,
             dp_rank=rank,
