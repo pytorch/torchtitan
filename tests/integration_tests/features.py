@@ -544,7 +544,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--validation.enable",
-                    "--validation.dataset c4_test",
+                    "--validation.data.name c4_test",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
                     "--parallelism.pipeline_parallel_degree=2",
@@ -558,11 +558,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.dataloader.num_workers",
+                    "--training.data.dataloader.num_workers",
                     "2",
-                    "--training.dataloader.pin_memory",
-                    "--training.dataloader.persistent_workers",
-                    "--training.dataloader.prefetch_factor",
+                    "--training.data.dataloader.pin_memory",
+                    "--training.data.dataloader.persistent_workers",
+                    "--training.data.dataloader.prefetch_factor",
                     "4",
                 ],
             ],

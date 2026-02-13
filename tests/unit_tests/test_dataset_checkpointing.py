@@ -63,7 +63,7 @@ class TestDatasetCheckpointing(unittest.TestCase):
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
-                "--training.dataset",
+                "--training.data.name",
                 dataset_name,
                 "--training.local_batch_size",
                 str(batch_size),

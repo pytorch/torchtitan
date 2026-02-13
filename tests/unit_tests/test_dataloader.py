@@ -127,13 +127,13 @@ class TestParallelAwareDataloader(unittest.TestCase):
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
-                "--training.dataset",
+                "--training.data.name",
                 "c4_test",
                 "--training.local_batch_size",
                 "8",
                 "--training.seq_len",
                 "512",
-                "--training.dataloader.num_workers",
+                "--training.data.dataloader.num_workers",
                 "2",
             ]
         )

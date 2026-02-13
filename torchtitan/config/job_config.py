@@ -216,7 +216,7 @@ class DataLoader:
         persistent_workers and prefetch_factor are only valid if num_workers > 0.
 
     Example (TOML config file):
-        [training.dataloader]
+        [training.data.dataloader]
         num_workers = 4
         pin_memory = true
         persistent_workers = true
@@ -240,15 +240,37 @@ class DataLoader:
 
 
 @dataclass
-class Training:
-    dataset: str = "c4_test"
+class Data:
+    name: str = "c4_test"
     """Dataset to use"""
 
-    dataset_path: str | None = None
+    paths: list[str] | None = None
     """
-    Path to the dataset in the file system. If provided, data will be
-    loaded from this path instead of downloaded.
+    Paths to the datasets in the file system. can be one or several datasets.
+    If provided, data will be loaded from these paths instead of downloaded.
     """
+
+    weights : list[float] | None = None
+    """
+    In multi dataset setting, list of weight of each dataset.
+    """
+
+    dataloader: DataLoader = field(default_factory=DataLoader)
+    """DataLoader configuration"""
+
+    def __post_init__(self):
+        assert (
+            # one dataset
+            self.paths is None or len(self.paths) == 1
+        ) or (
+            # multi dataset
+            len(self.paths) > 1 and self.weights and len(self.paths) == len(self.weights)
+        )
+
+@dataclass
+class Training:
+    data: Data = field(default_factory=Data)
+    """Data configuration"""
 
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""
@@ -303,9 +325,6 @@ class Training:
     Note that you may want to lower the training steps to avoid generating too
     many temporary files.
     """
-
-    dataloader: DataLoader = field(default_factory=DataLoader)
-    """DataLoader configuration"""
 
 
 @dataclass
@@ -951,11 +970,8 @@ class Validation:
     enable: bool = False
     """Enable validation to default run validation after each training loop"""
 
-    dataset: str = "c4_validation"
-    """Dataset to use for validation"""
-
-    dataset_path: str | None = None
-    """Path to dataset to use for validation"""
+    data: Data = field(default_factory=Data)
+    """Data configuration"""
 
     local_batch_size: int = 8
     """Batch size for validation"""
@@ -971,9 +987,6 @@ class Validation:
     Number of steps to take in the validation set, -1 means consuming all the data in the validation dataset
     WARNING: When setting to -1 there could be hangs due to mismatch among ranks
     """
-
-    dataloader: DataLoader = field(default_factory=DataLoader)
-    """DataLoader configuration"""
 
     def __post_init__(self):
         assert (

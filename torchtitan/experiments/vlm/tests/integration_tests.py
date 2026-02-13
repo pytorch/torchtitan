@@ -23,7 +23,7 @@ def build_vlm_test_list() -> list[OverrideDefinitions]:
                 [
                     "--job.custom_config_module torchtitan.experiments.vlm.job_config",
                     "--model.name vlm",
-                    "--training.dataset cc12m-test",
+                    "--training.data.name cc12m-test",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--data.max_patches_per_image 1024",
                     "--data.max_images_per_batch 64",

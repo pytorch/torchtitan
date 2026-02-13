@@ -34,9 +34,10 @@ decay_ratio = 0.0  # no decay
 local_batch_size = 64
 max_norm = 1.0  # grad norm clipping
 steps = 30_000
-dataset = "cc12m-wds"
 classifier_free_guidance_prob = 0.447
 img_size = 256
+[training.data]
+name = "cc12m-wds"
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
@@ -61,7 +62,6 @@ async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
 
 [validation]
 enable = false
-dataset = "coco-validation"
 local_batch_size=64
 steps = 6   # Recommended value with the current settings and world_size=8
 freq = 1000
@@ -71,3 +71,5 @@ denoising_steps = 50
 save_img_count = 50
 save_img_folder = "img"
 all_timesteps = false
+[validation.data]
+name = "coco-validation"

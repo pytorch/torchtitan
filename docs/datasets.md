@@ -1,5 +1,5 @@
 # Custom Datasets in torchtitan
-
+TODO update this file
 `torchtitan` is designed to work seamlessly with most HuggingFace datasets. While we provide the C4 dataset for numerics and convergence testing, you can easily add support for your own datasets. Here's how to do it using Wikipedia as an example.
 
 ## Quick Start
@@ -57,7 +57,8 @@ DATASETS = {
 In your training configuration file (`.toml`), set your dataset:
 
 ```toml
-dataset = "wikipedia"
+[training.data]
+name = "wikipedia"
 ```
 
 That's it! Your custom dataset is now ready to use with `torchtitan`.
