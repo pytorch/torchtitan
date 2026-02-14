@@ -14,6 +14,7 @@ from unittest import mock
 
 import torch
 import torch.nn as nn
+from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config.job_config import Checkpoint as CheckpointConfig
@@ -75,7 +76,7 @@ class DummyFuture:
         self.result = mock.Mock()
 
 
-class DummyAsyncResult:
+class DummyAsyncResult(AsyncSaveResponse):
     """Mock object that mimics the return value of dcp.async_save with pinned memory"""
 
     def __init__(self):

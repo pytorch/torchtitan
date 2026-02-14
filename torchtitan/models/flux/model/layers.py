@@ -13,6 +13,8 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 
+from torchtitan.models.attention import ScaledDotProductAttentionWrapper
+
 
 def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     assert dim % 2 == 0
@@ -124,6 +126,7 @@ class SelfAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.norm = QKNorm(head_dim)
         self.proj = nn.Linear(dim, dim)
+        self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def init_weights(self):
         for layer in (self.qkv, self.proj):
@@ -136,7 +139,7 @@ class SelfAttention(nn.Module):
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         q, k = apply_rope(q, k, pe)
-        x = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        x = self.inner_attention(q, k, v, is_causal=False)
         x = rearrange(x, "B H L D -> B L (H D)")
         x = self.proj(x)
         return x
@@ -206,6 +209,8 @@ class DoubleStreamBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
 
+        self.inner_attention = ScaledDotProductAttentionWrapper()
+
     def init_weights(self):
         # initialize all the nn.Linear submodules
         for layer in (
@@ -257,7 +262,7 @@ class DoubleStreamBlock(nn.Module):
         v = torch.cat((txt_v, img_v), dim=2)
 
         q, k = apply_rope(q, k, pe)
-        attn = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        attn = self.inner_attention(q, k, v)
         attn = rearrange(attn, "B H L D -> B L (H D)")
 
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
@@ -308,6 +313,7 @@ class SingleStreamBlock(nn.Module):
 
         self.mlp_act = nn.GELU(approximate="tanh")
         self.modulation = Modulation(hidden_size, double=False)
+        self.inner_attention = ScaledDotProductAttentionWrapper()
 
     def init_weights(self):
         for layer in (self.linear1, self.linear2):
@@ -329,7 +335,7 @@ class SingleStreamBlock(nn.Module):
 
         # compute attention
         q, k = apply_rope(q, k, pe)
-        attn = torch.nn.functional.scaled_dot_product_attention(q, k, v)
+        attn = self.inner_attention(q, k, v)
         attn = rearrange(attn, "B H L D -> B L (H D)")
 
         # compute activation in mlp stream, cat again and run second linear layer

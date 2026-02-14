@@ -25,7 +25,7 @@ from torch.distributed.pipelining.schedules import (
     ScheduleZBVZeroBubble,
 )
 
-from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
+from torchtitan.components.loss import LossFunction
 from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.dual_pipe_v import overlap_callback
@@ -205,7 +205,7 @@ def build_pipeline_schedule(
         # pyrefly: ignore [bad-argument-type]
         stages if looped_schedule else stages[0],
         n_microbatches=n_microbatches,
-        loss_fn=rescale_accumulated_loss(loss_fn, n_microbatches),
+        loss_fn=loss_fn,
         scale_grads=False,
     )
     logger.info(

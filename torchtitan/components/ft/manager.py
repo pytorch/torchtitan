@@ -7,7 +7,7 @@
 import importlib.util
 from contextlib import nullcontext
 from datetime import timedelta
-from typing import Callable, ContextManager, Optional, TYPE_CHECKING, Union
+from typing import Callable, cast, ContextManager, Optional, TYPE_CHECKING, Union
 
 import torch
 import torch.distributed as dist
@@ -15,7 +15,8 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.distributed_c10d import ReduceOp
-from torchtitan.components.ft.config import FaultTolerance as FTConfig
+from torchtitan.components.ft.config import FaultTolerance as ExtendedFTConfig
+from torchtitan.config import FaultTolerance as FTConfig
 from torchtitan.tools.logging import logger
 
 if importlib.util.find_spec("torchft") is not None:
@@ -119,8 +120,9 @@ def maybe_semi_sync_training(
     """
     If TorchFT is enabled and the config is set, use semi_sync_method
     """
-    semi_sync_method = ft_config.semi_sync_method
-    if ft_config.enable and semi_sync_method is not None:
+    extend_ft_config = cast(ExtendedFTConfig, ft_config)
+    semi_sync_method = extend_ft_config.semi_sync_method
+    if extend_ft_config.enable and semi_sync_method is not None:
         from torchft import local_sgd
 
         assert (
@@ -131,7 +133,7 @@ def maybe_semi_sync_training(
         )
         if semi_sync_method.lower() == "diloco":
             if fragment_fn:
-                model_parts = fragment_fn(model, ft_config, n_layers)
+                model_parts = fragment_fn(model, extend_ft_config, n_layers)
             else:
                 model_parts = [model]
 
@@ -149,17 +151,17 @@ def maybe_semi_sync_training(
                 model_fragments=model_parts,
                 inner_optimizer=optimizer,
                 outer_optimizer=outer_optimizers,
-                sync_every=ft_config.sync_steps,
-                should_quantize=ft_config.should_quantize,
-                fragment_sync_delay=ft_config.fragment_sync_delay,
-                fragment_update_alpha=ft_config.fragment_update_alpha,
+                sync_every=extend_ft_config.sync_steps,
+                should_quantize=extend_ft_config.should_quantize,
+                fragment_sync_delay=extend_ft_config.fragment_sync_delay,
+                fragment_update_alpha=extend_ft_config.fragment_update_alpha,
             )
         elif semi_sync_method.lower() == "local_sgd":
             return local_sgd.LocalSGD(
                 manager=ft_manager._manager,
                 model=model,
                 optimizer=optimizer,
-                sync_every=ft_config.sync_steps,
+                sync_every=extend_ft_config.sync_steps,
             )
         else:
             raise ValueError(
