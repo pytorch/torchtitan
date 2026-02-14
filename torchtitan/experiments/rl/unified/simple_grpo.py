@@ -45,11 +45,6 @@ async def main():
         job_config.parallelism.data_parallel_replicate_degree
         * job_config.parallelism.tensor_parallel_degree
     )
-    generator_world_size = (
-        job_config.generation.parallelism.data_parallel_replicate_degree
-        * job_config.generation.parallelism.tensor_parallel_degree
-    )
-
     # RL Training config
     num_steps = job_config.training.steps
 
@@ -67,40 +62,44 @@ async def main():
 
     logger.info(f"Loaded {len(prompt_texts)} prompts")
 
-    # Create process meshes
+    # Create process mesh for trainer (generator is collocated on same mesh)
     # TODO: Make the world size according to parallel degrees
     trainer_mesh = this_host().spawn_procs(per_host={"gpus": trainer_world_size})
-    gen_mesh = this_host().spawn_procs(per_host={"gpus": generator_world_size})
 
     # Set up distributed env vars so that actors are connected via c10d
     await setup_env_for_distributed(
         trainer_mesh,
         master_addr="localhost",  # TODO: figure out what to set
-        master_port=29500,  # TODO: figure out what to set
-    )
-
-    # Set up distributed env vars so that actors are connected via c10d
-    await setup_env_for_distributed(
-        gen_mesh,
-        master_addr="localhost",  # TODO: figure out what to set
         master_port=29501,  # TODO: figure out what to set
     )
 
-    # Spawn actors on trainer and generator mesh
+    # Spawn trainer first and wait for it to be fully initialized on all ranks
+    # before spawning generator. This is critical because both actors do NCCL
+    # collective operations during init, and Monarch doesn't guarantee init order
+    # across ranks — spawning them concurrently can cause cross-rank deadlocks.
     trainer = trainer_mesh.spawn(
         "trainer",
         Trainer,
         job_config,  # Pass full job_config
     )
 
-    # Spawn grader on trainer mesh (can share resources with trainer)
+    # Spawn grader on trainer mesh (no collective ops in init, safe to co-spawn)
     grader = trainer_mesh.spawn(
         "grader",
         Grader,
         job_config,  # Pass full job_config
     )
 
-    generator = gen_mesh.spawn(
+    # Wait for trainer to be fully initialized on all ranks
+    # Collect weights from ALL trainer ranks (each holds different TP shards)
+    initial_weight_mesh = trainer.get_weights.call().get()
+    initial_weights = {
+        gpu: initial_weight_mesh.item(gpus=gpu) for gpu in range(trainer_world_size)
+    }
+
+    # Now spawn generator — trainer init is complete and process group is ready
+    # Make trainer and generator collocated
+    generator = trainer_mesh.spawn(
         "generator",
         Generator,
         job_config,  # Pass full job_config
@@ -108,8 +107,7 @@ async def main():
         expected_answers,
     )
 
-    # Initialize generator with trainer weights
-    initial_weights = trainer.get_weights.call().get().item(gpus=0)
+    # Initialize generator with trainer weights.
     generator.update.call(0, initial_weights).get()
 
     # Training loop
@@ -125,8 +123,9 @@ async def main():
         episode = grader.score.call(episode).get().item(gpus=0)
         # 3. Trainer computes advantages and updates policy
         metrics = trainer.step.call(episode).get().item(gpus=0)
-        # 4. Sync weights back to generator
-        weights = trainer.get_weights.call().get().item(gpus=0)
+        # 4. Sync weights back to generator (all TP ranks)
+        weight_mesh = trainer.get_weights.call().get()
+        weights = {gpu: weight_mesh.item(gpus=gpu) for gpu in range(trainer_world_size)}
         generator.update.call(metrics["policy_version"], weights).get()
 
         logger.info(

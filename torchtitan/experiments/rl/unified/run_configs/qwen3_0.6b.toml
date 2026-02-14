@@ -18,6 +18,10 @@ name = "qwen3"
 flavor = "0.6B"
 hf_assets_path = "./assets/hf/Qwen3-0.6B"
 
+[optimizer]
+name = "AdamW"
+lr = 1e-6
+
 [lr_scheduler]
 warmup_steps = 2  # lr scheduler warm up, 20% total steps
 
@@ -37,11 +41,10 @@ dataset = "c4"
 dtype = "bfloat16"  # matching inference dtype
 
 [parallelism]  # training parallelism plan
-data_parallel_replicate_degree = 2
+data_parallel_replicate_degree = 1
 data_parallel_shard_degree = 1
 fsdp_reshard_after_forward = "default" # default / never / always
-tensor_parallel_degree = 1
-
+tensor_parallel_degree = 2
 [checkpoint]
 initial_load_path = "/data/users/jianiw/model/qwen3-0.6b"
 
@@ -60,7 +63,7 @@ enforce_eager = true
 
 [generation.parallelism]
 data_parallel_replicate_degree = 1
-tensor_parallel_degree = 1
+tensor_parallel_degree = 2
 
 [generation.sampling]
 temperature = 0.8

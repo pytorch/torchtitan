@@ -61,7 +61,7 @@ class Grader(Actor):
         reward_fn: Optional[Callable] = None,
     ):
         # Extract needed fields from job_config
-        self.group_size = job_config.rl.grpo_group_size
+        self.group_size = job_config.policy_optimization.grpo_group_size
 
         # Set reward function
         self.reward_fn = reward_fn if reward_fn is not None else trivial_reward_function

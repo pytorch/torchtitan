@@ -10,9 +10,10 @@ from typing import Any, Optional
 
 import torch
 import torch.distributed.checkpoint as dcp
-
 import torchtitan.protocols.train_spec as train_spec_module
 from monarch.actor import Actor, endpoint
+
+from torch.distributed._tensor import DTensor
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
     set_model_state_dict,
@@ -57,9 +58,9 @@ class Trainer(Actor):
         self.job_config = job_config
 
         # GRPO config for advantage computation
-        self.group_size = job_config.rl.grpo_group_size
-        self.grpo_beta = job_config.rl.grpo_beta
-        self.use_stable_grpo = job_config.rl.use_stable_grpo
+        self.group_size = job_config.policy_optimization.grpo_group_size
+        self.grpo_beta = job_config.policy_optimization.grpo_beta
+        self.use_stable_grpo = job_config.policy_optimization.use_stable_grpo
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -67,7 +68,12 @@ class Trainer(Actor):
         device_module.set_device(self.device)
 
         # Initialize distributed
-        world_size = dist_utils.init_distributed(job_config.comm)
+        # When running under Monarch, setup_env_for_distributed already
+        # initializes the process group, so skip re-initialization.
+        if torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+        else:
+            world_size = dist_utils.init_distributed(job_config.comm)
 
         # Build parallel dims
         parallelism_config = job_config.parallelism
@@ -239,10 +245,20 @@ class Trainer(Actor):
         """Get model weights for generator.
 
         Returns:
-            model state dict
+            model state dict with plain local tensors (DTensors unwrapped
+            to avoid cross-mesh issues when transferring through Monarch).
         """
         titan_state = self.model.state_dict()
-        return titan_state
+
+        # Unwrap DTensors to plain local tensors and clone to break shared storage.
+        # Without clone, to_local() returns a view of the trainer's parameter data.
+        # Since trainer and generator are collocated (same process), Monarch passes
+        # by reference, so the generator's set_model_state_dict can corrupt the
+        # trainer's Replicate params (norm weights) via in-place redistribution.
+        return {
+            k: v.to_local().clone() if isinstance(v, DTensor) else v.clone()
+            for k, v in titan_state.items()
+        }
 
     @endpoint
     async def step(self, episode: Episodes) -> dict:
@@ -289,6 +305,12 @@ class Trainer(Actor):
         verification_result = verify_logprob_identity(
             episode.vllm_token_log_probs,
             batch_token_log_probs,
+        )
+        logger.info(
+            f"Logprob verification: bitwise_identical={verification_result['bitwise_identical']}, "
+            f"max_delta={verification_result['max_delta']:.6e}, "
+            f"avg_delta={verification_result['avg_delta']:.6e}, "
+            f"tokens_checked={verification_result['total_tokens_checked']}"
         )
 
         # Update weights using torchtitan optimizers
