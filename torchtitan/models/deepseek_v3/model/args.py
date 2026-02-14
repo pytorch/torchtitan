@@ -103,6 +103,16 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             job_config.debug.moe_force_load_balance
         )
 
+        # LLEP config overrides from [llep] TOML section
+        if job_config.llep.enabled is not None:
+            self.moe_args.use_llep = job_config.llep.enabled
+        if job_config.llep.max_tokens_factor is not None:
+            self.moe_args.llep.max_tokens_factor = job_config.llep.max_tokens_factor
+        if job_config.llep.min_tokens_per_gemm is not None:
+            self.moe_args.llep.min_tokens_per_gemm = job_config.llep.min_tokens_per_gemm
+        if job_config.llep.adaptive_threshold is not None:
+            self.moe_args.llep.adaptive_threshold = job_config.llep.adaptive_threshold
+
         # Configure expert parallel communication backend from config (defaults to "standard")
         self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
 

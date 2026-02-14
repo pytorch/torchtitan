@@ -1,5 +1,4 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
+# Copyright (c) Nous Research. All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
@@ -1039,6 +1038,9 @@ def llep_moe_forward(
     )
     min_tokens_per_gemm = int(
         os.environ.get("EP_MIN_TOKENS_PER_GEMM", str(min_tokens_per_gemm))
+    )
+    adaptive_threshold = float(
+        os.environ.get("EP_ADAPTIVE_THRESHOLD", str(adaptive_threshold))
     )
 
     # ------------------------------------------------------------------

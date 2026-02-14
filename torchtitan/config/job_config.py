@@ -1420,6 +1420,31 @@ class Debug:
 
 
 @dataclass
+class LLEP:
+    """Least-Loaded Expert Parallelism (LLEP) configuration.
+
+    Overrides model flavor defaults when set. Leave as None to keep flavor defaults.
+    Only takes effect when the model flavor has use_llep=True.
+
+    Paper defaults (Section 5.1): "For LLEP, we use λ=1.3, α=1, m=1024."
+    Reference: "Least-Loaded Expert Parallelism: Load Balancing An Imbalanced
+    Mixture-of-Experts" (Nguyen et al., Salesforce AI Research)
+    """
+
+    enabled: bool | None = None
+    """Enable LLEP. Overrides model flavor's use_llep when set."""
+
+    max_tokens_factor: float | None = None
+    """α: GPU capacity factor. Paper default: 1.0 (fair share)."""
+
+    min_tokens_per_gemm: int | None = None
+    """m: minimum tokens per GEMM to justify spilling. Paper default: 1024."""
+
+    adaptive_threshold: float | None = None
+    """λ: imbalance ratio to trigger LLEP. Paper default: 1.3. Set 0 for always-on."""
+
+
+@dataclass
 class JobConfig:
     """
     Default container for training configuration.
@@ -1434,6 +1459,7 @@ class JobConfig:
     training: Training = field(default_factory=Training)
     parallelism: Parallelism = field(default_factory=Parallelism)
     deepep: DeepEP = field(default_factory=DeepEP)
+    llep: LLEP = field(default_factory=LLEP)
     checkpoint: Checkpoint = field(default_factory=Checkpoint)
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint

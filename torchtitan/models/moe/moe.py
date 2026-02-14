@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 import torch
@@ -68,6 +68,32 @@ def fast_init_normal_(
 
 
 @dataclass
+class LLEPConfig:
+    """Least-Loaded Expert Parallelism (LLEP) configuration.
+
+    Default values from the paper (Section 5.1):
+        "For LLEP, we use λ=1.3, α=1, m=1024."
+    Reference: "Least-Loaded Expert Parallelism: Load Balancing An Imbalanced
+    Mixture-of-Experts" (Nguyen et al., Salesforce AI Research)
+
+    These apply automatically when use_llep=True without explicit config.
+    Override via [llep] TOML section or per-flavor LLEPConfig(...).
+    """
+
+    max_tokens_factor: float = 1.1
+    """α (alpha): GPU capacity factor. max_tokens_per_gpu = α × (total_tokens / num_gpus).
+    1.1 = allow 10% overload before spilling. Paper recommends 1.0 (Section 5.1)."""
+
+    min_tokens_per_gemm: int = 1024
+    """m: minimum tokens per GEMM to justify spilling to a helper GPU.
+    Below this threshold, the GEMM is too small to be efficient. Paper default: 1024 (Section 5.1)."""
+
+    adaptive_threshold: float = 0.0
+    """λ (lambda): imbalance ratio (max_gpu_load / mean_gpu_load) to trigger LLEP.
+    Below this ratio, standard EP is used instead. 0 = always use LLEP. Paper recommends 1.3 (Section 5.1)."""
+
+
+@dataclass
 class MoEArgs:
     num_experts: int = 8
     num_shared_experts: int = 1
@@ -97,9 +123,7 @@ class MoEArgs:
 
     # Least-Loaded Expert Parallelism (LLEP)
     use_llep: bool = False
-    llep_max_tokens_factor: float = 1.1  # alpha: max GPU capacity factor
-    llep_min_tokens_per_gemm: int = 1024  # min tokens per GEMM to spill
-    llep_adaptive_threshold: float = 0.0  # lambda: 0 = always use LPT
+    llep: "LLEPConfig" = field(default_factory=lambda: LLEPConfig())
 
     def validate_deepep_config(self) -> None:
         """Validate DeepEP configuration consistency.
@@ -861,9 +885,16 @@ class MoE(nn.Module):
         self.use_llep = moe_args.use_llep
         self._llep_enabled = False
         self._ep_group = None
-        self._llep_max_tokens_factor = moe_args.llep_max_tokens_factor
-        self._llep_min_tokens_per_gemm = moe_args.llep_min_tokens_per_gemm
-        self._llep_adaptive_threshold = moe_args.llep_adaptive_threshold
+        self._llep_max_tokens_factor = moe_args.llep.max_tokens_factor
+        self._llep_min_tokens_per_gemm = moe_args.llep.min_tokens_per_gemm
+        self._llep_adaptive_threshold = moe_args.llep.adaptive_threshold
+
+        if self.use_llep:
+            logger.info(
+                f"[LLEP] enabled with α={self._llep_max_tokens_factor}, "
+                f"m={self._llep_min_tokens_per_gemm}, "
+                f"λ={self._llep_adaptive_threshold}"
+            )
 
         if peft_config is not None and peft_config.enable_peft:
             # TODO:

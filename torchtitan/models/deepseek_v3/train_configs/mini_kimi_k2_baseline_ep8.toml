@@ -1,10 +1,9 @@
-# Mini Kimi K2 with LLEP: 256 experts, top_k=8, dim=1024, EP=8 (8 GPUs, 1 node)
-# No weight loading - random init. Same structure as real Kimi K2 LLEP config.
-# Original config from: /mnt/data/home/nous/phuc/least_loaded_ep/torchtitan/torchtitan/models/deepseek_v3/train_configs/kimi_k2_ep64_cp1_seq24k_lbs1_8n_disable_force_balance_and_c4_dataset_and_use_llep_muon.toml
+# Mini Kimi K2 BASELINE (no LLEP): 256 experts, top_k=8, dim=3072, EP=8 (8 GPUs, 1 node)
+# Identical to mini_kimi_k2_llep_ep8.toml but with LLEP disabled for A/B speed comparison.
 
 [job]
-dump_folder = "./outputs/mini_kimi_k2_llep_ep8"
-description = "Mini Kimi K2: EP=8 SEQ=24K LBS=6 LLEP enabled, 256 experts top_k=8"
+dump_folder = "./outputs/mini_kimi_k2_baseline_ep8"
+description = "Mini Kimi K2 BASELINE: EP=8 SEQ=8K LBS=6 NO LLEP, 256 experts top_k=8"
 
 [profiling]
 enable_profiling = false
@@ -15,13 +14,8 @@ disable_color_printing = true
 
 [model]
 name = "deepseek_v3"
-flavor = "mini_kimi_k2_llep"
+flavor = "mini_kimi_k2_baseline"
 hf_assets_path = "./tests/assets/tokenizer"
-
-# [optimizer]
-# name = "AdamW"
-# lr = 8e-4
-# eps = 1e-8
 
 [optimizer]
 name = "Muon"
@@ -82,15 +76,6 @@ mode = "full"
 [compile]
 enable = true
 components = ["loss"]
-
-# Least-Loaded Expert Parallelism (Nguyen et al., Salesforce AI Research)
-# Paper defaults (Section 5.1): "For LLEP, we use λ=1.3, α=1, m=1024."
-# Original working values for this config: α=1.1, m=256, λ=0.0
-[llep]
-enabled = true
-#max_tokens_factor = 1.1       # α: original value (paper default 1.0 causes OOM on this config)
-#min_tokens_per_gemm = 256     # m: original value (smaller chunks for mini model)
-#adaptive_threshold = 0.0      # λ: always active (original value)
 
 [debug]
 moe_force_load_balance = false
