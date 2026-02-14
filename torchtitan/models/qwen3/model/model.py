@@ -6,6 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -24,6 +25,7 @@ from torchtitan.models.attention import (
     VarlenMetadata,
 )
 from torchtitan.models.moe import MoE
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -129,18 +131,6 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -175,6 +165,7 @@ class Attention(nn.Module):
         self.head_dim = model_args.head_dim
         self.scaling = self.head_dim**-0.5
         self.attn_type = getattr(model_args, "attn_type", "sdpa")
+        self.enable_gqa = self.n_heads > self.n_kv_heads
 
         # RMSNorm added here to the here to include the q-k norm
         # This is one of the main differences between Llama3 and Qwen3
@@ -198,22 +189,21 @@ class Attention(nn.Module):
             model_args.n_heads * self.head_dim, model_args.dim, bias=False
         )
 
+        self.inner_attention: nn.Module
         match self.attn_type:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
             case "varlen":
-                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = VarlenAttentionWrapper()
             case "sdpa":
-                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
         if self.q_norm is not None:
             self.q_norm.reset_parameters()
         if self.k_norm is not None:
@@ -252,48 +242,55 @@ class Attention(nn.Module):
 
         # Adding the q_norm and k_norm here
         # Last layer of adding q-k norm
-        if self.q_norm:  # pyrefly: ignore[invalid-argument]
+        if self.q_norm:
             xq = self.q_norm(xq)
-        if self.k_norm:  # pyrefly: ignore[invalid-argument]
+        if self.k_norm:
             xk = self.k_norm(xk)
 
         # Apply rotary embedding
         xq, xk = apply_rotary_emb(xq, xk, rope_cache, positions)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-
-        xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xq = xq.transpose(1, 2)  # (bs, n_heads, seqlen, head_dim)
+        xk = xk.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        xv = xv.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
 
         match self.attn_type:
             case "flex":
                 assert isinstance(attention_masks, BlockMask), attention_masks
-                output = self.inner_attention(
-                    xq, xk, xv, block_mask=attention_masks, scale=self.scaling
-                )
-                output = output.transpose(
-                    1, 2
-                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+                output = (
+                    self.inner_attention(
+                        xq,  # (bs, n_heads, seqlen, head_dim)
+                        xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                        xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                        block_mask=attention_masks,
+                        scale=self.scaling,
+                        enable_gqa=self.enable_gqa,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )  # (bs, seqlen, n_local_heads, head_dim)
             case "varlen":
-                # TODO: pass self.scaling into varlen attention
                 assert isinstance(attention_masks, VarlenMetadata), attention_masks
                 output = self.inner_attention(
-                    xq,
-                    xk,
-                    xv,
-                    self.head_dim,
+                    xq,  # (bs, n_heads, seqlen, head_dim)
+                    xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                    xv,  # (bs, n_kv_heads, seqlen, head_dim)
                     attention_masks,
                     scale=self.scaling,
                 )
             case "sdpa":
                 assert attention_masks is None
-                output = self.inner_attention(xq, xk, xv, scale=self.scaling)
-                output = output.transpose(
-                    1, 2
-                ).contiguous()  # (bs, seqlen, n_local_heads, head_dim)
+                output = (
+                    self.inner_attention(
+                        xq,  # (bs, n_heads, seqlen, head_dim)
+                        xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                        xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                        scale=self.scaling,
+                        enable_gqa=self.enable_gqa,
+                    )
+                    .transpose(1, 2)
+                    .contiguous()
+                )  # (bs, seqlen, n_local_heads, head_dim)
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
@@ -334,9 +331,9 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
         for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
 class TransformerBlock(nn.Module):
@@ -437,7 +434,7 @@ class Qwen3Model(ModelProtocol):
         vocab_size (int): Vocabulary size.
         n_layers (int): Number of layers in the model.
         tok_embeddings (ParallelEmbedding): Token embeddings.
-        layers (torch.nn.ModuleList): List of Transformer blocks.
+        layers (torch.nn.ModuleDict): Dict of Transformer blocks.
         norm (RMSNorm): Layer normalization for the model output.
         output (ColumnParallelLinear): Linear layer for final output.
         freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
@@ -449,8 +446,8 @@ class Qwen3Model(ModelProtocol):
         self.model_args = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
-        self.eos_id = model_args.eos_id
         self.head_dim = model_args.head_dim
+        self.enable_weight_tying = model_args.enable_weight_tying
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
@@ -464,6 +461,9 @@ class Qwen3Model(ModelProtocol):
         self.norm = nn.RMSNorm(model_args.dim, eps=model_args.norm_eps)
 
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+
+        if self.enable_weight_tying:
+            self.output.weight = self.tok_embeddings.weight
 
     def init_weights(
         self,
@@ -487,16 +487,24 @@ class Qwen3Model(ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                # pyrefly: ignore [not-callable]
-                layer.init_weights(buffer_device)
+                cast(TransformerBlock, layer).init_weights(buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
 
-        # If weight tying is enabled, we don't need to initialize the output layer
+        if self.enable_weight_tying:
+            # since when the model is initialized on meta device,
+            # the tying in the __init__ may not have worked correctly
+            # we ensure the weights are tied here
+            assert self.tok_embeddings is not None and self.output is not None
+            self.output.weight = self.tok_embeddings.weight
+
+        # The token embedding initialization produces weights with too large
+        # standard deviation for the output layer. Reinitialize the output weights
+        # with a smaller, truncated normal distribution to improve training stability.
         if self.output is not None:
-            nn.init.trunc_normal_(
+            trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,
@@ -523,6 +531,7 @@ class Qwen3Model(ModelProtocol):
                 B = 1
             case "block_causal":
                 B = input_batch.shape[0]
+                assert tokenizer.eos_id is not None
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
             case _:
                 raise ValueError(
@@ -549,13 +558,12 @@ class Qwen3Model(ModelProtocol):
                         f"varlen attention is only supported with block_causal \
                         attention mask type, got {self.model_args.attn_mask_type}"
                     )
+                assert tokenizer.eos_id is not None
                 return create_varlen_metadata_for_document(
                     input_batch, tokenizer.eos_id
                 )
             case _:
-                raise NotImplementedError(
-                    "Only varlen and flex attn masks are supported"
-                )
+                raise TypeError("Only varlen and flex attn masks are supported")
 
     def forward(
         self,
@@ -579,14 +587,11 @@ class Qwen3Model(ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        # pyrefly: ignore[not-callable, invalid-argument]
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.rope_cache, attention_masks, positions)
 
-        # pyrefly: ignore[not-callable, invalid-argument]
-        h = self.norm(h) if self.norm else h
-        # pyrefly: ignore[not-callable, invalid-argument]
-        output = self.output(h) if self.output else h
+        h = self.norm(h) if self.norm is not None else h
+        output = self.output(h) if self.output is not None else h
         return output
