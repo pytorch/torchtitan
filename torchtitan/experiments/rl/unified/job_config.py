@@ -59,6 +59,12 @@ class Generate:
     enforce_eager: bool = True
     """Whether to enforce eager execution (disable CUDA graphs)"""
 
+    distributed_executor_backend: str = "mp"
+    """Distributed executor backend for vLLM (mp, ray, or external)"""
+
+    seed: int = 42
+    """Random seed for reproducible generation"""
+
     parallelism: Parallelism = field(default_factory=Parallelism)
     """Parallelism configuration for generation"""
 
