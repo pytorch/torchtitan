@@ -88,9 +88,9 @@ components = ["loss"]
 # Original working values for this config: α=1.1, m=256, λ=0.0
 [llep]
 enabled = true
-#max_tokens_factor = 1.1       # α: original value (paper default 1.0 causes OOM on this config)
-#min_tokens_per_gemm = 256     # m: original value (smaller chunks for mini model)
-#adaptive_threshold = 0.0      # λ: always active (original value)
+# max_tokens_factor = 1.1     # α
+# min_tokens_per_gemm = 1024  # m
+# adaptive_threshold = 0.0    # λ
 
 [debug]
 moe_force_load_balance = false

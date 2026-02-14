@@ -1443,6 +1443,13 @@ class LLEP:
     adaptive_threshold: float | None = None
     """λ: imbalance ratio to trigger LLEP. Paper default: 1.3. Set 0 for always-on."""
 
+    autotune: bool = False
+    """Run LLEP autotuning at startup. Finds optimal α, m, λ from real routing stats.
+    Adds ~20-30s to startup. Overrides manual values above when enabled."""
+
+    autotune_samples: int = 3
+    """Number of forward passes for routing stat collection during autotune."""
+
 
 @dataclass
 class JobConfig:

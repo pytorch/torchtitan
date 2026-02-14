@@ -880,6 +880,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 torch.distributed.barrier()
                 logger.info("All ranks synchronized after bf16 optimizer state init")
 
+        # LLEP autotune: find optimal hyperparameters from real routing stats
+        if hasattr(job_config, "llep") and job_config.llep.autotune:
+            from torchtitan.distributed.llep_autotune import autotune_llep
+
+            autotune_llep(
+                model=self.model_parts[0],
+                dataloader=self.dataloader,
+                job_config=job_config,
+            )
+
         logger.info(f"Training starts at step {self.step + 1}")
 
         leaf_folder = (
