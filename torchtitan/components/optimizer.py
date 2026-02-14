@@ -130,6 +130,10 @@ class OptimizersContainer(Optimizer, Stateful, Generic[T]):
         # functionality such as hooks.
         Optimizer.__init__(self, all_params, optimizer_kwargs)
 
+    def init_cache_state_dict(self) -> None:
+        """Initialize cached state dict for TorchFT. No-op for base class."""
+        pass
+
 
 class OptimizersInBackwardContainer(OptimizersContainer):
     """OptimizersContainer for executing ``optim.step()`` in backward pass.
@@ -347,9 +351,9 @@ def build_optimizers_with_moe_load_balancing(
 
     def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
         for model_part in model_parts:
-            # pyrefly: ignore [not-callable]
-            for transformer_block in model_part.layers.values():
-                # pyrefly: ignore [missing-attribute]
+            layers = model_part.get_submodule("layers")
+            assert isinstance(layers, nn.ModuleDict)
+            for transformer_block in layers.values():
                 if transformer_block.moe_enabled:
                     # Assumption: load_balance_coeff is set universally on all moe blocks.
                     # pyrefly: ignore [missing-attribute]
@@ -369,9 +373,9 @@ def build_optimizers_with_moe_load_balancing(
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_list = []
         for model_part in model_parts:
-            # pyrefly: ignore [not-callable]
-            for transformer_block in model_part.layers.values():
-                # pyrefly: ignore [missing-attribute]
+            layers = model_part.get_submodule("layers")
+            assert isinstance(layers, nn.ModuleDict)
+            for transformer_block in layers.values():
                 if not transformer_block.moe_enabled:
                     continue
                 # pyrefly: ignore [missing-attribute]
@@ -407,12 +411,11 @@ def build_optimizers_with_moe_load_balancing(
         moe_layer_idx = 0
         with torch.no_grad():
             for model_part in model_parts:
-                # pyrefly: ignore [not-callable]
-                for transformer_block in model_part.layers.values():
-                    # pyrefly: ignore [missing-attribute]
+                layers = model_part.get_submodule("layers")
+                assert isinstance(layers, nn.ModuleDict)
+                for transformer_block in layers.values():
                     if not transformer_block.moe_enabled:
                         continue
-                    # pyrefly: ignore [missing-attribute]
                     moe = transformer_block.moe
 
                     tokens_per_expert = tokens_per_expert_by_layer[
@@ -422,11 +425,14 @@ def build_optimizers_with_moe_load_balancing(
 
                     # update the expert bias
                     # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
+                    # pyrefly: ignore [missing-attribute]
                     expert_bias_delta = moe.load_balance_coeff * torch.sign(
                         tokens_per_expert.mean() - tokens_per_expert
                     )
                     expert_bias_delta = expert_bias_delta - expert_bias_delta.mean()
+                    # pyrefly: ignore [missing-attribute]
                     moe.expert_bias.add_(expert_bias_delta)
+                    # pyrefly: ignore [missing-attribute]
                     moe.tokens_per_expert.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):

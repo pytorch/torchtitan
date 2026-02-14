@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
+from typing import cast
 
 import torch
 import torch.nn.functional as F
@@ -21,6 +22,7 @@ from torchtitan.models.attention import (
     ScaledDotProductAttentionWrapper,
 )
 from torchtitan.models.moe import MoE
+from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -165,18 +167,6 @@ def apply_rotary_emb(
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
-    bs, slen, n_kv_heads, head_dim = x.shape
-    if n_rep == 1:
-        return x
-    return (
-        torch.unsqueeze(x, dim=3)
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
-    )
-
-
 class Attention(nn.Module):
     """
     Multi-head attention module.
@@ -211,6 +201,7 @@ class Attention(nn.Module):
         )
         self.n_rep = self.n_heads // self.n_kv_heads
         self.head_dim = model_args.dim // model_args.n_heads
+        self.enable_gqa = self.n_heads > self.n_kv_heads
 
         self.wq = nn.Linear(
             model_args.dim, model_args.n_heads * self.head_dim, bias=False
@@ -227,11 +218,11 @@ class Attention(nn.Module):
         self.use_rope = use_rope
 
         self.attn_type = model_args.attn_type
+        self.inner_attention: nn.Module
         match self.attn_type:
             case "flex":
                 self.inner_attention = FlexAttentionWrapper()
             case "sdpa":
-                # pyrefly: ignore [bad-assignment]
                 self.inner_attention = ScaledDotProductAttentionWrapper()
             case "varlen":
                 raise ValueError("Varlen attention is not supported with Llama 4.")
@@ -240,8 +231,8 @@ class Attention(nn.Module):
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
     def forward(
         self,
@@ -277,21 +268,28 @@ class Attention(nn.Module):
         if self.use_rope:
             xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, positions=positions)
 
-        # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-        values = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
-
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xk = keys.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
-        xv = values.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        xk = xk.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
+        xv = xv.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
 
         if self.attn_type == "flex":
             assert isinstance(attention_masks, dict), attention_masks
             attention_mask = attention_masks["rope" if self.use_rope else "nope"]
-            output = self.inner_attention(xq, xk, xv, block_mask=attention_mask)
+            output = self.inner_attention(
+                xq,  # (bs, n_local_heads, seqlen, head_dim)
+                xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                block_mask=attention_masks,
+                enable_gqa=self.enable_gqa,
+            )
         else:
-            assert attention_masks is None
-            output = self.inner_attention(xq, xk, xv)
+            assert attention_masks is None and self.attn_type == "sdpa"
+            output = self.inner_attention(
+                xq,  # (bs, n_local_heads, seqlen, head_dim)
+                xk,  # (bs, n_kv_heads, seqlen, head_dim)
+                xv,  # (bs, n_kv_heads, seqlen, head_dim)
+                enable_gqa=self.enable_gqa,
+            )
 
         output = output.transpose(
             1, 2
@@ -339,9 +337,9 @@ class FeedForward(nn.Module):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
         for linear in (self.w2, self.w3):
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            trunc_normal_(linear.weight, mean=0.0, std=init_std)
 
 
 class TransformerBlock(nn.Module):
@@ -471,7 +469,7 @@ class Transformer(ModelProtocol):
         vocab_size (int): Vocabulary size.
         n_layers (int): Number of layers in the model.
         tok_embeddings (ParallelEmbedding): Token embeddings.
-        layers (torch.nn.ModuleList): List of Transformer blocks.
+        layers (torch.nn.ModuleDict): Dict of Transformer blocks.
         norm (RMSNorm): Layer normalization for the model output.
         output (Linear): Linear layer for final output.
         freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
@@ -518,14 +516,13 @@ class Transformer(ModelProtocol):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                # pyrefly: ignore [not-callable]
-                layer.init_weights(buffer_device=buffer_device)
+                cast(TransformerBlock, layer).init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.model_args.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
-            nn.init.trunc_normal_(
+            trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,
@@ -536,9 +533,6 @@ class Transformer(ModelProtocol):
     def _precompute_freqs_cis(self) -> torch.Tensor:
         return precompute_freqs_cis(
             self.model_args.dim // self.model_args.n_heads,
-            # Need to compute until at least the max token limit for generation
-            # TODO: explain in docs/composability.md why we removed the 2x
-            # relaxing in our CP enablement PR
             self.model_args.max_seq_len,
             self.model_args.rope_theta,
             self.model_args.rope_scaling_args,
@@ -555,6 +549,7 @@ class Transformer(ModelProtocol):
             case "causal":
                 B = 1
             case "block_causal":
+                assert tokenizer.eos_id is not None
                 mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
                 B = input_batch.shape[0]
             case _:
@@ -596,14 +591,11 @@ class Transformer(ModelProtocol):
 
         """
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        # pyrefly: ignore[not-callable, invalid-argument]
-        h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
+        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
             h = layer(h, self.freqs_cis, attention_masks, positions)
 
-        # pyrefly: ignore[not-callable, invalid-argument]
-        h = self.norm(h) if self.norm else h
-        # pyrefly: ignore[not-callable, invalid-argument]
-        output = self.output(h) if self.output else h
+        h = self.norm(h) if self.norm is not None else h
+        output = self.output(h) if self.output is not None else h
         return output
