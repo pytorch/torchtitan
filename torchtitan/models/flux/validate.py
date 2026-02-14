@@ -61,6 +61,7 @@ class FluxValidator(Validator):
         pp_has_last_stage: bool | None = None,
     ):
         self.job_config = job_config
+        self.tokenizer = tokenizer
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
         # pyrefly: ignore [missing-attribute]
@@ -126,7 +127,6 @@ class FluxValidator(Validator):
         device_type = dist_utils.device_type
         num_steps = 0
 
-        # pyrefly: ignore [not-iterable]
         for input_dict, labels in self.validation_dataloader:
             if (
                 self.job_config.validation.steps != -1
@@ -138,6 +138,7 @@ class FluxValidator(Validator):
             if not isinstance(prompt, list):
                 prompt = [prompt]
             for p in prompt:
+                assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if save_img_count != -1 and save_img_count <= 0:
                     break
                 image = generate_image(
@@ -146,7 +147,7 @@ class FluxValidator(Validator):
                     job_config=self.job_config,
                     # pyrefly: ignore [bad-argument-type]
                     model=model,
-                    prompt=p,  # pyrefly: ignore[bad-argument-type]
+                    prompt=p,
                     autoencoder=self.autoencoder,
                     t5_tokenizer=self.t5_tokenizer,
                     clip_tokenizer=self.clip_tokenizer,
@@ -163,7 +164,7 @@ class FluxValidator(Validator):
                     ),
                     x=image,
                     add_sampling_metadata=True,
-                    prompt=p,  # pyrefly: ignore[bad-argument-type]
+                    prompt=p,
                 )
                 save_img_count -= 1
 
@@ -220,41 +221,35 @@ class FluxValidator(Validator):
                 latents = pack_latents(latents)
                 target = pack_latents(noise - labels)
 
-                optional_context_parallel_ctx = None
-                if parallel_dims.cp_enabled:
-                    cp_mesh = parallel_dims.get_mesh("cp")
-                    optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
-                        cp_mesh=cp_mesh,
-                        cp_buffers=[
-                            latents,
-                            latent_pos_enc,
-                            t5_encodings,
-                            text_pos_enc,
-                            target,
-                        ],
-                        cp_seq_dims=[1, 1, 1, 1, 1],
-                        cp_no_restore_buffers={
-                            latents,
-                            latent_pos_enc,
-                            t5_encodings,
-                            text_pos_enc,
-                            target,
-                        },
-                        cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
+            # Apply CP sharding if enabled
+            if parallel_dims.cp_enabled:
+                from torchtitan.distributed.context_parallel import cp_shard
+
+                (
+                    latents,
+                    latent_pos_enc,
+                    t5_encodings,
+                    text_pos_enc,
+                    target,
+                ), _ = cp_shard(
+                    parallel_dims.get_mesh("cp"),
+                    (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
+                    None,  # No attention masks for Flux
+                    load_balancer_type=None,
+                )
+
+            with self.validation_context():
+                with self.maybe_enable_amp:
+                    latent_noise_pred = model(
+                        img=latents,
+                        img_ids=latent_pos_enc,
+                        txt=t5_encodings,
+                        txt_ids=text_pos_enc,
+                        y=clip_encodings,
+                        timesteps=timesteps,
                     )
 
-                with self.validation_context(optional_context_parallel_ctx):
-                    with self.maybe_enable_amp:
-                        latent_noise_pred = model(
-                            img=latents,
-                            img_ids=latent_pos_enc,
-                            txt=t5_encodings,
-                            txt_ids=text_pos_enc,
-                            y=clip_encodings,
-                            timesteps=timesteps,
-                        )
-
-                    loss = self.loss_fn(latent_noise_pred, target)
+                loss = self.loss_fn(latent_noise_pred, target)
 
             del noise, target, latent_noise_pred, latents
 

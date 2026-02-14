@@ -172,6 +172,14 @@ class LRScheduler:
     Steps for lr scheduler warmup, normally 1/5 of --training.steps
     """
 
+    total_steps: int | None = None
+    """
+    Total steps for LR schedule calculation. If None, defaults to training.steps.
+    This allows decoupling the LR schedule from the actual training steps,
+    which is useful for debugging with fewer steps while maintaining the same LR curve,
+    or for early stopping scenarios.
+    """
+
     decay_ratio: float | None = None
     """
     Controls the proportion of the training steps allocated to the learning rate decay phase.
@@ -419,6 +427,21 @@ class Parallelism:
 
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
+
+    context_parallel_load_balancer: str | None = "headtail"
+    """
+    Load balancer type for context parallelism. Options:
+    - "headtail": Use HeadTailLoadBalancer for SDPA
+    - "ptrr": Use PTRRLoadBalancer for FlexAttention
+    - None: Disable load balancing
+    """
+
+    def __post_init__(self):
+        if self.context_parallel_load_balancer == "":
+            raise ValueError(
+                "context_parallel_load_balancer cannot be an empty string. "
+                "Use None to disable load balancing."
+            )
 
     context_parallel_rotate_method: Literal["allgather", "alltoall"] = "allgather"
     """

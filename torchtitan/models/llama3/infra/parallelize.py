@@ -9,6 +9,7 @@
 
 import torch
 import torch.nn as nn
+from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._composable.replicate import replicate
 
 from torch.distributed.device_mesh import DeviceMesh
@@ -26,6 +27,7 @@ from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.config.job_config import Compile as CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
 from torchtitan.tools.logging import logger
 
@@ -89,8 +91,18 @@ def parallelize_llama(
             tp_mesh,
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
+            cp_enabled=parallel_dims.cp_enabled,
         )
         maybe_enable_async_tp(job_config, tp_mesh)
+
+    attn_type = getattr(model.model_args, "attn_type", "sdpa")
+    if parallel_dims.cp_enabled:
+        apply_cp_to_attention_module(
+            # pyrefly: ignore [missing-attribute, not-callable]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+            attn_type,
+        )
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -131,9 +143,6 @@ def parallelize_llama(
         else:
             logger.info("Applied FSDP to the model")
 
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
-
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
@@ -154,6 +163,7 @@ def apply_tp(
     tp_mesh: DeviceMesh,
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
+    cp_enabled: bool = False,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -208,7 +218,10 @@ def apply_tp(
         layer_plan = {
             "attention_norm": SequenceParallel(),
             # NOTE: when the fourth argument (positions) is not None, its input layout
-            # and desired input layout should be Replicate()
+            # and desired input layout is still None as we don't convert freqs_cis to
+            # a DTensor for llama3.
+            # TODO: https://github.com/pytorch/torchtitan/pull/2149 would fix this
+            # inconsistency.
             "attention": prepare_module_input(
                 input_layouts=(Shard(1), None, None, None),
                 desired_input_layouts=(Replicate(), None, None, None),
@@ -254,6 +267,21 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig):
         model.layers.register_module(layer_id, transformer_block)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
+
+
+def disable_fsdp_gradient_division(model: nn.Module) -> None:
+    """
+    Disable FSDP's automatic gradient division for all FSDP modules.
+
+    Set gradient_divide_factor=1.0 to disable FSDP's automatic gradient division.
+    We handle gradient scaling ourselves in the training loop with global token count.
+
+    Args:
+        model: The model containing FSDP-wrapped modules
+    """
+    for module in model.modules():
+        if isinstance(module, FSDPModule):
+            module.set_gradient_divide_factor(1.0)
 
 
 def apply_fsdp(
@@ -311,7 +339,6 @@ def apply_fsdp(
         )
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
-        # pyrefly: ignore[no-matching-overload]
         fully_shard(
             transformer_block,
             **fsdp_config,
@@ -326,8 +353,11 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
-    # pyrefly: ignore[no-matching-overload]
+
     fully_shard(model, **fsdp_config)
+
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)
 
 
 def apply_ddp(
