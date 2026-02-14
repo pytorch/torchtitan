@@ -45,6 +45,20 @@ Example usages:
 
 6. Assert that losses are equal (for CI testing):
    loss_compare.py main my_branch --assert-equal
+
+7. Run baseline only and compare against imported losses (baseline-only mode):
+   loss_compare.py . . --assert-equal --import-result=expected_losses.txt
+
+8. Run baseline only with specific config and compare against imported losses:
+   loss_compare.py . . --assert-equal --import-result=expected_losses.txt \
+       --baseline-config='./custom.toml'
+
+9. Run baseline only and export the losses (no comparison):
+   loss_compare.py . . --export-result=baseline_losses.txt
+
+10. Run baseline with specific options and export the losses:
+    loss_compare.py . . --baseline-options='--parallelism.dp=2' \
+        --export-result=my_config_losses.txt
 """
 
 import argparse
@@ -172,31 +186,52 @@ def validate_arguments(
     assert_equal: bool,
     export_result: str | None,
     import_result: str | None,
-) -> None:
-    """Validate command line arguments."""
+) -> bool:
+    """Validate command line arguments.
+
+    Returns:
+        True if baseline-only mode (all settings identical with import_result),
+        False otherwise.
+    """
     # Validate that we are comparing different settings
     commits_differ = baseline_commit != test_commit
     configs_differ = baseline_config != test_config
     train_files_differ = baseline_train_file != test_train_file
     options_differ = baseline_options != test_options
 
-    if not (commits_differ or configs_differ or train_files_differ or options_differ):
+    all_identical = not (
+        commits_differ or configs_differ or train_files_differ or options_differ
+    )
+
+    # Determine baseline-only mode:
+    # - With --export-result: always run baseline only (export the losses)
+    # - With --import-result and --assert-equal: run baseline, compare against imported
+    baseline_only = export_result is not None or (
+        all_identical and import_result is not None and assert_equal
+    )
+
+    if export_result:
+        log_print("Baseline-only mode: --export-result specified")
+        log_print("Will run baseline only and export the losses")
+    elif all_identical and import_result and assert_equal:
+        log_print("Baseline-only mode: all settings identical with --import-result")
+        log_print("Will run baseline only and compare against imported losses")
+    elif all_identical:
         log_print("Error: All settings are identical")
         log_print("       Cannot compare identical configurations")
         log_print(
-            "       Please provide different commits, configs, train files, or options"
+            "       Please provide different commits, configs, train files, "
+            "or options"
+        )
+        log_print(
+            "       Or use --import-result with --assert-equal "
+            "or --export-result to run baseline-only mode"
         )
         sys.exit(1)
 
     # Validate steps is a positive integer
     if steps <= 0:
         log_print(f"Error: --steps must be a positive integer, got: {steps}")
-        sys.exit(1)
-
-    # Validate export-result requires assert-equal
-    if export_result and not assert_equal:
-        log_print("Error: --export-result requires --assert-equal")
-        log_print("       Export only happens when losses are verified to match")
         sys.exit(1)
 
     # Validate import-result requires assert-equal
@@ -220,6 +255,9 @@ def validate_arguments(
     if import_result and not os.path.exists(import_result):
         log_print(f"Error: Import file does not exist: {import_result}")
         sys.exit(1)
+
+    # Return whether we're in baseline-only mode
+    return baseline_only
 
 
 # =============================================================================
@@ -280,12 +318,16 @@ def print_configuration(
     steps: int,
     enable_seed_checkpoint: bool,
     job_dump_folder: str,
+    baseline_only_mode: bool = False,
 ) -> None:
     """Print configuration summary."""
-    log_print(
-        f"Starting loss comparison between baseline commit: "
-        f"{baseline_commit} and test commit: {test_commit}"
-    )
+    if baseline_only_mode:
+        log_print(f"Starting baseline-only run with commit: {baseline_commit}")
+    else:
+        log_print(
+            f"Starting loss comparison between baseline commit: "
+            f"{baseline_commit} and test commit: {test_commit}"
+        )
     log_print(f"Training steps: {steps}")
     log_print(f"Seed checkpoint enabled: {enable_seed_checkpoint}")
     log_print()
@@ -299,21 +341,23 @@ def print_configuration(
         enable_seed_checkpoint,
         job_dump_folder,
     )
-    test_final_cmd = build_training_command(
-        test_config,
-        test_train_file,
-        test_options,
-        steps,
-        enable_seed_checkpoint,
-        job_dump_folder,
-    )
 
     log_print("Baseline command:")
     log_print(f"  {baseline_final_cmd}")
     log_print()
-    log_print("Test command:")
-    log_print(f"  {test_final_cmd}")
-    log_print()
+
+    if not baseline_only_mode:
+        test_final_cmd = build_training_command(
+            test_config,
+            test_train_file,
+            test_options,
+            steps,
+            enable_seed_checkpoint,
+            job_dump_folder,
+        )
+        log_print("Test command:")
+        log_print(f"  {test_final_cmd}")
+        log_print()
 
 
 # =============================================================================
@@ -647,32 +691,50 @@ def perform_loss_analysis(
 
 
 def assert_losses_equal(
-    baseline_log: str, test_log: str, import_result: str | None = None
+    baseline_log: str,
+    test_log: str | None = None,
+    import_result: str | None = None,
 ) -> None:
     """Assert that losses are equal between baseline and test using unittest.
 
-    If import_result is provided, also compares baseline with imported losses.
+    Args:
+        baseline_log: Path to baseline training log file.
+        test_log: Path to test training log file. If None, only compares
+            baseline against imported losses (baseline-only mode).
+        import_result: Path to imported losses file for comparison.
+
+    In baseline-only mode (test_log is None), import_result must be provided.
     """
     log_print("Asserting losses are equal...")
     log_print(f"Baseline log: {baseline_log}")
-    log_print(f"Test log: {test_log}")
+    if test_log:
+        log_print(f"Test log: {test_log}")
+    else:
+        log_print("Test log: None (baseline-only mode)")
     if import_result:
         log_print(f"Import file: {import_result}")
 
-    # Extract losses from both logs
-    baseline_losses = extract_losses_from_log(baseline_log)
-    test_losses = extract_losses_from_log(test_log)
+    # Validate baseline-only mode has import_result
+    if test_log is None and import_result is None:
+        log_print("Error: baseline-only mode requires --import-result")
+        sys.exit(1)
 
+    # Extract losses from baseline log
+    baseline_losses = extract_losses_from_log(baseline_log)
     log_print(f"Extracted {len(baseline_losses)} steps from baseline log")
-    log_print(f"Extracted {len(test_losses)} steps from test log")
 
     if not baseline_losses:
         log_print("Error: No losses found in baseline log")
         sys.exit(1)
 
-    if not test_losses:
-        log_print("Error: No losses found in test log")
-        sys.exit(1)
+    # Extract losses from test log if provided
+    test_losses = None
+    if test_log:
+        test_losses = extract_losses_from_log(test_log)
+        log_print(f"Extracted {len(test_losses)} steps from test log")
+        if not test_losses:
+            log_print("Error: No losses found in test log")
+            sys.exit(1)
 
     # Load imported losses if provided
     imported_losses = None
@@ -686,16 +748,17 @@ def assert_losses_equal(
     # Create a test case
     class LossEqualityTest(unittest.TestCase):
         def test_losses_equal(self):
-            # Check that both have the same steps
             baseline_steps = set(baseline_losses.keys())
-            test_steps = set(test_losses.keys())
 
-            self.assertEqual(
-                baseline_steps,
-                test_steps,
-                f"Steps mismatch: baseline has {len(baseline_steps)} steps, "
-                f"test has {len(test_steps)} steps",
-            )
+            # Check baseline vs test if test exists
+            if test_losses is not None:
+                test_steps = set(test_losses.keys())
+                self.assertEqual(
+                    baseline_steps,
+                    test_steps,
+                    f"Steps mismatch: baseline has {len(baseline_steps)} steps, "
+                    f"test has {len(test_steps)} steps",
+                )
 
             # If imported losses exist, check steps match
             if imported_losses:
@@ -710,19 +773,18 @@ def assert_losses_equal(
             # Check that losses are equal for each step
             for step in sorted(baseline_steps):
                 baseline_loss = baseline_losses[step]
-                test_loss = test_losses[step]
 
-                # Compare baseline vs test
-                self.assertEqual(
-                    baseline_loss,
-                    test_loss,
-                    f"Loss mismatch at step {step}: "
-                    f"baseline={baseline_loss}, test={test_loss}",
-                )
+                # Compare baseline vs test (if test exists)
+                if test_losses is not None:
+                    test_loss = test_losses[step]
+                    self.assertEqual(
+                        baseline_loss,
+                        test_loss,
+                        f"Loss mismatch at step {step}: "
+                        f"baseline={baseline_loss}, test={test_loss}",
+                    )
 
                 # Compare baseline vs imported (if provided)
-                # No need to compare test vs imported since:
-                # baseline==test and baseline==imported implies test==imported
                 if imported_losses:
                     imported_loss = imported_losses[step]
                     self.assertEqual(
@@ -741,13 +803,15 @@ def assert_losses_equal(
         log_print("Loss assertion failed!")
         sys.exit(1)
     else:
-        if import_result:
+        if test_log and import_result:
             log_print(
                 "All losses are equal (baseline, test, and imported). "
                 "Assertion passed!"
             )
+        elif test_log:
+            log_print("All losses are equal (baseline and test). Assertion passed!")
         else:
-            log_print("All losses are equal. Assertion passed!")
+            log_print("All losses are equal (baseline and imported). Assertion passed!")
 
 
 def cleanup_temp_files(output_folder: str | None) -> None:
@@ -771,14 +835,20 @@ def cleanup_temp_files(output_folder: str | None) -> None:
 
 
 def print_completion_summary(
-    output_folder: str | None, enable_seed_checkpoint: bool
+    output_folder: str | None,
+    enable_seed_checkpoint: bool,
+    baseline_only_mode: bool = False,
 ) -> None:
     """Print completion summary."""
     log_print()
     if output_folder:
-        log_print(f"Loss comparison complete. Results saved in {output_folder}/:")
+        if baseline_only_mode:
+            log_print(f"Baseline run complete. Results saved in {output_folder}/:")
+        else:
+            log_print(f"Loss comparison complete. Results saved in {output_folder}/:")
         log_print("  - baseline_outputs/")
-        log_print("  - test_outputs/")
+        if not baseline_only_mode:
+            log_print("  - test_outputs/")
         if enable_seed_checkpoint:
             log_print("  - seed_checkpoint_outputs/")
         log_print()
@@ -786,14 +856,21 @@ def print_completion_summary(
         if enable_seed_checkpoint:
             log_print("  - seed_checkpoint.log")
         log_print("  - baseline_training.log")
-        log_print("  - test_training.log")
+        if not baseline_only_mode:
+            log_print("  - test_training.log")
         log_print()
         log_print(f"All outputs organized in: {output_folder}/")
     else:
-        log_print(
-            "Loss comparison complete. No results saved "
-            "(no output folder specified)."
-        )
+        if baseline_only_mode:
+            log_print(
+                "Baseline run complete. No results saved "
+                "(no output folder specified)."
+            )
+        else:
+            log_print(
+                "Loss comparison complete. No results saved "
+                "(no output folder specified)."
+            )
 
 
 # =============================================================================
@@ -1000,7 +1077,7 @@ def main() -> None:
     """Main function that orchestrates the entire comparison process."""
     # Parse and validate arguments
     args = parse_arguments()
-    validate_arguments(
+    baseline_only_mode = validate_arguments(
         args.baseline_commit,
         args.test_commit,
         args.baseline_config,
@@ -1030,6 +1107,7 @@ def main() -> None:
         args.steps,
         enable_seed_checkpoint,
         args.job_dump_folder,
+        baseline_only_mode,
     )
 
     # Check if git working directory is clean before switching commits
@@ -1053,7 +1131,7 @@ def main() -> None:
             args.output_folder,
             args.job_dump_folder,
         )
-        # Run baseline and test training
+        # Run baseline training
         baseline_log = run_scenario(
             "baseline",
             args.baseline_commit,
@@ -1067,23 +1145,26 @@ def main() -> None:
             args.baseline_ngpus,
         )
 
-        test_log = run_scenario(
-            "test",
-            args.test_commit,
-            args.test_config,
-            args.test_train_file,
-            args.test_options,
-            args.steps,
-            enable_seed_checkpoint,
-            args.output_folder,
-            args.job_dump_folder,
-            args.test_ngpus,
-        )
+        # Run test training (skip in baseline-only mode)
+        test_log = None
+        if not baseline_only_mode:
+            test_log = run_scenario(
+                "test",
+                args.test_commit,
+                args.test_config,
+                args.test_train_file,
+                args.test_options,
+                args.steps,
+                enable_seed_checkpoint,
+                args.output_folder,
+                args.job_dump_folder,
+                args.test_ngpus,
+            )
         log_print()
 
         # Assert losses are equal if requested
         if args.assert_equal:
-            # Pass import_result if provided for 3-way comparison
+            # Pass test_log (None in baseline-only mode) and import_result
             assert_losses_equal(baseline_log, test_log, args.import_result)
 
             # Export losses if requested (only after assertion passes)
@@ -1092,10 +1173,19 @@ def main() -> None:
                 baseline_losses = extract_losses_from_log(baseline_log)
                 export_losses_to_file(baseline_losses, args.export_result)
 
-        # Analysis and reporting
-        perform_loss_analysis(baseline_log, test_log, stats_file)
-        cleanup_temp_files(args.output_folder)
-        print_completion_summary(args.output_folder, enable_seed_checkpoint)
+        # Export losses in baseline-only mode without assertion
+        # (when --export-result is used with identical settings)
+        if args.export_result and baseline_only_mode and not args.assert_equal:
+            baseline_losses = extract_losses_from_log(baseline_log)
+            export_losses_to_file(baseline_losses, args.export_result)
+
+        # Analysis and reporting (skip in baseline-only mode as there's no test to compare)
+        if not baseline_only_mode and test_log is not None:
+            perform_loss_analysis(baseline_log, test_log, stats_file)
+            cleanup_temp_files(args.output_folder)
+        print_completion_summary(
+            args.output_folder, enable_seed_checkpoint, baseline_only_mode
+        )
     finally:
         # Restore original commit if we did checkouts
         if original_commit is not None:
