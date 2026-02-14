@@ -38,7 +38,7 @@ def generate():
     # Load TorchTitan plugin at runtime (like native_sampler does)
     from torchtitan.experiments.rl.unified.plugin import register
 
-    register()
+    register(model_flavor="0.6B")
     logger.info("Loaded TorchTitan vLLM plugin")
 
     logger.info("Initializing vLLM LLMEngine with TorchTitan model")
