@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-from vllm.attention.layer import Attention
+
+from vllm.model_executor.layers.attention import Attention
 
 
 class VLLMAttention(torch.nn.Module):
@@ -61,6 +62,7 @@ class VLLMAttention(torch.nn.Module):
         v: torch.Tensor,
         *,
         scale: float | None = None,
+        enable_gqa: bool = False,
     ) -> torch.Tensor:
         """
         Forward pass using vLLM's Attention layer for inference.
@@ -70,6 +72,7 @@ class VLLMAttention(torch.nn.Module):
             k: Key tensor [batch, num_kv_heads, seq_len, head_dim]
             v: Value tensor [batch, num_kv_heads, seq_len, head_dim]
             scale: Optional attention scale override (unused, vLLM uses internal scale)
+            enable_gqa: Whether GQA is enabled (unused, vLLM handles GQA internally)
 
         Returns:
             output: [batch, num_heads, seq_len, head_dim]

@@ -24,6 +24,7 @@ from torch.distributed.tensor.parallel import (
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
+from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama4.infra.parallelize import (
@@ -67,7 +68,11 @@ def parallelize_qwen3(
 
     attn_type = getattr(model.model_args, "attn_type", "sdpa")
     if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
-        raise NotImplementedError("CP support is only supported for SDPA.")
+        raise NotImplementedError(
+            f"Context Parallel only supports SDPA attention. "
+            f"Got attn_type='{attn_type}'. "
+            f"FlexAttention and varlen attention are not supported with CP."
+        )
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
@@ -97,6 +102,7 @@ def parallelize_qwen3(
             loss_parallel=not job_config.parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
+            cp_enabled=parallel_dims.cp_enabled,
         )
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
@@ -109,6 +115,14 @@ def parallelize_qwen3(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
+        )
+
+    if parallel_dims.cp_enabled:
+        apply_cp_to_attention_module(
+            # pyrefly: ignore [missing-attribute, not-callable]
+            [block.attention.inner_attention for block in model.layers.values()],
+            parallel_dims.get_mesh("cp"),
+            attn_type,
         )
 
     if job_config.activation_checkpoint.mode != "none":
@@ -158,9 +172,6 @@ def parallelize_qwen3(
         else:
             logger.info("Applied FSDP to the model")
 
-        if parallel_dims.cp_enabled:
-            logger.info("Applied Context Parallel to the model")
-
         if job_config.training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
@@ -173,12 +184,6 @@ def parallelize_qwen3(
             enable_compile=model_compile_enabled,
         )
 
-    # Enable weight tying after applying parallelisms
-    # pyrefly: ignore [missing-attribute]
-    if model.model_args.enable_weight_tying:
-        # pyrefly: ignore [missing-attribute]
-        model.output.weight = model.tok_embeddings.weight
-
     return model
 
 
@@ -188,6 +193,7 @@ def apply_non_moe_tp(
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
+    cp_enabled: bool,
 ):
     """Apply tensor parallelism."""
     # 1. Parallelize the embedding and shard its outputs (which are the first
@@ -237,15 +243,19 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    positions_sharding = Replicate() if cp_enabled else None
     # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),
-            # NOTE: when the fourth argument (positions) is not None, its input layout
-            # and desired input layout should be Replicate()
             "attention": prepare_module_input(
-                input_layouts=(Shard(1), Replicate(), None, None),
-                desired_input_layouts=(Replicate(), Replicate(), None, None),
+                input_layouts=(Shard(1), Replicate(), None, positions_sharding),
+                desired_input_layouts=(
+                    Replicate(),
+                    Replicate(),
+                    None,
+                    positions_sharding,
+                ),
             ),
             "attention.wq": colwise_parallel(use_local_output=False),
             "attention.wk": colwise_parallel(use_local_output=False),
