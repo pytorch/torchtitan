@@ -125,7 +125,7 @@ def parallelize_qwen3(
             attn_type,
         )
 
-    if job_config.activation_checkpoint.mode != "none":
+    if job_config.activation_checkpoint.mode != "none" or job_config.activation_checkpoint.cpu_offload:
         apply_ac(
             model,
             job_config.activation_checkpoint,

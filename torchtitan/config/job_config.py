@@ -652,6 +652,14 @@ class ActivationCheckpoint:
     mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
 
+    cpu_offload: bool = False
+    """
+    When enabled, activations saved for backward are offloaded to CPU memory
+    during forward and copied back to GPU during backward. This can be combined
+    with any AC mode to further reduce GPU memory usage at the cost of additional
+    CPU-GPU transfer overhead.
+    """
+
     selective_ac_option: str = "2"
     """
     Selective activation checkpointing options ['int', 'op'].

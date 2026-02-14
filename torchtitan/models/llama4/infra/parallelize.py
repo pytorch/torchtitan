@@ -159,7 +159,7 @@ def parallelize_llama(
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components
     )
-    if job_config.activation_checkpoint.mode != "none":
+    if job_config.activation_checkpoint.mode != "none" or job_config.activation_checkpoint.cpu_offload:
         if job_config.activation_checkpoint.selective_ac_option == "op":
             logger.info(
                 f"SAC save list contains {len(_op_sac_save_list)} ops: "

@@ -106,7 +106,7 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(job_config, tp_mesh)
 
-    if job_config.activation_checkpoint.mode != "none":
+    if job_config.activation_checkpoint.mode != "none" or job_config.activation_checkpoint.cpu_offload:
         model_compile_enabled = (
             job_config.compile.enable and "model" in job_config.compile.components
         )

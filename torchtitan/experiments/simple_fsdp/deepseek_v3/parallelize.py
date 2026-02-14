@@ -102,7 +102,7 @@ def parallelize_deepseekv3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
         )
 
-    if job_config.activation_checkpoint.mode != "none":
+    if job_config.activation_checkpoint.mode != "none" or job_config.activation_checkpoint.cpu_offload:
         apply_ac(model, job_config.activation_checkpoint)
 
     mp_policy = MixedPrecisionPolicy(

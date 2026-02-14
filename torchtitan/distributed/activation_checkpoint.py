@@ -13,7 +13,9 @@ from collections import defaultdict
 import torch
 import torch._functorch.config
 import torch.nn as nn
+from torch.autograd.graph import save_on_cpu
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    ActivationWrapper,
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 
@@ -156,6 +158,26 @@ def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
     )
 
 
+class CPUOffloadWrapper(ActivationWrapper):
+    """Wrapper that offloads activations saved for backward to CPU memory.
+
+    Args:
+        mod (nn.Module): The module to wrap.
+        pin_memory (bool): If True, use pinned (page-locked) CPU memory for
+            faster async GPU transfers. If False, use regular pageable memory
+            which avoids pinned memory exhaustion at the cost of synchronous
+            transfers. Defaults to True.
+    """
+
+    def __init__(self, mod: nn.Module, pin_memory: bool = True) -> None:
+        super().__init__(mod)
+        self.pin_memory = pin_memory
+
+    def forward(self, *args, **kwargs):
+        with save_on_cpu(pin_memory=self.pin_memory):
+            return self._checkpoint_wrapped_module(*args, **kwargs)
+
+
 def _apply_ac_to_transformer_block(
     module: nn.Module,
     ac_config: ACConfig,
@@ -237,13 +259,19 @@ def apply_ac(
     else:
         layers = model.get_submodule("layers")
         for layer_id, transformer_block in layers.named_children():
-            transformer_block = _apply_ac_to_transformer_block(
-                transformer_block,
-                ac_config,
-                base_fqn=f"layers.{layer_id}",
-                model_compile_enabled=model_compile_enabled,
-                op_sac_save_list=op_sac_save_list,
-            )
+            if ac_config.mode != "none":
+                transformer_block = _apply_ac_to_transformer_block(
+                    transformer_block,
+                    ac_config,
+                    base_fqn=f"layers.{layer_id}",
+                    model_compile_enabled=model_compile_enabled,
+                    op_sac_save_list=op_sac_save_list,
+                )
+            if ac_config.cpu_offload:
+                transformer_block = CPUOffloadWrapper(transformer_block)
             layers.register_module(layer_id, transformer_block)
 
-    logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
+    ac_label = ac_config.mode
+    if ac_config.cpu_offload:
+        ac_label += " + cpu_offload"
+    logger.info(f"Applied {ac_label} activation checkpointing to the model")

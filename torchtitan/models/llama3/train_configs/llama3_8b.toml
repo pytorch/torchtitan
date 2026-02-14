@@ -10,7 +10,7 @@ save_traces_folder = "profile_trace"
 profile_freq = 100
 
 [metrics]
-log_freq = 10
+log_freq = 5
 enable_tensorboard = true
 save_tb_folder = "tb"
 
@@ -26,13 +26,13 @@ lr = 3e-4
 eps = 1e-8
 
 [lr_scheduler]
-warmup_steps = 200  # lr scheduler warm up
+warmup_steps = 5  # lr scheduler warm up
 
 [training]
 local_batch_size = 1
 seq_len = 8192
 max_norm = 1.0  # grad norm clipping
-steps = 1000
+steps = 20
 dataset = "c4"
 
 [parallelism]
@@ -55,8 +55,9 @@ enable=false
 components = ["model", "loss"]
 
 [activation_checkpoint]
-mode = "selective"  # ["none", "selective", "full"]
+mode = "full"  # ["none", "selective", "full"]
 selective_ac_option = "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
+cpu_offload = false
 
 [quantize.linear.float8]
 enable_fsdp_float8_all_gather = false
