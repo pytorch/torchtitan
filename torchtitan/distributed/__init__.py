@@ -6,7 +6,9 @@
 
 
 from functools import partial
+from typing import Any
 
+import torch
 import torch.nn as nn
 from torch.distributed.tensor import DeviceMesh, distribute_module, DTensor, Replicate
 from torch.distributed.tensor.parallel import ParallelStyle
@@ -40,22 +42,37 @@ class NoParallel(ParallelStyle):
         self.use_local_output = use_local_output
 
     @staticmethod
-    def _prepare_input_fn(input_layout, desired_input_layout, mod, inputs, device_mesh):
+    def _prepare_input_fn(
+        input_layout: Placement | None,
+        desired_input_layout: Placement | None,
+        mod: nn.Module,
+        inputs: Any,
+        device_mesh: DeviceMesh,
+    ):
         # annotate module input placements/sharding with input_layouts
         input_tensor = inputs[0]
         if not isinstance(input_tensor, DTensor):
+            assert input_layout is not None
             input_tensor = DTensor.from_local(
                 input_tensor, device_mesh, (input_layout,), run_check=False
             )
 
         if input_layout != desired_input_layout:
+            assert input_layout is not None
+            assert desired_input_layout is not None
             input_tensor = input_tensor.redistribute(
                 placements=(desired_input_layout,), async_op=True
             )
         return (input_tensor, *inputs[1:])
 
     @staticmethod
-    def _prepare_output_fn(output_layout, use_local_output, mod, outputs, device_mesh):
+    def _prepare_output_fn(
+        output_layout: Placement,
+        use_local_output: bool,
+        mod: nn.Module,
+        outputs: DTensor,
+        device_mesh: DeviceMesh,
+    ) -> torch.Tensor | DTensor:
         if outputs.placements != (output_layout,):
             outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
         # back to local tensor
@@ -67,10 +84,17 @@ class NoParallel(ParallelStyle):
             device_mesh,
             None,
             partial(
+                # TODO: this is pytorch distribute_module typing issue.
                 # pyrefly: ignore [bad-argument-type]
                 self._prepare_input_fn,
                 self.input_layout,
                 self.desired_input_layout,
             ),
-            partial(self._prepare_output_fn, self.output_layout, self.use_local_output),
+            partial(
+                # TODO: this is pytorch distribute_module typing issue.
+                # pyrefly: ignore [bad-argument-type]
+                self._prepare_output_fn,
+                self.output_layout,
+                self.use_local_output,
+            ),
         )

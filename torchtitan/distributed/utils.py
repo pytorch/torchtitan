@@ -224,22 +224,16 @@ def create_context_parallel_ctx(
 
 class TrainContext(Protocol):
     @abstractmethod
-    def __call__(
-        self,
-        cp_context: contextlib.AbstractContextManager[None] | None = None,
-    ) -> contextlib.AbstractContextManager[None]:
+    def __call__(self) -> contextlib.AbstractContextManager[None]:
         pass
 
 
 def get_train_context(enable_loss_parallel: bool) -> TrainContext:
     @contextlib.contextmanager
-    def context(cp_context: contextlib.AbstractContextManager[None] | None = None):
+    def context():
         with contextlib.ExitStack() as stack:
             if enable_loss_parallel:
                 stack.enter_context(torch.distributed.tensor.parallel.loss_parallel())
-
-            if cp_context:
-                stack.enter_context(cp_context)
 
             yield
 
@@ -248,7 +242,7 @@ def get_train_context(enable_loss_parallel: bool) -> TrainContext:
 
 def maybe_enable_amp(
     parallel_dims: ParallelDims, mixed_precision_param: str, device_type: str
-) -> contextlib.AbstractContextManager[None]:
+) -> contextlib.AbstractContextManager[None] | torch.autocast:
     if parallel_dims.fsdp_enabled:
         # FSDP handles mixed precision internally
         logger.info("Mixed precision training is handled by fully_shard")
@@ -263,7 +257,6 @@ def maybe_enable_amp(
         else:
             # the following code will only be executed for DDP or single-device training
             logger.info("Mixed precision training is handled by AMP")
-            # pyrefly: ignore [bad-return]
             return torch.autocast(
                 device_type,
                 dtype=TORCH_DTYPE_MAP[mixed_precision_param],
@@ -467,9 +460,9 @@ def clip_grad_norm_(
         if math.isinf(norm_type):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
         else:
-            total_norm **= norm_type  # pyrefly: ignore[unsupported-operation]
+            total_norm **= norm_type
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
-            total_norm **= 1.0 / norm_type  # pyrefly: ignore[unsupported-operation]
+            total_norm **= 1.0 / norm_type
 
     torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
     return total_norm
@@ -493,43 +486,49 @@ def _clip_grad_norm_with_ep(
         if p.grad is None:
             continue
         assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-        # pyrefly: ignore[not-iterable]
-        if "ep" in p.device_mesh.mesh_dim_names:
+        mesh_dim_names = p.device_mesh.mesh_dim_names
+        assert mesh_dim_names is not None
+        if "ep" in mesh_dim_names:
             ep_params.append(p)
             ep_grads.append(p.grad)
         else:
             non_ep_params.append(p)
             non_ep_grads.append(p.grad)
+
+    # Either list can be empty depending on the parallelization strategy:
+    # - In torchtitan with separate dense/sparse meshes, both lists are typically non-empty
+    # - In autoparallel, all params may live on a single sparse mesh with "ep" dimension,
+    #   so non_ep_grads would be empty
+    # - In PP + EP setups, certain PP ranks may only own EP or non-EP layers
     ep_grads_total_norm = torch.nn.utils.get_total_norm(
         ep_grads, norm_type, error_if_nonfinite, foreach
     )
-    # ep_grads may be an empty list, in which case get_total_norm returns tensor(0.), a non-DTensor
-    # This can occur in PP + EP setups where certain PP ranks only own non-EP layers, for instance.
+    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
 
-    # pyrefly: ignore [missing-attribute]
     non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
         non_ep_grads, norm_type, error_if_nonfinite, foreach
-    ).full_tensor()
+    )
+    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
+    if isinstance(non_ep_grads_total_norm, DTensor):
+        non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
 
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
     else:
         total_norm = (
-            # pyrefly: ignore[unsupported-operation]
-            ep_grads_total_norm**norm_type
-            + non_ep_grads_total_norm**norm_type
+            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
         )
-        total_norm **= 1.0 / norm_type  # pyrefly: ignore[unsupported-operation]
+        total_norm **= 1.0 / norm_type
 
     if pp_mesh is not None:
         if math.isinf(norm_type):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
         else:
-            total_norm **= norm_type  # pyrefly: ignore[unsupported-operation]
+            total_norm **= norm_type
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
-            total_norm **= 1.0 / norm_type  # pyrefly: ignore[unsupported-operation]
+            total_norm **= 1.0 / norm_type
 
     torch.nn.utils.clip_grads_with_norm_(ep_params, max_norm, total_norm, foreach)
     torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
