@@ -358,6 +358,24 @@ class TokenChoiceTopKRouter(nn.Module):
         trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
 
 
+def _indices_dtype_by_sort_size(data: Tensor, sort_dim=-1) -> torch.dtype:
+    sort_size = data.size(sort_dim)
+    indices_dtype = torch.long
+    if sort_size - 1 <= torch.iinfo(torch.int8).max:
+        indices_dtype = torch.int8
+    elif sort_size - 1 <= torch.iinfo(torch.uint8).max:
+        indices_dtype = torch.uint8
+    elif sort_size - 1 <= torch.iinfo(torch.int16).max:
+        indices_dtype = torch.int16
+    elif sort_size - 1 <= torch.iinfo(torch.uint16).max:
+        indices_dtype = torch.uint16
+    elif sort_size - 1 <= torch.iinfo(torch.int32).max:
+        indices_dtype = torch.int32
+    else:
+        indices_dtype = torch.long
+    return indices_dtype
+
+
 # NOTE: the reason we make this a stateless module is to support
 #       expert_tensor_parallel_degree=1 with consistent TP/EP APIs.
 class TokenReorderer(nn.Module):
@@ -405,9 +423,17 @@ class TokenReorderer(nn.Module):
 
         # Reorder the token indices to match the order of the experts
         # token_indices_experts_sorted shape (bs*slen*top_k,)
-        token_indices_experts_sorted = torch.argsort(
-            selected_experts_indices.view(-1), stable=True
+        to_sort = selected_experts_indices.view(-1)
+        # Current torch indexing mechanism supports only int64 and int32
+        # If other integer value is supported in indexing, the torch native ops, below optimization can be enjoyed
+        # indices_dtype = _indices_dtype_by_sort_size(valid_expert_ids) if valid_expert_ids.is_cuda or valid_expert_ids.is_cpu else torch.long
+        # indices_dtype = indices_dtype.to(torch.int32) # addinitional copy is required in the constraint indexing dtype (int32, long)
+        indices_dtype = torch.int32  # Free performance improvement
+
+        token_indices_experts_sorted = torch.empty(
+            (), device=to_sort.device(), dtype=indices_dtype
         )
+        torch.argsort(to_sort, stable=True, out=token_indices_experts_sorted)
 
         top_scores_experts_sorted = top_scores.view(-1)[token_indices_experts_sorted]
 
