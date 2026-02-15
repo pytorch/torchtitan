@@ -66,7 +66,7 @@ selective_ac_option = 'op'  # 'int' = ac every positive int layer or 'op', ac ba
 
 [compile]
 enable=true
-components = ["loss"] # ["model", "loss"]
+components = ["model", "loss"]
 
 [quantize.linear.float8]
 enable_fsdp_float8_all_gather = false
