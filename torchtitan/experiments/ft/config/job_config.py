@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass, field
 
-from torchtitan.components.ft.manager import FTManager
+from torchtitan.experiments.ft.manager import FTManager
 
 
 @dataclass(kw_only=True, slots=True)

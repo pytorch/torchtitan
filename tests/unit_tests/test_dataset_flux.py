@@ -7,9 +7,7 @@
 import unittest
 
 import torch
-
 from datasets import load_dataset
-
 from torchtitan.config import ConfigManager
 from torchtitan.hf_datasets import DatasetConfig
 
@@ -63,15 +61,16 @@ class TestFluxDataLoader(unittest.TestCase):
                         "flux",
                         "--config",
                         "flux_debugmodel",
-                        "--training.img_size",
+                        "--training.local_batch_size",
+                        str(batch_size),
+                        "--dataloader.img_size",
                         str(256),
                         "--dataloader.dataset",
                         dataset_name,
-                        "--training.local_batch_size",
-                        str(batch_size),
-                        "--training.classifier_free_guidance_prob",
+                        "--dataloader.classifier_free_guidance_prob",
                         "0.447",
-                        "--training.test_mode",
+                        "--dataloader.encoder.test_mode",
+                        "--encoder.test_mode",
                         "--encoder.t5_encoder",
                         "tests/assets/flux_test_encoders/t5-v1_1-xxl",
                         "--encoder.clip_encoder",

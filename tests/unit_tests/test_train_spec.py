@@ -107,18 +107,14 @@ class TestModelSpec:
             hook_called = True
 
         # Build optimizers directly and apply post-build hook
-        optimizer_kwargs = {
-            "lr": 0.1,
-            "betas": (0.9, 0.95),
-            "weight_decay": 0.1,
-            "fused": True,
-            "foreach": False,
-        }
-        optimizers = OptimizersContainer(
-            model_parts=model_parts,
-            optimizer_cls=torch.optim.Adam,
-            optimizer_kwargs=optimizer_kwargs,
-        )
+        optimizers = OptimizersContainer.Config(
+            name="Adam",
+            lr=0.1,
+            beta1=0.9,
+            beta2=0.95,
+            weight_decay=0.1,
+            implementation="fused",
+        ).build(model_parts=model_parts)
         spec.post_optimizer_build_fn(optimizers, model_parts, None, my_hook)
 
         assert optimizers.optimizers[0].__class__.__name__ == "Adam"

@@ -60,7 +60,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
     def __init__(
         self,
-        config: "HuggingFaceTokenizer.Config | None" = None,
+        config: Config | None = None,
         *,
         tokenizer_path: str,
     ):

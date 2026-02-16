@@ -11,14 +11,14 @@ from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .model import SimpleFSDPTransformer
+from .model import SimpleFSDPLlama3Model
 from .parallelize import parallelize_llama
 
 
 def _to_simple_fsdp_configs(base_configs):
-    """Convert Transformer.Config instances to SimpleFSDPTransformer.Config."""
+    """Convert Llama3Model.Config instances to SimpleFSDPLlama3Model.Config."""
     return {
-        k: SimpleFSDPTransformer.Config(
+        k: SimpleFSDPLlama3Model.Config(
             **{f.name: getattr(v, f.name) for f in fields(v)}
         )
         for k, v in base_configs.items()

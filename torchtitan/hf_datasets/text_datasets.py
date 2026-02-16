@@ -9,7 +9,6 @@ from functools import partial
 from typing import Any, Callable
 
 import torch
-
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
@@ -186,7 +185,7 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
 
     def __init__(
         self,
-        config: "HuggingFaceTextDataLoader.Config",
+        config: Config,
         *,
         dp_world_size: int,
         dp_rank: int,

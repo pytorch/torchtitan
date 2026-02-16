@@ -7,7 +7,10 @@
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import (
+    OptimizersContainer,
+    OptimizersInBackwardContainer,
+)
 from torchtitan.components.quantization.float8 import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
@@ -73,6 +76,12 @@ def llama3_debugmodel_flex_attn() -> Trainer.Config:
 def llama3_debugmodel_varlen_attn() -> Trainer.Config:
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel_varlen_attn")
+    return config
+
+
+def llama3_debugmodel_opt_in_bwd() -> Trainer.Config:
+    config = llama3_debugmodel()
+    config.optimizer = OptimizersInBackwardContainer.Config(lr=8e-4)
     return config
 
 

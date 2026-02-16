@@ -11,7 +11,7 @@ from torchtitan.models.llama3 import Llama3Model
 from ..simple_fsdp import disable_active_parametrization
 
 
-class SimpleFSDPTransformer(Llama3Model):
+class SimpleFSDPLlama3Model(Llama3Model):
     @dataclass(kw_only=True, slots=True)
     class Config(Llama3Model.Config):
         pass

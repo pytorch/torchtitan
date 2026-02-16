@@ -88,23 +88,32 @@ class ConfigManager:
                 "--config is required. Example: --model llama3 --config llama3_debugmodel"
             )
 
+        from torchtitan.experiments import _supported_experiments
+
         # Validate model name
         from torchtitan.models import _supported_models
 
-        if model_name not in _supported_models:
+        all_supported = _supported_models | _supported_experiments
+        if model_name not in all_supported:
             raise ValueError(
                 f"Unknown model '{model_name}'. "
-                f"Supported models: {sorted(_supported_models)}"
+                f"Supported models: {sorted(all_supported)}"
             )
 
-        # Import config_registry module
-        module_path = f"torchtitan.models.{model_name}.config_registry"
-        try:
-            module = importlib.import_module(module_path)
-        except ImportError as e:
+        # Import config_registry module (search models first, then experiments)
+        module = None
+        for prefix in ("torchtitan.models", "torchtitan.experiments"):
+            module_path = f"{prefix}.{model_name}.config_registry"
+            try:
+                module = importlib.import_module(module_path)
+                break
+            except ImportError:
+                continue
+        if module is None:
             raise ImportError(
-                f"Cannot import config_registry for model '{model_name}': {e}"
-            ) from e
+                f"Cannot import config_registry for model '{model_name}' "
+                f"from torchtitan.models or torchtitan.experiments"
+            )
 
         # Get the config function
         config_fn = getattr(module, config_name, None)

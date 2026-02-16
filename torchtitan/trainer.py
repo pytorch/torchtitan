@@ -19,11 +19,13 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.ft import FTManager, maybe_semi_sync_training
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimizer import (
+    OptimizersContainer,
+    OptimizersInBackwardContainer,
+)
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -89,9 +91,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
-        fault_tolerance: FTManager.Config = field(default_factory=FTManager.Config)
         validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
+
+        def __post_init__(self):
+            if isinstance(self.optimizer, OptimizersInBackwardContainer.Config):
+                if self.parallelism.expert_parallel_degree > 1:
+                    raise NotImplementedError(
+                        "Optimizers in backward is not supported with Expert Parallel."
+                    )
+                if self.parallelism.pipeline_parallel_degree > 1:
+                    raise NotImplementedError(
+                        "Optimizers in backward is not supported with Pipeline Parallel."
+                    )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}
@@ -151,7 +163,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     # non-swappable training components
     checkpointer: CheckpointManager
-    ft_manager: FTManager
 
     # runtime utilities
     device: torch.device
@@ -195,9 +206,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             batch_degree, batch_rank = batch_mesh.size(), batch_mesh.get_local_rank()
         else:
             batch_degree, batch_rank = 1, 0
-
-        self.ft_manager = config.fault_tolerance.build()
-        batch_degree, batch_rank = self.ft_manager.get_dp_info(batch_degree, batch_rank)
 
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
@@ -262,8 +270,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             parallel_dims=parallel_dims,
             dump_folder=config.job.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
-            ft_enable=config.fault_tolerance.enable,
-            ft_replica_id=config.fault_tolerance.replica_id,
             config_dict=config.to_dict(),
         )
         color = self.metrics_processor.color
@@ -292,7 +298,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             buffer_device = None
 
         self.loss_fn = model_spec.build_loss_fn(
-            config.compile, parallel_dims=parallel_dims, ft_manager=self.ft_manager
+            config.compile, parallel_dims=parallel_dims
         )
 
         # verify batch sizes
@@ -380,8 +386,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.model_parts = [model]
 
-        self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
-
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = self.metrics_processor.device_memory_monitor
         gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
@@ -394,11 +398,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # build optimizer after applying parallelisms to the model
-        self.optimizers = config.optimizer.build(
-            model_parts=self.model_parts,
-            parallel_dims=parallel_dims,
-            ft_manager=self.ft_manager,
-        )
+        self.optimizers = config.optimizer.build(model_parts=self.model_parts)
         if model_spec.post_optimizer_build_fn is not None:
             model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, parallel_dims
@@ -436,7 +436,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 else None
             ),
             base_folder=config.job.dump_folder,
-            ft_manager=self.ft_manager,
         )
 
         loss_parallel_enabled = (
@@ -463,7 +462,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.validator = config.validator.build(
                 parallelism=config.parallelism,
-                job_config=config,
                 dp_world_size=batch_degree,
                 dp_rank=batch_rank,
                 tokenizer=self.tokenizer,
@@ -740,7 +738,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         if parallel_dims.dp_cp_enabled:
             loss = loss.detach()
-            ft_pg = self.ft_manager.loss_sync_pg
             loss_mesh = parallel_dims.get_optional_mesh("loss")
 
             # For global_avg_loss, we want the average loss across all ranks:
@@ -754,14 +751,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # global_max_loss = max(local_avg_loss)
             local_avg_loss = loss * global_valid_tokens / local_valid_tokens
             global_avg_loss, global_max_loss, global_ntokens_seen = (
-                dist_utils.dist_sum(loss, loss_mesh, ft_pg),
-                dist_utils.dist_max(local_avg_loss, loss_mesh, ft_pg),
+                dist_utils.dist_sum(loss, loss_mesh),
+                dist_utils.dist_max(local_avg_loss, loss_mesh),
                 dist_utils.dist_sum(
                     torch.tensor(
                         self.ntokens_seen, dtype=torch.int64, device=self.device
                     ),
                     loss_mesh,
-                    ft_pg,
                 ),
             )
         else:
@@ -787,40 +783,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.checkpointer.load(step=config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
 
-        leaf_folder = (
-            ""
-            if not self.ft_manager.enabled
-            else f"replica_{self.ft_manager.replica_id}"
-        )
         with (
             maybe_enable_profiling(
                 config.profiling,
                 global_step=self.step,
                 base_folder=config.job.dump_folder,
-                leaf_folder=leaf_folder,
             ) as torch_profiler,
             maybe_enable_memory_snapshot(
                 config.profiling,
                 global_step=self.step,
                 base_folder=config.job.dump_folder,
-                leaf_folder=leaf_folder,
             ) as memory_profiler,
-            maybe_semi_sync_training(
-                config.fault_tolerance,
-                ft_manager=self.ft_manager,
-                model=self.model_parts[0],
-                n_layers=(
-                    self.model_config.n_layers
-                    if hasattr(self.model_config, "n_layers")
-                    else 0
-                ),
-                optimizer=self.optimizers,
-                fragment_fn=(
-                    config.model_spec.fragment_fn
-                    if hasattr(config.model_spec, "fragment_fn")
-                    else None
-                ),
-            ),
         ):
             data_iterator = self.batch_generator(self.dataloader)
             while self.should_continue_training():

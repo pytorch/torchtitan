@@ -4,10 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.ft.config.job_config import FaultTolerance, JobConfig
+from torchtitan.experiments.ft.manager import (
+    FTManager,
+    has_torchft,
+    maybe_semi_sync_training,
+)
 
 
 __all__ = [
-    "FaultTolerance",
-    "JobConfig",
+    "FTManager",
+    "has_torchft",
+    "maybe_semi_sync_training",
 ]

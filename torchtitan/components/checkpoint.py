@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import enum
 import functools
 import os
@@ -14,7 +16,7 @@ import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any, cast, Literal
+from typing import Any, cast, Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -35,16 +37,16 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncSaveResponse,
 )
 from torch.distributed.checkpoint.stateful import Stateful
-
 from torchtitan.components.dataloader import BaseDataLoader
-from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
-
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
+
+if TYPE_CHECKING:
+    from torchtitan.experiments.ft.manager import FTManager
 
 
 MODEL = "model"
@@ -353,8 +355,8 @@ class CheckpointManager(Configurable):
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
-        checkpoint_config: "CheckpointManager.Config",
-        sd_adapter: "BaseStateDictAdapter | None",
+        checkpoint_config: Config,
+        sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
     ) -> None:

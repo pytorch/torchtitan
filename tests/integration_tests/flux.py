@@ -23,6 +23,8 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--model.name flux",
+                    "--config flux_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.context_parallel_degree 2",
@@ -51,7 +53,7 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
 
     # Random init encoder for offline testing
-    random_init_encoder_arg = "--training.test_mode"
+    random_init_encoder_arg = "--encoder.test_mode --dataloader.encoder.test_mode"
     clip_encoder_version_arg = (
         "--encoder.clip_encoder tests/assets/flux_test_encoders/clip-vit-large-patch14/"
     )
@@ -63,7 +65,7 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./torchtitan/models/flux/run_train.sh"
+        cmd = f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
 

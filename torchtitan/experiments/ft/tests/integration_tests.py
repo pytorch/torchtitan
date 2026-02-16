@@ -26,7 +26,7 @@ def build_ft_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model llama3_ft --config llama3_ft_debugmodel",
+                    "--model ft.llama3 --config llama3_ft_debugmodel",
                     "--training.steps 10",
                     "--checkpoint.enable",
                 ],
@@ -62,7 +62,6 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
             cmd = (
                 f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" '
                 + f"CUDA_VISIBLE_DEVICES={ranks} "
-                + "TRAIN_FILE=torchtitan.experiments.ft.trainer "
                 + f"NGPU={test_flavor.ngpu} ./run_train.sh "
                 + "--fault_tolerance.enable "
                 + f"--fault_tolerance.replica_id={replica_id} --fault_tolerance.group_size={test_flavor.ngpu}"

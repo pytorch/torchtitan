@@ -443,18 +443,18 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--model llama3 --config llama3_debugmodel_opt_in_bwd",
                     "--checkpoint.enable",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
                     "--training.enable_cpu_offload",
-                    "--optimizer.early_step_in_backward",
                 ],
                 [
+                    "--model llama3 --config llama3_debugmodel_opt_in_bwd",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
                     "--parallelism.data_parallel_replicate_degree=2",
                     "--training.enable_cpu_offload",
-                    "--optimizer.early_step_in_backward",
                 ],
             ],
             "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
