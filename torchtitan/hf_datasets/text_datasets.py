@@ -230,7 +230,9 @@ def build_text_validation_dataloader(
     """
     dataset_name = job_config.validation.data.name
     dataset_path = (
-        job_config.validation.data.paths[0] if job_config.validation.data.paths else None
+        job_config.validation.data.paths[0]
+        if job_config.validation.data.paths
+        else None
     )
     batch_size = job_config.validation.local_batch_size
     seq_len = job_config.validation.seq_len

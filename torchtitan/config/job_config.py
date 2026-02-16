@@ -250,7 +250,7 @@ class Data:
     If provided, data will be loaded from these paths instead of downloaded.
     """
 
-    weights : list[float] | None = None
+    weights: list[float] | None = None
     """
     In multi dataset setting, list of weight of each dataset.
     """
@@ -261,11 +261,15 @@ class Data:
     def __post_init__(self):
         assert (
             # one dataset
-            self.paths is None or len(self.paths) == 1
+            self.paths is None
+            or len(self.paths) == 1
         ) or (
             # multi dataset
-            len(self.paths) > 1 and self.weights and len(self.paths) == len(self.weights)
+            len(self.paths) > 1
+            and self.weights
+            and len(self.paths) == len(self.weights)
         )
+
 
 @dataclass
 class Training:

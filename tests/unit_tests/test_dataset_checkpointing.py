@@ -10,10 +10,12 @@ import torch
 from datasets import load_dataset
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import ConfigManager
-from torchtitan.hf_datasets import DatasetConfig
+from torchtitan.hf_datasets import DatasetConfig, MultiDatasetConfig
+from torchtitan.hf_datasets.multi_text_datasets import (
+    build_text_dataloader as build_text_dataloader_multi,
+    DATASETS as DATASETS_MULTI,
+)
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader, DATASETS
-from torchtitan.hf_datasets import MultiDatasetConfig
-from torchtitan.hf_datasets.multi_text_datasets import build_text_dataloader as build_text_dataloader_multi, DATASETS as DATASETS_MULTI
 
 
 class TestDatasetCheckpointing(unittest.TestCase):
