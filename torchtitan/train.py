@@ -707,8 +707,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         if torch.distributed.get_rank() == 0:
             logger.info("Sleeping 2 seconds for other ranks to complete")
             time.sleep(2)
-
-        logger.info("Training completed")
+            logger.info("Training completed")
 
     def should_continue_training(self) -> bool:
         return self.step < self.job_config.training.steps
