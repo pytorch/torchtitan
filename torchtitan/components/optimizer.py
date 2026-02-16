@@ -26,6 +26,7 @@ from torchtitan.distributed import ParallelDims
 
 __all__ = [
     "OptimizersContainer",
+    "MuonOptimizersContainer",
     "build_optimizers",
     "build_optimizers_with_moe_load_balancing",
 ]
@@ -250,6 +251,123 @@ class FTOptimizersContainer(OptimizersContainer):
             super().zero_grad(*args, **kwargs)
 
 
+def _is_lm_head_param(name: str, param: nn.Parameter) -> bool:
+    """Determine if a parameter is the language model head (output projection)."""
+    name_parts = name.split(".")
+    return "output" in name_parts and param.ndim == 2
+
+
+def _is_muon_param(name: str, param: nn.Parameter) -> bool:
+    """Determine if a parameter should use the Muon algorithm.
+
+    Muon's Newton-Schulz orthogonalization is only applicable to 2D weight
+    matrices. Embeddings and the output projection (lm_head) use AdamW instead.
+    """
+    if param.ndim != 2:
+        return False
+    if "tok_embeddings" in name or "embed" in name:
+        return False
+    if _is_lm_head_param(name, param):
+        return False
+    return True
+
+
+class MuonOptimizersContainer(OptimizersContainer):
+    """OptimizersContainer for the Muon optimizer from Microsoft's dion library.
+
+    Muon uses a single optimizer instance with multiple param groups that
+    have different algorithms: 'muon' for 2D weight matrices and 'adamw'
+    (or 'lion') for everything else (embeddings, biases, layernorms, lm_head).
+    """
+
+    def __init__(
+        self,
+        model_parts: list[nn.Module],
+        optimizer_kwargs: dict[str, Any],
+        parallel_dims: "ParallelDims",
+        fallback_algorithm: str = "adamw",
+    ) -> None:
+        try:
+            from dion import Muon
+        except ImportError:
+            raise ImportError(
+                "Muon optimizer requires the 'dion' package. "
+                "Install it with: pip install git+https://github.com/microsoft/dion.git"
+            )
+
+        from torchtitan.tools.logging import logger
+
+        all_params = []
+        self.model_parts = model_parts
+
+        muon_params = []
+        fallback_params = []
+
+        for model in self.model_parts:
+            for name, param in model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                all_params.append(param)
+                if _is_muon_param(name, param):
+                    muon_params.append(param)
+                else:
+                    fallback_params.append(param)
+
+        logger.info(
+            f"Muon optimizer: {len(muon_params)} params with 'muon' algorithm, "
+            f"{len(fallback_params)} params with '{fallback_algorithm}' algorithm"
+        )
+
+        param_groups = []
+        if muon_params:
+            param_groups.append({"params": muon_params, "algorithm": "muon"})
+        if fallback_params:
+            param_groups.append(
+                {"params": fallback_params, "algorithm": fallback_algorithm}
+            )
+
+        fsdp_mesh = parallel_dims.get_optional_mesh("fsdp")
+
+        muon_optimizer = Muon(
+            param_groups,
+            distributed_mesh=fsdp_mesh,
+            **optimizer_kwargs,
+        )
+
+        self.optimizers = [muon_optimizer]
+        self._post_init(all_params, optimizer_kwargs)
+
+    def _validate_length(self, expected_length: int) -> None:
+        pass
+
+    # pyrefly: ignore [bad-override]
+    def step(self, *args, **kwargs) -> None:
+        self.optimizers[0].step(*args, **kwargs)
+
+    def zero_grad(self, *args, **kwargs) -> None:
+        self.optimizers[0].zero_grad(*args, **kwargs)
+
+    def state_dict(self) -> dict[str, Any]:
+        func = functools.partial(
+            get_optimizer_state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        return {
+            k: v
+            for sd in (func(model, self.optimizers[0]) for model in self.model_parts)
+            for k, v in sd.items()
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        func = functools.partial(
+            set_optimizer_state_dict,
+            optim_state_dict=state_dict,
+            options=StateDictOptions(flatten_optimizer_state_dict=True),
+        )
+        for model in self.model_parts:
+            func(model, self.optimizers[0])
+
+
 def build_optimizers(
     model_parts: list[nn.Module],
     optimizer_config: OptimizerConfig,
@@ -290,6 +408,34 @@ def build_optimizers(
             )
 
     name = optimizer_config.name
+
+    if name == "Muon":
+        if optim_in_bwd:
+            raise NotImplementedError(
+                "Optimizer in backward is not supported with Muon."
+            )
+        if ft_manager and ft_manager.enabled:
+            raise NotImplementedError(
+                "TorchFT is not supported with Muon optimizer."
+            )
+
+        adjust_lr = optimizer_config.adjust_lr
+        optimizer_kwargs = {
+            "lr": optimizer_config.lr,
+            "mu": optimizer_config.mu,
+            "betas": (optimizer_config.beta1, optimizer_config.beta2),
+            "weight_decay": optimizer_config.weight_decay,
+            "epsilon": optimizer_config.eps,
+            "adjust_lr": adjust_lr if adjust_lr != "none" else None,
+        }
+
+        return MuonOptimizersContainer(
+            model_parts=model_parts,
+            optimizer_kwargs=optimizer_kwargs,
+            parallel_dims=parallel_dims,
+            fallback_algorithm=optimizer_config.muon_fallback_algorithm,
+        )
+
     lr = optimizer_config.lr
     beta1 = optimizer_config.beta1
     beta2 = optimizer_config.beta2
