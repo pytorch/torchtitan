@@ -16,6 +16,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.distributed_c10d import ReduceOp
+
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 
@@ -160,7 +161,7 @@ def maybe_semi_sync_training(
     """
     If TorchFT is enabled and the config is set, use semi_sync_method
     """
-    from torchtitan.components.ft.config import FaultTolerance as ExtendedFTConfig
+    from torchtitan.experiments.ft.config import FaultTolerance as ExtendedFTConfig
 
     extend_ft_config = cast(ExtendedFTConfig, ft_config)
     semi_sync_method = extend_ft_config.semi_sync_method

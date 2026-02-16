@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class DataLoaderConfig:
     """
     Configuration for PyTorch DataLoader settings.
@@ -50,7 +50,7 @@ class DataLoaderConfig:
     """
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class TrainingConfig:
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""
@@ -110,7 +110,7 @@ class TrainingConfig:
     """DataLoader configuration"""
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class JobConfig:
     hf_assets_path: str = "./tests/assets/tokenizer"
     """
@@ -132,7 +132,7 @@ class JobConfig:
     """Path to save job config into"""
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class ParallelismConfig:
     data_parallel_replicate_degree: int = 1
     """
@@ -307,7 +307,7 @@ class ParallelismConfig:
     """
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class ActivationCheckpointConfig:
     mode: Literal["selective", "full", "memory_budget", "none"] = "selective"
     """Type of activation checkpointing to use"""
@@ -377,7 +377,7 @@ class ActivationCheckpointConfig:
     """
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class CompileConfig:
     enable: bool = False
     """Whether to apply torch.compile"""
@@ -388,7 +388,7 @@ class CompileConfig:
     backend: str = "inductor"
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class CommConfig:
     init_timeout_seconds: int = 300
     """Timeout for communication operations, during initialization and first train step."""
@@ -425,7 +425,7 @@ class CommConfig:
     """
 
 
-@dataclass
+@dataclass(kw_only=True, slots=True)
 class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""

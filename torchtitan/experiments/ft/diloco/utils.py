@@ -5,8 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch.nn as nn
-from torchtitan.components.ft.config import FaultTolerance as FTConfig
+
 from torchtitan.distributed.pipeline_parallel import generate_llm_fqn_per_model_part
+from torchtitan.experiments.ft.config import FaultTolerance as FTConfig
 from torchtitan.tools.logging import logger
 
 

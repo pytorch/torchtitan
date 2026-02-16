@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
-import importlib.util
 from dataclasses import dataclass
 from typing import Any, Generic, Iterator, Literal, TypeVar
 
@@ -26,13 +25,9 @@ from torchtitan.distributed import ParallelDims
 
 __all__ = [
     "OptimizersContainer",
+    "OptimizersInBackwardContainer",
     "register_moe_load_balancing_hook",
 ]
-
-
-has_torchft = importlib.util.find_spec("torchft") is not None
-if has_torchft:
-    import torchft as ft
 
 
 T = TypeVar("T", bound=Optimizer)
@@ -91,82 +86,31 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
-        early_step_in_backward: bool = False
-        """
-        Whether to apply optimizer in the backward. Caution, optimizer_in_backward
-        is not compatible with gradients clipping, users should not call
-        register_post_accumulate_grad_hook after the optimizer is built.
-        """
-
-        # TODO: This is violating encapsulation. We should separate the build of different optimizers.
-        def build(self, *, model_parts, parallel_dims, ft_manager=None):
-            """Build an OptimizersContainer from this config.
-
-            Args:
-                model_parts: List of model parts to be optimized.
-                parallel_dims: Parallel dimensions for the model.
-                ft_manager: Optional fault tolerance manager.
-
-            Returns:
-                An OptimizersContainer (or subclass) for the given model parts.
-            """
-            if self.early_step_in_backward:
-                if parallel_dims.ep_enabled:
-                    raise NotImplementedError(
-                        "Optimizers in backward is not supported with Expert Parallel."
-                    )
-                if parallel_dims.pp_enabled:
-                    raise NotImplementedError(
-                        "Optimizers in backward is not supported with Pipeline Parallel."
-                    )
-                if ft_manager and ft_manager.enabled:
-                    raise NotImplementedError(
-                        "TorchFT is not supported with optimizers in backward."
-                    )
-
-            optimizer_classes = {
-                "Adam": torch.optim.Adam,
-                "AdamW": torch.optim.AdamW,
-            }
-            if self.name not in optimizer_classes:
-                raise NotImplementedError(f"Optimizer {self.name} not added.")
-            optimizer_cls = optimizer_classes[self.name]
-
-            assert self.implementation in ["fused", "foreach", "for-loop"]
-            optimizer_kwargs = {
-                "lr": self.lr,
-                "betas": (self.beta1, self.beta2),
-                "eps": self.eps,
-                "weight_decay": self.weight_decay,
-                "fused": self.implementation == "fused",
-                "foreach": self.implementation == "foreach",
-            }
-
-            if self.early_step_in_backward:
-                return OptimizersInBackwardContainer(
-                    model_parts, optimizer_cls, optimizer_kwargs
-                )
-
-            if ft_manager and ft_manager.enabled:
-                return FTOptimizersContainer(
-                    model_parts,
-                    optimizer_cls,
-                    optimizer_kwargs,
-                    ft_manager.manager,
-                    use_ft_optimizer=ft_manager.use_async_quorum,
-                )
-
-            return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
-
     optimizers: list[T]
     model_parts: list[nn.Module]
 
-    def __init__(
-        self,
-        model_parts: list[nn.Module],
-        optimizer_cls: type[T],
-        optimizer_kwargs: dict[str, Any],
-    ) -> None:
+    @staticmethod
+    def _resolve_optimizer_cls(name: str) -> type:
+        optimizer_classes = {"Adam": torch.optim.Adam, "AdamW": torch.optim.AdamW}
+        if name not in optimizer_classes:
+            raise NotImplementedError(f"Optimizer {name} not added.")
+        return optimizer_classes[name]
+
+    @staticmethod
+    def _build_optimizer_kwargs(config: Config) -> dict[str, Any]:
+        assert config.implementation in ["fused", "foreach", "for-loop"]
+        return {
+            "lr": config.lr,
+            "betas": (config.beta1, config.beta2),
+            "eps": config.eps,
+            "weight_decay": config.weight_decay,
+            "fused": config.implementation == "fused",
+            "foreach": config.implementation == "foreach",
+        }
+
+    def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
+        optimizer_cls = self._resolve_optimizer_cls(config.name)
+        optimizer_kwargs = self._build_optimizer_kwargs(config)
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
@@ -238,12 +182,13 @@ class OptimizersInBackwardContainer(OptimizersContainer):
     execute these methods when the gradient is accumulated.
     """
 
-    def __init__(
-        self,
-        model_parts: list[nn.Module],
-        optimizer_cls: type[T],
-        optimizer_kwargs: dict[str, Any],
-    ) -> None:
+    @dataclass(kw_only=True, slots=True)
+    class Config(OptimizersContainer.Config):
+        pass
+
+    def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
+        optimizer_cls = self._resolve_optimizer_cls(config.name)
+        optimizer_kwargs = self._build_optimizer_kwargs(config)
         all_params = []
         self.model_parts = model_parts
 
@@ -277,71 +222,6 @@ class OptimizersInBackwardContainer(OptimizersContainer):
     # pyrefly: ignore [bad-override]
     def zero_grad(self) -> None:
         pass
-
-
-class FTOptimizersContainer(OptimizersContainer):
-    def __init__(
-        self,
-        model_parts: list[nn.Module],
-        optimizer_cls: type[T],
-        optimizer_kwargs: dict[str, Any],
-        ft_manager: "ft.Manager",
-        use_ft_optimizer: bool = True,
-    ) -> None:
-        super().__init__(model_parts, optimizer_cls, optimizer_kwargs)
-
-        # Force to initialize the optimizer state so that `optim.step()`
-        # won't be called by state_dict() and load_state_dict().
-        _ = {
-            k: v
-            for sd in map(get_optimizer_state_dict, model_parts, self.optimizers)
-            for k, v in sd.items()
-        }
-        self.cache_state_dict: dict[str, Any] = {}
-        self._ft_optimizer = ft.Optimizer(ft_manager, self)
-        # Whether to determine quorum using FT.optimizer,
-        # in semi-sync training we use the synchronization step to start quorum
-        self._use_ft_optimizer: bool = use_ft_optimizer
-
-    def init_cache_state_dict(self) -> None:
-        self.cache_state_dict = super().state_dict()
-
-    def state_dict(self) -> dict[str, Any]:
-        return self.cache_state_dict
-
-    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        # We have to invalidate the `cache_state_dict` because optimizer uses
-        # assign instead of copy when doing `load_state_dict()`. Without
-        # invalidating the `cache_state_dict`, there will be memory leakage.
-        self.cache_state_dict = {}
-        super().load_state_dict(state_dict)
-        self.init_cache_state_dict()
-
-    def step(self, *args, **kwargs) -> None:
-        """Calling the correct step() depending on the caller.
-
-        TorchFT's OptimizerWrapper.step() is designed to be called only once
-        per train step per ft.Manager regardless how many optimizers are used.
-        Hence we will need to appropriately dispatch the call.
-        """
-        if self._use_ft_optimizer:
-            self._use_ft_optimizer = False
-            self._ft_optimizer.step(*args, **kwargs)
-            self._use_ft_optimizer = True
-        else:
-            super().step(*args, **kwargs)
-
-    def zero_grad(self, *args, **kwargs) -> None:
-        """Calling the correct zero_grad() depending on the caller.
-
-        Check the comment in ``step()``.
-        """
-        if self._use_ft_optimizer:
-            self._use_ft_optimizer = False
-            self._ft_optimizer.zero_grad(*args, **kwargs)
-            self._use_ft_optimizer = True
-        else:
-            super().zero_grad(*args, **kwargs)
 
 
 def register_moe_load_balancing_hook(

@@ -97,7 +97,7 @@ class Validator(BaseValidator):
     # TODO: improve the constructor signature
     def __init__(
         self,
-        config: "Validator.Config",
+        config: Config,
         *,
         parallelism: ParallelismConfig,
         dp_world_size: int,

@@ -12,7 +12,7 @@ The extension points and protocols mentioned in this note are subject to change.
 - factory methods for creating dataloader / tokenizer / optimizer / learning rate scheduler / metrics processor
 
 The coarse level abstraction tries to hit a balance between flexible component swapping and a straightforward train script ([train.py](../torchtitan/train.py)).
-Note that among all training components, currently [`CheckpointManager`](../torchtitan/components/checkpoint.py) and [`FTManager`](../torchtitan/components/ft.py) are not configurable since we do not expect them to be customized, but we are open to requests.
+Note that among all training components, currently [`CheckpointManager`](../torchtitan/components/checkpoint.py) and [`FTManager`](../torchtitan/experiments/ft/manager.py) are not configurable since we do not expect them to be customized, but we are open to requests.
 
 To register a `TrainSpec`, please use the `register_train_spec` API, and make sure registration happens before `get_train_spec` is called during training initialization. In torchtitan, `get_train_spec` will dynamically look for models in `torchtitan/models` or `torchtitan/experiments`.
 
