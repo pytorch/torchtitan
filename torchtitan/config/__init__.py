@@ -18,21 +18,21 @@ from .configs import (
     CompileConfig,
     DataLoaderConfig,
     DebugConfig,
-    FaultToleranceConfig,
     JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
+from .configurable import Configurable
 from .manager import ConfigManager
 
 __all__ = [
     "ConfigManager",
+    "Configurable",
     "TORCH_DTYPE_MAP",
     # Config dataclasses
     "JobConfig",
     "ActivationCheckpointConfig",
     "CompileConfig",
-    "FaultToleranceConfig",
     "ParallelismConfig",
     "CommConfig",
     "TrainingConfig",

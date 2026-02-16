@@ -10,12 +10,10 @@ from enum import Enum
 
 import torch
 from safetensors.torch import load_file
-
 from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
 from torchtitan.experiments.rl.vllm_compat.models.attention import (
     VLLMCompatibleFlashAttention,
 )
-
 from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
@@ -57,7 +55,7 @@ def replace_with_vllm_attention(model, tp_degree=1):
 
     # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3.py#L80
     # Calculate num_kv_heads based on TP size
-    total_num_kv_heads = model_args.attn_config.n_kv_heads
+    total_num_kv_heads = model_args.layer.attention.n_kv_heads
     if total_num_kv_heads >= tp_degree:
         # Number of KV heads is greater than TP size, so we partition
         # the KV heads across multiple tensor parallel GPUs.
@@ -74,7 +72,7 @@ def replace_with_vllm_attention(model, tp_degree=1):
         # GQA
         vllm_attn = VLLMAttention(
             hidden_size=model_args.dim,
-            num_heads=model_args.attn_config.n_heads // tp_degree,
+            num_heads=model_args.layer.attention.n_heads // tp_degree,
             num_kv_heads=num_kv_heads,
             head_dim=model_args.head_dim,
             layer_name=layer_name,
@@ -100,7 +98,6 @@ def replace_with_vllm_compatible_flash_attention(model):
             f"Model {type(model).__name__} must have .layers attribute"
         )
 
-    model_args = model.config
     for layer_name, layer in model.layers.items():
         if not hasattr(layer, "attention"):
             raise ValueError(f"Layer {layer_name} must have .attention attribute")

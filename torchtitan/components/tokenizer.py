@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from tokenizers import AddedToken, Tokenizer
-from torchtitan.config.configurable import Configurable
+from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 from typing_extensions import override
 

@@ -40,8 +40,7 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.ft import FTManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.config.configurable import Configurable
+from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger

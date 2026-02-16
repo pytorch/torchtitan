@@ -11,7 +11,6 @@ import torch
 import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
 from torch.distributed._composable.replicate import replicate
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 from torch.distributed.tensor import Replicate, Shard
@@ -35,6 +34,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
@@ -59,7 +59,7 @@ _op_sac_save_list = {
 
 
 def parallelize_llama(
-    model: nn.Module,
+    model: Llama3Model,
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,

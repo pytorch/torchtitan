@@ -15,7 +15,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config.configurable import Configurable
+from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -284,7 +284,9 @@ def _build_metric_logger(
     # Determine if this rank should log
     should_log = has_logging_enabled
     if (not config.save_for_all_ranks) and should_log:
-        metrics_rank = _get_metrics_rank(parallel_dims=parallel_dims, pp_schedule=pp_schedule)
+        metrics_rank = _get_metrics_rank(
+            parallel_dims=parallel_dims, pp_schedule=pp_schedule
+        )
         should_log = torch.distributed.get_rank() == metrics_rank
 
     logger.debug(
@@ -320,9 +322,7 @@ def _build_metric_logger(
     if config.enable_wandb:
         logger.debug("Attempting to create WandB logger")
         try:
-            wandb_logger = WandBLogger(
-                base_log_dir, config_dict=config_dict, tag=tag
-            )
+            wandb_logger = WandBLogger(base_log_dir, config_dict=config_dict, tag=tag)
             logger_container.add_logger(wandb_logger)
         except Exception as e:
             if "No module named 'wandb'" in str(e):
@@ -426,11 +426,7 @@ class MetricsProcessor(Configurable):
         self.config = config
         self.device_memory_monitor = build_device_memory_monitor()
         # used for colorful printing
-        self.color = (
-            utils.NoColor()
-            if config.disable_color_printing
-            else utils.Color()
-        )
+        self.color = utils.NoColor() if config.disable_color_printing else utils.Color()
 
         self.gpu_peak_flops = utils.get_peak_flops(
             self.device_memory_monitor.device_name

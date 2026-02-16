@@ -14,7 +14,7 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config.configurable import Configurable
+from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 
 __all__ = [

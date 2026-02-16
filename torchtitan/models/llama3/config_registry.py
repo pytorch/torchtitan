@@ -27,7 +27,10 @@ from . import model_registry
 
 def llama3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(hf_assets_path="./tests/assets/tokenizer"),
+        job=JobConfig(
+            description="Llama 3 debug training",
+            hf_assets_path="./tests/assets/tokenizer",
+        ),
         model_spec=model_registry("debugmodel"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(

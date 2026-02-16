@@ -77,7 +77,7 @@ def parallelize_deepseekv3(
 
     if (
         parallelism.context_parallel_degree > 1
-        and model.config.attn_config.attn_backend != "sdpa"
+        and model.config.layer.attention.attn_backend != "sdpa"
     ):
         raise NotImplementedError("CP support is only supported for SDPA.")
 

@@ -8,7 +8,6 @@ import torch
 import torch._inductor.config
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-
 from torch.distributed.tensor import distribute_tensor, Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -38,6 +37,7 @@ from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ReordererSequenceParallel,
 )
+from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama3.parallelize import apply_ddp
 from torchtitan.models.llama4.parallelize import apply_fsdp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -67,7 +67,7 @@ _op_sac_save_list = {
 
 # Adapted from llama4/infra/parallelize.py
 def parallelize_gptoss(
-    model: nn.Module,
+    model: GptOssModel,
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
@@ -108,7 +108,7 @@ def parallelize_gptoss(
             model,
             parallel_dims.get_mesh("tp"),
             loss_parallel=not parallelism.disable_loss_parallel,
-            enable_float8_tensorwise_tp=False,
+            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
             enable_async_tp=False,
         )
 

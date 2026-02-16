@@ -172,5 +172,6 @@ def model_registry(flavor: str) -> ModelSpec:
         parallelize_fn=parallelize_flux,
         pipelining_fn=None,
         build_loss_fn=build_mse_loss,
+        post_optimizer_build_fn=None,
         state_dict_adapter=FluxStateDictAdapter,
     )

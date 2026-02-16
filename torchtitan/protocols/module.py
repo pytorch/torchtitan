@@ -8,7 +8,7 @@ from abc import abstractmethod
 
 import torch.nn as nn
 
-from torchtitan.config.configurable import Configurable
+from torchtitan.config import Configurable
 
 
 class Module(nn.Module, Configurable):

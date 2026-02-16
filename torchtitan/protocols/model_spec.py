@@ -10,6 +10,7 @@ from typing import TypeAlias
 
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
+
 from torchtitan.components.loss import LossFunction
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -28,23 +29,23 @@ PostOptimizerBuildFn: TypeAlias = Callable[..., None]
 class ModelSpec:
     """Per-model bundle. Contains already-selected arch config + callables."""
 
-    name: str = ""
-    flavor: str = ""
-    model: BaseModel.Config | None = None
+    name: str
+    flavor: str
+    model: BaseModel.Config
     # TODO: improve the serializability of ModelSpec by refactoring the following
-    #       fields, e.g. by moving them to the model config / class
+    #       fields, e.g. by having their own classes, or hard-coding into trainer
     # NOTE: Callable fields use bare ``Callable`` instead of the parameterised
     # TypeAliases (e.g. ``ParallelizeFunction``) because tyro's type-parameter
     # resolver does not handle ``Callable[..., X]`` (Ellipsis as param spec).
     # The detailed TypeAliases above are still available for use in function
     # signatures elsewhere in the codebase.
-    build_loss_fn: Callable | None = None
-    parallelize_fn: Callable | None = None
-    pipelining_fn: Callable | None = None
-    post_optimizer_build_fn: Callable | None = None
-    state_dict_adapter: type[BaseStateDictAdapter] | None = None
+    build_loss_fn: Callable
+    parallelize_fn: Callable
+    pipelining_fn: Callable | None
+    post_optimizer_build_fn: Callable | None
+    state_dict_adapter: type[BaseStateDictAdapter] | None
 
 
 @dataclass
 class FaultTolerantModelSpec(ModelSpec):
-    fragment_fn: Callable | None = None
+    fragment_fn: Callable | None

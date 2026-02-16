@@ -52,6 +52,7 @@ from torchtitan.models.llama3.parallelize import (
     apply_ddp,
     disable_fsdp_gradient_division,
 )
+from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
@@ -75,7 +76,7 @@ _op_sac_save_list = {
 
 
 def parallelize_llama(
-    model: nn.Module,
+    model: Llama4Model,
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
@@ -164,7 +165,7 @@ def parallelize_llama(
             use_deepep=use_deepep,
         )
 
-    attn_backend = model.config.attn_config.attn_backend
+    attn_backend = model.config.layer.attention.attn_backend
     if parallel_dims.cp_enabled:
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]

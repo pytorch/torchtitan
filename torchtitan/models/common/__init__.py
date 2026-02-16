@@ -17,6 +17,7 @@ from .attention import (
     VarlenAttentionWrapper,
     VarlenMetadata,
 )
+from .decoder import Decoder, TransformerBlock
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .moe import MoE
 from .rope import (
@@ -30,6 +31,7 @@ from .utils import trunc_normal_
 __all__ = [
     "create_attention_mask",
     "create_varlen_metadata_for_document",
+    "Decoder",
     "FeedForward",
     "FlexAttentionWrapper",
     "get_causal_mask_mod",
@@ -40,6 +42,7 @@ __all__ = [
     "MoE",
     "RoPE",
     "ScaledDotProductAttentionWrapper",
+    "TransformerBlock",
     "VarlenAttentionWrapper",
     "VarlenMetadata",
     "apply_rotary_emb_complex",

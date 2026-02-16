@@ -27,7 +27,6 @@ from torchtitan.models.common.rope import (
     apply_rotary_emb_cos_sin,
 )
 from torchtitan.models.common.utils import trunc_normal_
-
 from torchtitan.protocols.module import Module
 
 
@@ -368,7 +367,15 @@ def create_varlen_metadata_for_document(
     )
 
 
-class GQAttention(Module):
+class BaseAttention(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        n_heads: int
+        attn_backend: str
+        attn_mask_type: str
+
+
+class GQAttention(BaseAttention):
     """Grouped-Query Attention module shared across Llama3, Llama4, Qwen3.
 
     Supports GQA (grouped-query attention) with optional QK normalization,
@@ -380,7 +387,7 @@ class GQAttention(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(BaseAttention.Config):
         n_heads: int
         n_kv_heads: int | None = None
         head_dim: int | None = None

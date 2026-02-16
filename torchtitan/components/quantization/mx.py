@@ -12,7 +12,7 @@ from typing import Any, ClassVar, Literal
 import torch.nn as nn
 from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
 
-from torchtitan.config.configurable import Configurable
+from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger

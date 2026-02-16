@@ -8,7 +8,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import RoPE
 from torchtitan.protocols.model_spec import ModelSpec
-from .model import GptOssModel
+from .model import Attention, GptOssModel, GptOssTransformerBlock
 
 from .moe import GptOssMoE
 from .parallelize import parallelize_gptoss
@@ -26,20 +26,23 @@ gptoss_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=4,
-        moe_config=GptOssMoE.Config(
-            hidden_dim=2880,
-            num_experts=8,
-            num_shared_experts=0,
-            score_func="softmax",
-            route_norm=True,
-            route_scale=1.0,
-            gate_bias=True,
-            score_before_experts=False,
-            top_k=4,
-            use_grouped_mm=True,
-            load_balance_coeff=1e-3,
+        layer=GptOssTransformerBlock.Config(
+            moe=GptOssMoE.Config(
+                hidden_dim=2880,
+                num_experts=8,
+                num_shared_experts=0,
+                score_func="softmax",
+                route_norm=True,
+                route_scale=1.0,
+                gate_bias=True,
+                score_before_experts=False,
+                top_k=4,
+                use_grouped_mm=True,
+                load_balance_coeff=1e-3,
+            ),
+            attention=Attention.Config(),
         ),
-        rope_config=RoPE.Config(
+        rope=RoPE.Config(
             dim=64,
             max_seq_len=131072,
             theta=150000.0,
@@ -53,20 +56,23 @@ gptoss_configs = {
     ),
     "20b": GptOssModel.Config(
         n_layers=24,
-        moe_config=GptOssMoE.Config(
-            hidden_dim=2880,
-            num_experts=32,
-            num_shared_experts=0,
-            score_func="softmax",
-            route_norm=True,
-            route_scale=1.0,
-            gate_bias=True,
-            score_before_experts=False,
-            top_k=4,
-            use_grouped_mm=True,
-            load_balance_coeff=1e-3,
+        layer=GptOssTransformerBlock.Config(
+            moe=GptOssMoE.Config(
+                hidden_dim=2880,
+                num_experts=32,
+                num_shared_experts=0,
+                score_func="softmax",
+                route_norm=True,
+                route_scale=1.0,
+                gate_bias=True,
+                score_before_experts=False,
+                top_k=4,
+                use_grouped_mm=True,
+                load_balance_coeff=1e-3,
+            ),
+            attention=Attention.Config(),
         ),
-        rope_config=RoPE.Config(
+        rope=RoPE.Config(
             dim=64,
             max_seq_len=131072,
             theta=150000.0,
@@ -80,20 +86,23 @@ gptoss_configs = {
     ),
     "120b": GptOssModel.Config(
         n_layers=36,
-        moe_config=GptOssMoE.Config(
-            hidden_dim=2880,
-            num_experts=128,
-            num_shared_experts=0,
-            score_func="softmax",
-            route_norm=True,
-            route_scale=1.0,
-            gate_bias=True,
-            score_before_experts=False,
-            top_k=4,
-            use_grouped_mm=True,
-            load_balance_coeff=1e-3,
+        layer=GptOssTransformerBlock.Config(
+            moe=GptOssMoE.Config(
+                hidden_dim=2880,
+                num_experts=128,
+                num_shared_experts=0,
+                score_func="softmax",
+                route_norm=True,
+                route_scale=1.0,
+                gate_bias=True,
+                score_before_experts=False,
+                top_k=4,
+                use_grouped_mm=True,
+                load_balance_coeff=1e-3,
+            ),
+            attention=Attention.Config(),
         ),
-        rope_config=RoPE.Config(
+        rope=RoPE.Config(
             dim=64,
             max_seq_len=131072,
             theta=150000.0,

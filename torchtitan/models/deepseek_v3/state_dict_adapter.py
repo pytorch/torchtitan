@@ -57,7 +57,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         }
 
         # Adjustments for from_hf_map based on model architecture
-        if model_config.attn_config.q_lora_rank != 0:
+        if model_config.layer.attention.q_lora_rank != 0:
             self.from_hf_map.update(
                 {
                     "model.layers.{}.self_attn.q_a_proj.weight": "layers.{}.attention.wq_a.weight",
@@ -133,13 +133,11 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     split_values = self._split_experts_weights(
                         value,
                         # pyrefly: ignore [missing-attribute]
-                        self.model_config.moe_config.num_experts,
+                        self.model_config.layer.moe.num_experts,
                     )
 
                     # pyrefly: ignore [missing-attribute]
-                    for expert_num in range(
-                        0, self.model_config.moe_config.num_experts
-                    ):
+                    for expert_num in range(0, self.model_config.layer.moe.num_experts):
                         new_key = new_abstract_key.format(layer_num, expert_num)
                         hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
@@ -197,7 +195,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                         titan_abstract_key,
                         layer_num,
                         # pyrefly: ignore [missing-attribute]
-                        self.model_config.moe_config.num_experts,
+                        self.model_config.layer.moe.num_experts,
                     )
 
                 if stacked_value is not None:

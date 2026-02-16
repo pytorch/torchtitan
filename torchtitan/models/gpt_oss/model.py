@@ -4,45 +4,45 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.common import RoPE, trunc_normal_
+from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import (
     AttentionMasksType,
+    BaseAttention,
     create_attention_mask,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_sliding_window_mask_mod,
 )
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
-from .moe import GptOssMoE
 
-
-class Attention(Module):
+class Attention(BaseAttention):
     """
     Multi-head attention (MLA) module with sink attention.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(BaseAttention.Config):
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
         attn_backend: str = "flex"  # NOTE: gpt-oss only supports FlexAttention
         attn_mask_type: str = "causal"
+        sliding_window_size: int = 128
 
     def __init__(self, config: Config, *, dim: int):
         super().__init__()
@@ -80,7 +80,9 @@ class Attention(Module):
         assert config.attn_backend == "flex", "gpt-oss only supports FlexAttention"
         self.inner_attention = FlexAttentionWrapper()
 
-    def init_weights(self, init_std: float):
+    def init_weights(self, **kwargs):
+        init_std = kwargs.get("init_std")
+        assert init_std is not None
         linear_list = [
             self.wq,
             self.wk,
@@ -97,16 +99,18 @@ class Attention(Module):
     def forward(
         self,
         x: torch.Tensor,
-        rope_cache: torch.Tensor,
+        freqs_cis: torch.Tensor,
         attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
-            rope_cache (torch.Tensor): Precomputed cosine and sine frequencies for rope embedding.
+            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies for rope embedding.
             attention_masks: Attention mask (BlockMask).
+            positions: Optional position indices (unused, for API compatibility).
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -118,7 +122,7 @@ class Attention(Module):
         k = self.wk(x).view(hidden_shape)
         v = self.wv(x).view(hidden_shape)
 
-        q, k = apply_rotary_emb_cos_sin(q, k, rope_cache)
+        q, k = apply_rotary_emb_cos_sin(q, k, freqs_cis, positions)
 
         xq = q.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xk = k.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
@@ -150,20 +154,24 @@ class Attention(Module):
         return output
 
 
-class TransformerBlock(nn.Module):
+class GptOssTransformerBlock(TransformerBlock):
     """
-    Transformer block with attention and feed-forward layers.
+    GptOss Transformer block with sliding window attention support.
     """
 
-    def __init__(self, layer_id: int, config: "GptOssModel.Config"):
+    @dataclass(kw_only=True, slots=True)
+    class Config(TransformerBlock.Config):
+        pass
 
+    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
         super().__init__()
         self.use_sliding_attention = layer_id % 2 == 0
-        self.attention = config.attn_config.build(dim=config.dim)
-        self.attention_norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
+        self.attention = config.attention.build(dim=dim)
+        self.attention_norm = nn.RMSNorm(dim, eps=config.norm_eps)
+        self.ffn_norm = nn.RMSNorm(dim, eps=config.norm_eps)
 
-        self.moe = config.moe_config.build(dim=config.dim)
+        assert config.moe is not None
+        self.moe = config.moe.build(dim=dim)
         self.moe_enabled = True  # for composability with load balancing
 
         self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -172,16 +180,18 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        rope_cache: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        freqs_cis: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Transformer block.
 
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
-            rope_cache (torch.Tensor): Precomputed cosine and sine frequencies.
+            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
             attention_masks (AttentionMasksType): a dict of BlockMasks.
+            positions: Optional position indices.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
@@ -195,56 +205,31 @@ class TransformerBlock(nn.Module):
             layer_mask = attention_masks.get("basic_mask", None)
         assert layer_mask is not None
 
-        x = x + self.attention(self.attention_norm(x), rope_cache, layer_mask)
+        x = x + self.attention(self.attention_norm(x), freqs_cis, layer_mask, positions)
         x = x + self.moe(self.ffn_norm(x))
         return x
 
-    def init_weights(self, buffer_device: torch.device):
+    def init_weights(self, **kwargs):
+        buffer_device = kwargs.get("buffer_device")
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         self.moe.init_weights(self.weight_init_std, buffer_device)
 
 
-class GptOssModel(BaseModel):
+class GptOssModel(Decoder):
     """
     GPT-OSS Transformer model with attention and feed-forward layers.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseModel.Config):
+    class Config(Decoder.Config):
         dim: int = 2880
         n_layers: int = 24
         vocab_size: int = 201088
-        norm_eps: float = 1e-5
-        sliding_window_size: int = 128
-
-        # Multi-Head Attention
-        attn_config: Attention.Config = field(
-            default_factory=lambda: Attention.Config(
-                n_heads=64,
-                n_kv_heads=8,
-                head_dim=64,
-            )
-        )
-
-        # MoE
-        moe_config: GptOssMoE.Config = field(default_factory=GptOssMoE.Config)
 
         # Sub-component configs
-        rope_config: RoPE.Config = field(
-            default_factory=lambda: RoPE.Config(
-                dim=64,
-                max_seq_len=131072,
-                theta=150000.0,
-                backend="cos_sin",
-                scaling="yarn",
-                rope_factor=32,
-                beta_slow=32.0,
-                beta_fast=1.0,
-                original_seq_len=4096,
-            )
-        )
+        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -255,21 +240,20 @@ class GptOssModel(BaseModel):
             training = job_config.training
             parallelism = job_config.parallelism
             seq_len = training.seq_len
-            if seq_len > self.rope_config.max_seq_len:
+            if seq_len > self.rope.max_seq_len:
                 logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope_config.max_seq_len}."
+                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
                 )
 
-            # Sync rope_config max_seq_len
-            import dataclasses as _dc
+            # Sync rope max_seq_len
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            self.rope_config = _dc.replace(self.rope_config, max_seq_len=seq_len)
-
-            if self.moe_config.use_grouped_mm and not has_cuda_capability(9, 0):
+            assert self.layer.moe is not None
+            if self.layer.moe.use_grouped_mm and not has_cuda_capability(9, 0):
                 logger.warning(
                     "Failed to use grouped mm, which is only supported on SM90 or later",
                 )
-                self.moe_config.use_grouped_mm = False
+                self.layer.moe.use_grouped_mm = False
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
@@ -280,62 +264,24 @@ class GptOssModel(BaseModel):
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, float]:
+            assert isinstance(self.layer.attention, Attention.Config)
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                self.attn_config.n_heads,
-                2 * self.attn_config.head_dim,
+                self.layer.attention.n_heads,
+                2 * self.layer.attention.head_dim,
                 seq_len,
             )
 
     def __init__(self, config: Config):
-        super().__init__()
-        self.config = config
-        self.max_seq_len = config.rope_config.max_seq_len
-
-        self.tok_embeddings = nn.Embedding(config.vocab_size, config.dim)
-
-        self.rope = config.rope_config.build()
-        self.register_buffer("rope_cache", self.rope.cache, persistent=False)
-
-        self.layers = torch.nn.ModuleDict()
-        for layer_id in range(config.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, config).to(
-                torch.bfloat16
-            )
-
-        self.norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
+        super().__init__(config)
+        # GptOss uses dtype=torch.get_default_dtype() for output linear
         self.output = nn.Linear(
             config.dim,
             config.vocab_size,
             dtype=torch.get_default_dtype(),
             bias=False,
         )
-
-    def init_weights(
-        self, *, buffer_device: torch.device | None = None, **kwargs
-    ) -> None:
-        buffer_device = buffer_device or self.rope_cache.device
-        self.rope.init_weights(buffer_device=buffer_device)
-        self.rope_cache = self.rope.cache
-        if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight)
-        for layer in self.layers.values():
-            if layer is not None:
-                # pyrefly: ignore [not-callable]
-                layer.init_weights(buffer_device=buffer_device)
-        if self.norm is not None:
-            self.norm.reset_parameters()
-        final_out_std = self.config.dim**-0.5
-        cutoff_factor = 3
-        if self.output is not None:
-            trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
-            )
 
     def get_attention_masks(
         self,
@@ -345,10 +291,11 @@ class GptOssModel(BaseModel):
     ) -> AttentionMasksType:
 
         basic_mask_mods = []
+        assert isinstance(self.config.layer.attention, Attention.Config)
         sliding_window_mask_mods = [
-            get_sliding_window_mask_mod(self.config.sliding_window_size)
+            get_sliding_window_mask_mod(self.config.layer.attention.sliding_window_size)
         ]
-        match self.config.attn_config.attn_mask_type:
+        match self.config.layer.attention.attn_mask_type:
             case "causal":
                 B = 1
                 basic_mask_mods.append(get_causal_mask_mod())
@@ -360,7 +307,7 @@ class GptOssModel(BaseModel):
                 )
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.config.attn_config.attn_mask_type}"
+                    f"Unknown attention mask type: {self.config.layer.attention.attn_mask_type}"
                 )
 
         # create basic attention mask: causal or block_causal
@@ -382,26 +329,3 @@ class GptOssModel(BaseModel):
         )
 
         return {"basic_mask": basic_mask, "sliding_window_mask": sliding_window_mask}
-
-    def forward(
-        self,
-        tokens: torch.Tensor,
-        attention_masks: AttentionMasksType,
-    ):
-        """
-        Forward pass for the Transformer model.
-
-        Args:
-            tokens (torch.Tensor): Input tensor of token IDs with shape (batch_size, seq_len).
-            attention_masks (AttentionMasksType): a dict of BlockMasks.
-
-        Returns:
-            torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
-        """
-        h = self.tok_embeddings(tokens)
-
-        for layer in self.layers.values():
-            h = layer(h, self.rope_cache, attention_masks)
-        h = self.norm(h)
-        output = self.output(h)
-        return output

@@ -26,20 +26,19 @@ from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcess
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
-from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     ActivationCheckpointConfig,
     CommConfig,
     CompileConfig,
     DebugConfig,
-    FaultToleranceConfig,
     JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.config.configurable import Configurable
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
@@ -59,9 +58,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         Default container for training configuration.
         """
 
-        model_spec: Annotated[ModelSpec, tyro.conf.Suppress] = field(
-            default_factory=ModelSpec
-        )
+        # NOTE: model_spec is suppressed from tyro CLI parsing and is always
+        # set programmatically by the model registry before Trainer construction.
+        model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
         job: JobConfig = field(default_factory=JobConfig)
         profiling: ProfilingConfig = field(default_factory=ProfilingConfig)
         metrics: MetricsProcessor.Config = field(
@@ -90,9 +89,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
-        fault_tolerance: FaultToleranceConfig = field(
-            default_factory=FaultToleranceConfig
-        )
+        fault_tolerance: FTManager.Config = field(default_factory=FTManager.Config)
         validator: Validator.Config = field(default_factory=Validator.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
 
@@ -100,6 +97,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             d = {}
             for f in dataclasses.fields(self):
                 if f.name == "model_spec":
+                    assert self.model_spec is not None
                     # ModelSpec contains callables that can't be serialized
                     d["model_spec"] = {
                         "name": self.model_spec.name,
@@ -173,6 +171,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.config = config
+        assert (
+            config.model_spec is not None
+        ), "model_spec must be set before creating Trainer"
         model_spec = config.model_spec
 
         logger.info(f"Starting job: {config.job.description}")
@@ -195,7 +196,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             batch_degree, batch_rank = 1, 0
 
-        self.ft_manager = FTManager(config.fault_tolerance)
+        self.ft_manager = config.fault_tolerance.build()
         batch_degree, batch_rank = self.ft_manager.get_dp_info(batch_degree, batch_rank)
 
         # take control of garbage collection to avoid stragglers
@@ -350,7 +351,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for m in self.model_parts:
                 m.to_empty(device=init_device)
                 with torch.no_grad():
-                    cast(BaseModel, m).init_weights(buffer_device=buffer_device)
+                    cast(Decoder, m).init_weights(buffer_device=buffer_device)
                 m.train()
 
             # confirm that user will be able to view loss metrics on the console
@@ -582,13 +583,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_kwargs: dict[str, Any] = {}
 
         # TODO: improve the logic on obtaining attention masks
-        attn_config = getattr(self.model_config, "attn_config", None)
+        layer = getattr(self.model_config, "layer", None)
+        attn_config = getattr(layer, "attention", None) if layer else None
         attn_backend = getattr(attn_config, "attn_backend", "sdpa")
         if attn_backend in ["flex", "varlen"]:
             assert (
                 self.tokenizer is not None
             ), "tokenizer is required for flex/varlen attention"
-            model = cast(BaseModel, self.model_parts[0])
+            model = cast(Decoder, self.model_parts[0])
             extra_kwargs["attention_masks"] = model.get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,

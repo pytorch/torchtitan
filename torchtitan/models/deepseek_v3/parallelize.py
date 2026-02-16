@@ -29,13 +29,14 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama3.parallelize import apply_ddp
 from torchtitan.models.llama4.parallelize import (
     apply_compile,
     apply_fsdp,
     apply_moe_ep_tp,
 )
-from torchtitan.protocols.model_converter import ModelConvertersContainer
+from torchtitan.protocols import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 # for selective op activation checkpointing
@@ -59,7 +60,7 @@ _op_sac_save_list = {
 
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
-    model: nn.Module,
+    model: DeepSeekV3Model,
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
@@ -79,7 +80,7 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    attn_backend = getattr(model.config.attn_config, "attn_backend", "sdpa")
+    attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
     if parallelism.context_parallel_degree > 1 and attn_backend != "sdpa":
         raise NotImplementedError(
             f"Context Parallel only supports SDPA attention. "

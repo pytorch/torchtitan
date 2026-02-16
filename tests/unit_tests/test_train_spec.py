@@ -70,6 +70,8 @@ class TestModelSpec:
             parallelize_fn=parallelize_llama,
             pipelining_fn=None,
             build_loss_fn=build_cross_entropy_loss,
+            post_optimizer_build_fn=None,
+            state_dict_adapter=None,
         )
         assert spec.name == "fake"
         assert spec.flavor == "test"
@@ -86,6 +88,7 @@ class TestModelSpec:
             pipelining_fn=None,
             build_loss_fn=build_cross_entropy_loss,
             post_optimizer_build_fn=fake_post_optimizer_build_fn,
+            state_dict_adapter=None,
         )
 
         model = FakeModel.Config().build()
