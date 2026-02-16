@@ -4,19 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from __future__ import annotations
-
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-import torch
-
-from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.protocols.module import Module
-
-if TYPE_CHECKING:
-    from torchtitan.models.common.attention import AttentionMasksType
+from .module import Module
 
 
 class BaseModel(Module):
@@ -50,13 +41,3 @@ class BaseModel(Module):
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             pass
-
-    def get_attention_masks(
-        self,
-        input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
-    ) -> AttentionMasksType:
-        raise NotImplementedError(
-            "This model does not support attention masking/Flex Attention."
-        )

@@ -98,7 +98,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         tp_size = self.parallel_dims.tp
         if tp_size > 1:
             assert (
-                self.config.attn_config.n_heads % tp_size == 0
+                self.config.layer.attention.n_heads % tp_size == 0
             ), "Only support when n_heads can be divided by tp_size"
 
         replace_with_vllm_attention(self.model, tp_degree=tp_size)

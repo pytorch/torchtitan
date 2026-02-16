@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+
 from torchtitan.protocols.module import Module
 
 
@@ -193,7 +194,8 @@ class RoPE(Module):
         """Return the precomputed cache tensor (slicing is done by apply_rotary_emb)."""
         return self.cache
 
-    def init_weights(self, buffer_device: torch.device | None = None, **kwargs) -> None:
+    def init_weights(self, **kwargs) -> None:
+        buffer_device = kwargs.get("buffer_device")
         if buffer_device is not None:
             with torch.device(buffer_device):
                 self.cache = self._precompute()

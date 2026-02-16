@@ -90,11 +90,11 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     split_values = self._split_experts_weights(
                         value,
                         # pyrefly: ignore [missing-attribute]
-                        self.model_config.moe_config.num_experts,
+                        self.model_config.layer.moe.num_experts,
                     )
 
                     # pyrefly: ignore [missing-attribute]
-                    for expert_num in range(self.model_config.moe_config.num_experts):
+                    for expert_num in range(self.model_config.layer.moe.num_experts):
                         new_key = new_abstract_key.format(layer_num, expert_num)
                         hf_state_dict[new_key] = split_values[expert_num].squeeze()
 
@@ -167,7 +167,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                         titan_abstract_key,
                         layer_num,
                         # pyrefly: ignore [missing-attribute]
-                        self.model_config.moe_config.num_experts,
+                        self.model_config.layer.moe.num_experts,
                     )
 
                 if stacked_value is not None:

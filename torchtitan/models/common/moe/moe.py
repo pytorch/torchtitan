@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.models.common import FeedForward
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.module import Module
 
@@ -381,9 +381,8 @@ class MoE(Module):
         top_k: int = 1
         num_expert_groups: int | None = None  # must be a divisor of num_experts
         num_limited_groups: int | None = None
-        use_grouped_mm: bool = (
-            True  # grouped mm or for-loop for the experts computation
-        )
+        # grouped mm or for-loop for the experts computation
+        use_grouped_mm: bool = True
         load_balance_coeff: float | None = 1e-3
 
         _debug_force_load_balance: bool = False
@@ -530,9 +529,12 @@ class MoE(Module):
             return out_experts.reshape(bs, slen, dim)
         return (out + out_experts).reshape(bs, slen, dim)
 
-    def init_weights(
-        self, init_std: float, buffer_device: torch.device, **kwargs
-    ) -> None:
+    def init_weights(self, **kwargs) -> None:
+        init_std = kwargs.get("init_std")
+        buffer_device = kwargs.get("buffer_device")
+        assert init_std is not None
+        assert isinstance(buffer_device, torch.device)
+
         self.experts.init_weights(init_std)
         self.router.init_weights(init_std)
         if self.shared_experts is not None:

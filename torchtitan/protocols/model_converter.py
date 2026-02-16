@@ -8,9 +8,8 @@ from typing import List, Protocol, Union
 
 import torch.nn as nn
 
+from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
-
-from torchtitan.config.configurable import Configurable
 from torchtitan.tools.logging import logger
 
 

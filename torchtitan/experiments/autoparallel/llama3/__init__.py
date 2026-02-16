@@ -24,5 +24,6 @@ def model_registry(flavor: str) -> ModelSpec:
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,
+        post_optimizer_build_fn=None,
         state_dict_adapter=Llama3StateDictAdapter,
     )

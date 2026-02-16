@@ -10,7 +10,6 @@
 import torch
 import torch._inductor.config
 import torch.nn as nn
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.parallel import (
@@ -39,6 +38,7 @@ from torchtitan.models.llama4.parallelize import (
     apply_fsdp,
     apply_moe_ep_tp,
 )
+from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
@@ -63,7 +63,7 @@ _op_sac_save_list = {
 
 
 def parallelize_qwen3(
-    model: nn.Module,
+    model: Qwen3Model,
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
@@ -80,7 +80,7 @@ def parallelize_qwen3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    attn_backend = getattr(model.config, "attn_backend", "sdpa")
+    attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
     if parallelism.context_parallel_degree > 1 and attn_backend != "sdpa":
         raise NotImplementedError(
             f"Context Parallel only supports SDPA attention. "

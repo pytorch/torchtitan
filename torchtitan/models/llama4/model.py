@@ -5,31 +5,23 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
-from dataclasses import dataclass, field
-from typing import cast
+from dataclasses import dataclass
 
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.common import (
-    compute_ffn_hidden_dim,
-    FeedForward,
-    GQAttention,
-    RoPE,
-    trunc_normal_,
-)
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_fixed_block_mask_mod,
+    GQAttention,
 )
-from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.protocols.model import BaseModel
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -67,16 +59,25 @@ def compute_moe_hidden_dim(
     return hidden_dim
 
 
-class TransformerBlock(nn.Module):
+class Llama4TransformerBlock(TransformerBlock):
     """
-    TransformerBlock Module
+    Llama4 TransformerBlock Module
 
     Args:
         layer_id (int): Identifier for the layer.
-        config (Llama4Model.Config): Model configuration.
+        dim (int): Model dimension.
+        n_layers (int): Total number of layers.
+        config (Llama4TransformerBlock.Config): Block configuration.
     """
 
-    def __init__(self, layer_id: int, config: "Llama4Model.Config"):
+    @dataclass(kw_only=True, slots=True)
+    class Config(TransformerBlock.Config):
+        depth_init: bool = True
+        every_n_layers_nope: int | None = None
+        interleave_moe_layer_step: int = 2
+        fixed_attn_block_size: int = 8192
+
+    def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
         super().__init__()
 
         # iRoPE: determine per-layer use_rope and fixed_attn_block_size
@@ -89,26 +90,29 @@ class TransformerBlock(nn.Module):
 
         # Create per-layer attention config with potentially overridden use_rope
         if not attn_use_rope:
-            layer_attn_config = dataclasses.replace(config.attn_config, use_rope=False)
+            assert isinstance(config.attention, GQAttention.Config)
+            layer_attention = dataclasses.replace(config.attention, use_rope=False)
         else:
-            layer_attn_config = config.attn_config
+            layer_attention = config.attention
 
-        self.attention = layer_attn_config.build(dim=config.dim)
+        self.attention = layer_attention.build(dim=dim)
 
         # use MoE layer for every interleave_moe_layer_step FFN layers
         self.moe_enabled = (layer_id + 1) % config.interleave_moe_layer_step == 0
         if self.moe_enabled:
-            self.moe = config.moe_config.build(dim=config.dim)
+            assert config.moe is not None
+            self.moe = config.moe.build(dim=dim)
         else:
-            self.feed_forward = config.ff_config.build(dim=config.dim)
+            assert config.feed_forward is not None
+            self.feed_forward = config.feed_forward.build(dim=dim)
 
-        self.attention_norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
+        self.attention_norm = nn.RMSNorm(dim, eps=config.norm_eps)
+        self.ffn_norm = nn.RMSNorm(dim, eps=config.norm_eps)
 
         if config.depth_init:
             self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         else:
-            self.weight_init_std = 0.02 / (2 * config.n_layers) ** 0.5
+            self.weight_init_std = 0.02 / (2 * n_layers) ** 0.5
 
     def forward(
         self,
@@ -117,19 +121,6 @@ class TransformerBlock(nn.Module):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        """
-        Perform a forward pass through the TransformerBlock.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
-            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
-            positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache. Defaults to None.
-
-        Returns:
-            torch.Tensor: Output tensor after applying attention and feedforward layers.
-
-        """
         h = x + self.attention(
             self.attention_norm(x), freqs_cis, attention_masks, positions
         )
@@ -139,7 +130,8 @@ class TransformerBlock(nn.Module):
             out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
-    def init_weights(self, buffer_device: torch.device):
+    def init_weights(self, **kwargs):
+        buffer_device: torch.device | None = kwargs.get("buffer_device")
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
@@ -149,7 +141,7 @@ class TransformerBlock(nn.Module):
             self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Llama4Model(BaseModel):
+class Llama4Model(Decoder):
     """
     Llama4Model Module
 
@@ -158,55 +150,11 @@ class Llama4Model(BaseModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseModel.Config):
+    class Config(Decoder.Config):
         dim: int = 4096
         n_layers: int = 32
         vocab_size: int = 202048
-        norm_eps: float = 1e-5
-        # If `True`, then each transformer block init uses its layer ID, and if
-        # `False`, each uses the total number of transformer blocks
-        depth_init: bool = True
-
-        # iRoPE settings
-        # When ``every_n_layers_nope`` is specified, NoPE (no positional embedding) is
-        # used every n layers. Other layers uses RoPE (rotary positional embedding) and
-        # the inner attention of those layer will use the fixed block size specified by
-        # ``fixed_attn_block_size``. ``fixed_attn_block_size`` means that the query will
-        # only attend to the tokens within the same block regardless how long is the
-        # sequence.
-        every_n_layers_nope: int | None = None
-        fixed_attn_block_size: int = 8192
-
-        # MoE
-        moe_config: MoE.Config = field(default_factory=MoE.Config)
-        # frequency of using MoE layer instead of feedforward layer in a transformer block
-        interleave_moe_layer_step: int = 2
-
-        # Sub-component configs
-        ff_config: FeedForward.Config = field(
-            default_factory=lambda: FeedForward.Config(
-                hidden_dim=compute_ffn_hidden_dim(4096)
-            )
-        )
-        rope_config: RoPE.Config = field(
-            default_factory=lambda: RoPE.Config(
-                dim=4096 // 32,
-                max_seq_len=1048576,
-                theta=10000.0,
-                backend="complex",
-                scaling="llama",
-                scaling_factor=16.0,
-                high_freq_factor=1.0,
-            )
-        )
-        attn_config: GQAttention.Config = field(
-            default_factory=lambda: GQAttention.Config(
-                n_heads=32,
-                attn_backend="flex",
-                attn_mask_type="block_causal",
-                rope_backend="complex",
-            )
-        )
+        layer: TransformerBlock.Config
 
         def update_from_config(
             self,
@@ -218,20 +166,19 @@ class Llama4Model(BaseModel):
             parallelism = job_config.parallelism
             debug = job_config.debug
             seq_len = training.seq_len
-            if seq_len > self.rope_config.max_seq_len:
+            if seq_len > self.rope.max_seq_len:
                 logger.warning(
-                    f"Sequence length {seq_len} exceeds original maximum {self.rope_config.max_seq_len}."
+                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
                 )
-            # Sync rope_config max_seq_len
-            self.rope_config = dataclasses.replace(
-                self.rope_config, max_seq_len=seq_len
-            )
+            # Sync rope max_seq_len
+            self.rope = dataclasses.replace(self.rope, max_seq_len=seq_len)
 
-            if self.moe_config.use_grouped_mm and not has_cuda_capability(9, 0):
+            assert self.layer.moe is not None
+            if self.layer.moe.use_grouped_mm and not has_cuda_capability(9, 0):
                 logger.warning(
                     "Failed to use grouped mm, which is only supported on SM90 or later",
                 )
-                self.moe_config.use_grouped_mm = False
+                self.layer.moe.use_grouped_mm = False
 
             if parallelism.context_parallel_degree > 1:
                 raise NotImplementedError(
@@ -239,7 +186,7 @@ class Llama4Model(BaseModel):
                     "(Llama4 requires FlexAttention, which is not supported with CP)."
                 )
 
-            self.moe_config._debug_force_load_balance = debug.moe_force_load_balance
+            self.layer.moe._debug_force_load_balance = debug.moe_force_load_balance
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -247,65 +194,9 @@ class Llama4Model(BaseModel):
             return get_moe_model_nparams_and_flops(
                 self,
                 model,
-                self.attn_config.n_heads,
-                2 * (self.dim // self.attn_config.n_heads),
+                self.layer.attention.n_heads,
+                2 * (self.dim // self.layer.attention.n_heads),
                 seq_len,
-            )
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.config = config
-        self.vocab_size = config.vocab_size
-        self.n_layers = config.n_layers
-
-        self.tok_embeddings = nn.Embedding(config.vocab_size, config.dim)
-
-        self.rope = config.rope_config.build()
-        self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
-
-        self.layers = torch.nn.ModuleDict()
-        for layer_id in range(config.n_layers):
-            self.layers[str(layer_id)] = TransformerBlock(layer_id, config)
-        self.norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
-        self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
-
-    def init_weights(self, *, buffer_device: torch.device | None = None, **kwargs):
-        """
-        [Note: On ``init_weights`` vs. ``reset_parameters``]
-        Modules may define ``reset_parameters`` to initialize parameter values.
-        ``reset_parameters`` is meant to only initialize directly owned
-        parameters/buffers, not those of their child modules, and it can be
-        used to give the initial values for these tensors.
-        Separately, users may want custom initialization for their modules,
-        different from that in ``reset_parameters``. For this, we define
-        ``init_weights``. We only call it in the constructor of this
-        ``Transformer`` root module to avoid reinitializing tensors.
-        """
-        buffer_device = buffer_device or self.freqs_cis.device
-        if self.rope is not None:
-            self.rope.init_weights(buffer_device=buffer_device)
-            self.freqs_cis = self.rope.cache
-        else:
-            # PP case: rope module was pruned, rebuild to get freqs_cis
-            rope = self.config.rope_config.build()
-            rope.init_weights(buffer_device=buffer_device)
-            self.freqs_cis = rope.cache
-        if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight)
-        for layer in self.layers.values():
-            if layer is not None:
-                cast(TransformerBlock, layer).init_weights(buffer_device=buffer_device)
-        if self.norm is not None:
-            self.norm.reset_parameters()
-        final_out_std = self.config.dim**-0.5
-        cutoff_factor = 3
-        if self.output is not None:
-            trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
             )
 
     def get_attention_masks(
@@ -315,7 +206,7 @@ class Llama4Model(BaseModel):
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
         mask_mods = [get_causal_mask_mod()]
-        match self.config.attn_config.attn_mask_type:
+        match self.config.layer.attention.attn_mask_type:
             case "causal":
                 B = 1
             case "block_causal":
@@ -324,12 +215,13 @@ class Llama4Model(BaseModel):
                 B = input_batch.shape[0]
             case _:
                 raise ValueError(
-                    f"Unknown attention mask type: {self.config.attn_config.attn_mask_type}"
+                    f"Unknown attention mask type: {self.config.layer.attention.attn_mask_type}"
                 )
 
+        assert isinstance(self.config.layer, Llama4TransformerBlock.Config)
         rope_mask_mod = and_masks(
             *mask_mods,
-            get_fixed_block_mask_mod(self.config.fixed_attn_block_size),
+            get_fixed_block_mask_mod(self.config.layer.fixed_attn_block_size),
         )
         nope_mask_mod = and_masks(*mask_mods)
 
@@ -338,34 +230,3 @@ class Llama4Model(BaseModel):
             "rope": create_attention_mask(rope_mask_mod, B, None, seqlen, seqlen),
             "nope": create_attention_mask(nope_mask_mod, B, None, seqlen, seqlen),
         }
-
-    def forward(
-        self,
-        tokens: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
-        positions: torch.Tensor | None = None,
-    ):
-        """
-        Perform a forward pass through the Transformer model.
-
-        Args:
-            tokens (torch.Tensor): Input token indices if pipeline parallelism is not enabled.
-                If pipeline parallelism is enabled, this will be the input token indices
-                for the ranks on the first pipeline stage. This will be the activation of the
-                previous pipeline stage if the current rank is not on the first stage.
-            attention_masks (AttentionMasksType | None): Masks used when calculating attention scores.
-            positions (torch.Tensor | None): Position indices used to access/shuffle RoPE cache. Defaults to None.
-
-        Returns:
-            torch.Tensor: Output logits after applying the Transformer model.
-
-        """
-        # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
-        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-
-        for layer in self.layers.values():
-            h = layer(h, self.freqs_cis, attention_masks, positions)
-
-        h = self.norm(h) if self.norm is not None else h
-        output = self.output(h) if self.output is not None else h
-        return output

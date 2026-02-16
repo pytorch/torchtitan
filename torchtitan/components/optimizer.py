@@ -21,7 +21,7 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import Replicate
 from torch.optim import Optimizer
-from torchtitan.config.configurable import Configurable
+from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 
 __all__ = [

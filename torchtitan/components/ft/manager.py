@@ -6,6 +6,7 @@
 
 import importlib.util
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Callable, cast, ContextManager, Optional, TYPE_CHECKING, Union
 
@@ -15,8 +16,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.distributed_c10d import ReduceOp
-from torchtitan.components.ft.config import FaultTolerance as ExtendedFTConfig
-from torchtitan.config.configs import FaultToleranceConfig as FTConfig
+from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 
 if importlib.util.find_spec("torchft") is not None:
@@ -30,41 +30,81 @@ else:
     has_torchft = False
 
 
-class FTManager:
+class FTManager(Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        enable: bool = False
+        """
+        Enable TorchFT integration. When TorchFT is enabled, HSDP will be used.
+        And --fault_tolerance.data_parallel_replicate_degree should be 1 and
+        --fault_tolerance.group_size will be used to control the maximum
+        replicate group size as the replicate group size is dynamic.
+        Note that this is still an experimental feature.
+        """
+
+        process_group: str = "gloo"
+        """
+        The process group to use for fault tolerance. Currently, only "gloo" and "nccl" are supported.
+        """
+
+        process_group_timeout_ms: int = 10000
+        """
+        The process group will abort if operations don't succeed within this duration.
+        Note: This currently only works with gloo process group.
+        """
+
+        replica_id: int = 0
+        """The TorchFT replica ID of this run."""
+
+        group_size: int = 0
+        """
+        The number of TorchFT replicate groups. This number will be used for
+        dataloader to split the dataset across the replicate groups and FSDP
+        dimension
+        """
+
+        min_replica_size: int = 1
+        """The minimum number of FT replica for each step."""
+
+        semi_sync_method: str | None = None
+        """
+        The algorithm to use for semi-sync training. Currently, only "local_sgd" and "diloco" from
+        torchft are supported
+        (https://github.com/pytorch/torchft/blob/360c5c534bdeac959507e9d238ba9f3902d3fda9/torchft/local_sgd.py#L41)
+        """
+
     def __init__(
         self,
-        ft_config: FTConfig,
+        config: Config,
     ) -> None:
-        if not ft_config.enable:
+        if not config.enable:
             self._manager = None
             return
 
         if not has_torchft:
             raise ImportError("torchft is not installed. Please install it.")
 
-        process_group_timeout = timedelta(
-            milliseconds=ft_config.process_group_timeout_ms
-        )
-        if ft_config.process_group == "gloo":
+        process_group_timeout = timedelta(milliseconds=config.process_group_timeout_ms)
+        if config.process_group == "gloo":
             pg = ft.ProcessGroupGloo(timeout=process_group_timeout)
-        elif ft_config.process_group == "nccl":
+        elif config.process_group == "nccl":
             pg = ft.ProcessGroupNCCL(timeout=process_group_timeout)
         else:
-            raise ValueError(f"Unsupported process group: {ft_config.process_group}")
+            raise ValueError(f"Unsupported process group: {config.process_group}")
 
         # If the training method is specific, then the quorum should be synchronous
-        self.use_async_quorum = ft_config.semi_sync_method is None
+        self.use_async_quorum = config.semi_sync_method is None
 
         self._manager = ft.Manager(
             pg=pg,
-            min_replica_size=ft_config.min_replica_size,
+            min_replica_size=config.min_replica_size,
             load_state_dict=None,
             state_dict=None,
             use_async_quorum=self.use_async_quorum,
-            replica_id=f"torchtitan_ft_{ft_config.replica_id}",
+            replica_id=f"torchtitan_ft_{config.replica_id}",
         )
-        self.group_size = ft_config.group_size
-        self.replica_id = ft_config.replica_id
+        self.group_size = config.group_size
+        self.replica_id = config.replica_id
 
         if self.use_async_quorum:
             self.replicate_pg = ft.process_group.ManagedProcessGroup(self._manager)
@@ -110,7 +150,7 @@ class FTManager:
 
 
 def maybe_semi_sync_training(
-    ft_config: FTConfig,
+    ft_config: "FTManager.Config",
     ft_manager: FTManager,
     model: torch.nn.Module,
     n_layers: int,
@@ -120,6 +160,8 @@ def maybe_semi_sync_training(
     """
     If TorchFT is enabled and the config is set, use semi_sync_method
     """
+    from torchtitan.components.ft.config import FaultTolerance as ExtendedFTConfig
+
     extend_ft_config = cast(ExtendedFTConfig, ft_config)
     semi_sync_method = extend_ft_config.semi_sync_method
     if extend_ft_config.enable and semi_sync_method is not None:

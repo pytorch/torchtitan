@@ -6,13 +6,13 @@
 
 from dataclasses import dataclass, field
 
-from torchtitan.config.configs import FaultToleranceConfig as BaseFaultTolerance
+from torchtitan.components.ft.manager import FTManager
 
 
-@dataclass
-class FaultTolerance(BaseFaultTolerance):
+@dataclass(kw_only=True, slots=True)
+class FaultTolerance(FTManager.Config):
     """
-    Extends fault tolerance to also support Streaming DiLoCo
+    Extends FTManager.Config to also support Streaming DiLoCo
     """
 
     sync_steps: int = 5

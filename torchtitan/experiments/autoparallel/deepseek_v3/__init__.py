@@ -27,7 +27,7 @@ def model_registry(flavor: str) -> ModelSpec:
         if "flex_attn" in config:
             continue
 
-        args.attn_config = default_args.attn_config
+        args.layer.attention = default_args.layer.attention
 
     return ModelSpec(
         name="autoparallel/deepseek_v3",

@@ -482,8 +482,8 @@ def get_moe_model_nparams_and_flops(
         + nparams_shared_experts
         # pyrefly: ignore [missing-attribute]
         + nparams_experts
-        * model_args.moe_config.top_k
-        // model_args.moe_config.num_experts
+        * model_args.layer.moe.top_k
+        // model_args.layer.moe.num_experts
     )
 
     logger.info(
