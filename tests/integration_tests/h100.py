@@ -73,10 +73,14 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         # Experimental, non-blocking: PRs can land if only this test fails
+        # Reason: grouped mm in deepseek v3 only works on H100
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.deepseek_v3 --config simple_fsdp_deepseek_v3_debugmodel_auto_bucketing",
+                    "--model simple_fsdp.deepseek_v3 --config simple_fsdp_deepseek_v3_debugmodel",
+                    "--parallelism.tensor_parallel_degree 1",
+                    "--parallelism.expert_parallel_degree 8",
+                    "--compile.graph_passes auto_bucketing",
                 ]
             ],
             "[Experimental, non-blocking landing if fails] SimpleFSDP DeepSeekV3 auto_bucketing",

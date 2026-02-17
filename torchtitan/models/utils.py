@@ -386,7 +386,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
 
 def get_dense_model_nparams_and_flops(
-    model_args: BaseModel.Config,
+    model_config: BaseModel.Config,
     model: nn.Module,
     n_heads: int,
     head_dims: int,
@@ -394,7 +394,7 @@ def get_dense_model_nparams_and_flops(
 ) -> tuple[int, int]:
     """
     Args:
-        model_args: BaseModel.Config object containing model configuration parameters.
+        model_config: BaseModel.Config object containing model configuration parameters.
         model: nn.Module representing the model.
         n_heads: The number of attention heads.
         head_dims: The sum of qk and v head dimensions.
@@ -423,18 +423,21 @@ def get_dense_model_nparams_and_flops(
     num_flops_per_token = (
         6 * (nparams - nparams_embedding)
         # pyrefly: ignore [missing-attribute]
-        + 6 * model_args.n_layers * n_heads * head_dims * seq_len
+        + 6 * model_config.n_layers * n_heads * head_dims * seq_len
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
-    if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
+    if (
+        hasattr(model_config, "enable_weight_tying")
+        and model_config.enable_weight_tying
+    ):
         nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token
 
 
 def get_moe_model_nparams_and_flops(
-    model_args: BaseModel.Config,
+    model_config: BaseModel.Config,
     model: nn.Module,
     n_heads: int,
     head_dims: int,
@@ -444,7 +447,7 @@ def get_moe_model_nparams_and_flops(
     Calculate nparams and nflops for MoE models.
 
     Args:
-        model_args: BaseModel.Config object containing model configuration parameters including MoE settings.
+        model_config: BaseModel.Config object containing model configuration parameters including MoE settings.
         model: nn.Module representing the MoE model.
         n_heads: The number of attention heads.
         head_dims: The sum of qk and v head dimensions.
@@ -477,14 +480,17 @@ def get_moe_model_nparams_and_flops(
 
     nparams_sparse = nparams_moe_router + nparams_shared_experts + nparams_experts
     nparams = nparams_dense + nparams_sparse
-    nparams_sparse_active = (
-        nparams_moe_router
-        + nparams_shared_experts
-        # pyrefly: ignore [missing-attribute]
-        + nparams_experts
-        * model_args.layer.moe.top_k
-        // model_args.layer.moe.num_experts
-    )
+
+    # pyrefly: ignore [missing-attribute]
+    moe_config = model_config.layer.moe
+    if moe_config is not None:
+        nparams_sparse_active = (
+            nparams_moe_router
+            + nparams_shared_experts
+            + nparams_experts * moe_config.top_k // moe_config.num_experts
+        )
+    else:
+        nparams_sparse_active = 0
 
     logger.info(
         f"Total parameter count: dense {nparams_dense:,}, "
@@ -494,11 +500,14 @@ def get_moe_model_nparams_and_flops(
     num_flops_per_token = (
         6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
         # pyrefly: ignore [missing-attribute]
-        + 6 * model_args.n_layers * n_heads * head_dims * seq_len
+        + 6 * model_config.n_layers * n_heads * head_dims * seq_len
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
-    if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
+    if (
+        hasattr(model_config, "enable_weight_tying")
+        and model_config.enable_weight_tying
+    ):
         nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token

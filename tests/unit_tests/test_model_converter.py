@@ -28,7 +28,9 @@ def build_parallel_dims(job_config, world_size):
 
 def test_build_model_converters_empty_list():
     config_manager = ConfigManager()
-    config = config_manager.parse_args([])
+    config = config_manager.parse_args(
+        ["--model", "llama3", "--config", "llama3_debugmodel"]
+    )
     parallel_dims = build_parallel_dims(config, 1)
 
     model_compile_enabled = (
@@ -45,7 +47,9 @@ def test_build_model_converters_empty_list():
 def test_build_model_converters_float8_converter():
     pytest.importorskip("torchao")
     config_manager = ConfigManager()
-    config = config_manager.parse_args([])
+    config = config_manager.parse_args(
+        ["--model", "llama3", "--config", "llama3_debugmodel"]
+    )
     # Set converter config directly (not via CLI)
     config.model_converters = ModelConvertersContainer.Config(
         converters=[Float8LinearConverter.Config(emulate=True)],

@@ -392,6 +392,8 @@ class FluxDataLoader(ParallelAwareDataloader):
         dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
         """DataLoader configuration"""
 
+        # TODO: Remove after the tokenizer is properly built from the trainer. E.g.,
+        # we can have a tokenizer container which holds the t5 and clip tokenizers.
         encoder: Encoder = field(default_factory=Encoder)
         """This is a hack to get the T5 and CLIP tokenizer asset paths. Ideally tokenizer should be
         built from the trainer, not inside dataloader. The reason we are doing this is because FLUX

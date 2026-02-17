@@ -136,7 +136,9 @@ class Llama4TransformerBlock(TransformerBlock):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            self.moe.init_weights(self.weight_init_std, buffer_device)
+            self.moe.init_weights(
+                init_std=self.weight_init_std, buffer_device=buffer_device
+            )
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 
