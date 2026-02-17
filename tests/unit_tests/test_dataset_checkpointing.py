@@ -138,9 +138,9 @@ class TestMultiDatasetCheckpointing(TestDatasetCheckpointing):
                 for _ in range(100):
                     input_ids1, labels1 = next(it1)
                     input_ids2, labels2 = next(it2)
-                    assert torch.equal(input_ids1["input"], input_ids2["input"]), (
-                        f"Cross-run reproducibility failed at world_size={world_size}, rank={rank}"
-                    )
-                    assert torch.equal(labels1, labels2), (
-                        f"Cross-run reproducibility failed at world_size={world_size}, rank={rank}"
-                    )
+                    assert torch.equal(
+                        input_ids1["input"], input_ids2["input"]
+                    ), f"Cross-run reproducibility failed at world_size={world_size}, rank={rank}"
+                    assert torch.equal(
+                        labels1, labels2
+                    ), f"Cross-run reproducibility failed at world_size={world_size}, rank={rank}"
