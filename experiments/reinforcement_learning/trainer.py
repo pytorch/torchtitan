@@ -139,7 +139,6 @@ class Trainer(Actor):
         self.optimizer.zero_grad()
 
         losses = []
-        valid_count = 0
 
         for traj in trajectories:
             # Load pre-tokenized sequence from the generator
@@ -164,16 +163,12 @@ class Trainer(Actor):
             # REINFORCE loss = -log_prob * advantage
             advantage = traj.reward - advantage_baseline
             losses.append(-token_log_probs.sum() * advantage)
-            valid_count += 1
 
         # Optimizer step
-        if valid_count > 0:
-            avg_loss = torch.stack(losses).sum() / valid_count
-            avg_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            self.optimizer.step()
-        else:
-            avg_loss = torch.tensor(0.0)
+        avg_loss = torch.stack(losses).sum() / len(trajectories)
+        avg_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        self.optimizer.step()
 
         self.policy_version += 1
         self.train_steps += 1
