@@ -40,20 +40,19 @@ MXFP8 differs from standard Float8 training in its scaling approach:
 
 #### Usage
 
-To enable MXFP8 training for linear layers, configure it in your Python config file:
+To enable MXFP8 training for linear layers, configure it in your config_registry function:
 
 ```python
 from torchtitan.components.quantization.mx import MXLinearConverter
-from torchtitan.config import JobConfig, Model, Compile
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
-default_config = JobConfig(
-    model=Model(
-        converters=[
-            MXLinearConverter.Config(recipe_name="mxfp8_cublas"),
-        ],
-    ),
-    compile=Compile(enable=True),
-)
+# In your config_registry function:
+model_converters=ModelConvertersContainer.Config(
+    converters=[
+        MXLinearConverter.Config(recipe_name="mxfp8_cublas"),
+    ],
+),
+compile=CompileConfig(enable=True),
 ```
 
 **Configuration Options:**
@@ -75,21 +74,20 @@ For Mixture-of-Experts (MoE) models, MXFP8 can accelerate the expert computation
 
 #### Usage
 
-To enable MXFP8 for MoE expert layers, configure it in your Python config file:
+To enable MXFP8 for MoE expert layers, configure it in your config_registry function:
 
 ```python
 from torchtitan.components.quantization.mx import MXGroupedMMConverter
-from torchtitan.config import JobConfig, Model, Compile
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
-default_config = JobConfig(
-    model=Model(
-        converters=[
-            MXGroupedMMConverter.Config(fqns=["experts"], recipe_name="mxfp8"),
-        ],
-        print_after_conversion=True,
-    ),
-    compile=Compile(enable=True),
-)
+# In your config_registry function:
+model_converters=ModelConvertersContainer.Config(
+    converters=[
+        MXGroupedMMConverter.Config(fqns=["experts"], recipe_name="mxfp8"),
+    ],
+    print_after_conversion=True,
+),
+compile=CompileConfig(enable=True),
 ```
 
 **Combined usage**: You can use MXFP8 for both linear modules and grouped GEMMs simultaneously by specifying both converters:
@@ -117,31 +115,30 @@ default_config = JobConfig(
 
 ### Example Python Configuration
 
-Here's an example configuration for MXFP8 training in a Python config file:
+Here's an example configuration for MXFP8 training in a config_registry function:
 
 ```python
 from torchtitan.components.quantization.mx import MXLinearConverter, MXGroupedMMConverter
-from torchtitan.config import JobConfig, Model, Compile
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
-default_config = JobConfig(
-    model=Model(
-        converters=[
-            MXLinearConverter.Config(
-                recipe_name="mxfp8_cublas",
-                mxfp8_dim1_cast_kernel_choice="cuda",
-                filter_fqns=["output", "router.gate"],
-            ),
-            MXGroupedMMConverter.Config(
-                recipe_name="mxfp8",
-                fqns=["experts"],
-            ),
-        ],
-    ),
-    compile=Compile(
-        enable=True,
-        components=["model"],
-    ),
-)
+# In your config_registry function:
+model_converters=ModelConvertersContainer.Config(
+    converters=[
+        MXLinearConverter.Config(
+            recipe_name="mxfp8_cublas",
+            mxfp8_dim1_cast_kernel_choice="cuda",
+            filter_fqns=["output", "router.gate"],
+        ),
+        MXGroupedMMConverter.Config(
+            recipe_name="mxfp8",
+            fqns=["experts"],
+        ),
+    ],
+),
+compile=CompileConfig(
+    enable=True,
+    components=["model"],
+),
 ```
 
 ### Performance

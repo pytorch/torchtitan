@@ -9,22 +9,21 @@ Please install latest [TorchAO](https://github.com/pytorch/ao/tree/main/torchao/
 USE_CPP=0 python -m pip install git+https://github.com/pytorch/ao.git
 ```
 
-For float8 with tensorwise scaling, configure it in your Python config file:
+For float8 with tensorwise scaling, configure it in your config_registry function:
 ```python
 from torchtitan.components.quantization.float8 import Float8LinearConverter
-from torchtitan.config import JobConfig, Model, Compile
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
-default_config = JobConfig(
-    model=Model(
-        converters=[
-            Float8LinearConverter.Config(
-                enable_fsdp_float8_all_gather=True,
-                precompute_float8_dynamic_scale_for_fsdp=True,
-            ),
-        ],
-    ),
-    compile=Compile(enable=True),
-)
+# In your config_registry function:
+model_converters=ModelConvertersContainer.Config(
+    converters=[
+        Float8LinearConverter.Config(
+            enable_fsdp_float8_all_gather=True,
+            precompute_float8_dynamic_scale_for_fsdp=True,
+        ),
+    ],
+),
+compile=CompileConfig(enable=True),
 ```
 * `enable_fsdp_float8_all_gather`: cast `Float8Linear.weight` from high precision to float8 before FSDP all-gather so we can communicate in float8 to save bandwidth.
 * `precompute_float8_dynamic_scale_for_fsdp` (optional): communicate AMAX/scales efficiently in a single all-reduce for all parameters instead of doing many small all-reduce for each parameter.
@@ -32,19 +31,18 @@ default_config = JobConfig(
     * **Auto-filter**: add `"auto_filter_small_kn"` as one of the `filter_fqns` to to enable automatic module filtering, which will automatically not convert linear layers are not large enough to benefit from float8 training, since the GEMM has to be big enough that the speedup from using FP8 tensorcores is greater than the overhead of creating dynamically quantized inputs. The thresholds for conversion are based on microbenchmarks measured on NVIDIA H100 GPUs, where (K,N) represents the linear layer weight shape. For best performance, you should still manually filter out layers that are too small to benefit from float8 training.
 * `compile.enable` (required for competitive performance): use `torch.compile` to fuse the float8 scaling/casting kernels
 
-For float8 with rowwise scaling, configure it in your Python config file:
+For float8 with rowwise scaling, configure it in your config_registry function:
 ```python
 from torchtitan.components.quantization.float8 import Float8LinearConverter
-from torchtitan.config import JobConfig, Model, Compile
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
-default_config = JobConfig(
-    model=Model(
-        converters=[
-            Float8LinearConverter.Config(recipe_name="rowwise"),
-        ],
-    ),
-    compile=Compile(enable=True),
-)
+# In your config_registry function:
+model_converters=ModelConvertersContainer.Config(
+    converters=[
+        Float8LinearConverter.Config(recipe_name="rowwise"),
+    ],
+),
+compile=CompileConfig(enable=True),
 ```
 * `recipe_name="rowwise"`: use the rowwise scaling recipe for higher accuracy compared to tensorwise scaling
 * `compile.enable` (required for competitive performance): use `torch.compile` to fuse the float8 scaling/casting kernels

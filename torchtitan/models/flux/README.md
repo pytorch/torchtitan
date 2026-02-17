@@ -25,7 +25,7 @@ Run the following command to train the model on a single GPU:
 
 If you want to train with other model args, run the following command:
 ```bash
-CONFIG_FILE="./torchtitan/models/flux/train_configs/flux_schnell_model.py" ./torchtitan/models/flux/run_train.sh
+MODEL=flux CONFIG=flux_schnell ./torchtitan/models/flux/run_train.sh
 ```
 
 

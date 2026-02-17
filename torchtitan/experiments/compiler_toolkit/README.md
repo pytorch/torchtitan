@@ -14,58 +14,56 @@ Joint Graph based Training Prototype:
 
 **SimpleFSDP + TP + EP**
 ```shell
-NGPU=4 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train CONFIG_FILE=./torchtitan/models/deepseek_v3/train_configs/debug_model.py ./run_train.sh --model.name compiler_toolkit.deepseek_v3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=2 --parallelism.expert_parallel_degree=2 --activation_checkpoint.mode none
+NGPU=4 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train MODEL=compiler_toolkit.deepseek_v3 CONFIG=compiler_toolkit_deepseek_v3_debugmodel ./run_train.sh --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=2 --parallelism.expert_parallel_degree=2 --activation_checkpoint.mode none
 ```
 
 **SimpleFSDP + TP + EP + FlexAttention**
 ```shell
-NGPU=4 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train CONFIG_FILE=./torchtitan/models/deepseek_v3/train_configs/debug_model.py ./run_train.sh --model.name compiler_toolkit.deepseek_v3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=2 --parallelism.expert_parallel_degree=2 --activation_checkpoint.mode none --model.flavor=debugmodel_flex_attn
+NGPU=4 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train MODEL=compiler_toolkit.deepseek_v3 CONFIG=compiler_toolkit_deepseek_v3_debugmodel_flex_attn ./run_train.sh --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=2 --parallelism.expert_parallel_degree=2 --activation_checkpoint.mode none
 ```
 
 ## llama3
 
 **SimpleFSDP + TP**
 ```shell
-NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.py ./run_train.sh --model.name compiler_toolkit.llama3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4
+NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train MODEL=compiler_toolkit.llama3 CONFIG=compiler_toolkit_llama3_debugmodel ./run_train.sh --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4
 ```
-
-> **Note**: The commands below require the compiler_toolkit-specific config fields (e.g., `compile.passes`, `compile.joint_passes`). Create a Python config file that merges the compiler_toolkit config using `ConfigManager._merge_configs()`. See [docs/extension.md](../../../docs/extension.md) for details.
 
 **SimpleFSDP + TP + auto-bucketing**
 ```shell
-NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.py ./run_train.sh --model.name compiler_toolkit.llama3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.passes autobucketing_reordering
+NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train MODEL=compiler_toolkit.llama3 CONFIG=compiler_toolkit_llama3_debugmodel ./run_train.sh --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.passes autobucketing_reordering
 ```
 
 **SimpleFSDP + TP + transformer-block-bucketing**
 ```shell
-NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.py ./run_train.sh --model.name compiler_toolkit.llama3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.passes transformer_block_bucketing
+NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train MODEL=compiler_toolkit.llama3 CONFIG=compiler_toolkit_llama3_debugmodel ./run_train.sh --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.passes transformer_block_bucketing
 ```
 
 **SimpleFSDP + TP + FlexAttention**
 ```shell
-NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.py ./run_train.sh --model.name compiler_toolkit.llama3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --model.flavor=debugmodel_flex_attn
+NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train MODEL=compiler_toolkit.llama3 CONFIG=compiler_toolkit_llama3_debugmodel_flex_attn ./run_train.sh --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4
 ```
 
 **SimpleFSDP + TP + FlexAttention + auto-bucketing + regional-inductor**
 
 ```shell
-NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.py ./run_train.sh --model.name compiler_toolkit.llama3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.passes autobucketing_reordering,regional_inductor --model.flavor=debugmodel_flex_attn
+NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train MODEL=compiler_toolkit.llama3 CONFIG=compiler_toolkit_llama3_debugmodel_flex_attn ./run_train.sh --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.passes autobucketing_reordering,regional_inductor
 ```
 
 **SimpleFSDP + TP + FlexAttention + transformer-block-bucketing + regional-inductor**
 
 ```shell
-NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.py ./run_train.sh --model.name compiler_toolkit.llama3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.passes transformer_block_bucketing,regional_inductor --model.flavor=debugmodel_flex_attn
+NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train MODEL=compiler_toolkit.llama3 CONFIG=compiler_toolkit_llama3_debugmodel_flex_attn ./run_train.sh --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.passes transformer_block_bucketing,regional_inductor
 ```
 
 **SimpleFSDP + TP + FlexAttention + transformer-block-bucketing + regional-inductor + cudagraph**
 
 ```shell
-NCCL_GRAPH_REGISTER=0 NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.py ./run_train.sh --model.name compiler_toolkit.llama3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.passes transformer_block_bucketing,regional_inductor,cudagraph --model.flavor=debugmodel_flex_attn
+NCCL_GRAPH_REGISTER=0 NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train MODEL=compiler_toolkit.llama3 CONFIG=compiler_toolkit_llama3_debugmodel_flex_attn ./run_train.sh --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.passes transformer_block_bucketing,regional_inductor,cudagraph
 ```
 
 **SimpleFSDP + TP + Full Inductor compilation**
 
 ```shell
-NGPU=8 CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.py TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train ./run_train.sh --model.name compiler_toolkit.llama3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.joint_passes inductor_decomposition --compile.passes full_inductor_compilation
+NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train MODEL=compiler_toolkit.llama3 CONFIG=compiler_toolkit_llama3_debugmodel ./run_train.sh --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --compile.joint_passes inductor_decomposition --compile.passes full_inductor_compilation
 ```
