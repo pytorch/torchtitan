@@ -20,8 +20,10 @@ from torchtitan.distributed import utils as dist_utils
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
 
-from torchtitan.experiments.rl.vllm_compat.simple_rl import (
+from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     build_compilation_config,
+)
+from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
     compute_grpo_advantages_stable,
     math_reward_function,
@@ -215,7 +217,7 @@ class VLLMRolloutEngine:
                 seed=42,  # Fixed seed for determinism
                 enforce_eager=not self.vllm_compile_and_cudagraph,
                 compilation_config=build_compilation_config(
-                    self.vllm_compile_and_cudagraph
+                    self.vllm_compile_and_cudagraph, tp_size=self.tp_size
                 ),
                 tensor_parallel_size=self.tp_size,  # Explicitly single GPU
                 attention_config=AttentionConfig(

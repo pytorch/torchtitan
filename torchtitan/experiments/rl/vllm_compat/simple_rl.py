@@ -26,6 +26,10 @@ from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
 from torch.utils.tensorboard import SummaryWriter
 
+from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
+    build_compilation_config,
+)
+
 from torchtitan.experiments.rl.vllm_compat.weights.converter import (
     torchtitan_to_vllm,
     vllm_to_torchtitan,
@@ -38,28 +42,10 @@ from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
 from transformers import AutoConfig, AutoTokenizer
 
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-
 init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
-
-
-def build_compilation_config(
-    vllm_compile_and_cudagraph: bool,
-) -> CompilationConfig | None:
-    """Build a CompilationConfig when vllm_compile_and_cudagraph is enabled."""
-    if not vllm_compile_and_cudagraph:
-        return None
-    # NOTE: these options optimize speed while retaining numerics, but
-    # greatly increase memory usage
-    # see https://docs.vllm.ai/en/stable/design/cuda_graphs/#cudagraphmodes
-    return CompilationConfig(
-        cudagraph_mode="full_and_piecewise",
-        # Prefer eager over inductor for the sake of numerics
-        backend="eager",
-    )
 
 
 class VLLMRolloutEngine:

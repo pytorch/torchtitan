@@ -17,7 +17,7 @@ from torchtitan.config.job_config import Comm, JobConfig, Model, Parallelism, Tr
 from torchtitan.distributed import utils as dist_utils
 
 from torchtitan.distributed.parallel_dims import ParallelDims
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 
 
@@ -137,3 +137,30 @@ def create_job_config_from_vllm_config(
     )
 
     return job_config
+
+
+def build_compilation_config(
+    vllm_compile_and_cudagraph: bool,
+    tp_size: int = 1,
+) -> CompilationConfig | None:
+    """Build a vLLM CompilationConfig for torch.compile + piecewise CUDA graphs.
+
+    Full CUDA-graph mode cannot capture DTensor operations (CPU metadata),
+    so we fall back to piecewise-only when tensor parallelism is active.
+    See https://docs.vllm.ai/en/stable/design/cuda_graphs/#cudagraphmodes
+
+    Args:
+        vllm_compile_and_cudagraph: Whether to enable compilation.
+            When False, returns None (enforce_eager should be True).
+        tp_size: Tensor parallel size. Controls CUDA-graph capture mode.
+
+    Returns:
+        CompilationConfig or None.
+    """
+    if not vllm_compile_and_cudagraph:
+        return None
+    cudagraph_mode = "piecewise" if tp_size > 1 else "full_and_piecewise"
+    return CompilationConfig(
+        cudagraph_mode=cudagraph_mode,
+        backend="eager",
+    )

@@ -34,17 +34,26 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-from torch.distributed.tensor._ops._pointwise_ops import pointwise_strategy
+import vllm.utils.torch_utils as _vllm_torch_utils
 
-# Register DTensor sharding strategy for vLLM's _C.weak_ref_tensor custom op.
-# This op is called by vLLM's CUDAGraphWrapper on piecewise subgraph outputs
-# (via weak_ref_tensors()). Without a registered strategy, DTensor dispatch
-# raises RuntimeError when intermediate hidden states are DTensors (e.g. with
-# SequenceParallel / Shard(1) placements under TP).
-# weak_ref_tensor is semantically identity (same data pointer), so pointwise
-# strategy (propagate input placement to output) is correct.
-# We also need a Meta/FakeTensor impl since DTensor's sharding propagation
-# calls the op on FakeTensors to determine output tensor metadata.
+# ---------------------------------------------------------------------------
+# vLLM weak_ref_tensor + DTensor compatibility patches
+#
+# Piecewise CUDA-graph capture calls weak_ref_tensor() on every subgraph
+# output (see vllm/compilation/cuda_graph.py). When TP is active some of
+# those outputs are DTensors with Shard(1) placement.  Three things are
+# needed to make that work:
+#
+# 1. A FakeTensor ("Meta") kernel so torch.compile tracing can infer the
+#    output shape/dtype.
+# 2. A DTensor sharding strategy so DTensor dispatch knows how to propagate
+#    the placement.  pointwise (identity) is correct because weak_ref_tensor
+#    is semantically a no-op.
+# 3. A Python-level guard that returns the DTensor as-is, because the C++
+#    _C.weak_ref_tensor op can fail on DTensors in spawned workers
+#    ("The specified pointer resides on host memory").
+# ---------------------------------------------------------------------------
+from torch.distributed.tensor._ops._pointwise_ops import pointwise_strategy
 from torch.distributed.tensor._ops.utils import register_op_strategy
 
 torch.library.register_fake(
@@ -52,6 +61,17 @@ torch.library.register_fake(
     lambda tensor: torch.empty_like(tensor),
 )
 register_op_strategy(torch.ops._C.weak_ref_tensor.default)(pointwise_strategy)
+
+_orig_weak_ref_tensor = _vllm_torch_utils.weak_ref_tensor
+
+
+def _patched_weak_ref_tensor(tensor):
+    if isinstance(tensor, DTensor):
+        return tensor
+    return _orig_weak_ref_tensor(tensor)
+
+
+_vllm_torch_utils.weak_ref_tensor = _patched_weak_ref_tensor
 
 
 @support_torch_compile(
@@ -205,7 +225,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # When TP is applied, we return the full tensor (plain tensor) to vLLM engine
         # at the end of TorchTitanVLLMModelWrapper.forward().
         # We need to wrap the input from vLLM engine back to DTensor with Replicate() placement.
-        if self.parallel_dims.tp_enabled:
+        if self._tp_enabled:
             hidden_states = DTensor.from_local(
                 hidden_states,
                 device_mesh=self.parallel_dims.get_mesh("tp"),

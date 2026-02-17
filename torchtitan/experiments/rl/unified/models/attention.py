@@ -21,11 +21,13 @@ class VLLMAttention(torch.nn.Module):
         head_dim: int,
         layer_name: str,
         scale: float | None = None,
+        tp_enabled: bool = False,
     ) -> None:
         super().__init__()
 
         self.hidden_size = hidden_size
         self.layer_name = layer_name
+        self._tp_enabled = tp_enabled
 
         from vllm.config import get_current_vllm_config
 
@@ -67,20 +69,38 @@ class VLLMAttention(torch.nn.Module):
         Forward pass using vLLM's Attention layer for inference.
 
         Args:
-            q: Query tensor [batch, num_heads, seq_len, head_dim]
-            k: Key tensor [batch, num_kv_heads, seq_len, head_dim]
-            v: Value tensor [batch, num_kv_heads, seq_len, head_dim]
+            q: Query tensor [batch, num_heads, seq_len, head_dim] (DTensor when TP enabled)
+            k: Key tensor [batch, num_kv_heads, seq_len, head_dim] (DTensor when TP enabled)
+            v: Value tensor [batch, num_kv_heads, seq_len, head_dim] (DTensor when TP enabled)
             scale: Optional attention scale override (unused, vLLM uses internal scale)
             enable_gqa: Whether GQA is enabled (unused, vLLM handles GQA internally)
 
         Returns:
-            output: [batch, num_heads, seq_len, head_dim]
+            output: [batch, num_heads, seq_len, head_dim] (plain tensor, not DTensor)
         """
-        # Input is (batch, num_heads, seq_len, head_dim)
-        # TODO: may be good to use einops in future as we can explicitly reshape
-        # with dimension names - see https://github.com/arogozhnikov/einops
-        batch_size, num_heads, seq_len, head_dim = q.shape
-        _, num_kv_heads, _, _ = k.shape
+        num_heads = self.num_heads
+        num_kv_heads = self.num_kv_heads
+        head_dim = self.head_dim
+
+        if self._tp_enabled:
+            # Capture correct seq_len from DTensor global shape BEFORE
+            # to_local() corrupts it.  Under torch.compile, prim_to_local
+            # (the traced form of to_local()) uses ceiling division for ALL
+            # dimensions, producing buggy symbolic shapes like
+            # 2*(((s72+1)//2)) instead of s72 for non-sharded dims.
+            seq_len = q.shape[2]
+
+            # Convert DTensors to local tensors
+            q = q.to_local()
+            k = k.to_local()
+            v = v.to_local()
+
+            # Fix the corrupted symbolic seq_len dimension with narrow().
+            # At runtime this is a no-op view (actual shapes are correct).
+            # During tracing it constrains the symbolic dim back to seq_len.
+            q = q.narrow(2, 0, seq_len)
+            k = k.narrow(2, 0, seq_len)
+            v = v.narrow(2, 0, seq_len)
 
         # vLLM expects (num_tokens, num_heads, head_dim) where num_tokens = batch * seq_len
         # First transpose to (batch, seq_len, num_heads, head_dim)
@@ -88,17 +108,18 @@ class VLLMAttention(torch.nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        # TODO: reimplement as a 4d tensor once vLLM fix has landed
-        # Then flatten batch and seq_len: (batch * seq_len, num_heads, head_dim)
-        q = q.reshape(batch_size * seq_len, num_heads, head_dim)
-        k = k.reshape(batch_size * seq_len, num_kv_heads, head_dim)
-        v = v.reshape(batch_size * seq_len, num_kv_heads, head_dim)
+        # Flatten batch and seq_len: (batch * seq_len, num_heads, head_dim)
+        # Use -1 to avoid relying on symbolic shape from prim_to_local
+        q = q.reshape(-1, num_heads, head_dim)
+        k = k.reshape(-1, num_kv_heads, head_dim)
+        v = v.reshape(-1, num_kv_heads, head_dim)
 
         # vLLM attention returns (num_tokens, hidden_size) where hidden_size = num_heads * head_dim
         output_flat = self.vllm_attn(q, k, v)
 
-        # Output is (batch * seq_len, num_heads * head_dim), reshape to (batch, seq_len, num_heads, head_dim)
-        output = output_flat.view(batch_size, seq_len, num_heads, head_dim)
+        # Reshape back: (batch, seq_len, num_heads, head_dim)
+        # Use view(1, -1, ...) since batch is always 1 in vLLM varlen format
+        output = output_flat.view(1, -1, num_heads, head_dim)
 
         # Transpose back to TorchTitan format: (batch, num_heads, seq_len, head_dim)
         output = output.transpose(1, 2)

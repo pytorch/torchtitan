@@ -16,7 +16,9 @@ import argparse
 
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
-from torchtitan.experiments.rl.vllm_compat.simple_rl import build_compilation_config
+from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
+    build_compilation_config,
+)
 from vllm import LLM, SamplingParams
 from vllm.logger import init_logger
 
@@ -87,7 +89,8 @@ def infer():
     logger.info("Creating vLLM LLM engine...")
 
     compilation_config = build_compilation_config(
-        not args.disable_vllm_compile_and_cudagraph
+        not args.disable_vllm_compile_and_cudagraph,
+        tp_size=args.tensor_parallel_size,
     )
 
     llm = LLM(
