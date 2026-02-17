@@ -13,12 +13,11 @@ from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
 from torch.distributed.tensor.placement_types import Shard
 from torchtitan.config import (
     ActivationCheckpointConfig,
-    CompileConfig,
     ParallelismConfig,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.autoparallel.job_config import Experimental
+from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from torchtitan.tools.logging import logger
@@ -39,9 +38,8 @@ def parallelize_deepseekv3(
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    compile_config: AutoParallelCompileConfig,
     ac_config: ActivationCheckpointConfig,
-    experimental: Experimental,
     dump_folder: str,
 ):
     """
@@ -58,7 +56,7 @@ def parallelize_deepseekv3(
     torch._inductor.config.allow_buffer_reuse = False
 
     # allow configuring inductor comms optimizations from torchtitan commandline
-    configure_inductor_for_autobucketing(experimental.comms_bucket_reorder_strategy)
+    configure_inductor_for_autobucketing(compile_config.comms_bucket_reorder_strategy)
 
     # Build the sparse mesh for MoE expert parallelism
     # Filter to only include enabled mesh dimensions

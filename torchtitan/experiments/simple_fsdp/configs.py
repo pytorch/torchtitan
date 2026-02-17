@@ -7,9 +7,12 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
+from torchtitan.config.configs import CompileConfig
+from torchtitan.trainer import Trainer
 
-@dataclass
-class CompileConfig:
+
+@dataclass(kw_only=True, slots=True)
+class SimpleFSDPCompileConfig(CompileConfig):
     graph_passes: Literal["auto_bucketing", "transformer_block_bucketing"] | None = None
     """
     Bucketing and overlapping passes in simplefsdp. Additional passes include:
@@ -17,6 +20,6 @@ class CompileConfig:
     """
 
 
-@dataclass
-class JobConfig:
-    compile: CompileConfig = field(default_factory=CompileConfig)
+@dataclass(kw_only=True, slots=True)
+class SimpleFSDPConfig(Trainer.Config):
+    compile: SimpleFSDPCompileConfig = field(default_factory=SimpleFSDPCompileConfig)

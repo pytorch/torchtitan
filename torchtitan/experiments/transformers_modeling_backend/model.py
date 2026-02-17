@@ -11,14 +11,15 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from torch.nn import init
-from torchtitan.models.common import trunc_normal_
-from torchtitan.models.utils import get_dense_model_nparams_and_flops
-from torchtitan.protocols.model import BaseModel
-from torchtitan.tools.logging import logger
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
+
+from torchtitan.models.common import trunc_normal_
+from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.protocols.model import BaseModel
+from torchtitan.tools.logging import logger
 
 
 class SliceableModuleDict(nn.ModuleDict):
@@ -173,9 +174,7 @@ class HFTransformerModel(BaseModel):
             parallelism = job_config.parallelism
             debug = job_config.debug
             # Extract HF model ID from the extended job_config
-            hf_model_id = getattr(
-                getattr(job_config, "hf_transformers", None), "model", ""
-            )
+            hf_model_id = getattr(job_config.job, "hf_model", "")
             # Load HF config (overwrites our HF attributes)
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,

@@ -109,7 +109,7 @@ def parallelize_llama(
         )
         maybe_enable_async_tp(parallelism, compile_config, tp_mesh)
 
-    attn_backend = getattr(model.config, "attn_backend", "sdpa")
+    attn_backend = model.config.layer.attention.attn_backend
     if parallel_dims.cp_enabled:
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]

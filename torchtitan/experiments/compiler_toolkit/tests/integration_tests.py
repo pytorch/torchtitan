@@ -21,7 +21,8 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name compiler_toolkit.llama3",
+                    "--model compiler_toolkit.llama3",
+                    "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -33,7 +34,8 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name compiler_toolkit.llama3",
+                    "--model compiler_toolkit.llama3",
+                    "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--compile.passes autobucketing_reordering",
@@ -46,7 +48,8 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name compiler_toolkit.llama3",
+                    "--model compiler_toolkit.llama3",
+                    "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--compile.passes transformer_block_bucketing",
@@ -59,7 +62,8 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name compiler_toolkit.llama3",
+                    "--model compiler_toolkit.llama3",
+                    "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--compile.passes cudagraph",
@@ -73,10 +77,10 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name compiler_toolkit.llama3",
+                    "--model compiler_toolkit.llama3",
+                    "--config compiler_toolkit_llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--model.flavor debugmodel_flex_attn",
                 ],
             ],
             "llama3 FSDP+TP+FlexAttn",
@@ -86,10 +90,10 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name compiler_toolkit.llama3",
+                    "--model compiler_toolkit.llama3",
+                    "--config compiler_toolkit_llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--model.flavor debugmodel_flex_attn",
                     "--compile.passes autobucketing_reordering,regional_inductor",
                 ],
             ],
@@ -101,10 +105,10 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         # OverrideDefinitions(
         #     [
         #         [
-        #             "--model.name compiler_toolkit.llama3",
+        #             "--model compiler_toolkit.llama3",
+        #             "--config compiler_toolkit_llama3_debugmodel_flex_attn",
         #             "--parallelism.data_parallel_shard_degree 2",
         #             "--parallelism.tensor_parallel_degree 2",
-        #             "--model.flavor debugmodel_flex_attn",
         #             "--compile.passes autobucketing_reordering,regional_inductor,cudagraph",
         #         ],
         #     ],
@@ -115,7 +119,8 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name compiler_toolkit.llama3",
+                    "--model compiler_toolkit.llama3",
+                    "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--compile.joint_passes inductor_decomposition",
@@ -129,7 +134,8 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name compiler_toolkit.llama3",
+                    "--model compiler_toolkit.llama3",
+                    "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--compile.passes transformer_block_bucketing,regional_inductor",
@@ -143,7 +149,8 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name compiler_toolkit.deepseek_v3",
+                    "--model compiler_toolkit.deepseek_v3",
+                    "--config compiler_toolkit_deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
@@ -158,13 +165,13 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name compiler_toolkit.deepseek_v3",
+                    "--model compiler_toolkit.deepseek_v3",
+                    "--config compiler_toolkit_deepseek_v3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                     "--parallelism.expert_tensor_parallel_degree 1",
                     "--activation_checkpoint.mode none",
-                    "--model.flavor debugmodel_flex_attn",
                 ],
             ],
             "deepseek_v3 FSDP+TP+EP+FlexAttention",
@@ -183,11 +190,6 @@ _TEST_SUITES_FUNCTION = {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
-    parser.add_argument(
-        "--config_path",
-        default="./torchtitan/experiments/compiler_toolkit/tests/base_config.py",
-        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
-    )
     parser.add_argument(
         "--gpu_arch_type",
         default="cuda",

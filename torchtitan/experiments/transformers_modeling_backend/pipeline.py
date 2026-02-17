@@ -389,7 +389,6 @@ def pipeline_hf_transformers(
             parallelism=parallelism,
             compile_config=compile_config,
             ac_config=ac_config,
-            experimental=experimental,
             dump_folder=dump_folder,
         )
         model_parts[i] = m
