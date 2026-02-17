@@ -172,6 +172,14 @@ class LRScheduler:
     Steps for lr scheduler warmup, normally 1/5 of --training.steps
     """
 
+    total_steps: int | None = None
+    """
+    Total steps for LR schedule calculation. If None, defaults to training.steps.
+    This allows decoupling the LR schedule from the actual training steps,
+    which is useful for debugging with fewer steps while maintaining the same LR curve,
+    or for early stopping scenarios.
+    """
+
     decay_ratio: float | None = None
     """
     Controls the proportion of the training steps allocated to the learning rate decay phase.
@@ -688,7 +696,7 @@ class ActivationCheckpoint:
     https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
     """
 
-    preserve_rng_state: bool = False
+    preserve_rng_state: bool = True
     """
     If deterministic output compared to non-checkpointed passes is required, set
     to true. Results in stashing and restoring the RNG state during each checkpoint,
