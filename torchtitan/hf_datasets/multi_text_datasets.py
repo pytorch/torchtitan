@@ -197,7 +197,7 @@ def build_text_dataloader(
     datasets_weights = job_config.training.data.weights
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
-    seed = job_config.debug.seed
+    seed = job_config.debug.seed or 42
 
     hf_ds = HuggingFaceTextMultiDataset(
         dataset_name=dataset_name,
