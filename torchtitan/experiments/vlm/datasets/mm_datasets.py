@@ -19,7 +19,6 @@ from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
-
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.config import JobConfig
@@ -372,6 +371,27 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         return state
 
 
+# TODO: refactor mm dataloader to use config build style
+# @dataclass
+# class Data:
+#     max_images_per_batch: int = 10
+#     """Vision encoder batch size (N)"""
+#     max_patches_per_image: int = 256
+#     """Vision encoder sequence length (L)"""
+#     patch_size: int = 16
+#     """ Patch size of the vision encoder.
+#     For example, image size 256x256, patch size 16
+#         Number of visual tokens is: (256/16)**2=256
+#     """
+#     spatial_merge_size: int = 1
+#     """ Spatially merge visual tokens after encoder.  Default 1 means no merging.
+#     For example: image size 256x256, patch size 16, spaitl merge size is 2
+#         Number of visual tokens for the LLM: (256/16/2)**2 = 8
+#     """
+#     packing_buffer_size: int = 0
+#     """ Set to a value >0 to enable sample packing.
+#     This control the buffer uses to store training samples available for packing.
+#     """
 def build_mm_dataloader(
     dp_world_size: int,
     dp_rank: int,

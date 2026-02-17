@@ -21,7 +21,8 @@ def build_vlm_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name vlm",
+                    "--model vlm",
+                    "--config vlm_debugmodel",
                     "--dataloader.dataset cc12m-test",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--data.max_patches_per_image 1024",
@@ -44,11 +45,6 @@ _TEST_SUITES_FUNCTION = {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
-    parser.add_argument(
-        "--config_path",
-        default="./torchtitan/experiments/vlm/tests/base_config.py",
-        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
-    )
     parser.add_argument(
         "--test_name",
         default="all",

@@ -16,13 +16,12 @@ from torch.distributed.tensor.placement_types import Replicate, Shard
 
 from torchtitan.config import (
     ActivationCheckpointConfig,
-    CompileConfig,
     ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.autoparallel.job_config import Experimental
+from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 from torchtitan.tools.logging import logger
@@ -35,9 +34,8 @@ def parallelize_llama(
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    compile_config: AutoParallelCompileConfig,
     ac_config: ActivationCheckpointConfig,
-    experimental: Experimental,
     dump_folder: str,
 ):
     """
@@ -55,7 +53,7 @@ def parallelize_llama(
     torch._inductor.config.allow_buffer_reuse = False
 
     # allow configuring inductor comms optimizations from torchtitan commandline
-    configure_inductor_for_autobucketing(experimental.comms_bucket_reorder_strategy)
+    configure_inductor_for_autobucketing(compile_config.comms_bucket_reorder_strategy)
 
     dense_names = ["dp_replicate", "fsdp", "tp"]
     dense_names = [
@@ -97,7 +95,7 @@ def parallelize_llama(
     # bail out
     # model = model_fn()
     # return model
-    if experimental.autop_force_bf16:
+    if compile_config.autop_force_bf16:
         logger.info("Forcing bf16 on model")
         model = model.bfloat16()
 

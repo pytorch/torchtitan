@@ -7,6 +7,7 @@
 import importlib
 import os
 import sys
+import warnings
 from dataclasses import field, fields, is_dataclass, make_dataclass
 from typing import Type
 
@@ -137,16 +138,13 @@ class ConfigManager:
     def _merge_configs(base, custom) -> Type:
         """
         Merges a base config class with user-defined extensions.
-
-        This method creates a new dataclass type that combines fields from both `base` and `custom`,
-        allowing users to extend or override configuration structure.
-
-        Merge behavior:
-        - If a field exists in both `base` and `custom`:
-            - If both field types are dataclasses, they are merged recursively.
-            - Otherwise, the field from `custom` overrides the one in `base` (type, default, etc.).
-        - Fields only present in `base` or `custom` are preserved as-is.
         """
+        warnings.warn(
+            "ConfigManager._merge_configs is deprecated. "
+            "Use Config subclasses with config_registry instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         result: list[str | tuple[str, Any] | tuple[str, Any, Any]] = []
         b_map = {f.name: f for f in fields(base)}
         c_map = {f.name: f for f in fields(custom)}

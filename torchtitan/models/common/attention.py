@@ -176,7 +176,6 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
         compatible with _ContextParallel.
     """
 
-    # TODO: remove sdpa_backends after PyTorch 2.9 is released.
     sdpa_backends: list[SDPBackend] = []
 
     def __init__(self) -> None:

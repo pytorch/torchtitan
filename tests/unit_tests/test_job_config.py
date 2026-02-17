@@ -136,6 +136,7 @@ class TestJobConfig(unittest.TestCase):
         parser = get_parser(Trainer.Config)
         parser.print_help()
 
+    # TODO: remove this test when we remove the merge functionality
     def test_extend_job_config_directly(self):
         """Test that _merge_configs works to extend config types."""
         from dataclasses import dataclass
@@ -158,16 +159,6 @@ class TestJobConfig(unittest.TestCase):
         assert merged.checkpoint.convert_path == "/custom/path"
         assert merged.checkpoint.fake_model is True
         assert hasattr(merged, "model_spec")
-
-    def test_custom_config_via_config_registry(self):
-        """Test that config_registry functions can use _merge_configs (like flux does)."""
-        from torchtitan.models.flux.config_registry import flux_debugmodel
-
-        config = flux_debugmodel()
-        # Flux config is a merged type with custom fields
-        assert hasattr(config, "encoder")
-        assert hasattr(config, "model_spec")
-        assert config.model_spec.name == "flux"
 
     def test_flux_config_via_cli(self):
         """Test that --model flux --config flux_debugmodel works."""

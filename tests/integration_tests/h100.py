@@ -76,15 +76,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--job.config_file ./torchtitan/models/deepseek_v3/train_configs/debug_model.toml",
-                    "--model.name simple_fsdp.deepseek_v3",
-                    "--parallelism.tensor_parallel_degree 1",
-                    "--parallelism.expert_parallel_degree 8",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
-                    "--compile.graph_passes auto_bucketing",
-                    "--activation_checkpoint.mode none",
-                    "--compile.backend inductor",
-                    "--compile.enable",
+                    "--model simple_fsdp.deepseek_v3 --config simple_fsdp_deepseek_v3_debugmodel_auto_bucketing",
                 ]
             ],
             "[Experimental, non-blocking landing if fails] SimpleFSDP DeepSeekV3 auto_bucketing",
