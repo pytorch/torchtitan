@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
+from torch.distributed._tensor import Partial #Imported this to use partial placements
 
 from torchtitan.models.utils import trunc_normal_
 
@@ -153,11 +154,12 @@ class GroupedExperts(nn.Module):
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w1 = self.w1.to_local()
+            # FIX: Add grad_placements to ensure gradients are AllReduced properly
+            w1 = self.w1.to_local(grad_placements=(Partial(),))
             # pyrefly: ignore [missing-attribute]
-            w2 = self.w2.to_local()
+            w2 = self.w2.to_local(grad_placements=(Partial(),))
             # pyrefly: ignore [missing-attribute]
-            w3 = self.w3.to_local()
+            w3 = self.w3.to_local(grad_placements=(Partial(),))
         else:
             w1 = self.w1
             w2 = self.w2
