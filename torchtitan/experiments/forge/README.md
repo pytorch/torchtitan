@@ -9,6 +9,6 @@ The [`ForgeEngine`](engine.py) takes a [`ForgeJobConfig`](job_config.py) to
 
 **Primary Use Case**: The engine is designed for building trainers in post-training workflows where multiple specialized components (trainer, generator, replay buffer, parameter server, etc.) work together.
 
-Additionally, the folder provides a train spec registration method [`register_train_spec`](train_spec.py) that allows users to extend beyond the core set of models and training components available in torchtitan, enabling greater flexibility and customization for specific training requirements.
+Additionally, the folder provides a model spec registration method [`register_model_spec`](model_spec.py) that allows users to extend beyond the core set of models and training components available in torchtitan, enabling greater flexibility and customization for specific training requirements.
 
 The [example_train.py](./example_train.py) demonstrates how to use `ForgeEngine` for pretraining, achieving the same functionality as [torchtitan/train.py](/torchtitan/train.py) (except for quantization or fault tolerance).

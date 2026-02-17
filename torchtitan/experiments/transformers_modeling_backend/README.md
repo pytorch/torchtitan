@@ -6,20 +6,15 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
 
 - Requirements `transformers==4.57.1`
 
-- Config: `torchtitan/experiments/transformers_modeling_backend/configs/debug_model.py`
+- Config: `torchtitan/experiments/transformers_modeling_backend/config_registry.py`
 ```diff
 ...
-[model]
-- name = "llama3"
-+ name = "transformers_modeling_backend"
-flavor = "debugmodel"
-hf_assets_path = "./tests/assets/tokenizer"
-
-+[hf_transformers]
-+model = "Qwen/Qwen3-4B-Instruct-2507"
+- --model llama3
++ --model transformers_modeling_backend
+--config transformers_modeling_backend_debugmodel
 ...
 ```
-- Train: `LOG_RANK=7 CONFIG_FILE=<YOUR_PATH>/torchtitan/experiments/transformers_modeling_backend/configs/debug_model.py ./run_train.sh --compile.enable`
+- Train: `LOG_RANK=7 MODEL=transformers_modeling_backend CONFIG=transformers_modeling_backend_debugmodel ./run_train.sh --compile.enable`
     - Make sure you have created the tokenizers beforehand
 <img width="1334" height="453" alt="image" src="https://github.com/user-attachments/assets/da459448-027b-4af9-8176-6a3e433a272c" />
 

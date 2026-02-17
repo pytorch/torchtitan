@@ -2,7 +2,7 @@
 
 ## Quick Start
 ```bash
-CONFIG_FILE="./torchtitan/models/gpt_oss/train_configs/debug_model.py" ./run_train.sh
+MODEL=gpt_oss CONFIG=gpt_oss_debugmodel ./run_train.sh
 ```
 
 ## Supported Features
