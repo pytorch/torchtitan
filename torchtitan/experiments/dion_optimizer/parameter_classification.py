@@ -165,24 +165,24 @@ def create_parameter_groups(
 
     algorithm_name = dion_config.algorithm.upper()
     logger.info(f"{algorithm_name} algorithm parameters: {len(param_stats['dion'])}")
-    for name, shape in param_stats["dion"]:
-        logger.info(f"  - {name}: {shape}")
+    # for name, shape in param_stats["dion"]:
+    #     logger.info(f"  - {name}: {shape}")
 
     logger.info(f"Scalar parameters ({scalar_opt}): {len(param_stats['scalar'])}")
 
     logger.info(
         f"Embedding parameters ({embedding_opt}): {len(param_stats['embedding'])}"
     )
-    for name, shape in param_stats["embedding"]:
-        logger.info(f"  - {name}: {shape}")
+    # for name, shape in param_stats["embedding"]:
+    #     logger.info(f"  - {name}: {shape}")
 
     logger.info(f"Head parameters ({head_opt}): {len(param_stats['head'])}")
-    for name, shape in param_stats["head"]:
-        logger.info(f"  - {name}: {shape}")
+    # for name, shape in param_stats["head"]:
+    #     logger.info(f"  - {name}: {shape}")
 
     logger.info(f"Routing parameters ({routing_opt.upper() if routing_opt is not None else algorithm_name}): {len(param_stats['routing'])}")
-    for name, shape in param_stats["routing"]:
-        logger.info(f"  - {name}: {shape}")
+    # for name, shape in param_stats["routing"]:
+    #     logger.info(f"  - {name}: {shape}")
 
     # Special focus on expert weights
     logger.info("=" * 40)
@@ -197,10 +197,10 @@ def create_parameter_groups(
         )
         if expert_optimizer is not None:
             logger.info(f"Expert optimizer configured: {expert_optimizer.upper()}")
-            for name, shape, expert_type in param_stats["expert"]:
-                logger.info(
-                    f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {expert_optimizer.upper()}"
-                )
+            # for name, shape, expert_type in param_stats["expert"]:
+            #     logger.info(
+            #         f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {expert_optimizer.upper()}"
+            #     )
         else:
             logger.info(
                 "Expert optimizer not configured - using default classification:"
@@ -214,14 +214,14 @@ def create_parameter_groups(
                 )
                 flatten_enabled = getattr(dion_config, "flatten", False)
 
-                if (len(shape) == 2) or (is_muon and len(shape) >= 2):
-                    logger.info(
-                        f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {algorithm_name}"
-                    )
-                else:
-                    logger.info(
-                        f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {scalar_opt}"
-                    )
+    #             if (len(shape) == 2) or (is_muon and len(shape) >= 2):
+    #                 logger.info(
+    #                     f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {algorithm_name}"
+    #                 )
+    #             else:
+    #                 logger.info(
+    #                     f"  ✓ EXPERT: {name} ({shape}) - {expert_type} → USING {scalar_opt}"
+    #                 )
     else:
         logger.info("No expert weight parameters detected in this model")
 
