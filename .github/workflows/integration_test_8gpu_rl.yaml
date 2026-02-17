@@ -1,0 +1,75 @@
+name: RL Unified 8 GPU Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'torchtitan/experiments/rl/unified/**'
+      - '.github/workflows/integration_test_8gpu_rl.yaml'
+  pull_request:
+    paths:
+      - 'torchtitan/experiments/rl/unified/**'
+      - '.github/workflows/integration_test_8gpu_rl.yaml'
+  schedule:
+    # Runs every 12 hours
+    - cron: '0 */12 * * *'
+
+concurrency:
+  group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+permissions:
+      id-token: write
+      contents: read
+
+jobs:
+  # Step 1: Dynamically compute the matrix based on conditions
+  set-matrix:
+    uses: ./.github/workflows/set-matrix.yaml
+
+  # Step 2: Use the dynamic matrix in the build-test job
+  build-test:
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: ${{ matrix.docker-image }}
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 45
+      script: |
+        set -eux
+
+        # The generic Linux job chooses to use base env, not the one setup by the image
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        # Log CUDA driver version for debugging.
+        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+        echo "CUDA driver version: ${DRIVER_VERSION}"
+
+        pip config --user set global.progress_bar off
+
+        # Install uv for faster dependency resolution
+        pip install uv
+
+        # Install vllm with nightly torch
+        uv pip install torch vllm xformers --pre \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
+          --index-strategy unsafe-best-match
+
+        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Run the numerics tests for RL unified
+        torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/rl/unified/tests/test_numerics.py -v
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
