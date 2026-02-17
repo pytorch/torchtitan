@@ -10,8 +10,6 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -78,7 +76,9 @@ class Qwen3TransformerBlock(TransformerBlock):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            self.moe.init_weights(self.weight_init_std, buffer_device)
+            self.moe.init_weights(
+                init_std=self.weight_init_std, buffer_device=buffer_device
+            )
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 
@@ -150,7 +150,7 @@ class Qwen3Model(Decoder):
         self.enable_weight_tying = config.enable_weight_tying
 
         if self.enable_weight_tying:
-            self.output.weight = self.tok_embeddings.weight
+            self.tok_embeddings.weight = self.output.weight
 
     def init_weights(
         self,
@@ -158,25 +158,15 @@ class Qwen3Model(Decoder):
         buffer_device: torch.device | None = None,
         **kwargs,
     ):
-        super().init_weights(buffer_device=buffer_device, **kwargs)
-
+        # The token embedding initialization produces weights with too large
+        # standard deviation for the output layer. Under weight_tying, both should
+        # use the output weights with a smaller, truncated normal distribution to
+        # improve training stability.
         if self.enable_weight_tying:
             # since when the model is initialized on meta device,
             # the tying in the __init__ may not have worked correctly
             # we ensure the weights are tied here
             assert self.tok_embeddings is not None and self.output is not None
-            self.output.weight = self.tok_embeddings.weight
+            self.tok_embeddings.weight = self.output.weight
 
-        # The token embedding initialization produces weights with too large
-        # standard deviation for the output layer. Reinitialize the output weights
-        # with a smaller, truncated normal distribution to improve training stability.
-        final_out_std = self.config.dim**-0.5
-        cutoff_factor = 3
-        if self.output is not None:
-            trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
-            )
+        super().init_weights(buffer_device=buffer_device, **kwargs)

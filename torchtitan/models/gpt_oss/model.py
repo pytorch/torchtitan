@@ -213,8 +213,10 @@ class GptOssTransformerBlock(TransformerBlock):
         buffer_device = kwargs.get("buffer_device")
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
-        self.attention.init_weights(self.weight_init_std)
-        self.moe.init_weights(self.weight_init_std, buffer_device)
+        self.attention.init_weights(init_std=self.weight_init_std)
+        self.moe.init_weights(
+            init_std=self.weight_init_std, buffer_device=buffer_device
+        )
 
 
 class GptOssModel(Decoder):
