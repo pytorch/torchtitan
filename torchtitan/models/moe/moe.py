@@ -10,8 +10,8 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed._tensor import Partial
 from torch.distributed.tensor import DTensor
-from torch.distributed._tensor import Partial #Imported this to use partial placements
 
 from torchtitan.models.utils import trunc_normal_
 
