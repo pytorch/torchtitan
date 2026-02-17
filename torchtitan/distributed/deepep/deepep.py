@@ -39,6 +39,13 @@ _buffer: Buffer = None
 _handle_cache: dict = {}
 _handle_counter: int = 0
 
+# Pending combine event for deferred synchronization.
+# Stores the EventOverlap from buffer.combine() to allow overlapping
+# shared_experts computation with combine communication.
+# This is process-local state (each GPU process has its own Python interpreter),
+# and execution is single-threaded, so a simple module variable suffices.
+_pending_combine_event: Optional[EventOverlap] = None
+
 
 def _get_next_handle_id() -> torch.Tensor:
     """Generate a unique handle_id tensor on CPU to avoid GPU-CPU sync."""
@@ -164,7 +171,7 @@ def _dispatch_backward(
 @torch.library.impl(_lib, "combine", "CUDA")
 def _combine_op_impl(x: torch.Tensor, handle_id: torch.Tensor) -> torch.Tensor:
     """Execute DeepEP combine."""
-    global _buffer
+    global _buffer, _pending_combine_event
 
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before combine"
@@ -187,7 +194,10 @@ def _combine_op_impl(x: torch.Tensor, handle_id: torch.Tensor) -> torch.Tensor:
         allocate_on_comm_stream=True,
     )
 
-    after_event.current_stream_wait()
+    # Store event for deferred sync instead of syncing immediately.
+    # This enables overlapping shared_experts computation with combine communication.
+    # The caller MUST call sync_combine() before using the returned tensor.
+    _pending_combine_event = after_event
 
     return combined
 
@@ -231,6 +241,48 @@ torch.library.register_autograd(
 torch.library.register_autograd(
     "deepep::combine", _combine_backward, setup_context=_combine_setup_context
 )
+
+
+@torch.compiler.disable()
+def sync_combine() -> None:
+    """Synchronize the current CUDA stream with the pending combine operation.
+
+    This function MUST be called before using the result of combine_tokens()
+    to ensure the async combine has completed. It inserts a wait operation
+    on the current CUDA stream, making subsequent CUDA kernels wait for
+    the combine to finish.
+
+    torch.compile Compatibility:
+        Decorated with @torch.compiler.disable() to always run in eager mode.
+        This avoids issues with CUDA event operations not being traceable.
+
+    Process Isolation:
+        Each GPU process has its own Python interpreter, so this module-level
+        variable is inherently process-local. No cross-process interference.
+
+    Single-Threaded Execution:
+        PyTorch training is single-threaded per process, so no thread safety
+        concerns. Sequential execution guarantees correct event ordering.
+
+    Activation Checkpointing Compatibility:
+        - During forward: combine stores event, sync_combine() waits on it
+        - During AC recomputation: combine runs again, stores NEW event,
+          sync_combine() waits on the new event
+        - Sequential execution ensures each forward/recompute uses its own event
+
+    Multiple MoE Layers:
+        Each layer's combine overwrites the pending event. Since sync_combine()
+        is called before using each layer's output (and before the next layer's
+        combine), this is safe. The sync clears the event to prevent double-sync.
+
+    Safe to call multiple times - subsequent calls are no-ops if the event
+    was already synced or if no combine operation is pending.
+    """
+    global _pending_combine_event
+
+    if _pending_combine_event is not None:
+        _pending_combine_event.current_stream_wait()
+        _pending_combine_event = None
 
 
 def get_hidden_bytes(x: torch.Tensor) -> int:
