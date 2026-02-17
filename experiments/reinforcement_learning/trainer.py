@@ -119,7 +119,7 @@ class Trainer(Actor):
 
     @endpoint
     def train_step(
-        self, trajectories: list[Trajectory], baseline: float
+        self, trajectories: list[Trajectory], advantage_baseline: float
     ) -> TrainMetrics:
         """Train on a batch of trajectories using REINFORCE.
 
@@ -142,15 +142,10 @@ class Trainer(Actor):
         valid_count = 0
 
         for traj in trajectories:
-            if not traj.input_ids or traj.prompt_length == 0:
-                continue
-
             # Load pre-tokenized sequence from the generator
+            # unsqueeze to add batch dimension
             full_ids = torch.tensor(traj.input_ids, device=self.device).unsqueeze(0)
             prompt_len = traj.prompt_length
-
-            if full_ids.shape[1] <= prompt_len + 1:
-                continue
 
             # Forward pass, then slice at prompt_length for response-only log-probs
             with torch.amp.autocast("cuda", enabled=self.device == "cuda"):
@@ -160,12 +155,14 @@ class Trainer(Actor):
             shift_logits = logits[:, prompt_len - 1 : -1, :]
             shift_labels = full_ids[:, prompt_len:]
             log_probs = F.log_softmax(shift_logits, dim=-1)
+            # get log probs of the actual response tokens (shift_labels)
+            # 2 means index along dimension 2 (vocab dimension)
             token_log_probs = log_probs.gather(2, shift_labels.unsqueeze(-1)).squeeze(
                 -1
             )
 
             # REINFORCE loss = -log_prob * advantage
-            advantage = traj.reward - baseline
+            advantage = traj.reward - advantage_baseline
             losses.append(-token_log_probs.sum() * advantage)
             valid_count += 1
 

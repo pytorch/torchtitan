@@ -3,11 +3,11 @@
 ## Setup
 
 ```bash
-conda create -n torchtitan-rl python=3.12 -y
-conda activate torchtitan-rl
-pip install torch --extra-index-url https://download.pytorch.org/whl/nightly/cu126
-pip install transformers>=4.40.0
-pip install torchmonarch==0.3.0
+uv venv --python 3.12 .venv
+source .venv/bin/activate
+uv pip install torch --extra-index-url https://download.pytorch.org/whl/nightly/cu126
+uv pip install transformers>=4.40.0
+uv pip install torchmonarch==0.3.0
 ```
 
 ## Usage
@@ -19,7 +19,7 @@ Run the CLI entry point to execute training:
 python experiments/reinforcement_learning/main.py --help
 
 # Run training
-python experiments/reinforcement_learning/main.py --num-steps 40 --num-generators 4
+python experiments/reinforcement_learning/main.py --num-steps 20 --num-generators 4
 ```
 
 ### Options

@@ -135,7 +135,7 @@ def run_sync_loop(
     generators = actors["generators"]
 
     total_generations = 0
-    baseline = 0.5
+    advantage_baseline = 0.5
     t0 = time.perf_counter()
 
     for step in range(num_steps):
@@ -162,8 +162,8 @@ def run_sync_loop(
         # Train directly on the batch (no buffer in sync mode)
         train_start = time.perf_counter()
         if batch:
-            metrics = trainer.train_step.call_one(batch, baseline).get()
-            baseline = 0.9 * baseline + 0.1 * metrics.avg_reward
+            metrics = trainer.train_step.call_one(batch, advantage_baseline).get()
+            advantage_baseline = 0.9 * advantage_baseline + 0.1 * metrics.avg_reward
 
             # Sync weights to all generators (broadcast)
             state_dict, ver = trainer.get_state_dict.call_one().get()
