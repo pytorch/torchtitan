@@ -535,6 +535,7 @@ def build_optimizers(
             mu=optimizer_config.mu,
             betas=(optimizer_config.beta1, optimizer_config.beta2),
             epsilon=optimizer_config.eps,
+            state_dtype=TORCH_DTYPE_MAP[optimizer_config.state_dtype],
             nesterov=getattr(optimizer_config, "nesterov", False),
             adjust_lr=getattr(optimizer_config, "adjust_lr", "spectral_norm"),
             flatten=getattr(optimizer_config, "flatten", False),

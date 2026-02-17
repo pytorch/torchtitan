@@ -68,6 +68,7 @@ class Muon(Optimizer):
         flatten: bool = False,
         use_triton: bool = False,
         newton_schulz_func: Optional[Callable] = None,
+        state_dtype = torch.float32,
     ):
         # Check hyperparameters
         if lr < 0.0:
@@ -137,6 +138,7 @@ class Muon(Optimizer):
             self._newton_schulz_func = newton_schulz_triton
         else:
             self._newton_schulz_func = zeropower_via_newtonschulz5
+        self.state_dtype = state_dtype
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -252,9 +254,9 @@ class Muon(Optimizer):
         """
         state = self.state[param]
         if not state:
-            state["momentum"] = torch.zeros_like(param)
+            state["momentum"] = torch.zeros_like(param, dtype=self.state_dtype)
             if algo == "adamw":
-                state["variance"] = torch.zeros_like(param)
+                state["variance"] = torch.zeros_like(param, dtype=self.state_dtype)
         return state
 
     def _get_process_group_id(

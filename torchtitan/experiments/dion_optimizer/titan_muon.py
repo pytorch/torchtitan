@@ -77,6 +77,9 @@ class MuonOptimizerConfig:
     # Gradient synchronization
     replicate_mesh_grad_sync: bool = True
 
+    # Data type of optimizer state
+    state_dtype: torch.dtype = torch.float32
+
 
 class MuonOptimizersContainer(OptimizersContainer):
     """A container for Muon optimizers compatible with TorchTitan interface.
@@ -120,6 +123,7 @@ class MuonOptimizersContainer(OptimizersContainer):
             adjust_lr=muon_config.adjust_lr,
             flatten=muon_config.flatten,
             use_triton=muon_config.use_triton,
+            state_dtype=muon_config.state_dtype,
         )
 
         # Initialize parent class with dummy optimizer kwargs
