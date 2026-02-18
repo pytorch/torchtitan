@@ -93,8 +93,8 @@ class Qwen3NextModelArgs(BaseModelArgs):
                 for i in range(self.n_layers)
             ]
 
-        if self.attn_type != "flex" and self.attn_type != "varlen":
-            raise ValueError(f"Qwen3-Next requires `attn_type` be 'flex' or 'varlen' but got {self.attn_type}")
+        if self.full_attention_interval > 1 and (self.attn_type != "flex" and self.attn_type != "varlen"):
+            raise ValueError(f"Qwen3-Next with linear attention requires `attn_type` be 'flex' or 'varlen' but got {self.attn_type}")
         if (
             job_config.compile.enable
             and "model" in job_config.compile.components
