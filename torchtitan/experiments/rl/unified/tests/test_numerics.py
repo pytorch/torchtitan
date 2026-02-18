@@ -238,9 +238,13 @@ def setup_models_and_inputs(
     # Load HF weights from checkpoint and create iterator for load_weights
     def load_hf_weights_iter(checkpoint_path: str):
         """Load HF checkpoint weights and yield (name, tensor) pairs."""
-        # Check if it's a local path or HF hub model
-        assert os.path.isdir(checkpoint_path)
-        model_path = checkpoint_path
+        if os.path.isdir(checkpoint_path):
+            model_path = checkpoint_path
+        else:
+            # Download from HuggingFace Hub
+            from huggingface_hub import snapshot_download
+
+            model_path = snapshot_download(checkpoint_path)
 
         # Find all safetensors files
         safetensor_files = glob.glob(os.path.join(model_path, "*.safetensors"))
