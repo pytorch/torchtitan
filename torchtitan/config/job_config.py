@@ -390,6 +390,13 @@ class Training:
     dataset_weights: list[float] | None = None
     """Optional list of weights for weighted sampling from datasets"""
 
+    target_tokens: int | None = None
+    """Optional target total token count for the Nanoset dataset.
+    If set, the dataset index will be sized to produce this many tokens
+    (divided by seq_len to get target samples). Datasets will be upsampled or
+    downsampled accordingly while respecting weights. If None (default),
+    the total is the sum of all underlying dataset lengths."""
+
     dataset_random_seed: int = 1234
     """Random seed for dataset shuffling"""
 
