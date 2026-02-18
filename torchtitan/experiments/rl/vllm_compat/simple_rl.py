@@ -950,11 +950,10 @@ def rl_update_step(
             rollout_peak_gib = max(rollout_peak_gib, rollout_mem.max_active_gib)
             rollout_peak_pct = max(rollout_peak_pct, rollout_mem.max_active_pct)
 
-        # --- Train phase ---
+        # Compute loss using current policy
         if enable_profiling:
             device_memory_monitor.reset_peak_stats()
         with gpu_timer(sync=cuda_sync_for_metrics, enabled=enable_profiling) as train_t:
-            # Compute loss using current policy
             loss, loss_metrics = compute_policy_gradient_loss_vllm(
                 model,
                 vllm_token_ids,
@@ -967,8 +966,7 @@ def rl_update_step(
             # Accumulate loss (will be averaged later)
             loss = loss / num_rollout_batches
             loss.backward()
-
-        total_loss += loss.item()
+            total_loss += loss.item()
 
         if enable_profiling:
             train_time_s += train_t.get("elapsed_s", 0.0)
@@ -983,7 +981,6 @@ def rl_update_step(
         batch_metrics.append(loss_metrics)
 
     if enable_profiling:
-        # --- Optimizer phase ---
         device_memory_monitor.reset_peak_stats()
     with gpu_timer(sync=cuda_sync_for_metrics, enabled=enable_profiling) as opt_t:
         # Gradient clipping
@@ -996,7 +993,6 @@ def rl_update_step(
         optimizer_time_s = opt_t["elapsed_s"]
         optimizer_mem = device_memory_monitor.get_peak_stats()
 
-        # --- Weight sync phase ---
         device_memory_monitor.reset_peak_stats()
     with gpu_timer(sync=cuda_sync_for_metrics, enabled=enable_profiling) as wsync_t:
         # Update vLLM weights from current policy (only once per update)

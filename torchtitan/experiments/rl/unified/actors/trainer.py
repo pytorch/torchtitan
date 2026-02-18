@@ -127,7 +127,7 @@ class Trainer(Actor):
                 kl_coef=0.1,
             )
 
-            # Backward pass
+            # Update weights
             self.optimizer.zero_grad()
             loss.backward()
 
