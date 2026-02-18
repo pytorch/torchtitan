@@ -41,7 +41,9 @@ class Qwen3ModelArgs(BaseModelArgs):
     eos_id: int = 151645
 
     enable_weight_tying: bool = False
-    moe_impl: str = "standard"
+
+    # Expert parallel communication backend (set from config)
+    expert_parallel_comm_backend: str = "standard"  # "standard" or "deepep"
 
     # MoE params
     moe_enabled: bool = False
