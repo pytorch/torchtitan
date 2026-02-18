@@ -286,6 +286,10 @@ class Optimizer:
     use_triton: bool = False
     """Whether to use Triton kernel for Newton-Schulz in Muon optimizer."""
 
+    muon_split: bool = False
+    """Enable Muon Split for MLA attention: apply per-head Newton-Schulz orthogonalization
+    on up-projection matrices (wq_b, wkv_b) instead of treating them as single matrices."""
+
     state_dtype: Literal["float32", "bfloat16"] = "float32"
     """
     Dtype for optimizer states (exp_avg, exp_avg_sq for Adam/AdamW).

@@ -557,6 +557,8 @@ def build_optimizers(
             head_lr_factor=getattr(optimizer_config, "head_lr_factor", 1.0),
             routing_lr_factor=getattr(optimizer_config, "routing_lr_factor", 1.0),
             expert_lr_factor=getattr(optimizer_config, "expert_lr_factor", 1.0),
+            # Muon Split for MLA
+            muon_split=getattr(optimizer_config, "muon_split", False),
         )
 
         return MuonOptimizersContainer(

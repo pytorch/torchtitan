@@ -17,6 +17,32 @@ import torch.nn as nn
 from torchtitan.tools.logging import logger
 
 
+def annotate_muon_split_params(model_parts: List[nn.Module]) -> None:
+    """Annotate MLA up-projection params with _muon_split_heads for per-head orthogonalization.
+
+    Finds attention modules with n_heads and wq_b/wkv_b attributes, and sets
+    param._muon_split_heads = n_heads on their weight tensors. This tells the
+    Muon optimizer to reshape [n_heads*d, r] → [n_heads, d, r] before
+    Newton-Schulz, applying orthogonalization independently per head.
+    """
+    annotated = 0
+    for model in model_parts:
+        for name, module in model.named_modules():
+            if not hasattr(module, "n_heads"):
+                continue
+            n_heads = module.n_heads
+            # Annotate MLA up-projection weights (wq_b, wkv_b, or wq when q_lora_rank=0)
+            for attr in ("wq_b", "wkv_b", "wq"):
+                submodule = getattr(module, attr, None)
+                if submodule is not None and hasattr(submodule, "weight"):
+                    submodule.weight._muon_split_heads = n_heads
+                    annotated += 1
+    if annotated > 0:
+        logger.info(
+            f"Muon Split: annotated {annotated} MLA up-projection params for per-head orthogonalization"
+        )
+
+
 def create_parameter_groups(
     model_parts: List[nn.Module], dion_config
 ) -> List[Dict[str, Any]]:
@@ -30,6 +56,11 @@ def create_parameter_groups(
     5. Expert weights (MoE experts) → Follow 2D matrix classification
     6. 2D matrix parameters (not head/embedding/routing) → Use Dion/Muon algorithm
     """
+    # Annotate MLA params for Muon Split if enabled
+    muon_split = getattr(dion_config, "muon_split", False)
+    if muon_split:
+        annotate_muon_split_params(model_parts)
+
     param_groups = []
 
     # Track parameter statistics for logging

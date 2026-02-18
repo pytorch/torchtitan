@@ -372,6 +372,9 @@ class Muon(Optimizer):
                 states = [self._get_or_initialize_state(p, algo_name) for p in params]
                 momentums = [s["momentum"] for s in states]
 
+                # Extract Muon Split heads annotation (consistent within batch due to shape grouping)
+                split_heads = getattr(params[0], '_muon_split_heads', 0)
+
                 sharded_mesh_dim = None
                 sharded_tensor_dim = None
                 batch_process_group = self._process_group
@@ -453,6 +456,7 @@ class Muon(Optimizer):
                             flatten=flatten,
                             adjust_lr=adjust_lr,
                             newton_schulz_func=self._newton_schulz_func,
+                            split_heads=split_heads,
                         ),
                         pg_id,
                     )
@@ -479,6 +483,7 @@ class Muon(Optimizer):
                                 shard_dim=sharded_tensor_dim,
                                 process_group=batch_process_group,
                                 newton_schulz_func=self._newton_schulz_func,
+                                split_heads=split_heads,
                             ),
                             pg_id,
                         )
@@ -501,6 +506,7 @@ class Muon(Optimizer):
                             shard_dim=sharded_tensor_dim,
                             process_group=batch_process_group,
                             newton_schulz_func=self._newton_schulz_func,
+                            split_heads=split_heads,
                         ),
                         pg_id,
                     )
@@ -599,6 +605,7 @@ def muon_update_batch_dim_sharded_async(
     flatten: bool,  # Whether to flatten 3D+ tensors to 2D
     adjust_lr: Optional[str],  # How to adjust learning rate
     newton_schulz_func: Optional[Callable] = None,
+    split_heads: int = 0,  # Muon Split: per-head orthogonalization for MLA
 ) -> Generator[None, None, None]:
     """
     Muon update for batch-dimension sharded tensors (e.g., EP expert weights).
@@ -682,10 +689,10 @@ def muon_update_batch_dim_sharded_async(
                 # Batched Newton-Schulz: stack same-shape tensors for single kernel
                 if len(u_batch) > 1 and all(u.shape == u_batch[0].shape for u in u_batch):
                     u_stacked = torch.stack(u_batch, dim=0)
-                    u_stacked = muon_update_newton_schulz(u_stacked, newton_schulz_func, flatten, epsilon)
+                    u_stacked = muon_update_newton_schulz(u_stacked, newton_schulz_func, flatten, epsilon, split_heads=split_heads)
                     u_batch = list(u_stacked.unbind(0))
                 else:
-                    u_batch = [muon_update_newton_schulz(u, newton_schulz_func, flatten, epsilon) for u in u_batch]
+                    u_batch = [muon_update_newton_schulz(u, newton_schulz_func, flatten, epsilon, split_heads=split_heads) for u in u_batch]
 
                 # Apply weight decay and update
                 for j in range(len(indices)):
@@ -744,6 +751,7 @@ def muon_update_batch_dim_sharded_async(
                 newton_schulz_func=newton_schulz_func,
                 flatten=flatten,
                 epsilon=epsilon,
+                split_heads=split_heads,
             )
             for u in U
         ]
@@ -776,6 +784,7 @@ def muon_update_batch_async(
     shard_dim: Optional[int] = None,  # Shard dimension for DTensor (if applicable)
     process_group: Optional[ProcessGroup] = None,
     newton_schulz_func: Optional[Callable] = None,
+    split_heads: int = 0,  # Muon Split: per-head orthogonalization for MLA
 ) -> Generator[None, None, None]:
     """
     Batched version of Muon update. Batch size should be equal to number of GPUs.
@@ -861,6 +870,7 @@ def muon_update_batch_async(
                 newton_schulz_func=newton_schulz_func,
                 flatten=flatten,
                 epsilon=epsilon,
+                split_heads=split_heads,
             )
 
             # Split result back into shards
@@ -886,6 +896,7 @@ def muon_update_batch_async(
                 newton_schulz_func=newton_schulz_func,
                 flatten=flatten,
                 epsilon=epsilon,
+                split_heads=split_heads,
             )
 
             if process_group is not None and process_group.size() > 1:
@@ -1048,6 +1059,7 @@ def muon_update_batch_async(
                 newton_schulz_func=newton_schulz_func,
                 flatten=flatten,
                 epsilon=epsilon,
+                split_heads=split_heads,
             )
 
             orth_shards = [
@@ -1075,6 +1087,7 @@ def muon_update_batch_async(
                 newton_schulz_func=newton_schulz_func,
                 flatten=flatten,
                 epsilon=epsilon,
+                split_heads=split_heads,
             )
 
             if process_group is not None and process_group.size() > 1:
@@ -1202,12 +1215,23 @@ def muon_update_newton_schulz(
     newton_schulz_func: Callable,
     flatten: bool,
     epsilon: Tensor,
+    split_heads: int = 0,
 ) -> Tensor:
     """
     Flatten the input tensor if needed and call the Newton-Schulz function.
     Always normalizes to 3D before calling newton_schulz_func to avoid torch.compile recompilations.
+
+    Args:
+        split_heads: If > 0, reshape the second-to-last dimension to separate heads
+            before orthogonalization (Muon Split). E.g. [n_heads*d, r] → [n_heads, d, r]
+            so each head gets independent Newton-Schulz orthogonalization.
     """
     original_shape = X.shape
+    if split_heads > 0:
+        # Muon Split: separate heads for per-head orthogonalization
+        # 2D: [n_heads*d, r] → [n_heads, d, r]
+        # 3D (stacked batch): [batch, n_heads*d, r] → [batch, n_heads, d, r]
+        X = X.unflatten(-2, (split_heads, -1))
     if flatten and X.ndim >= 3:
         # Flatten 3D+ tensors to 2D matrix
         X = X.flatten(start_dim=1)

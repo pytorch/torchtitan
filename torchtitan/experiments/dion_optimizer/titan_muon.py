@@ -74,6 +74,9 @@ class MuonOptimizerConfig:
     routing_lr_factor: float = 1.0  # LR multiplier for routing parameters
     expert_lr_factor: float = 1.0  # LR multiplier for expert parameters
 
+    # Muon Split: per-head Newton-Schulz for MLA up-projection matrices
+    muon_split: bool = False
+
     # Gradient synchronization
     replicate_mesh_grad_sync: bool = True
 
