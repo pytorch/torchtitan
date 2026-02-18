@@ -665,9 +665,16 @@ def compute_policy_gradient_loss_vllm(
     kl_coef: float = 0.1,
     ppo_clip_eps: float = 0.2,
     entropy_coef: float = 0.01,
-) -> tuple[torch.Tensor, dict]:
+    micro_batch_size: int = 4,
+    grad_scale: float = 1.0,
+) -> tuple[float, dict]:
     """
     Compute PPO policy gradient loss by re-evaluating completions under current policy.
+
+    Uses micro-batched gradient accumulation for CUDAGraph compatibility.
+    CUDAGraph uses static buffers that get overwritten on each forward replay,
+    so we must call backward() after each forward() before the next forward.
+    Each micro-batch does: forward -> loss -> backward, keeping CUDAGraph happy.
 
     Args:
         model: Current policy model
@@ -678,84 +685,162 @@ def compute_policy_gradient_loss_vllm(
         kl_coef: KL divergence penalty coefficient
         ppo_clip_eps: PPO clipping epsilon
         entropy_coef: Entropy bonus coefficient
+        micro_batch_size: Number of samples per micro-batch (must evenly divide
+            total batch size for CUDAGraph shape consistency)
+        grad_scale: Scale factor for gradients (e.g. 1/num_rollout_batches for
+            gradient accumulation across rollout batches)
 
     Returns:
-        loss: Total loss (PG + entropy + KL)
+        loss_value: Total loss as a Python float (backward already called)
         metrics: Training metrics dict (includes per-token logprob deltas)
     """
     device = next(model.parameters()).device
     advantages = advantages.to(device)
+    batch_size = len(vllm_token_ids)
 
-    # Compute reference log probs from per-token values
-    # Use PyTorch's sum() to match the reduction order used for total_log_probs
-    # This ensures exactly zero KL divergence with batch invariance
-    ref_log_probs = torch.stack(
-        [
-            torch.tensor(lps, dtype=torch.float32, device=device).sum()
-            for lps in vllm_token_log_probs
-        ]
-    )
+    # Ensure micro_batch_size evenly divides batch_size for CUDAGraph shape
+    # consistency (CUDAGraph captures fixed shapes; mismatched last batch would
+    # require a separate graph capture).
+    mbs = min(micro_batch_size, batch_size)
+    while mbs > 1 and batch_size % mbs != 0:
+        mbs -= 1
+    if mbs != micro_batch_size:
+        print(
+            f"  Adjusted micro_batch_size from {micro_batch_size} to {mbs} "
+            f"(must evenly divide batch_size={batch_size})"
+        )
+    micro_batch_size = mbs
+    num_micro_batches = batch_size // micro_batch_size
 
-    # Compute log probs under current policy (WITH GRADIENTS)
-    batch_token_log_probs = []
-    batch_total_log_probs = []
-
-    # Track per-token differences for the first sample
+    # Metrics accumulators
+    total_loss_value = 0.0
+    total_pg_loss = 0.0
+    total_entropy_sum = 0.0
+    total_token_count = 0
+    total_kl_div = 0.0
+    total_ratio_sum = 0.0
+    total_clipped_count = 0
     first_sample_deltas = []
 
-    for idx, (prompt_toks, gen_toks, vllm_toks_lp) in enumerate(
-        zip(prompt_token_ids, vllm_token_ids, vllm_token_log_probs)
-    ):
-        # Concatenate prompt + generated tokens
-        full_sequence = prompt_toks + gen_toks
-        full_tensor = torch.tensor(
-            full_sequence, dtype=torch.long, device=device
-        ).unsqueeze(0)
+    for mb_idx in range(num_micro_batches):
+        mb_start = mb_idx * micro_batch_size
+        mb_end = mb_start + micro_batch_size
 
-        # Forward pass
-        logits = model(full_tensor)
-        # Use F.log_softmax which is overridden by batch_invariant mode for determinism
-        # Convert to float32 to match vLLM's sampler behavior (use .to() to preserve gradients)
-        log_probs = F.log_softmax(logits[:, :-1, :].to(torch.float32), dim=-1)
-        target_tokens = full_tensor[:, 1:]
+        # Slice micro-batch data
+        mb_vllm_token_ids = vllm_token_ids[mb_start:mb_end]
+        mb_vllm_token_log_probs = vllm_token_log_probs[mb_start:mb_end]
+        mb_prompt_token_ids = prompt_token_ids[mb_start:mb_end]
+        mb_advantages = advantages[mb_start:mb_end]
 
-        # Extract log probs for generated tokens only
-        prompt_len = len(prompt_toks)
-        gen_start_idx = prompt_len - 1
-        gen_end_idx = gen_start_idx + len(gen_toks)
-
-        gen_token_logprobs = log_probs[0, gen_start_idx:gen_end_idx, :]
-        gen_token_ids = target_tokens[0, gen_start_idx:gen_end_idx]
-        token_lps = gen_token_logprobs.gather(1, gen_token_ids.unsqueeze(-1)).squeeze(
-            -1
+        # Ref log probs for this micro-batch
+        mb_ref_log_probs = torch.stack(
+            [
+                torch.tensor(lps, dtype=torch.float32, device=device).sum()
+                for lps in mb_vllm_token_log_probs
+            ]
         )
 
-        batch_token_log_probs.append(token_lps)
-        batch_total_log_probs.append(token_lps.sum())
+        # Build batched tokens for this micro-batch
+        full_sequences = [p + g for p, g in zip(mb_prompt_token_ids, mb_vllm_token_ids)]
+        max_total_len = max(len(seq) for seq in full_sequences)
+        prompt_lengths = [len(p) for p in mb_prompt_token_ids]
+        gen_lengths = [len(g) for g in mb_vllm_token_ids]
 
-        # For the first sample, store raw tensors for bitwise comparison
-        if idx == 0:
-            # Keep bfloat16 tensors for bitwise comparison
-            titan_lps_bf16 = token_lps.detach().cpu()  # Keep as bfloat16
-            titan_lps_f32 = (
-                token_lps.detach().cpu().float()
-            )  # Convert to float32 for display
+        # Left-aligned with zero-padding on the right.  Causal attention
+        # ensures real token positions cannot attend to later padding, so
+        # logits for real tokens are unaffected.  This assumption breaks
+        # for bidirectional attention.
+        batch_tokens = torch.zeros(
+            micro_batch_size, max_total_len, dtype=torch.long, device=device
+        )
+        for i, seq in enumerate(full_sequences):
+            batch_tokens[i, : len(seq)] = torch.tensor(
+                seq, dtype=torch.long, device=device
+            )
 
-            for token_id, vllm_lp, titan_lp_bf16, titan_lp_f32 in zip(
-                gen_toks, vllm_toks_lp, titan_lps_bf16, titan_lps_f32
-            ):
-                first_sample_deltas.append(
-                    {
-                        "token_id": token_id,
-                        "vllm_logprob": vllm_lp,
-                        "titan_logprob_bf16": titan_lp_bf16,
-                        "titan_logprob_f32": titan_lp_f32.item(),
-                    }
-                )
+        # Forward pass (one per micro-batch; CUDAGraph replays with fixed shape)
+        logits = model(batch_tokens)
+        log_probs = F.log_softmax(logits[:, :-1, :].to(torch.float32), dim=-1)
+        target_tokens = batch_tokens[:, 1:]
 
-    total_log_probs = torch.stack(batch_total_log_probs)
+        # Extract per-sample log probs
+        mb_token_log_probs_list = []
+        mb_total_log_probs = []
 
-    # Verify bitwise determinism between vLLM and TorchTitan
+        for i in range(micro_batch_size):
+            gen_start_idx = prompt_lengths[i] - 1
+            gen_end_idx = gen_start_idx + gen_lengths[i]
+
+            gen_token_logprobs = log_probs[i, gen_start_idx:gen_end_idx, :]
+            gen_token_ids = target_tokens[i, gen_start_idx:gen_end_idx]
+            token_lps = gen_token_logprobs.gather(
+                1, gen_token_ids.unsqueeze(-1)
+            ).squeeze(-1)
+
+            mb_token_log_probs_list.append(token_lps)
+            mb_total_log_probs.append(token_lps.sum())
+
+            # Bitwise comparison for the first overall sample
+            if mb_start + i == 0:
+                titan_lps_bf16 = token_lps.detach().cpu()
+                titan_lps_f32 = token_lps.detach().cpu().float()
+
+                for token_id, vllm_lp, titan_lp_bf16, titan_lp_f32 in zip(
+                    mb_vllm_token_ids[i],
+                    mb_vllm_token_log_probs[i],
+                    titan_lps_bf16,
+                    titan_lps_f32,
+                ):
+                    first_sample_deltas.append(
+                        {
+                            "token_id": token_id,
+                            "vllm_logprob": vllm_lp,
+                            "titan_logprob_bf16": titan_lp_bf16,
+                            "titan_logprob_f32": titan_lp_f32.item(),
+                        }
+                    )
+
+        mb_total = torch.stack(mb_total_log_probs)
+
+        # PPO clipped objective for this micro-batch
+        log_ratio = mb_total - mb_ref_log_probs
+        ratio = torch.exp(log_ratio)
+        unclipped = ratio * mb_advantages
+        clipped_ratio = torch.clamp(ratio, 1 - ppo_clip_eps, 1 + ppo_clip_eps)
+        clipped = clipped_ratio * mb_advantages
+        pg_loss = -torch.min(unclipped, clipped).mean()
+
+        # Entropy bonus for this micro-batch
+        all_token_lps = torch.cat(mb_token_log_probs_list)
+        mb_token_count = all_token_lps.shape[0]
+        entropy = -all_token_lps.mean()
+        entropy_bonus = -entropy_coef * entropy
+
+        # KL divergence for this micro-batch
+        kl_div = (ratio - 1 - log_ratio).mean()
+
+        # Micro-batch loss
+        mb_loss = pg_loss + entropy_bonus + kl_coef * kl_div
+
+        # Scale for gradient accumulation:
+        # - (1 / num_micro_batches) for proper mean across all samples
+        # - grad_scale for accumulation across rollout batches
+        scaled_loss = mb_loss * (1.0 / num_micro_batches) * grad_scale
+        scaled_loss.backward()
+
+        # Accumulate metrics (all detached)
+        weight = 1.0 / num_micro_batches
+        total_loss_value += mb_loss.item() * weight
+        total_pg_loss += pg_loss.item() * weight
+        total_entropy_sum += all_token_lps.detach().sum().item()
+        total_token_count += mb_token_count
+        total_kl_div += kl_div.item() * weight
+        total_ratio_sum += ratio.detach().sum().item()
+        total_clipped_count += (
+            (torch.abs(ratio - clipped_ratio) > 1e-6).float().sum().item()
+        )
+
+    # Verify bitwise determinism between vLLM and TorchTitan (first sample)
     if first_sample_deltas:
         vllm_lps_f32 = torch.tensor(
             [d["vllm_logprob"] for d in first_sample_deltas], dtype=torch.float32
@@ -786,38 +871,21 @@ def compute_policy_gradient_loss_vllm(
                 f"    TorchTitan logprobs: {[f'{lp:.10f}' for lp in titan_lps_f32[:5].tolist()]}"
             )
 
-    # PPO clipped objective
-    log_ratio = total_log_probs - ref_log_probs
-    ratio = torch.exp(log_ratio)
-    unclipped_loss = ratio * advantages
-    clipped_ratio = torch.clamp(ratio, 1 - ppo_clip_eps, 1 + ppo_clip_eps)
-    clipped_loss = clipped_ratio * advantages
-    pg_loss = -torch.min(unclipped_loss, clipped_loss).mean()
-
-    # Entropy bonus
-    all_token_log_probs = torch.cat(batch_token_log_probs)
-    entropy = -all_token_log_probs.mean()
-    entropy_bonus = -entropy_coef * entropy
-
-    # KL divergence penalty
-    kl_div = (ratio - 1 - log_ratio).mean()
-
-    # Total loss
-    total_loss = pg_loss + entropy_bonus + kl_coef * kl_div
+    # Compute exact global entropy (token-weighted, not sample-weighted)
+    global_entropy = (
+        -total_entropy_sum / total_token_count if total_token_count > 0 else 0.0
+    )
 
     metrics = {
-        "pg_loss": pg_loss.item(),
-        "entropy": entropy.item(),
-        "kl_div": kl_div.item(),
-        "ratio_mean": ratio.mean().item(),
-        "ratio_clipped_frac": (torch.abs(ratio - clipped_ratio) > 1e-6)
-        .float()
-        .mean()
-        .item(),
-        "per_token_deltas": first_sample_deltas,  # Per-token logprob differences for first sample
+        "pg_loss": total_pg_loss,
+        "entropy": global_entropy,
+        "kl_div": total_kl_div,
+        "ratio_mean": total_ratio_sum / batch_size,
+        "ratio_clipped_frac": total_clipped_count / batch_size,
+        "per_token_deltas": first_sample_deltas,
     }
 
-    return total_loss, metrics
+    return total_loss_value, metrics
 
 
 def rl_update_step(
@@ -910,20 +978,20 @@ def rl_update_step(
                 rewards_normalized, group_size, beta=grpo_beta
             )
 
-        # Compute loss using current policy
-        loss, loss_metrics = compute_policy_gradient_loss_vllm(
+        # Compute loss using current policy (backward happens internally
+        # via micro-batched gradient accumulation for CUDAGraph compatibility)
+        loss_value, loss_metrics = compute_policy_gradient_loss_vllm(
             model,
             vllm_token_ids,
             vllm_token_log_probs,
             prompt_token_ids,
             advantages,
             kl_coef=0.1,
+            grad_scale=1.0 / num_rollout_batches,
         )
 
-        # Accumulate loss (will be averaged later)
-        loss = loss / num_rollout_batches
-        loss.backward()
-        total_loss += loss.item()
+        # Accumulate loss for logging
+        total_loss += loss_value / num_rollout_batches
 
         # Track metrics
         all_completions.extend(completions[:2])  # Sample 2 from each batch

@@ -101,7 +101,11 @@ class Trainer(Actor):
         logger.info(
             f"{os.getpid()=} Trainer starts to train {self.policy_version} on traj:"
         )
-        # Compute loss
+        # Zero grads before loss computation (backward happens inside
+        # compute_policy_gradient_loss_vllm via micro-batched gradient accumulation)
+        self.optimizer.zero_grad()
+
+        # Compute loss (backward already done inside via micro-batching)
         loss, loss_metrics = compute_policy_gradient_loss_vllm(
             self.model,
             trajectory.vllm_token_ids,
@@ -112,8 +116,6 @@ class Trainer(Actor):
         )
 
         # Update weights
-        self.optimizer.zero_grad()
-        loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
 
@@ -123,7 +125,7 @@ class Trainer(Actor):
 
         # Return metrics
         metrics = {
-            "loss": loss.item(),
+            "loss": loss,
             "reward_mean": trajectory.rewards.mean().item(),
             "reward_std": trajectory.rewards.std().item(),
             "advantage_mean": trajectory.advantages.mean().item(),
