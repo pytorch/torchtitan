@@ -106,6 +106,24 @@ qwen3next_configs = {
             shared_gate=True,
         ),
     ),
+    "80B_A3B-35": Qwen3NextModelArgs(
+        moe_enabled=True,
+        moe_inter_dim=512,
+        rope_theta=50000,
+        linear_split_projections=True,
+        moe_args=MoEArgs(
+            num_experts=512,
+            num_shared_experts=1,
+            top_k=10,
+            score_func="softmax",
+            route_norm=True,
+            route_scale=1.0,
+            score_before_experts=False,
+            shared_gate=True,
+        ),
+        attn_type="varlen",
+        full_attention_interval=4,
+    ),
 }
 
 

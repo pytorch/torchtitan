@@ -65,6 +65,7 @@ class Qwen3NextModelArgs(BaseModelArgs):
     linear_key_head_dim: int = 128
     linear_value_head_dim: int = 128
     linear_conv_kernel_dim: int = 4
+    linear_split_projections: bool = False  # False=fused (qwen3-next), True=split (qwen3.5)
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
@@ -92,8 +93,8 @@ class Qwen3NextModelArgs(BaseModelArgs):
                 for i in range(self.n_layers)
             ]
 
-        if self.attn_type != "flex":
-            raise ValueError(f"Qwen3-Next requires `attn_type` be 'flex' but got {self.attn_type}")
+        if self.attn_type != "flex" and self.attn_type != "varlen":
+            raise ValueError(f"Qwen3-Next requires `attn_type` be 'flex' or 'varlen' but got {self.attn_type}")
         if (
             job_config.compile.enable
             and "model" in job_config.compile.components
