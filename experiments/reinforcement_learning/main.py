@@ -25,6 +25,7 @@ import time
 
 def setup_actors(
     num_generators: int = 2,
+    task: str = "sum_digits",
 ) -> dict:
     """Spawn and initialize all actors.
 
@@ -38,7 +39,7 @@ def setup_actors(
 
     # 1. Generators -- plain ActorMesh
     gen_procs = host.spawn_procs(per_host={"procs": num_generators})
-    generators = gen_procs.spawn("generators", Generator)
+    generators = gen_procs.spawn("generators", Generator, task=task)
 
     # 2. Trainer
     trainer_procs = host.spawn_procs(per_host={"procs": 1})
@@ -77,36 +78,64 @@ def teardown_actors(actors: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def evaluate(actors: dict, num_samples: int = 10, seed: int = 42) -> dict:
-    """Run evaluation on the trainer's current model.
+def evaluate(
+    trainer,
+    task: str = "sum_digits",
+    num_samples: int = 10,
+    seed: int = 42,
+    verbose: bool = False,
+) -> dict:
+    """Run evaluation on the trainer's current model."""
+    import re
 
-    Returns a dict with accuracy, correct, total, avg_turns, avg_tools,
-    format_rate, and failure_modes.
-    """
-    return (
-        actors["trainer"]
-        .evaluate_zorplex.call_one(
-            num_samples=num_samples,
-            seed=seed,
-        )
-        .get()
-    )
+    from sum_digits import SumDigitsSpec
+    from reverse_digits import ReverseDigitsSpec
+    from task import extract_answer
+
+    if task == "reverse_digits":
+        spec = ReverseDigitsSpec(seed=seed)
+    else:
+        spec = SumDigitsSpec(seed=seed)
+    correct = 0
+    format_ok = 0
+
+    for _ in range(num_samples):
+        t = spec.generate_task()
+        messages = [
+            {"role": "system", "content": spec.get_system_prompt()},
+            {"role": "user", "content": t.question},
+        ]
+        response_text = trainer.generate_text.call_one(messages).get()
+
+        extracted = extract_answer(response_text)
+        is_correct = extracted == t.correct_answer
+        has_tag = bool(re.search(r"\[ANSWER\]", response_text))
+
+        correct += int(is_correct)
+        format_ok += int(has_tag)
+
+        if verbose:
+            mark = "Y" if is_correct else "N"
+            print(f"  [{mark}] Q: {t.question}")
+            print(f"       A: {response_text[:200]}")
+            print(f"       extracted={extracted} expected={t.correct_answer}")
+            print()
+
+    return {
+        "accuracy": correct / num_samples,
+        "correct": correct,
+        "total": num_samples,
+        "format_rate": format_ok / num_samples,
+    }
 
 
 def _print_eval(label: str, eval_result: dict) -> None:
-    """Print all evaluation stats."""
-    fm = eval_result["failure_modes"]
+    """Print evaluation stats."""
     print(f"\n{label}:")
     print(
         f"  Accuracy:          {eval_result['accuracy']:.0%} ({eval_result['correct']}/{eval_result['total']})"
     )
     print(f"  Format compliance: {eval_result['format_rate']:.0%}")
-    print(f"  Avg turns:         {eval_result['avg_turns']:.1f}")
-    print(f"  Avg tool calls:    {eval_result['avg_tools']:.1f}")
-    print(
-        f"  Failure modes:     success={fm['success']} wrong_format={fm['wrong_format']} "
-        f"tool_spam={fm['tool_spam']} wrong_answer={fm['wrong_answer']}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +188,7 @@ def run_sync_loop(
         gen_time = time.perf_counter() - gen_start
         total_generations += num_generators
 
-        # Train directly on the batch (no buffer in sync mode)
+        # Train directly on the batch
         train_start = time.perf_counter()
         if batch:
             metrics = trainer.train_step.call_one(batch, advantage_baseline).get()
@@ -211,8 +240,15 @@ def main():
     parser.add_argument(
         "--eval-samples",
         type=int,
-        default=16,
-        help="Number of evaluation samples (default: 10)",
+        default=20,
+        help="Number of evaluation samples (default: 20)",
+    )
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="sum_digits",
+        choices=["sum_digits", "reverse_digits"],
+        help="Task to train on (default: sum_digits)",
     )
     parser.add_argument(
         "--verbose",
@@ -236,10 +272,11 @@ def main():
 
     actors = setup_actors(
         num_generators=args.num_generators,
+        task=args.task,
     )
 
     print("Evaluating pre-training baseline...")
-    pre_eval = evaluate(actors, num_samples=args.eval_samples)
+    pre_eval = evaluate(actors["trainer"], task=args.task, num_samples=args.eval_samples, verbose=args.verbose)
     _print_eval("Pre-training baseline", pre_eval)
 
     stats = run_sync_loop(
@@ -252,7 +289,7 @@ def main():
     )
 
     print("Evaluating post-training performance...")
-    post_eval = evaluate(actors, num_samples=args.eval_samples)
+    post_eval = evaluate(actors["trainer"], task=args.task, num_samples=args.eval_samples, verbose=args.verbose)
     _print_eval("Post-training results", post_eval)
 
     teardown_actors(actors)

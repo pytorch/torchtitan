@@ -18,7 +18,6 @@ import torch.nn.functional as F
 from monarch.actor import Actor, current_rank, endpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from zorplex import generate_with_tools, ZorplexSpec
 
 
 @dataclass
@@ -160,9 +159,10 @@ class Trainer(Actor):
                 -1
             )
 
-            # REINFORCE loss = -log_prob * advantage
+            # REINFORCE loss = -log_prob * advantage (normalized by response length)
             advantage = traj.reward - advantage_baseline
-            losses.append(-token_log_probs.sum() * advantage)
+            num_response_tokens = token_log_probs.shape[1]
+            losses.append(-token_log_probs.sum() / num_response_tokens * advantage)
 
         # Optimizer step
         avg_loss = torch.stack(losses).sum() / len(trajectories)
@@ -175,9 +175,7 @@ class Trainer(Actor):
 
         avg_reward = sum(t.reward for t in trajectories) / len(trajectories)
         correct_rate = sum(1 for t in trajectories if t.is_correct) / len(trajectories)
-        format_rate = sum(1 for t in trajectories if t.has_answer_tag) / len(
-            trajectories
-        )
+        format_rate = sum(1 for t in trajectories if t.has_answer_tag) / len(trajectories)
 
         return TrainMetrics(
             step=self.train_steps,
@@ -190,56 +188,23 @@ class Trainer(Actor):
         )
 
     @endpoint
-    def evaluate_zorplex(
-        self, num_samples: int = 10, seed: int = 42, max_turns: int = 4
-    ) -> dict:
-        """Evaluate current model on compositional Zorplex tasks."""
-        import re as _re
-
+    def generate_text(self, messages: list[dict]) -> str:
+        """Generate text from a list of chat messages."""
         self.model.eval()
-        torch.manual_seed(seed)  # Deterministic evaluation
-        spec = ZorplexSpec(seed=seed)
-        correct = 0
-        total_turns = 0
-        total_tools = 0
-        format_ok = 0
-        failure_modes = {
-            "success": 0,
-            "wrong_format": 0,
-            "tool_spam": 0,
-            "wrong_answer": 0,
-        }
-        for _ in range(num_samples):
-            task = spec.generate_task()
-            result = generate_with_tools(
-                self.model,
-                self.tokenizer,
-                spec,
-                task,
-                self.device,
-                max_turns=max_turns,
-                temperature=0.0,
+        prompt_text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self.tokenizer(prompt_text, return_tensors="pt").to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=256,
+                pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
                 do_sample=False,
             )
-            correct += int(result.is_correct)
-            total_turns += len(result.turns)
-            total_tools += result.total_tool_calls
-            has_tag = bool(_re.search(r"\[ANSWER\]", result.final_text))
-            format_ok += int(has_tag)
-            if result.is_correct:
-                failure_modes["success"] += 1
-            elif not has_tag:
-                failure_modes["wrong_format"] += 1
-            elif result.total_tool_calls > 3:
-                failure_modes["tool_spam"] += 1
-            else:
-                failure_modes["wrong_answer"] += 1
-        return {
-            "accuracy": correct / num_samples,
-            "correct": correct,
-            "total": num_samples,
-            "avg_turns": total_turns / num_samples,
-            "avg_tools": total_tools / num_samples,
-            "format_rate": format_ok / num_samples,
-            "failure_modes": failure_modes,
-        }
+
+        return self.tokenizer.decode(
+            outputs[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
+        )

@@ -18,56 +18,62 @@ Run the CLI entry point to execute training:
 # Show all options
 python experiments/reinforcement_learning/main.py --help
 
-# Run training
-python experiments/reinforcement_learning/main.py --num-steps 20 --num-generators 4
+# Run training with sum digits task
+python experiments/reinforcement_learning/main.py --task sum_digits --num-steps 20 --num-generators 4
+
+# Run training with reverse digits task
+python experiments/reinforcement_learning/main.py --task reverse_digits --num-steps 20 --num-generators 4
 ```
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--task` | sum_digits | Task to train on (`sum_digits` or `reverse_digits`) |
 | `--num-steps` | 20 | Number of training steps |
 | `--num-generators` | 2 | Number of generator workers |
-| `--eval-samples` | 16 | Number of evaluation samples |
+| `--eval-samples` | 20 | Number of evaluation samples |
 | `--verbose` | off | Print sample generations on each step |
 
-## Zorplex Task
+## Tasks
 
-Zorplex is a synthetic benchmark for training LLMs on multi-step tool use. Each word in a fixed vocabulary (apple, banana, cat, ...) maps to a hidden integer value via a seeded lookup table. The model must use a `LOOKUP[word]` tool to discover values — it cannot know them in advance.
+### Sum Digits
 
-Each task picks two words and asks the model to add their zorplex values: "What is zorplex('apple') + zorplex('banana')?" → two LOOKUPs, then add the results.
+Given a sequence of 2-4 integers (10-999), the model must compute the total digit sum.
 
-### Multi-turn Generation
+Example: "What is the total digit sum of [123, 45, 67]?" → 1+2+3 + 4+5 + 6+7 = 28
 
-Each trajectory runs for up to `max_turns` turns (default: 4). On each turn, the model generates text until a tool call (`LOOKUP[word]`) is detected. The tool result is injected back into the context, and the model continues. When no tool call is produced, the turn is treated as the final response.
+The system prompt includes a worked example and instructs the model to solve step by step.
 
-The ideal trajectory is 3 turns:
-1. `LOOKUP[apple]` → gets value
-2. `LOOKUP[banana]` → gets value
-3. Computes sum, emits `[ANSWER] <number>`
+### Reverse Digits
 
-### Reward Calculation
+Given a 6-7 digit integer (100000-9999999), the model must reverse its digits.
 
-Rewards are assigned per trajectory in `Generator._run_generation`:
+Example: "What is 123456 reversed?" → 654321
+
+Trailing zeros become leading zeros and are dropped (e.g., 1200 → 0021 → 21).
+
+## Training
+
+Training uses REINFORCE with per-token normalized log-probabilities. Each step:
+
+1. All generators produce trajectories in parallel (one per generator)
+2. The trainer computes a policy gradient update on the batch
+3. Updated weights are synced back to all generators
+
+### Reward
 
 | Condition | Reward |
 |-----------|--------|
 | Correct answer | +1.0 |
-| Correct + `[ANSWER]` tag | +1.2 |
-| Wrong answer | 0.0 |
-
-The `[ANSWER]` format bonus (+0.2) is only awarded when the answer is also correct, preventing the model from gaming the reward by emitting `[ANSWER]` without doing the work.
+| Wrong answer | -1.0 |
 
 ### Evaluation
 
-Evaluation runs on the trainer's model before and after training (`--eval-samples` controls the number of tasks).
-
-**Accuracy** is measured by `extract_answer`, which parses the model's final answer using a fallback chain:
+Evaluation runs on the trainer's model before and after training. Accuracy is measured by `extract_answer`, which parses the model's output using a fallback chain:
 
 1. `[ANSWER] <number>` tag (preferred)
 2. Patterns like "the answer is <number>" or "= <number>"
 3. Last number in the text (fallback)
 
-If the extracted number matches the correct answer, the trajectory counts as correct. A model can get accuracy credit without using `[ANSWER]` formatting.
-
-**Format compliance** measures the fraction of trajectories where the model emits an `[ANSWER]` tag. A model that learns to use `LOOKUP` tools correctly but never wraps its final answer in `[ANSWER]` will show high accuracy but low format compliance.
+Format compliance measures the fraction of responses using the `[ANSWER]` tag.

@@ -7,16 +7,20 @@
 """
 Generator actor for RL training.
 
-Generates trajectories with tool-augmented multi-turn inference.
+Generates trajectories for the digit sum task.
 Weight sync uses load_state_dict from the trainer.
 """
+
+import re
 
 import torch
 from monarch.actor import Actor, current_rank, endpoint
 
+from sum_digits import SumDigitsSpec
+from task import Task, extract_answer
+from reverse_digits import ReverseDigitsSpec
 from trainer import Trajectory
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from zorplex import generate_with_tools, Task, ZorplexSpec
 
 
 class Generator(Actor):
@@ -30,10 +34,12 @@ class Generator(Actor):
         self,
         model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
         device: str = "cuda",
+        task: str = "sum_digits",
     ):
         # Lightweight init - just store config
         self.model_name = model_name
         self.device_config = device
+        self.task = task
         self.rank = current_rank().rank
         self._ready = False
         print(f"[Generator:{self.rank}] Spawned, waiting for setup()...")
@@ -66,7 +72,10 @@ class Generator(Actor):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        self.spec = ZorplexSpec(seed=42 + self.rank)
+        if self.task == "reverse_digits":
+            self.spec = ReverseDigitsSpec(seed=42 + self.rank)
+        else:
+            self.spec = SumDigitsSpec(seed=42 + self.rank)
 
         self._ready = True
         print(f"[Generator:{self.rank}] Ready on GPU {gpu_id}!")
@@ -87,14 +96,7 @@ class Generator(Actor):
         return True
 
     @endpoint
-    def generate(self, question: str, answer: int, max_turns: int = 4) -> Trajectory:
-        """Generate a trajectory for a given task (used for examples/debugging)."""
-        self.model.eval()
-        task = Task(question=question, correct_answer=answer, metadata={})
-        return self._run_generation(task, max_turns)
-
-    @endpoint
-    def generate_trajectory(self, max_turns: int = 4) -> Trajectory:
+    def generate_trajectory(self) -> Trajectory:
         """Generate a trajectory using a self-generated task.
 
         Each generator has its own seeded spec, so broadcasting this endpoint
@@ -102,30 +104,10 @@ class Generator(Actor):
         """
         self.model.eval()
         task = self.spec.generate_task()
-        return self._run_generation(task, max_turns)
+        return self._run_generation(task)
 
-    def _run_generation(self, task: Task, max_turns: int) -> Trajectory:
-        """Shared generation logic: run inference, compute tokens, return Trajectory."""
-        import re as _re
-
-        result = generate_with_tools(
-            self.model,
-            self.tokenizer,
-            self.spec,
-            task,
-            self.device,
-            max_turns=max_turns,
-            max_tokens_per_turn=150,
-        )
-
-        self.generations += 1
-
-        # Build model-only text (generated tokens without injected tool results)
-        model_only_text = "".join(t.generated_text for t in result.turns)
-
-        has_answer_tag = bool(_re.search(r"\[ANSWER\]", result.final_text))
-
-        # Pre-tokenize for the trainer: prompt + model_only_text
+    def _run_generation(self, task: Task) -> Trajectory:
+        """Generate a response, score it, and return a Trajectory."""
         messages = [
             {"role": "system", "content": self.spec.get_system_prompt()},
             {"role": "user", "content": task.question},
@@ -133,34 +115,38 @@ class Generator(Actor):
         prompt_text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        prompt_ids = self.tokenizer(
-            prompt_text, return_tensors="pt", add_special_tokens=False
-        )["input_ids"]
-        prompt_length = prompt_ids.shape[1]
+        inputs = self.tokenizer(prompt_text, return_tensors="pt").to(self.device)
+        prompt_length = inputs["input_ids"].shape[1]
 
-        full_ids = self.tokenizer(
-            prompt_text + model_only_text,
-            return_tensors="pt",
-            add_special_tokens=False,
-            truncation=True,
-            max_length=1024,
-        )["input_ids"]
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=256,
+                pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                do_sample=True,
+                temperature=0.7,
+            )
 
-        # Reward shaping:
-        #   +1.0 for correct answer
-        #   +0.2 for format compliance ([ANSWER] tag), only when correct
-        reward = 0.0
-        if result.is_correct:
-            reward += 1.0
-            if has_answer_tag:
-                reward += 0.2
+        response_text = self.tokenizer.decode(
+            outputs[0][prompt_length:], skip_special_tokens=True
+        )
+
+        self.generations += 1
+
+        extracted = extract_answer(response_text)
+        is_correct = extracted == task.correct_answer
+        has_answer_tag = bool(re.search(r"\[ANSWER\]", response_text))
+
+        reward = 1.0 if is_correct and has_answer_tag else -1.0
+        
 
         return Trajectory(
             task_question=task.question,
-            response_text=result.final_text,
+            response_text=response_text,
             reward=reward,
-            is_correct=result.is_correct,
+            is_correct=is_correct,
             has_answer_tag=has_answer_tag,
-            input_ids=full_ids[0].tolist(),
+            input_ids=outputs[0].tolist(),
             prompt_length=prompt_length,
         )
