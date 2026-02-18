@@ -70,6 +70,6 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        # Run the numerics tests for RL unified
-        torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/rl/unified/tests/test_numerics.py -v
+        # Run the numerics tests for RL unified (test with TP=1 for exact numerics match)
+        torchrun --nproc-per-node=1 -m pytest torchtitan/experiments/rl/unified/tests/test_numerics.py -v
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
