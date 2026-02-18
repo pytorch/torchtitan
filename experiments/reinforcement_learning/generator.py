@@ -7,7 +7,6 @@
 """
 Generator actor for RL training.
 
-Generates trajectories for the digit sum task.
 Weight sync uses load_state_dict from the trainer.
 """
 
