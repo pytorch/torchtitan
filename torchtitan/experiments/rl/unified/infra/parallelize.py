@@ -16,7 +16,6 @@ from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
     PrepareModuleInput,
-    PrepareModuleInputOutput,
     RowwiseParallel,
     SequenceParallel,
 )
@@ -108,16 +107,14 @@ def apply_non_moe_tp(
                 sequence_dim=2,
                 use_local_output=False,
             ),
-            # Apply on vllm.Attention() module to use local tensor
-            "attention.inner_attention": PrepareModuleInputOutput(
-                input_layouts=(Shard(1), Shard(1), Shard(1)),  # xq, xk, xv
-                desired_input_layouts=(None, None, None),
-                use_local_input=True,  # use local tensor for attention calculation
-                output_layouts=(Shard(1)),  # output
-                desired_output_layouts=(Shard(1)),
-                use_local_output=False,
-            ),
+            # VLLMAttention handles DTensor-to-local conversion internally.
+            # It captures the correct symbolic seq_len from the DTensor global
+            # shape before calling to_local(), then uses narrow() to fix the
+            # corrupted symbolic dimension that prim_to_local produces under
+            # torch.compile.  Its output is a plain tensor; RowwiseParallel on
+            # attention.wo wraps it back into a DTensor via from_local(Shard(-1)).
             "attention.wo": RowwiseParallel(
+                input_layouts=Shard(-1),
                 output_layouts=Shard(1),
                 use_local_output=False,
             ),

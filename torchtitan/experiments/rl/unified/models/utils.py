@@ -79,6 +79,7 @@ def replace_with_vllm_attention(model, tp_degree=1):
             head_dim=model_args.head_dim,
             layer_name=layer_name,
             scale=model_args.head_dim**-0.5,
+            tp_enabled=(tp_degree > 1),
         )
 
         layer.attention.inner_attention = vllm_attn
