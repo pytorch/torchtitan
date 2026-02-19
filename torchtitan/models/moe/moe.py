@@ -83,12 +83,15 @@ def _run_experts_for_loop(
     num_tokens_per_expert_list = num_tokens_per_expert.tolist()
 
     # side-effect code due to the usage of generate_permute_indices
-    num_padding = x.shape[0] - sum(num_tokens_per_expert_list)
+    total_tokens = sum(num_tokens_per_expert_list)
+    torch._check(total_tokens >= 0)
+    torch._check(total_tokens <= x.shape[0])
+    num_padding = x.shape[0] - total_tokens
 
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
     x_splits = torch.split(
-        x[: sum(num_tokens_per_expert_list)],
+        x[:total_tokens],
         split_size_or_sections=num_tokens_per_expert_list,
         dim=0,
     )
