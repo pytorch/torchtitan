@@ -6,6 +6,7 @@
 
 import logging
 import os
+from dataclasses import replace
 from typing import Any, Optional
 
 import torch
@@ -40,6 +41,31 @@ from torchtitan.tools import utils
 logger = logging.getLogger(__name__)
 
 
+def _set_nccl_determinism_envs() -> None:
+    """Set environment variables to force deterministic NCCL collective operations.
+
+    This configures NCCL to use a single-channel tree all-reduce with the Simple
+    protocol, ensuring a fixed reduction order and bitwise-reproducible results
+    at the cost of reduced throughput.
+    """
+    # Disable symmetric memory all-reduce (non-deterministic)
+    os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+    # Deterministic cuBLAS
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    # NCCL determinism: fixed tree algorithm, simple protocol,
+    # single channel/thread to ensure identical reduction order
+    os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
+    os.environ["NCCL_COLLNET_ENABLE"] = "0"
+    os.environ["NCCL_NVLS_ENABLE"] = "0"
+    os.environ["NCCL_P2P_NET_DISABLE"] = "1"
+    os.environ["NCCL_MIN_NCHANNELS"] = "1"
+    os.environ["NCCL_MAX_NCHANNELS"] = "1"
+    os.environ["NCCL_PROTO"] = "Simple"
+    os.environ["NCCL_ALGO"] = "allreduce:tree"
+    os.environ["NCCL_NTHREADS"] = "1"
+    os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+
+
 class Trainer(Actor):
     """
     Updates policy based on collected trajectories using TorchTitan components.
@@ -61,6 +87,11 @@ class Trainer(Actor):
         self.group_size = job_config.policy_optimization.grpo_group_size
         self.grpo_beta = job_config.policy_optimization.grpo_beta
         self.use_stable_grpo = job_config.policy_optimization.use_stable_grpo
+
+        # Batch invariant mode: set NCCL determinism env vars
+        policy_opt = job_config.policy_optimization
+        if policy_opt.batch_invariant_mode:
+            _set_nccl_determinism_envs()
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -87,6 +118,16 @@ class Trainer(Actor):
             etp=parallelism_config.expert_tensor_parallel_degree,
             world_size=world_size,
         )
+
+        # Enable PyTorch determinism when batch invariant mode is on
+        if policy_opt.batch_invariant_mode:
+            debug_config = replace(job_config.debug, deterministic=True)
+            dist_utils.set_determinism(
+                self.parallel_dims,
+                self.device,
+                debug_config,
+                distinct_seed_mesh_dims=["pp"],
+            )
 
         # Get train spec for the model
         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)

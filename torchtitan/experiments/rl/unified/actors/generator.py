@@ -251,7 +251,7 @@ class Generator(Actor):
     ):
         # Set vLLM environment variables from config before any vLLM initialization
         policy_opt = job_config.policy_optimization
-        if policy_opt.vllm_batch_invariant:
+        if policy_opt.batch_invariant_mode:
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
             init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 
