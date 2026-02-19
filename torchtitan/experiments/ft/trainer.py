@@ -15,7 +15,6 @@ from typing import cast, Iterator
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -106,7 +105,7 @@ class FaultTolerantTrainer(Trainer):
         model_config = model_spec.model
         # set the model args from training job configs
         model_config.update_from_config(
-            job_config=config,
+            trainer_config=config,
         )
         self.model_config = model_config
 
@@ -240,7 +239,7 @@ class FaultTolerantTrainer(Trainer):
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
             model = model_spec.parallelize_fn(
                 model,
-                parallel_dims,
+                parallel_dims=parallel_dims,
                 training=config.training,
                 model_converters=config.model_converters,
                 parallelism=config.parallelism,
@@ -303,13 +302,12 @@ class FaultTolerantTrainer(Trainer):
         self.ntokens_seen = 0
 
         # FT addition: pass ft_manager to CheckpointManager
-        self.checkpointer = CheckpointManager(
+        self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            checkpoint_config=config.checkpoint,
             sd_adapter=(
                 model_spec.state_dict_adapter(model_config, config.hf_assets_path)
                 if model_spec.state_dict_adapter

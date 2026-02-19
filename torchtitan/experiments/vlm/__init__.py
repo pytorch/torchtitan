@@ -11,14 +11,13 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.protocols.model_spec import ModelSpec
 
-# TODO: should refactor into a DataLoader with Config
-#       and be used in config_registry.py
-# from .datasets.mm_datasets import build_mm_dataloader
+from .datasets.mm_datasets import HuggingFaceMultiModalDataLoader
 from .infra.parallelize import parallelize_vlm
 from .model.args import Siglip2Config
 from .model.model import Llama3Siglip2Transformer
 
 __all__ = [
+    "HuggingFaceMultiModalDataLoader",
     "parallelize_vlm",
     "Llama3Siglip2Transformer",
     "llama3_siglip2_configs",

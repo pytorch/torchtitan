@@ -33,8 +33,8 @@ from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 def parallelize_qwen3(
     model: nn.Module,
-    parallel_dims: ParallelDims,
     *,
+    parallel_dims: ParallelDims,
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,

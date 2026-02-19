@@ -32,17 +32,21 @@ def main() -> None:
         # TODO(local_tensor): Remove this special case once LocalTensor supports
         # init_weights() and foreach_allgather. In local tensor mode, skip
         # training/checkpointing as the # model is not fully initialized
+        # pyrefly: ignore [missing-attribute]
         if config.comm.mode == "local_tensor":
             logger.info("Local tensor mode enabled - skipping training execution")
             return
 
+        # pyrefly: ignore [missing-attribute]
         trainer = config.build()
 
+        # pyrefly: ignore [missing-attribute]
         if config.checkpoint.create_seed_checkpoint:
             assert (
                 int(os.environ["WORLD_SIZE"]) == 1
             ), "Must create seed checkpoint using a single device, to disable sharding."
             assert (
+                # pyrefly: ignore [missing-attribute]
                 config.checkpoint.enable
             ), "Must enable checkpointing when creating a seed checkpoint."
             trainer.checkpointer.save(curr_step=0, last_step=True)

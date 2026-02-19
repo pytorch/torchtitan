@@ -42,19 +42,19 @@ class Trainer(ForgeEngine):
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
-    def __init__(self, job_config: TitanTrainer.Config):
-        if job_config.debug.print_config:
-            logger.info(f"Running with args: {job_config.to_dict()}")
+    def __init__(self, config: TitanTrainer.Config):
+        if config.debug.print_config:
+            logger.info(f"Running with args: {config.to_dict()}")
 
-        # NOTE: Here we are passing in JobConfig as a superset of ForgeJobConfig
-        super().__init__(job_config)
+        # NOTE: Here we are passing in Trainer.Config as a superset of ForgeEngine.Config
+        super().__init__(config)
 
         # build tokenizer
-        self.tokenizer = HuggingFaceTokenizer(job_config.hf_assets_path)
+        self.tokenizer = HuggingFaceTokenizer(config.hf_assets_path)
 
         # build dataloader
         self.dataloader = HuggingFaceTextDataLoader(
-            job_config.dataloader,
+            config.dataloader,
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
@@ -62,24 +62,24 @@ class Trainer(ForgeEngine):
 
         model_args = self.model_config
         logger.info(
-            f"Built {job_config.model_spec.name} {job_config.model_spec.flavor} with {model_args}"
+            f"Built {config.model_spec.name} {config.model_spec.flavor} with {model_args}"
         )
 
         # metrics logging
-        self.metrics_processor = job_config.metrics.build(
+        self.metrics_processor = config.metrics.build(
             parallel_dims=self.parallel_dims,
-            dump_folder=job_config.dump_folder,
-            pp_schedule=job_config.parallelism.pipeline_parallel_schedule,
-            ft_enable=job_config.fault_tolerance.enable,
-            ft_replica_id=job_config.fault_tolerance.replica_id,
-            config_dict=job_config.to_dict(),
+            dump_folder=config.dump_folder,
+            pp_schedule=config.parallelism.pipeline_parallel_schedule,
+            ft_enable=config.fault_tolerance.enable,
+            ft_replica_id=config.fault_tolerance.replica_id,
+            config_dict=config.to_dict(),
         )
         color = self.metrics_processor.color
 
         self.metrics_processor.num_flops_per_token = self.num_flops_per_token
 
         logger.info(
-            f"{color.blue}Model {job_config.model_spec.name} {job_config.model_spec.flavor} "
+            f"{color.blue}Model {config.model_spec.name} {config.model_spec.flavor} "
             f"{color.red}size: {self.model_param_count:,} total parameters{color.reset}"
         )
 
@@ -101,10 +101,10 @@ class Trainer(ForgeEngine):
         self.step = 0
 
         # Build validator if validation is configured
-        if job_config.validation.enable:
+        if config.validation.enable:
             self.validator = Validator(
-                validation=job_config.validation,
-                parallelism=job_config.parallelism,
+                validation=config.validation,
+                parallelism=config.parallelism,
                 dp_world_size=self.dp_degree,
                 dp_rank=self.dp_rank,
                 tokenizer=self.tokenizer,
@@ -117,12 +117,12 @@ class Trainer(ForgeEngine):
 
         logger.info(
             "Trainer is initialized with "
-            f"local batch size {job_config.training.local_batch_size}, "
+            f"local batch size {config.training.local_batch_size}, "
             f"global batch size {self.global_batch_size}, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
-            f"sequence length {job_config.training.seq_len}, "
-            f"total steps {job_config.training.steps} "
-            f"(warmup {job_config.lr_scheduler.warmup_steps})."
+            f"sequence length {config.training.seq_len}, "
+            f"total steps {config.training.steps} "
+            f"(warmup {config.lr_scheduler.warmup_steps})."
         )
 
     def batch_generator(
@@ -181,7 +181,7 @@ class Trainer(ForgeEngine):
                 extra_kwargs,
                 self.parallel_dims.get_mesh("cp"),
                 self.device,
-                self.job_config.parallelism.context_parallel_load_balancer,
+                self.config.parallelism.context_parallel_load_balancer,
             )
 
         return inputs, labels, extra_inputs, extra_kwargs
@@ -295,7 +295,7 @@ class Trainer(ForgeEngine):
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
-            self.job_config.training.max_norm,
+            self.config.training.max_norm,
             foreach=True,
             pp_mesh=parallel_dims.get_optional_mesh("pp"),
             ep_enabled=parallel_dims.ep_enabled,
@@ -329,25 +329,25 @@ class Trainer(ForgeEngine):
 
     @record
     def train(self):
-        job_config = self.job_config
+        config = self.config
 
-        self.checkpointer.load(step=job_config.checkpoint.load_step)
+        self.checkpointer.load(step=config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}.")
 
         with (
             maybe_enable_profiling(
-                job_config.profiling,
+                config.profiling,
                 global_step=self.step,
-                base_folder=job_config.dump_folder,
+                base_folder=config.dump_folder,
             ) as torch_profiler,
             maybe_enable_memory_snapshot(
-                job_config.profiling,
+                config.profiling,
                 global_step=self.step,
-                base_folder=job_config.dump_folder,
+                base_folder=config.dump_folder,
             ) as memory_profiler,
         ):
             data_iterator = self.batch_generator(self.dataloader)
-            while self.step < job_config.training.steps:
+            while self.step < config.training.steps:
                 self.step += 1
                 self.gc_handler.run(self.step)
                 try:
@@ -357,15 +357,14 @@ class Trainer(ForgeEngine):
                     break
 
                 # Run validation if validator is available
-                if (
-                    self.job_config.validation.enable
-                    and self.validator.should_validate(self.step)
+                if self.config.validation.enable and self.validator.should_validate(
+                    self.step
                 ):
                     with self.loss_fn.no_rescale():
                         self.validator.validate(self.model_parts, self.step)
 
                 self.checkpointer.save(
-                    self.step, last_step=(self.step == job_config.training.steps)
+                    self.step, last_step=(self.step == config.training.steps)
                 )
 
                 # signal the profiler that the next profiling step has started
@@ -378,9 +377,7 @@ class Trainer(ForgeEngine):
                 # (assuming lazy init and compilation are finished)
                 if self.step == 1:
                     dist_utils.set_pg_timeouts(
-                        timeout=timedelta(
-                            seconds=job_config.comm.train_timeout_seconds
-                        ),
+                        timeout=timedelta(seconds=config.comm.train_timeout_seconds),
                         parallel_dims=self.parallel_dims,
                     )
 

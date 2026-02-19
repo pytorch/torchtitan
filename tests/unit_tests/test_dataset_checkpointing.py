@@ -58,14 +58,13 @@ class TestDatasetCheckpointing(unittest.TestCase):
                         assert torch.equal(labels, expected_labels)
 
     def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
-        tokenizer = HuggingFaceTokenizer("./tests/assets/tokenizer")
-
+        tokenizer_config = HuggingFaceTokenizer.Config()
         dl_config = HuggingFaceTextDataLoader.Config(dataset=dataset_name)
 
         return dl_config.build(
             dp_world_size=world_size,
             dp_rank=rank,
-            tokenizer=tokenizer,
+            tokenizer=tokenizer_config.build(tokenizer_path="./tests/assets/tokenizer"),
             seq_len=seq_len,
             local_batch_size=batch_size,
         )

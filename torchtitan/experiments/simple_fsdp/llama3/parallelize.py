@@ -5,8 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
-import torch.nn as nn
-
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -18,12 +16,12 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.parallelize import apply_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 from ..backend import get_compile_backend_with_passes
-
 from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
 
 
@@ -41,7 +39,7 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
-    torch.ops.torch_attn._varlen_attn,
+    torch.ops.torch_attn._varlen_attn.default,
     torch._higher_order_ops.inductor_compiled_code,
 }
 
@@ -72,9 +70,9 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
 
 
 def parallelize_llama(
-    model: nn.Module,
-    parallel_dims: ParallelDims,
+    model: Llama3Model,
     *,
+    parallel_dims: ParallelDims,
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,

@@ -27,6 +27,7 @@ def _fill_indices_kernel(
     num_programs = tl.num_programs(axis=0)
 
     # map programs (blocks) to the experts and loop (grid stride) if needed
+    # pyrefly: ignore [no-matching-overload]
     for expert_id in range(pid, experts_per_rank, num_programs):
         # read this experts write offset
         write_offset = tl.load(write_offsets_ptr + expert_id)
@@ -43,6 +44,7 @@ def _fill_indices_kernel(
             offsets = tl.arange(0, BLOCK_SIZE)
 
             # tokens are processed in chunks of BLOCK_SIZE
+            # pyrefly: ignore [no-matching-overload]
             for chunk_start in range(0, length, BLOCK_SIZE):
                 chunk_offsets = chunk_start + offsets
 

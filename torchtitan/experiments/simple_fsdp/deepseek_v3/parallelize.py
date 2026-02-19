@@ -56,8 +56,8 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: nn.Module,
-    parallel_dims: ParallelDims,
     *,
+    parallel_dims: ParallelDims,
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,

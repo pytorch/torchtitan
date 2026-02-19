@@ -51,6 +51,30 @@ class SliceableModuleDict(nn.ModuleDict):
         return len(self._modules)
 
 
+# Define all possible mappings organized by argument type
+_TT_TO_HF_MAPPINGS = {
+    "dense": {
+        # TorchTitan dense model mappings (always available)
+        "dim": "hidden_size",
+        "n_layers": "num_hidden_layers",
+        "n_heads": "num_attention_heads",
+        "n_kv_heads": "num_key_value_heads",
+        "norm_eps": "rms_norm_eps",
+        "max_seq_len": "max_position_embeddings",
+        "eos_id": "eos_token_id",
+    }
+}
+
+# Declarative list of TorchTitan-only attributes (no HF equivalent)
+_TT_SPECIFIC_ATTRIBUTES = [
+    "multiple_of",
+    "ffn_dim_multiplier",
+    "depth_init",
+    "use_flex_attn",
+    "attn_mask_type",
+]
+
+
 class HFTransformerModel(BaseModel):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config, PretrainedConfig):
@@ -59,29 +83,6 @@ class HFTransformerModel(BaseModel):
         Uses properties to provide TorchTitan-style access while maintaining
         HuggingFace compatibility.
         """
-
-        # Define all possible mappings organized by argument type
-        _TT_TO_HF_MAPPINGS = {
-            "dense": {
-                # TorchTitan dense model mappings (always available)
-                "dim": "hidden_size",
-                "n_layers": "num_hidden_layers",
-                "n_heads": "num_attention_heads",
-                "n_kv_heads": "num_key_value_heads",
-                "norm_eps": "rms_norm_eps",
-                "max_seq_len": "max_position_embeddings",
-                "eos_id": "eos_token_id",
-            }
-        }
-
-        # Declarative list of TorchTitan-only attributes (no HF equivalent)
-        _TT_SPECIFIC_ATTRIBUTES = [
-            "multiple_of",
-            "ffn_dim_multiplier",
-            "depth_init",
-            "use_flex_attn",
-            "attn_mask_type",
-        ]
 
         def __init__(
             self,
@@ -114,7 +115,7 @@ class HFTransformerModel(BaseModel):
                     setattr(self, hf_name, value)
 
             # Set TorchTitan-only attributes
-            for attr_name in self._TT_SPECIFIC_ATTRIBUTES:
+            for attr_name in _TT_SPECIFIC_ATTRIBUTES:
                 if hasattr(titan_dense_config, attr_name):
                     setattr(self, attr_name, getattr(titan_dense_config, attr_name))
 
@@ -146,9 +147,9 @@ class HFTransformerModel(BaseModel):
                 return property(getter, setter)
 
             # Setup attribute mappings
-            self._tt_to_hf_attribute_map = dict(self._TT_TO_HF_MAPPINGS["dense"])
+            self._tt_to_hf_attribute_map = dict(_TT_TO_HF_MAPPINGS["dense"])
             if has_moe:
-                self._tt_to_hf_attribute_map.update(self._TT_TO_HF_MAPPINGS["moe"])
+                self._tt_to_hf_attribute_map.update(_TT_TO_HF_MAPPINGS["moe"])
 
             for titan_name, hf_name in self._tt_to_hf_attribute_map.items():
                 # Create getter/setter for attribute that don't already exist
@@ -167,14 +168,14 @@ class HFTransformerModel(BaseModel):
         def update_from_config(
             self,
             *,
-            job_config=None,
+            trainer_config=None,
             **kwargs,
         ):
-            training = job_config.training
-            parallelism = job_config.parallelism
-            debug = job_config.debug
-            # Extract HF model ID from the extended job_config
-            hf_model_id = getattr(job_config.job, "hf_model", "")
+            training = trainer_config.training
+            parallelism = trainer_config.parallelism
+            debug = trainer_config.debug
+            # Extract HF model ID from the extended trainer_config
+            hf_model_id = getattr(trainer_config, "hf_model", "")
             # Load HF config (overwrites our HF attributes)
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,

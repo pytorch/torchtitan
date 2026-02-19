@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
@@ -103,12 +104,12 @@ class Qwen3Model(Decoder):
         def update_from_config(
             self,
             *,
-            job_config,
+            trainer_config,
             **kwargs,
         ) -> None:
-            training = job_config.training
-            parallelism = job_config.parallelism
-            debug = job_config.debug
+            training = trainer_config.training
+            parallelism = trainer_config.parallelism
+            debug = trainer_config.debug
             seq_len = training.seq_len
             if seq_len > self.rope.max_seq_len:
                 logger.warning(

@@ -258,90 +258,6 @@ def _get_metrics_rank(
     return (world_size // pp_size) * (pp_size - 1)
 
 
-def _build_metric_logger(
-    *,
-    config: "MetricsProcessor.Config",
-    parallel_dims: ParallelDims,
-    dump_folder: str,
-    pp_schedule: str,
-    ft_enable: bool = False,
-    ft_replica_id: int = 0,
-    config_dict: dict[str, Any] | None = None,
-    tag: str | None = None,
-) -> BaseLogger:
-    """
-    Build an appropriate metric logger based on configuration.
-    """
-    # Log initial config state
-    logger.debug(
-        f"Building logger with config: wandb={config.enable_wandb}, "
-        f"tensorboard={config.enable_tensorboard}"
-    )
-
-    # Check if any logging backend is enabled
-    has_logging_enabled = config.enable_tensorboard or config.enable_wandb
-
-    # Determine if this rank should log
-    should_log = has_logging_enabled
-    if (not config.save_for_all_ranks) and should_log:
-        metrics_rank = _get_metrics_rank(
-            parallel_dims=parallel_dims, pp_schedule=pp_schedule
-        )
-        should_log = torch.distributed.get_rank() == metrics_rank
-
-    logger.debug(
-        f"Logging decision: has_logging_enabled={has_logging_enabled}, should_log={should_log}"
-    )
-
-    if not should_log:
-        logger.debug("Returning BaseLogger due to should_log=False")
-        return BaseLogger()
-
-    # Setup logging directory
-    base_log_dir = os.path.join(
-        dump_folder,
-        config.save_tb_folder,
-        datetime.now().strftime("%Y%m%d-%H%M"),
-    )
-
-    if ft_enable:
-        base_log_dir = os.path.join(
-            base_log_dir,
-            f"replica_{ft_replica_id}",
-        )
-
-    if config.save_for_all_ranks:
-        base_log_dir = os.path.join(
-            base_log_dir, f"rank_{torch.distributed.get_rank()}"
-        )
-
-    # Create logger container
-    logger_container = LoggerContainer()
-
-    # Create loggers in priority order
-    if config.enable_wandb:
-        logger.debug("Attempting to create WandB logger")
-        try:
-            wandb_logger = WandBLogger(base_log_dir, config_dict=config_dict, tag=tag)
-            logger_container.add_logger(wandb_logger)
-        except Exception as e:
-            if "No module named 'wandb'" in str(e):
-                logger.error(
-                    "Failed to create WandB logger: No module named 'wandb'. Please install it using 'pip install wandb'."
-                )
-            else:
-                logger.error(f"Failed to create WandB logger: {e}")
-
-    if config.enable_tensorboard:
-        logger.debug("Creating TensorBoard logger")
-        tensorboard_logger = TensorBoardLogger(base_log_dir, tag)
-        logger_container.add_logger(tensorboard_logger)
-
-    if logger_container.number_of_loggers == 0:
-        logger.debug("No loggers enabled, returning an empty LoggerContainer")
-    return logger_container
-
-
 class MetricsProcessor(Configurable):
     """Metrics processor to processes the metrics and log metrics.
 
@@ -384,9 +300,9 @@ class MetricsProcessor(Configurable):
         enable_wandb: bool = False
         """Whether to log metrics to Weights & Biases"""
 
+    config: Config
     logger: BaseLogger
     parallel_dims: ParallelDims
-    config: "MetricsProcessor.Config"
     device_memory_monitor: DeviceMemoryMonitor
     color: utils.NoColor | utils.Color
 
@@ -412,7 +328,7 @@ class MetricsProcessor(Configurable):
         config_dict: dict[str, Any] | None = None,
         tag: str | None = None,
     ):
-        self.logger = _build_metric_logger(
+        self.logger = self._build_metric_logger(
             config=config,
             parallel_dims=parallel_dims,
             dump_folder=dump_folder,
@@ -444,6 +360,92 @@ class MetricsProcessor(Configurable):
 
     def should_log(self, step: int) -> bool:
         return step == 1 or step % self.config.log_freq == 0
+
+    def _build_metric_logger(
+        self,
+        *,
+        config: Config,
+        parallel_dims: ParallelDims,
+        dump_folder: str,
+        pp_schedule: str,
+        ft_enable: bool = False,
+        ft_replica_id: int = 0,
+        config_dict: dict[str, Any] | None = None,
+        tag: str | None = None,
+    ) -> BaseLogger:
+        """
+        Build an appropriate metric logger based on configuration.
+        """
+        # Log initial config state
+        logger.debug(
+            f"Building logger with config: wandb={config.enable_wandb}, "
+            f"tensorboard={config.enable_tensorboard}"
+        )
+
+        # Check if any logging backend is enabled
+        has_logging_enabled = config.enable_tensorboard or config.enable_wandb
+
+        # Determine if this rank should log
+        should_log = has_logging_enabled
+        if (not config.save_for_all_ranks) and should_log:
+            metrics_rank = _get_metrics_rank(
+                parallel_dims=parallel_dims, pp_schedule=pp_schedule
+            )
+            should_log = torch.distributed.get_rank() == metrics_rank
+
+        logger.debug(
+            f"Logging decision: has_logging_enabled={has_logging_enabled}, should_log={should_log}"
+        )
+
+        if not should_log:
+            logger.debug("Returning BaseLogger due to should_log=False")
+            return BaseLogger()
+
+        # Setup logging directory
+        base_log_dir = os.path.join(
+            dump_folder,
+            config.save_tb_folder,
+            datetime.now().strftime("%Y%m%d-%H%M"),
+        )
+
+        if ft_enable:
+            base_log_dir = os.path.join(
+                base_log_dir,
+                f"replica_{ft_replica_id}",
+            )
+
+        if config.save_for_all_ranks:
+            base_log_dir = os.path.join(
+                base_log_dir, f"rank_{torch.distributed.get_rank()}"
+            )
+
+        # Create logger container
+        logger_container = LoggerContainer()
+
+        # Create loggers in priority order
+        if config.enable_wandb:
+            logger.debug("Attempting to create WandB logger")
+            try:
+                wandb_logger = WandBLogger(
+                    base_log_dir, config_dict=config_dict, tag=tag
+                )
+                logger_container.add_logger(wandb_logger)
+            except Exception as e:
+                if "No module named 'wandb'" in str(e):
+                    logger.error(
+                        "Failed to create WandB logger: No module named 'wandb'. Please install it using 'pip install wandb'."
+                    )
+                else:
+                    logger.error(f"Failed to create WandB logger: {e}")
+
+        if config.enable_tensorboard:
+            logger.debug("Creating TensorBoard logger")
+            tensorboard_logger = TensorBoardLogger(base_log_dir, tag)
+            logger_container.add_logger(tensorboard_logger)
+
+        if logger_container.number_of_loggers == 0:
+            logger.debug("No loggers enabled, returning an empty LoggerContainer")
+        return logger_container
 
     def log(
         self,

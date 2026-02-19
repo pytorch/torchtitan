@@ -11,7 +11,7 @@ from torchtitan.config import ConfigManager
 from torchtitan.trainer import Trainer
 
 
-class TestJobConfig(unittest.TestCase):
+class TestConfigManager(unittest.TestCase):
     def test_model_config_args(self):
         """--module and --config together load the correct config."""
         config_manager = ConfigManager()
@@ -123,21 +123,15 @@ class TestJobConfig(unittest.TestCase):
             "lr_scheduler",
         ]
 
-    def test_job_config_model_converters_default(self):
+    def test_trainer_config_model_converters_default(self):
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
         assert config.model_converters.converters == []
 
-    def test_print_help(self):
-        from tyro.extras import get_parser
-
-        parser = get_parser(Trainer.Config)
-        parser.print_help()
-
     # TODO: remove this test when we remove the merge functionality
-    def test_extend_job_config_directly(self):
+    def test_extend_trainer_config_directly(self):
         """Test that _merge_configs works to extend config types."""
         from dataclasses import dataclass
 
@@ -147,13 +141,15 @@ class TestJobConfig(unittest.TestCase):
             fake_model: bool = True
 
         @dataclass
-        class CustomJobConfig:
+        class CustomTrainerConfig:
             checkpoint: CustomCheckpoint
 
-        MergedJobConfig = ConfigManager._merge_configs(Trainer.Config, CustomJobConfig)
+        MergedTrainerConfig = ConfigManager._merge_configs(
+            Trainer.Config, CustomTrainerConfig
+        )
 
         # Verify the merged type has both base and custom fields
-        merged = MergedJobConfig()
+        merged = MergedTrainerConfig()
         assert hasattr(merged, "checkpoint")
         assert hasattr(merged.checkpoint, "convert_path")
         assert merged.checkpoint.convert_path == "/custom/path"

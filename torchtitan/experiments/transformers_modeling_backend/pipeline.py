@@ -383,7 +383,7 @@ def pipeline_hf_transformers(
         # apply SPMD-style PT-D techniques
         m = parallelize_fn(
             m,
-            parallel_dims,
+            parallel_dims=parallel_dims,
             training=training,
             model_converters=model_converters,
             parallelism=parallelism,

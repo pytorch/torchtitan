@@ -10,15 +10,14 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import ActivationCheckpointConfig, TrainingConfig
 
-# TODO: refactor mm dataloader to replace this
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.trainer import Trainer
-
 from . import model_registry
 
+from .configs import MultiModalTrainerConfig
+from .datasets.mm_datasets import HuggingFaceMultiModalDataLoader
 
-def vlm_debugmodel() -> Trainer.Config:
-    return Trainer.Config(
+
+def vlm_debugmodel() -> MultiModalTrainerConfig:
+    return MultiModalTrainerConfig(
         hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry("debugmodel"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
@@ -33,7 +32,7 @@ def vlm_debugmodel() -> Trainer.Config:
             seq_len=2048,
             steps=10,
         ),
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
+        dataloader=HuggingFaceMultiModalDataLoader.Config(dataset="cc12m-test"),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpoint=CheckpointManager.Config(
             interval=10,

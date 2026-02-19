@@ -172,9 +172,9 @@ class CheckpointManager(Configurable):
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize the model.
         states (Dict[str, Any]): The states that need to be saved, other than the
             previous 4 components.
-        checkpoint_config (Checkpoint): The config used to configure the checkpointing.
+        config (Checkpoint): The config used to configure the checkpointing.
         base_folder (str): The base folder to save the checkpoint. Will be concatenated
-            with checkpoint_config.folder
+            with config.folder
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert model state
             dicts between native format and other formats.
         ft_manager (Optional[ft.Manager]): The FTManager from TorchFT.
@@ -350,18 +350,19 @@ class CheckpointManager(Configurable):
 
     def __init__(
         self,
+        config: Config,
+        *,
         dataloader: BaseDataLoader | None,
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         states: dict[str, Any],
-        checkpoint_config: Config,
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
         ft_manager: FTManager | None = None,
     ) -> None:
-        self.enable = checkpoint_config.enable
-        self.load_only = checkpoint_config.load_only
+        self.enable = config.enable
+        self.load_only = config.load_only
 
         self.states = states
         self.states.update(
@@ -378,7 +379,7 @@ class CheckpointManager(Configurable):
         )
 
         self.enable_ft_dataloader_checkpoints = (
-            self.ft_manager and checkpoint_config.enable_ft_dataloader_checkpoints
+            self.ft_manager and config.enable_ft_dataloader_checkpoints
         )
 
         if self.ft_manager and not self.enable_ft_dataloader_checkpoints:
@@ -412,7 +413,7 @@ class CheckpointManager(Configurable):
             assert ft_manager is not None
             self.ft_replica_id = ft_manager.replica_id
 
-        async_mode = checkpoint_config.async_mode.lower()
+        async_mode = config.async_mode.lower()
         self.enable_staging = (
             self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
         ) or self.enable_ft_dataloader_checkpoints
@@ -428,31 +429,27 @@ class CheckpointManager(Configurable):
         self.cpu_offload_state_dict = None
         self.stager = None
 
-        self.folder = os.path.join(base_folder, checkpoint_config.folder)
+        self.folder = os.path.join(base_folder, config.folder)
 
         # Checkpoint policy related fields.
-        self.initial_load_model_only = checkpoint_config.initial_load_model_only
-        self.initial_load_in_hf = checkpoint_config.initial_load_in_hf
-        self.initial_load_path = checkpoint_config.initial_load_path
-        self.initial_load_in_hf_quantized = (
-            checkpoint_config.initial_load_in_hf_quantized
-        )
-        self.last_save_model_only = checkpoint_config.last_save_model_only
-        self.last_save_in_hf = checkpoint_config.last_save_in_hf
+        self.initial_load_model_only = config.initial_load_model_only
+        self.initial_load_in_hf = config.initial_load_in_hf
+        self.initial_load_path = config.initial_load_path
+        self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
+        self.last_save_model_only = config.last_save_model_only
+        self.last_save_in_hf = config.last_save_in_hf
         if self.last_save_in_hf:
             assert (
                 sd_adapter is not None
-            ), "job_config.checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+            ), "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
         self.sd_adapter = sd_adapter
-        self.export_dtype = TORCH_DTYPE_MAP[checkpoint_config.export_dtype]
-        self.exclude_from_loading = checkpoint_config.exclude_from_loading
-        self.interval = checkpoint_config.interval
-        self.enable_first_step_checkpoint = (
-            checkpoint_config.enable_first_step_checkpoint
-        )
+        self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
+        self.exclude_from_loading = config.exclude_from_loading
+        self.interval = config.interval
+        self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
 
         # Async checkpoint related fields.
-        async_mode = checkpoint_config.async_mode.lower()
+        async_mode = config.async_mode.lower()
         if (
             async_mode == AsyncMode.ASYNC
             or async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
@@ -460,7 +457,7 @@ class CheckpointManager(Configurable):
         ):
             self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
-        self.keep_latest_k = checkpoint_config.keep_latest_k
+        self.keep_latest_k = config.keep_latest_k
         if self.keep_latest_k > 0:
             if self.keep_latest_k == 1:
                 raise ValueError(
@@ -485,9 +482,7 @@ class CheckpointManager(Configurable):
         elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
         else:
-            raise ValueError(
-                f"Unknown checkpoint async_mode {checkpoint_config.async_mode}"
-            )
+            raise ValueError(f"Unknown checkpoint async_mode {config.async_mode}")
 
         logger.info(
             f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
@@ -647,7 +642,7 @@ class CheckpointManager(Configurable):
 
         This function will save the checkpoint for the current step. If ``last_step`` is
         true, it will save the checkpoint even if the interval has not been reached.
-        This only happens when train_state.step == job_config.training.steps, or
+        This only happens when train_state.step == trainer_config.training.steps, or
         for initial seed checkpoint.
 
         Args:

@@ -373,6 +373,22 @@ class BaseAttention(Module):
         attn_backend: str
         attn_mask_type: str
 
+        def __post_init__(self):
+            assert self.n_heads > 0, "n_heads must be > 0"
+            assert self.attn_backend in [
+                "flex",
+                "varlen",
+                "sdpa",
+            ], f"attn_backend must be one of ['flex', 'varlen', 'sdpa'], got {self.attn_backend}"
+            assert self.attn_mask_type in [
+                "causal",
+                "block_causal",
+            ], f"attn_mask_type must be one of ['causal', 'block_causal'], got {self.attn_mask_type}"
+            if self.attn_backend == "sdpa" and self.attn_mask_type == "block_causal":
+                raise ValueError(
+                    "attn_mask_type 'block_causal' is not supported with attn_backend 'sdpa'"
+                )
+
 
 class GQAttention(BaseAttention):
     """Grouped-Query Attention module shared across Llama3, Llama4, Qwen3.

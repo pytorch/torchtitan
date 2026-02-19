@@ -33,7 +33,7 @@ class BaseModel(Module):
         def update_from_config(
             self,
             *,
-            job_config,
+            trainer_config,
             **kwargs,
         ) -> None:
             pass

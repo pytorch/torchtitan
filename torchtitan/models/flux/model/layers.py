@@ -104,6 +104,7 @@ class MLPEmbedder(Module):
         self.silu = nn.SiLU()
         self.out_layer = nn.Linear(config.hidden_dim, config.hidden_dim, bias=True)
 
+    # pyrefly: ignore [bad-override]
     def init_weights(self, init_std: float = 0.02):
         nn.init.normal_(self.in_layer.weight, std=init_std)
         nn.init.constant_(self.in_layer.bias, 0)
@@ -237,6 +238,7 @@ class DoubleStreamBlock(Module):
 
         self.inner_attention = ScaledDotProductAttentionWrapper()
 
+    # pyrefly: ignore [bad-override]
     def init_weights(self):
         # initialize all the nn.Linear submodules
         for layer in (
@@ -348,6 +350,7 @@ class SingleStreamBlock(Module):
         self.modulation = Modulation(config.hidden_size, double=False)
         self.inner_attention = ScaledDotProductAttentionWrapper()
 
+    # pyrefly: ignore [bad-override]
     def init_weights(self):
         for layer in (self.linear1, self.linear2):
             nn.init.xavier_uniform_(layer.weight)
@@ -397,6 +400,7 @@ class LastLayer(Module):
             nn.SiLU(), nn.Linear(config.hidden_size, 2 * config.hidden_size, bias=True)
         )
 
+    # pyrefly: ignore [bad-override]
     def init_weights(self):
         # pyrefly: ignore [bad-argument-type]
         nn.init.constant_(self.adaLN_modulation[-1].weight, 0)

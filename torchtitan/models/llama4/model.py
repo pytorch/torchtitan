@@ -161,12 +161,12 @@ class Llama4Model(Decoder):
         def update_from_config(
             self,
             *,
-            job_config,
+            trainer_config,
             **kwargs,
         ) -> None:
-            training = job_config.training
-            parallelism = job_config.parallelism
-            debug = job_config.debug
+            training = trainer_config.training
+            parallelism = trainer_config.parallelism
+            debug = trainer_config.debug
             seq_len = training.seq_len
             if seq_len > self.rope.max_seq_len:
                 logger.warning(

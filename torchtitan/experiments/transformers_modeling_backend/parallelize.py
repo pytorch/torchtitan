@@ -41,8 +41,8 @@ from torchtitan.tools.logging import logger
 
 def parallelize_hf_transformers(
     model: nn.Module,
-    parallel_dims: ParallelDims,
     *,
+    parallel_dims: ParallelDims,
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,

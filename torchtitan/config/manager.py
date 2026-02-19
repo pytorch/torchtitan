@@ -145,6 +145,7 @@ class ConfigManager:
             DeprecationWarning,
             stacklevel=2,
         )
+        # pyrefly: ignore [unknown-name]
         result: list[str | tuple[str, Any] | tuple[str, Any, Any]] = []
         b_map = {f.name: f for f in fields(base)}
         c_map = {f.name: f for f in fields(custom)}
@@ -176,14 +177,17 @@ class ConfigManager:
     def _validate_config(self) -> None:
         # TODO: temporary mitigation of BC breaking change in hf_assets_path
         #       tokenizer default path, need to remove later
+        # pyrefly: ignore [missing-attribute]
         if not os.path.exists(self.config.hf_assets_path):
             logger.warning(
+                # pyrefly: ignore [missing-attribute]
                 f"HF assets path {self.config.hf_assets_path} does not exist!"
             )
             old_tokenizer_path = (
                 "torchtitan/datasets/tokenizer/original/tokenizer.model"
             )
             if os.path.exists(old_tokenizer_path):
+                # pyrefly: ignore [missing-attribute]
                 self.config.hf_assets_path = old_tokenizer_path
                 logger.warning(
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
@@ -191,6 +195,7 @@ class ConfigManager:
                 )
         else:
             # Check if we are using tokenizer.model, if so then we need to alert users to redownload the tokenizer
+            # pyrefly: ignore [missing-attribute]
             if self.config.hf_assets_path.endswith("tokenizer.model"):
                 raise Exception(
                     "You are using the old tokenizer.model, please redownload the tokenizer ",

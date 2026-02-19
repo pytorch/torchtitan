@@ -19,7 +19,6 @@ from torchtitan.tools.logging import logger
 
 __all__ = [
     "LRSchedulersContainer",
-    "build_lr_schedulers",
 ]
 
 
@@ -86,6 +85,7 @@ class LRSchedulersContainer(Stateful, Configurable):
         to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.min_lr_factor`.
         """
 
+        # pyrefly: ignore [bad-override]
         def build(self, *, optimizers, training_steps):
             """Build a LRSchedulersContainer from this config.
 
@@ -221,35 +221,7 @@ class LRSchedulersContainer(Stateful, Configurable):
         # Load the same state_dict for all schedulers. The key value we're concerned
         # within ``LRScheduler.state_dict()`` is ``last_epoch``, which is an integer
         # that is immutable. As long as ``training.steps`` and ``lr_scheduler.warmup_steps``
-        # in ``job_config`` remain unchanged when resuming from a checkpoint, this
+        # in the config remain unchanged when resuming from a checkpoint, this
         # approach is safe. We call ``copy()`` here to ensure extra safety.
         for scheduler in self.schedulers:
             scheduler.load_state_dict(copy.deepcopy(state_dict))
-
-
-def build_lr_schedulers(
-    optimizers: OptimizersContainer,
-    lr_scheduler_config: "LRSchedulersContainer.Config",
-    training_steps: int,
-) -> LRSchedulersContainer:
-    """Create a LRSchedulerContainer for the given optimizers and job config.
-
-    This function delegates to ``lr_scheduler_config.build()`` which contains
-    the schedule computation logic.
-
-    **Note**
-    Users who want to customize the lr scheduler behavior can create their own
-    ``LRSchedulersContainer`` subclass and ``build_lr_scheduler``. Passing the
-    customized ``build_lr_schedulers`` to ``ModelSpec`` will create the customized
-    ``LRSchedulersContainer``.
-
-    Args:
-        optimizers (OptimizersContainer): The corresponding optimizers for the
-            lr_schedulers.
-        lr_scheduler_config (LRSchedulersContainer.Config): The lr scheduler config.
-        training_steps (int): The total number of training steps.
-    """
-    return lr_scheduler_config.build(
-        optimizers=optimizers,
-        training_steps=training_steps,
-    )

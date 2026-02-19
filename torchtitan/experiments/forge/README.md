@@ -2,7 +2,7 @@
 
 The `forge` folder contains a lightweight training engine that serves as a streamlined subset of the `Trainer` class from [torchtitan/train.py](/torchtitan/train.py). This engine provides only the essential constructor method, making it highly flexible for various downstream applications.
 
-The [`ForgeEngine`](engine.py) takes a [`ForgeJobConfig`](job_config.py) to
+The [`ForgeEngine`](engine.py) takes a `ForgeEngine.Config` to
 - Initialize an SPMD distributed training environment
 - Construct and scale models via n-D parallelisms and meta-device initialization
 - Provide necessary training components and utilities

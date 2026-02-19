@@ -13,8 +13,8 @@ from torchtitan.models.common import (
     RoPE,
 )
 from torchtitan.protocols.model_spec import ModelSpec
-from .model import Llama3Model, Llama3TransformerBlock
 
+from .model import Llama3Model, Llama3TransformerBlock
 from .parallelize import parallelize_llama
 from .state_dict_adapter import Llama3StateDictAdapter
 
@@ -39,6 +39,7 @@ llama3_configs = {
             ),
         ),
         rope=RoPE.Config(
+            # TODO: find better ways to enforce dim = decoder dim // n_heads, for all models
             dim=256 // 16,
             max_seq_len=131072,
             theta=500000,
