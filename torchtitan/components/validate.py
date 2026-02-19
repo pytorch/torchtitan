@@ -120,6 +120,7 @@ class Validator(BaseValidator):
         self.tokenizer = tokenizer
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
+        # pyrefly: ignore [unexpected-keyword]
         dl_config = replace(config.dataloader, infinite=config.steps != -1)
         self.validation_dataloader = dl_config.build(
             dp_world_size=dp_world_size,
@@ -185,6 +186,7 @@ class Validator(BaseValidator):
         extra_kwargs: dict[str, Any] = {}
 
         try:
+            # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = cast(
                 BaseModel, model_parts[0]
             ).get_attention_masks(
@@ -224,6 +226,7 @@ class Validator(BaseValidator):
         num_steps = 0
 
         for input_dict, labels in self.validation_dataloader:
+            # pyrefly: ignore [missing-attribute, unsupported-operation]
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 

@@ -68,8 +68,8 @@ _op_sac_save_list = {
 # Adapted from llama4/infra/parallelize.py
 def parallelize_gptoss(
     model: GptOssModel,
-    parallel_dims: ParallelDims,
     *,
+    parallel_dims: ParallelDims,
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,

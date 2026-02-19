@@ -11,7 +11,8 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.protocols.module import Module
-from torchtitan.models.common.utils import trunc_normal_
+
+from .utils import trunc_normal_
 
 
 def compute_ffn_hidden_dim(

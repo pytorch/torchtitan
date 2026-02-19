@@ -72,5 +72,5 @@ def my_experiment_debugmodel() -> MyTrainer.Config:
 Then run with:
 
 ```bash
-MODEL=your_folder CONFIG=my_experiment_debugmodel ./run_train.sh
+MODULE=your_folder CONFIG=my_experiment_debugmodel ./run_train.sh
 ```

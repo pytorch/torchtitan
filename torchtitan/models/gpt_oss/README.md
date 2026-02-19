@@ -2,7 +2,7 @@
 
 ## Quick Start
 ```bash
-MODEL=gpt_oss CONFIG=gpt_oss_debugmodel ./run_train.sh
+MODULE=gpt_oss CONFIG=gpt_oss_debugmodel ./run_train.sh
 ```
 
 ## Supported Features

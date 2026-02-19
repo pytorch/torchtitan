@@ -283,6 +283,7 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
+# TODO: consolidate apply_rotary_emb_complex and apply_rotary_emb_single_complex
 def apply_rotary_emb_complex(
     xq: torch.Tensor,
     xk: torch.Tensor,

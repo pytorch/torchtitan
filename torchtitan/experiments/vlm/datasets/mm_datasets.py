@@ -11,6 +11,7 @@ including images and text. Images are interleaved with text at native aspect rat
 It supports both streaming and non-streaming datasets from HuggingFace.
 """
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 import torch
@@ -22,7 +23,6 @@ from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
-from torchtitan.trainer import Trainer
 
 from ..model.args import SpecialTokens
 from .mm_collator_nld import MultiModalCollatorNLD
@@ -370,101 +370,83 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         return state
 
 
-# TODO: refactor mm dataloader to use config build style
-# @dataclass
-# class Data:
-#     max_images_per_batch: int = 10
-#     """Vision encoder batch size (N)"""
-#     max_patches_per_image: int = 256
-#     """Vision encoder sequence length (L)"""
-#     patch_size: int = 16
-#     """ Patch size of the vision encoder.
-#     For example, image size 256x256, patch size 16
-#         Number of visual tokens is: (256/16)**2=256
-#     """
-#     spatial_merge_size: int = 1
-#     """ Spatially merge visual tokens after encoder.  Default 1 means no merging.
-#     For example: image size 256x256, patch size 16, spaitl merge size is 2
-#         Number of visual tokens for the LLM: (256/16/2)**2 = 8
-#     """
-#     packing_buffer_size: int = 0
-#     """ Set to a value >0 to enable sample packing.
-#     This control the buffer uses to store training samples available for packing.
-#     """
-def build_mm_dataloader(
-    dp_world_size: int,
-    dp_rank: int,
-    tokenizer: HuggingFaceTokenizer,
-    job_config: Trainer.Config,
-    infinite: bool = True,
-    **kwargs,
-) -> ParallelAwareDataloader:
-    """Build a data loader for multimodal datasets.
+class HuggingFaceMultiModalDataLoader(ParallelAwareDataloader):
+    """Configurable multimodal dataloader that wraps HuggingFaceMultiModalDataset."""
 
-    Args:
-        dp_world_size: Data parallel world size.
-        dp_rank: Data parallel rank.
-        tokenizer: Tokenizer for text processing.
-        job_config: Job configuration containing dataset and DataLoader settings.
-        infinite: Whether to loop infinitely.
+    @dataclass(kw_only=True, slots=True)
+    class Config(ParallelAwareDataloader.Config):
+        dataset: str = "cc12m-test"
+        """Dataset to use"""
 
-    Returns:
-        DataLoader with appropriate parallelism handling.
-    """
-    dataset_path = job_config.dataloader.dataset_path
-    batch_size = job_config.training.local_batch_size
-    seq_len = job_config.training.seq_len
+        infinite: bool = True
+        """Whether to loop the dataset infinitely"""
 
-    max_images_per_batch = job_config.data.max_images_per_batch
-    max_patches_per_image = job_config.data.max_patches_per_image
-    # NOTE: technically patch_size belongs to model variants, but we don't
-    # have access to model_args here. To discuss later.
-    patch_size = job_config.data.patch_size
-    spatial_merge_size = job_config.data.spatial_merge_size
-    packing_buffer_size = job_config.data.packing_buffer_size
-    special_tokens = SpecialTokens.from_tokenizer(tokenizer)
+        max_images_per_batch: int = 10
+        """Vision encoder batch size (N)"""
 
-    dataset = HuggingFaceMultiModalDataset(
-        dataset_name=job_config.dataloader.dataset,
-        dataset_path=dataset_path,
-        tokenizer=tokenizer,
-        batch_size=batch_size,
-        seq_len=seq_len,
-        patch_size=patch_size,
-        spatial_merge_size=spatial_merge_size,
-        max_patches_per_image=max_patches_per_image,
-        max_images_per_batch=max_images_per_batch,
-        packing_buffer_size=packing_buffer_size,
-        special_tokens=special_tokens,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=infinite,
-    )
+        max_patches_per_image: int = 256
+        """Vision encoder sequence length (L)"""
 
-    collate_fn = MultiModalCollatorNLD(
-        batch_size=batch_size,
-        seq_len=job_config.training.seq_len,
-        patch_size=patch_size,
-        max_images_per_batch=max_images_per_batch,
-        max_patches_per_image=max_patches_per_image,
-        special_tokens=special_tokens,
-    )
+        patch_size: int = 16
+        """Patch size of the vision encoder."""
 
-    dl_config = job_config.dataloader
-    dataloader_kwargs = {
-        "num_workers": getattr(dl_config, "num_workers", 0),
-        "persistent_workers": getattr(dl_config, "persistent_workers", False),
-        "pin_memory": getattr(dl_config, "pin_memory", False),
-        "prefetch_factor": getattr(dl_config, "prefetch_factor", None),
-        "batch_size": batch_size,
-        "collate_fn": collate_fn,
-    }
+        spatial_merge_size: int = 1
+        """Spatially merge visual tokens. Default 1 means no merging."""
 
-    base_dataloader = ParallelAwareDataloader(
-        dataset=dataset,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        **dataloader_kwargs,
-    )
+        packing_buffer_size: int = 0
+        """Set >0 to enable sample packing buffer."""
 
-    return base_dataloader
+    def __init__(
+        self,
+        config: Config,
+        *,
+        dp_world_size: int,
+        dp_rank: int,
+        tokenizer: BaseTokenizer,
+        seq_len: int,
+        local_batch_size: int,
+        **kwargs,
+    ):
+        special_tokens = SpecialTokens.from_tokenizer(tokenizer)
+
+        mm_ds = HuggingFaceMultiModalDataset(
+            dataset_name=config.dataset,
+            dataset_path=config.dataset_path,
+            tokenizer=tokenizer,
+            batch_size=local_batch_size,
+            seq_len=seq_len,
+            patch_size=config.patch_size,
+            spatial_merge_size=config.spatial_merge_size,
+            max_patches_per_image=config.max_patches_per_image,
+            max_images_per_batch=config.max_images_per_batch,
+            packing_buffer_size=config.packing_buffer_size,
+            special_tokens=special_tokens,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=config.infinite,
+        )
+
+        collate_fn = MultiModalCollatorNLD(
+            batch_size=local_batch_size,
+            seq_len=seq_len,
+            patch_size=config.patch_size,
+            max_images_per_batch=config.max_images_per_batch,
+            max_patches_per_image=config.max_patches_per_image,
+            special_tokens=special_tokens,
+        )
+
+        dataloader_kwargs = {
+            "num_workers": config.num_workers,
+            "persistent_workers": config.persistent_workers,
+            "pin_memory": config.pin_memory,
+            "prefetch_factor": config.prefetch_factor,
+            "batch_size": local_batch_size,
+            "collate_fn": collate_fn,
+        }
+
+        super().__init__(
+            mm_ds,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            **dataloader_kwargs,
+        )

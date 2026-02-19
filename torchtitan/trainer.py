@@ -247,7 +247,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         model_config = model_spec.model
         # set the model args from training job configs
         model_config.update_from_config(
-            job_config=config,
+            trainer_config=config,
         )
         self.model_config = model_config
 
@@ -376,7 +376,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # apply Tensor/Context/Expert Parallel, activation checkpointing, torch.compile, Data Parallel
             model = model_spec.parallelize_fn(
                 model,
-                parallel_dims,
+                parallel_dims=parallel_dims,
                 training=config.training,
                 model_converters=config.model_converters,
                 parallelism=config.parallelism,
@@ -429,13 +429,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.step = 0
         self.ntokens_seen = 0
 
-        self.checkpointer = CheckpointManager(
+        self.checkpointer = config.checkpoint.build(
             dataloader=self.dataloader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            checkpoint_config=config.checkpoint,
             sd_adapter=(
                 model_spec.state_dict_adapter(model_config, config.hf_assets_path)
                 if model_spec.state_dict_adapter

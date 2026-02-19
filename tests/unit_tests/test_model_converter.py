@@ -11,8 +11,8 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 
-def build_parallel_dims(job_config, world_size):
-    parallelism_config = job_config.parallelism
+def build_parallel_dims(trainer_config, world_size):
+    parallelism_config = trainer_config.parallelism
     parallel_dims = ParallelDims(
         dp_shard=parallelism_config.data_parallel_shard_degree,
         dp_replicate=parallelism_config.data_parallel_replicate_degree,

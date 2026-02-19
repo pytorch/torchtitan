@@ -240,12 +240,12 @@ class DeepSeekV3Model(Decoder):
         def update_from_config(
             self,
             *,
-            job_config,
+            trainer_config,
             **kwargs,
         ) -> None:
-            training = job_config.training
-            parallelism = job_config.parallelism
-            debug = job_config.debug
+            training = trainer_config.training
+            parallelism = trainer_config.parallelism
+            debug = trainer_config.debug
             seq_len = training.seq_len
             if seq_len > self.rope.max_seq_len:
                 logger.warning(
@@ -288,9 +288,7 @@ class DeepSeekV3Model(Decoder):
             if parallelism.expert_parallel_comm_backend == "deepep":
                 from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
 
-                self.layer.moe = _dc.replace(
-                    DeepEPMoE.Config(**_dc.asdict(self.layer.moe))
-                )
+                self.layer.moe = DeepEPMoE.Config(**_dc.asdict(self.layer.moe))
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

@@ -107,6 +107,7 @@ class Decoder(BaseModel):
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
+            # pyrefly: ignore [not-callable]
             layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()

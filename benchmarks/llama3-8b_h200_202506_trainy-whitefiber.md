@@ -25,7 +25,7 @@ Runs were invoked with the following, where `NUM_NODES` was `4` and `8`.
     --rdzv_backend c10d \
     --rdzv_endpoint "$MASTER_ADDR:29500" \
     torchtitan/train.py \
-    --job.config-file torchtitan/models/llama3/train_configs/llama3_8b.py \
+    --job.config-file torchtitan/models/llama3/train_configs/llama3_8b.toml \
     --metrics.enable_wandb \
     --training.local_batch_size=2 \
     --training.compile \

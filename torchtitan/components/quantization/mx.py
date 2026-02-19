@@ -82,6 +82,7 @@ class MXLinearConverter(Configurable):
         )
 
         torchao_config = TorchAOMXLinearConfig.from_recipe_name(config.recipe_name)
+        # pyrefly: ignore [missing-attribute]
         torchao_config.mxfp8_dim1_cast_kernel_choice = MXFP8Dim1CastKernelChoice[
             config.mxfp8_dim1_cast_kernel_choice.upper()
         ]

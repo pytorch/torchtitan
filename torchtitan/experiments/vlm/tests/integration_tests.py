@@ -23,10 +23,9 @@ def build_vlm_test_list() -> list[OverrideDefinitions]:
                 [
                     "--module vlm",
                     "--config vlm_debugmodel",
-                    "--dataloader.dataset cc12m-test",
                     "--parallelism.data_parallel_shard_degree 4",
-                    "--data.max_patches_per_image 1024",
-                    "--data.max_images_per_batch 64",
+                    "--dataloader.max_patches_per_image 1024",
+                    "--dataloader.max_images_per_batch 64",
                 ],
             ],
             "VLM FSDP",

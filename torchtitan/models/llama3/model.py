@@ -83,11 +83,11 @@ class Llama3Model(Decoder):
         def update_from_config(
             self,
             *,
-            job_config,
+            trainer_config,
             **kwargs,
         ) -> None:
-            training = job_config.training
-            parallelism = job_config.parallelism
+            training = trainer_config.training
+            parallelism = trainer_config.parallelism
             seq_len = training.seq_len
             if seq_len > self.rope.max_seq_len:
                 logger.warning(

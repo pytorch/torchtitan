@@ -157,10 +157,13 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 tokenizer = Tokenizer(bpe_model)
 
                 # Configure GPT-2 style components for proper space handling
+                # pyrefly: ignore [read-only]
                 tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
                     add_prefix_space=False
                 )
+                # pyrefly: ignore [read-only]
                 tokenizer.decoder = decoders.ByteLevel()
+                # pyrefly: ignore [read-only]
                 tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
 
                 return tokenizer

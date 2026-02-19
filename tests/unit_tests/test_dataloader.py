@@ -118,8 +118,8 @@ class TestParallelAwareDataloader(unittest.TestCase):
         # Verify that batch_size is the explicit one, not the config one
         self.assertEqual(dataloader.batch_size, explicit_batch_size)
 
-    def test_build_dataloader_with_job_config(self):
-        """Verify batch_size from job_config.training.local_batch_size is correctly used."""
+    def test_build_dataloader_with_trainer_config(self):
+        """Verify batch_size from training.local_batch_size is correctly used."""
         tokenizer = DummyTokenizer()
 
         dl_config = HuggingFaceTextDataLoader.Config(

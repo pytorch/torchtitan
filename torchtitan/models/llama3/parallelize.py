@@ -60,8 +60,8 @@ _op_sac_save_list = {
 
 def parallelize_llama(
     model: Llama3Model,
-    parallel_dims: ParallelDims,
     *,
+    parallel_dims: ParallelDims,
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
@@ -258,6 +258,7 @@ def apply_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 

@@ -57,6 +57,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         }
 
         # Adjustments for from_hf_map based on model architecture
+        # pyrefly: ignore [missing-attribute]
         if model_config.layer.attention.q_lora_rank != 0:
             self.from_hf_map.update(
                 {

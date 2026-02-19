@@ -5,6 +5,5 @@
 # LICENSE file in the root directory of this source tree.
 
 from .engine import ForgeEngine
-from .job_config import ForgeJobConfig
 
-__all__ = ["ForgeEngine", "ForgeJobConfig"]
+__all__ = ["ForgeEngine"]

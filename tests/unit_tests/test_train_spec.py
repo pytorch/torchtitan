@@ -22,7 +22,7 @@ class FakeModel(BaseModel):
     class Config(BaseModel.Config):
         hidden: int = 8
 
-        def update_from_config(self, *, job_config, **kwargs):
+        def update_from_config(self, *, trainer_config, **kwargs):
             pass
 
         def get_nparams_and_flops(self, model, seq_len):

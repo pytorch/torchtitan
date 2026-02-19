@@ -2,7 +2,7 @@
 
 Launch training job with the following command (or alternatively set configs in your config_registry function)
 ```
-./run_train.sh --profiling.enable_memory_snapshot --profiling.save_memory_snapshot_folder memory_snapshot
+MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --profiling.enable_memory_snapshot --profiling.save_memory_snapshot_folder memory_snapshot
 ```
 * `--profiling.enable_memory_snapshot`: to enable memory profiling
 * `--profiling.save_memory_snapshot_folder`: configures the folder which memory snapshots are dumped into (`./outputs/memory_snapshot/` by default)
@@ -83,7 +83,7 @@ NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
 **Example use case:**
 ```bash
 # Validate a 128-GPU configuration on a single GPU
-NGPU=128 COMM_MODE="fake_backend" MODEL=llama3 CONFIG=llama3_70b ./run_train.sh
+NGPU=128 COMM_MODE="fake_backend" MODULE=llama3 CONFIG=llama3_70b ./run_train.sh
 ```
 
 #### 2. `local_tensor` - Single-GPU Distributed Simulation
@@ -179,7 +179,7 @@ For multiple experimental runs with different parallelism configs, we need to us
 #### Creating a Seed Checkpoint
 
 ```bash
-NGPU=1 ./run_train.sh --checkpoint.enable --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
+NGPU=1 MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --checkpoint.enable --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
 ```
 
 #### Loading Seed Checkpoints for Debugging
@@ -187,7 +187,7 @@ NGPU=1 ./run_train.sh --checkpoint.enable --checkpoint.create_seed_checkpoint --
 When using seed checkpoints for debugging or validation purposes, you can enable the `load_only` configuration to load checkpoints without saving any new ones during training. This is particularly useful when you only want to verify model correctness or compare different configurations without cluttering your disk:
 
 ```bash
-./run_train.sh --checkpoint.enable --checkpoint.load_only
+MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --checkpoint.enable --checkpoint.load_only
 ```
 
 The `--checkpoint.load_only` flag prevents the training process from saving any checkpoints, allowing you to:

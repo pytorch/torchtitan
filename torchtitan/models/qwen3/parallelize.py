@@ -64,8 +64,8 @@ _op_sac_save_list = {
 
 def parallelize_qwen3(
     model: Qwen3Model,
-    parallel_dims: ParallelDims,
     *,
+    parallel_dims: ParallelDims,
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
@@ -298,6 +298,7 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             module=transformer_block,
             device_mesh=tp_mesh,
+            # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
 

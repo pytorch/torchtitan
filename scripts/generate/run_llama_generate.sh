@@ -12,7 +12,7 @@ set -e
 # LOG_RANK=0,1 NGPU=4 ./run_llama_generate.sh
 NGPU=${NGPU:-"1"}
 LOG_RANK=${LOG_RANK:-0}
-MODEL=${MODEL:-"llama3"}
+MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_debugmodel"}
 CHECKPOINT_DIR=${CHECKPOINT_DIR:-"./outputs/checkpoint/"}
 PROMPT=${PROMPT:-""}
@@ -39,7 +39,7 @@ torchrun --standalone \
 	--nproc_per_node="${NGPU}" \
 	--local-ranks-filter="${LOG_RANK}" \
 	-m scripts.generate.test_generate \
-	--module="${MODEL}" \
+	--module="${MODULE}" \
 	--config="${CONFIG}" \
 	--checkpoint="${CHECKPOINT_DIR}" \
 	--prompt="${PROMPT}" \

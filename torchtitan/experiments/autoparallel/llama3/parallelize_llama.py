@@ -25,8 +25,8 @@ from torchtitan.tools.logging import logger
 
 def parallelize_llama(
     model,
-    parallel_dims: ParallelDims,
     *,
+    parallel_dims: ParallelDims,
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
