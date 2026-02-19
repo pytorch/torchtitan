@@ -14,40 +14,22 @@ The integration consists of two main components:
 ## Quick Start
 ### Prerequisites
 
-1. Install PyTorch nightly & Monarch for torchtitan:
+1. Install Monarch:
 ```bash
-uv pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
 uv pip install torchmonarch
 ```
 
 
-2. Install vLLM from source [vllm-use-an-existing-pytorch-installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#use-an-existing-pytorch-installation):
-```bash
-# install PyTorch first, either from PyPI or from source
-git clone https://github.com/vllm-project/vllm.git
-cd vllm
-python use_existing_torch.py
-uv pip install -r requirements/build.txt
-uv pip install --no-build-isolation -e .
+2. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
+```
+# Install vllm with nightly torch
+uv pip install torch vllm xformers  --pre \
+--extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
+--index-strategy unsafe-best-match
 ```
 
+**NOTE:** The pre-built vLLM wheels are only compatible with CUDA 12.8, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu128, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
 
-NOTE: If `flash_attn_varlen_func` hits error "torch.AcceleratorError: CUDA error: the provided PTX was compiled with an unsupported toolchain" during forward path, this is due to GPU driver version is not compatible with vLLM/PyTorch compiled version. Use the following command to recompile vLLM.
-
-```bash
-# Set CUDA version environment variable
-export CUDA_HOME=/usr/local/cuda-12.4
-export PATH=/usr/local/cuda-12.4/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
-
-# Clean previous build
-rm -rf build dist *.egg-info
-uv pip uninstall -y vllm
-
-# Rebuild vLLM from source with CUDA 12.4
-uv pip install -e .
-
-```
 
 3. Download Qwen/Qwen3-0.6B checkpoint from HuggingFace and put into `torchtitan/experiments/rl/example_checkpoint` folder.
 ```bash
