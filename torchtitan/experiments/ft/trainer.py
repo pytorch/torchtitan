@@ -51,8 +51,6 @@ class FaultTolerantTrainer(Trainer):
         ), "model_spec must be set before creating Trainer"
         model_spec = config.model_spec
 
-        logger.info(f"Starting job: {config.job.description}")
-
         device_module, device_type = utils.device_module, utils.device_type
         # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
@@ -90,7 +88,7 @@ class FaultTolerantTrainer(Trainer):
 
         # build tokenizer
         self.tokenizer = (
-            config.tokenizer.build(tokenizer_path=config.job.hf_assets_path)
+            config.tokenizer.build(tokenizer_path=config.hf_assets_path)
             if config.tokenizer is not None
             else None
         )
@@ -135,7 +133,7 @@ class FaultTolerantTrainer(Trainer):
         # metrics logging (FT addition: ft_enable, ft_replica_id)
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
-            dump_folder=config.job.dump_folder,
+            dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             ft_enable=config.fault_tolerance.enable,
             ft_replica_id=config.fault_tolerance.replica_id,
@@ -210,13 +208,13 @@ class FaultTolerantTrainer(Trainer):
                 self.pp_has_last_stage,
             ) = model_spec.pipelining_fn(
                 model,
-                parallel_dims,
+                parallel_dims=parallel_dims,
                 training=config.training,
                 model_converters=config.model_converters,
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,
-                dump_folder=config.job.dump_folder,
+                dump_folder=config.dump_folder,
                 device=self.device,
                 model_config=model_config,
                 parallelize_fn=model_spec.parallelize_fn,
@@ -248,7 +246,7 @@ class FaultTolerantTrainer(Trainer):
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,
-                dump_folder=config.job.dump_folder,
+                dump_folder=config.dump_folder,
             )
 
             model.to_empty(device=init_device)
@@ -313,11 +311,11 @@ class FaultTolerantTrainer(Trainer):
             states={"train_state": self},
             checkpoint_config=config.checkpoint,
             sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.job.hf_assets_path)
+                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
                 if model_spec.state_dict_adapter
                 else None
             ),
-            base_folder=config.job.dump_folder,
+            base_folder=config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -388,7 +386,7 @@ class FaultTolerantTrainer(Trainer):
         dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
-            base_folder=config.job.dump_folder,
+            base_folder=config.dump_folder,
             ranks=global_ranks,
         )
 
@@ -532,13 +530,13 @@ class FaultTolerantTrainer(Trainer):
             maybe_enable_profiling(
                 config.profiling,
                 global_step=self.step,
-                base_folder=config.job.dump_folder,
+                base_folder=config.dump_folder,
                 leaf_folder=leaf_folder,
             ) as torch_profiler,
             maybe_enable_memory_snapshot(
                 config.profiling,
                 global_step=self.step,
-                base_folder=config.job.dump_folder,
+                base_folder=config.dump_folder,
                 leaf_folder=leaf_folder,
             ) as memory_profiler,
             # FT addition: maybe_semi_sync_training context manager

@@ -10,7 +10,6 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
     ActivationCheckpointConfig,
-    JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -22,10 +21,7 @@ from . import model_registry
 
 def qwen3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Qwen 3 debug training",
-            hf_assets_path="./tests/assets/tokenizer",
-        ),
+        hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
@@ -54,10 +50,7 @@ def qwen3_debugmodel() -> Trainer.Config:
 
 def qwen3_0_6b() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Qwen 3 0.6B training",
-            hf_assets_path="./assets/hf/Qwen3-0.6B",
-        ),
+        hf_assets_path="./assets/hf/Qwen3-0.6B",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("0.6B"),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -84,10 +77,7 @@ def qwen3_0_6b() -> Trainer.Config:
 
 def qwen3_1_7b() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Qwen 3 1.7B training",
-            hf_assets_path="./assets/hf/Qwen3-1.7B",
-        ),
+        hf_assets_path="./assets/hf/Qwen3-1.7B",
         model_spec=model_registry("1.7B"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
@@ -113,10 +103,7 @@ def qwen3_1_7b() -> Trainer.Config:
 
 def qwen3_32b() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Qwen3 32B training",
-            hf_assets_path="./assets/hf/Qwen3-32B",
-        ),
+        hf_assets_path="./assets/hf/Qwen3-32B",
         model_spec=model_registry("32B"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
@@ -142,10 +129,7 @@ def qwen3_32b() -> Trainer.Config:
 
 def qwen3_moe_debug() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Qwen 3 MoE debug model training",
-            hf_assets_path="./tests/assets/tokenizer",
-        ),
+        hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel_moe"),
         dataloader=HuggingFaceTextDataLoader.Config(

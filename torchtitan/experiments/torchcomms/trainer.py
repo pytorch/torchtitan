@@ -16,15 +16,15 @@ class TorchCommsTrainer(Trainer):
     parallel_dims: TorchCommsParallelDims
 
     def init_distributed(self) -> ParallelDims:
-        job_config = self.job_config
+        config = self.config
         dist_utils.init_distributed(
-            job_config.comm,
-            enable_cpu_backend=job_config.training.enable_cpu_offload,
-            base_folder=job_config.job.dump_folder,
+            config.comm,
+            enable_cpu_backend=config.training.enable_cpu_offload,
+            base_folder=config.dump_folder,
         )
 
         world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = job_config.parallelism
+        parallelism_config = config.parallelism
 
         return TorchCommsParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,

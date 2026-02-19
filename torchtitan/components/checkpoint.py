@@ -211,7 +211,7 @@ class CheckpointManager(Configurable):
         folder: str = "checkpoint"
         """
         The folder to store the checkpoints.
-        When enable is set to true, checkpoints will be in {--job.dump_folder}/{--checkpoint.folder}.
+        When enable is set to true, checkpoints will be in {--dump_folder}/{--checkpoint.folder}.
         """
 
         interval: int = 500
@@ -223,7 +223,7 @@ class CheckpointManager(Configurable):
         particularly useful for resuming training from a previous run with a
         different output path or when loading a checkpoint from a pre-trained model.
         If the checkpoint folder for the current run is not empty,
-        located at {--job.dump_folder}/{--checkpoint.folder}, this option will be ignored.
+        located at {--dump_folder}/{--checkpoint.folder}, this option will be ignored.
         This feature allows users to load an initial checkpoint from a different folder and
         continue training, saving new checkpoints to the specified folder without affecting
         the existing ones.

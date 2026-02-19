@@ -43,16 +43,14 @@ class Trainer(ForgeEngine):
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
     def __init__(self, job_config: TitanTrainer.Config):
-        logger.info(f"Starting job: {job_config.job.description}")
-
-        if job_config.job.print_config:
+        if job_config.debug.print_config:
             logger.info(f"Running with args: {job_config.to_dict()}")
 
         # NOTE: Here we are passing in JobConfig as a superset of ForgeJobConfig
         super().__init__(job_config)
 
         # build tokenizer
-        self.tokenizer = HuggingFaceTokenizer(job_config.job.hf_assets_path)
+        self.tokenizer = HuggingFaceTokenizer(job_config.hf_assets_path)
 
         # build dataloader
         self.dataloader = HuggingFaceTextDataLoader(
@@ -70,7 +68,7 @@ class Trainer(ForgeEngine):
         # metrics logging
         self.metrics_processor = job_config.metrics.build(
             parallel_dims=self.parallel_dims,
-            dump_folder=job_config.job.dump_folder,
+            dump_folder=job_config.dump_folder,
             pp_schedule=job_config.parallelism.pipeline_parallel_schedule,
             ft_enable=job_config.fault_tolerance.enable,
             ft_replica_id=job_config.fault_tolerance.replica_id,
@@ -340,12 +338,12 @@ class Trainer(ForgeEngine):
             maybe_enable_profiling(
                 job_config.profiling,
                 global_step=self.step,
-                base_folder=job_config.job.dump_folder,
+                base_folder=job_config.dump_folder,
             ) as torch_profiler,
             maybe_enable_memory_snapshot(
                 job_config.profiling,
                 global_step=self.step,
-                base_folder=job_config.job.dump_folder,
+                base_folder=job_config.dump_folder,
             ) as memory_profiler,
         ):
             data_iterator = self.batch_generator(self.dataloader)

@@ -11,7 +11,6 @@ including images and text. Images are interleaved with text at native aspect rat
 It supports both streaming and non-streaming datasets from HuggingFace.
 """
 
-from dataclasses import asdict
 from typing import Any, Callable
 
 import torch
@@ -21,9 +20,9 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
-from torchtitan.config import JobConfig
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
+from torchtitan.trainer import Trainer
 
 from ..model.args import SpecialTokens
 from .mm_collator_nld import MultiModalCollatorNLD
@@ -396,7 +395,7 @@ def build_mm_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: HuggingFaceTokenizer,
-    job_config: JobConfig,
+    job_config: Trainer.Config,
     infinite: bool = True,
     **kwargs,
 ) -> ParallelAwareDataloader:
@@ -451,8 +450,12 @@ def build_mm_dataloader(
         special_tokens=special_tokens,
     )
 
+    dl_config = job_config.dataloader
     dataloader_kwargs = {
-        **asdict(job_config.training.dataloader),
+        "num_workers": getattr(dl_config, "num_workers", 0),
+        "persistent_workers": getattr(dl_config, "persistent_workers", False),
+        "pin_memory": getattr(dl_config, "pin_memory", False),
+        "prefetch_factor": getattr(dl_config, "prefetch_factor", None),
         "batch_size": batch_size,
         "collate_fn": collate_fn,
     }

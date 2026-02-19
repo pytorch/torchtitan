@@ -15,7 +15,6 @@ from torchtitan.config import (
     CommConfig,
     CompileConfig,
     DebugConfig,
-    JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -26,7 +25,8 @@ from torchtitan.protocols.model_spec import ModelSpec
 # Parity w/ TorchTitan commit: 8ec37d2bca7ac9d3f7517ba70ac10e75e22a7bcb
 @dataclass
 class ForgeJobConfig:
-    job: JobConfig = field(default_factory=JobConfig)
+    hf_assets_path: str = "./tests/assets/tokenizer"
+    dump_folder: str = "./outputs"
     model_spec: ModelSpec = field(default_factory=ModelSpec)
     optimizer: OptimizersContainer.Config = field(
         default_factory=OptimizersContainer.Config

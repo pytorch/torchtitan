@@ -39,7 +39,7 @@ torchrun --standalone \
 	--nproc_per_node="${NGPU}" \
 	--local-ranks-filter="${LOG_RANK}" \
 	-m scripts.generate.test_generate \
-	--model="${MODEL}" \
+	--module="${MODEL}" \
 	--config="${CONFIG}" \
 	--checkpoint="${CHECKPOINT_DIR}" \
 	--prompt="${PROMPT}" \

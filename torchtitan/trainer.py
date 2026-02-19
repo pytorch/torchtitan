@@ -34,7 +34,6 @@ from torchtitan.config.configs import (
     CommConfig,
     CompileConfig,
     DebugConfig,
-    JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -63,7 +62,17 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # NOTE: model_spec is suppressed from tyro CLI parsing and is always
         # set programmatically by the model registry before Trainer construction.
         model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
-        job: JobConfig = field(default_factory=JobConfig)
+
+        hf_assets_path: str = "./tests/assets/tokenizer"
+        """
+        Path to HF assets folder. This folder contains local copies of Hugging Face assets,
+        including model weights in .safetensors format, the model.safetensor.index.json file
+        (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
+        """
+
+        dump_folder: str = "./outputs"
+        """Folder to dump job outputs"""
+
         profiling: ProfilingConfig = field(default_factory=ProfilingConfig)
         metrics: MetricsProcessor.Config = field(
             default_factory=MetricsProcessor.Config
@@ -125,14 +134,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return d
 
         def maybe_log(self) -> None:
-            if self.job.print_config:
+            if self.debug.print_config:
                 logger.info(
                     f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
                 )
 
-            if self.job.save_config_file is not None:
+            if self.debug.save_config_file is not None:
                 config_file = os.path.join(
-                    self.job.dump_folder, self.job.save_config_file
+                    self.dump_folder, self.debug.save_config_file
                 )
                 if torch.distributed.is_initialized():
                     if torch.distributed.get_rank() == 0:
@@ -186,8 +195,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         ), "model_spec must be set before creating Trainer"
         model_spec = config.model_spec
 
-        logger.info(f"Starting job: {config.job.description}")
-
         device_module, device_type = utils.device_module, utils.device_type
         # pyrefly: ignore [read-only]
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
@@ -222,7 +229,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # build tokenizer
         self.tokenizer = (
-            config.tokenizer.build(tokenizer_path=config.job.hf_assets_path)
+            config.tokenizer.build(tokenizer_path=config.hf_assets_path)
             if config.tokenizer is not None
             else None
         )
@@ -267,7 +274,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # metrics logging
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
-            dump_folder=config.job.dump_folder,
+            dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             config_dict=config.to_dict(),
         )
@@ -337,13 +344,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.pp_has_last_stage,
             ) = model_spec.pipelining_fn(
                 model,
-                parallel_dims,
+                parallel_dims=parallel_dims,
                 training=config.training,
                 model_converters=config.model_converters,
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,
-                dump_folder=config.job.dump_folder,
+                dump_folder=config.dump_folder,
                 device=self.device,
                 model_config=model_config,
                 parallelize_fn=model_spec.parallelize_fn,
@@ -375,7 +382,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 parallelism=config.parallelism,
                 compile_config=config.compile,
                 ac_config=config.activation_checkpoint,
-                dump_folder=config.job.dump_folder,
+                dump_folder=config.dump_folder,
             )
 
             model.to_empty(device=init_device)
@@ -430,11 +437,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             states={"train_state": self},
             checkpoint_config=config.checkpoint,
             sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.job.hf_assets_path)
+                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
                 if model_spec.state_dict_adapter
                 else None
             ),
-            base_folder=config.job.dump_folder,
+            base_folder=config.dump_folder,
         )
 
         loss_parallel_enabled = (
@@ -491,7 +498,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         world_size = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
-            base_folder=config.job.dump_folder,
+            base_folder=config.dump_folder,
         )
 
         parallelism_config = config.parallelism
@@ -786,12 +793,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             maybe_enable_profiling(
                 config.profiling,
                 global_step=self.step,
-                base_folder=config.job.dump_folder,
+                base_folder=config.dump_folder,
             ) as torch_profiler,
             maybe_enable_memory_snapshot(
                 config.profiling,
                 global_step=self.step,
-                base_folder=config.job.dump_folder,
+                base_folder=config.dump_folder,
             ) as memory_profiler,
         ):
             data_iterator = self.batch_generator(self.dataloader)

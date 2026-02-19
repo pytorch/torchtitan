@@ -26,6 +26,7 @@ class Encoder:
     """Whether to use integration test mode, which will randomly initialize the encoder and use a dummy tokenizer"""
 
 
+# TODO: maybe consolidate with FluxValidator.Config
 @dataclass(kw_only=True, slots=True)
 class Validation:
     enable_classifier_free_guidance: bool = False

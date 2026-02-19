@@ -10,12 +10,12 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
     ActivationCheckpointConfig,
+    DebugConfig,
     ParallelismConfig,
     TrainingConfig,
 )
 from torchtitan.experiments.transformers_modeling_backend.configs import (
     TransformersBackendConfig,
-    TransformersBackendJobConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.tools.profiling import ProfilingConfig
@@ -25,12 +25,9 @@ from . import model_registry
 
 def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
     return TransformersBackendConfig(
-        job=TransformersBackendJobConfig(
-            description="Qwen 3 debug training",
-            hf_assets_path="./tests/assets/tokenizer",
-            hf_model="Qwen/Qwen3-4B-Instruct-2507",
-            print_config=True,
-        ),
+        hf_assets_path="./tests/assets/tokenizer",
+        hf_model="Qwen/Qwen3-4B-Instruct-2507",
+        debug=DebugConfig(print_config=True),
         model_spec=model_registry("debugmodel"),
         profiling=ProfilingConfig(profile_freq=5),
         optimizer=OptimizersContainer.Config(lr=8e-4),
@@ -61,11 +58,8 @@ def transformers_modeling_backend_debugmodel() -> TransformersBackendConfig:
 
 def transformers_modeling_backend_full() -> TransformersBackendConfig:
     return TransformersBackendConfig(
-        job=TransformersBackendJobConfig(
-            description="Qwen 3 full training",
-            hf_model="Qwen/Qwen3-4B-Instruct-2507",
-            print_config=True,
-        ),
+        hf_model="Qwen/Qwen3-4B-Instruct-2507",
+        debug=DebugConfig(print_config=True),
         model_spec=model_registry("full"),
         profiling=ProfilingConfig(profile_freq=5),
         optimizer=OptimizersContainer.Config(lr=8e-4),

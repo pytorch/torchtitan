@@ -39,7 +39,7 @@ def inference(config: FluxTrainer.Config):
 
     trainer.checkpointer.load(step=config.checkpoint.load_step)
     t5_tokenizer, clip_tokenizer = build_flux_tokenizer(
-        config.encoder, config.job.hf_assets_path
+        config.encoder, config.hf_assets_path
     )
 
     if global_rank == 0:
@@ -51,7 +51,7 @@ def inference(config: FluxTrainer.Config):
         bs = config.inference.local_batch_size
 
         output_dir = os.path.join(
-            config.job.dump_folder,
+            config.dump_folder,
             # pyrefly: ignore [missing-attribute]
             config.inference.save_img_folder,
         )

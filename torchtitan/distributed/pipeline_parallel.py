@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
-
 import math
 import os
 from typing import Callable
@@ -13,7 +12,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
-
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
@@ -49,8 +47,8 @@ __all__ = [
 
 def pipeline_llm(
     model: nn.Module,
-    parallel_dims: ParallelDims,
     *,
+    parallel_dims: ParallelDims,
     training: TrainingConfig,
     model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,

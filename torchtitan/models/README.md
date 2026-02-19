@@ -50,7 +50,7 @@ The folder should be organized as follows
   - Define one function for each training configuration (e.g. `llama3_debugmodel`, `llama3_8b`, `llama3_70b`).
   - Each function returns a `Trainer.Config` (or subclass) instance with all training settings.
   - Functions can derive from each other via mutation for variants (e.g. flex_attn, float8).
-  - These are selected at runtime via `--model <model_name> --config <function_name>`.
+  - These are selected at runtime via `--module <model_name> --config <function_name>`.
 - `README.md`
   - Include [instructions](/README.md#downloading-a-tokenizer) to download tokenizers / encoders.
   - Include instructions to download model checkpoints for continued pretraining or post training.

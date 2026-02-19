@@ -9,8 +9,8 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
 - Config: `torchtitan/experiments/transformers_modeling_backend/config_registry.py`
 ```diff
 ...
-- --model llama3
-+ --model transformers_modeling_backend
+- --module llama3
++ --module transformers_modeling_backend
 --config transformers_modeling_backend_debugmodel
 ...
 ```

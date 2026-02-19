@@ -21,7 +21,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                 ],
             ],
@@ -31,7 +31,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes=auto_bucketing",
@@ -43,7 +43,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--compile.backend aot_eager",
                     "--compile.graph_passes=transformer_block_bucketing",
@@ -55,7 +55,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--activation_checkpoint.mode selective",
                     "--activation_checkpoint.selective_ac_option op",
@@ -67,7 +67,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--activation_checkpoint.mode full",
                 ],
@@ -78,7 +78,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -90,7 +90,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.enable_async_tensor_parallel",
@@ -103,12 +103,12 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                 ],
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                     "--training.steps 20",
@@ -120,7 +120,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
@@ -128,7 +128,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                 ],
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--training.steps 20",
                     "--checkpoint.enable",
@@ -144,7 +144,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 1",
                     "--parallelism.data_parallel_replicate_degree 4",
@@ -157,7 +157,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
@@ -170,7 +170,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
@@ -184,7 +184,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -197,7 +197,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
@@ -211,7 +211,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -225,7 +225,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                     "--training.steps 10",
@@ -233,7 +233,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
                 # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
                 # excluded during loading to avoid errors caused by mismatched dp_degree.
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
@@ -242,7 +242,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
                 ],
                 # load at [tp:4].
                 [
-                    "--model simple_fsdp.llama3",
+                    "--module simple_fsdp.llama3",
                     "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
@@ -257,7 +257,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.deepseek_v3",
+                    "--module simple_fsdp.deepseek_v3",
                     "--config simple_fsdp_deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
@@ -270,7 +270,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.deepseek_v3",
+                    "--module simple_fsdp.deepseek_v3",
                     "--config simple_fsdp_deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -285,7 +285,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.deepseek_v3",
+                    "--module simple_fsdp.deepseek_v3",
                     "--config simple_fsdp_deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -300,7 +300,7 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.deepseek_v3",
+                    "--module simple_fsdp.deepseek_v3",
                     "--config simple_fsdp_deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.context_parallel_degree 2",

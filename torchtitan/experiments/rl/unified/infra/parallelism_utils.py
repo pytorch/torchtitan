@@ -117,7 +117,7 @@ def create_job_config_from_vllm_config(
     # Create JobConfig with defaults
     job_config = JobConfig()
 
-    job_config.job.hf_assets_path = hf_assets_path
+    job_config.hf_assets_path = hf_assets_path
 
     parallel_config = vllm_config.parallel_config
     job_config.parallelism = ParallelismConfig(

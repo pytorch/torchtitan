@@ -32,7 +32,7 @@ def _run_cmd(cmd):
 def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 

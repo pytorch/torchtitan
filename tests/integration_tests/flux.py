@@ -23,7 +23,7 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model flux",
+                    "--module flux",
                     "--config flux_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
@@ -50,7 +50,7 @@ _TEST_SUITES_FUNCTION = {
 def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
 
     # Random init encoder for offline testing
     random_init_encoder_arg = "--encoder.test_mode --dataloader.encoder.test_mode"
@@ -60,7 +60,7 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     t5_encoder_version_arg = (
         "--encoder.t5_encoder tests/assets/flux_test_encoders/t5-v1_1-xxl/"
     )
-    hf_assets_path_arg = "--job.hf_assets_path tests/assets/tokenizer"
+    hf_assets_path_arg = "--hf_assets_path tests/assets/tokenizer"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 

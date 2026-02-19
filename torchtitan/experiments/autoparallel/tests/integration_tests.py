@@ -21,7 +21,7 @@ def build_autoparallel_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model autoparallel.llama3",
+                    "--module autoparallel.llama3",
                     "--config autoparallel_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",

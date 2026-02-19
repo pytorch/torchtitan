@@ -18,6 +18,6 @@ CONFIG=${CONFIG:-"flux_debugmodel"}
 PYTORCH_ALLOC_CONF="expandable_segments:True" \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
--m torchtitan.models.flux.inference.infer --model ${MODEL} --config ${CONFIG} \
+-m torchtitan.models.flux.inference.infer --module ${MODEL} --config ${CONFIG} \
 --checkpoint.enable \
 --checkpoint.exclude_from_loading=lr_scheduler,dataloader,optimizer "$@"

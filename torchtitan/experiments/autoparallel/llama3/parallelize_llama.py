@@ -7,13 +7,10 @@
 import time
 
 import torch
-
 from autoparallel.api import AutoParallel
 from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
-
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
-
 from torchtitan.config import (
     ActivationCheckpointConfig,
     ParallelismConfig,
@@ -23,7 +20,6 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
 from torchtitan.protocols.model_converter import ModelConvertersContainer
-
 from torchtitan.tools.logging import logger
 
 
@@ -73,8 +69,7 @@ def parallelize_llama(
         return (
             torch.randint(
                 0,
-                # job_config.training.vocab_size,
-                model.vocab_size,
+                model.config.vocab_size,
                 (global_batch_size, training.seq_len),
                 device=torch.device("cuda"),
             ),

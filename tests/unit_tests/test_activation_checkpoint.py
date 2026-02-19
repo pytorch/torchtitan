@@ -9,7 +9,6 @@ import unittest
 import torch
 import torch.nn as nn
 from torch.utils.flop_counter import FlopCounterMode
-
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
@@ -28,7 +27,7 @@ _op_sac_save_list = {
     # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
-    torch.ops.torch_attn._varlen_attn,
+    torch.ops.torch_attn._varlen_attn.default,
 }
 
 

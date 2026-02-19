@@ -78,8 +78,6 @@ class Llama3Model(Decoder):
         dim: int = 4096
         n_layers: int = 32
         vocab_size: int = 128256
-
-        # Sub-component configs
         layer: TransformerBlock.Config
 
         def update_from_config(

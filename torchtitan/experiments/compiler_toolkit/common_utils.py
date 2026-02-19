@@ -11,14 +11,14 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate
 from torch.utils._pytree import register_pytree_node, tree_map
-
-from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
+from torchtitan.trainer import Trainer
+
 
 @contextmanager
-def disable_compile(job_config: JobConfig):
+def disable_compile(job_config: Trainer.Config):
     """Context manager to temporarily disable compilation."""
     original_value = job_config.compile.enable
     job_config.compile.enable = False

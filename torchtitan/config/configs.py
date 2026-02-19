@@ -24,33 +24,6 @@ from typing import Literal
 
 
 @dataclass(kw_only=True, slots=True)
-class DataLoaderConfig:
-    """
-    Configuration for PyTorch DataLoader settings.
-
-    These settings are passed directly to StatefulDataLoader.
-
-    Note:
-        persistent_workers and prefetch_factor are only valid if num_workers > 0.
-    """
-
-    num_workers: int = 0
-    """Number of worker processes for data loading."""
-
-    persistent_workers: bool = False
-    """Keep workers alive between epochs. Only valid when num_workers > 0."""
-
-    pin_memory: bool = False
-    """Copy tensors to CUDA pinned memory before returning them."""
-
-    prefetch_factor: int | None = None
-    """
-    Number of batches loaded in advance by each worker. Only valid when num_workers > 0.
-    Default is 2 when num_workers > 0, otherwise None.
-    """
-
-
-@dataclass(kw_only=True, slots=True)
 class TrainingConfig:
     local_batch_size: int = 8
     """Local batch size (i.e., per-device batch size)"""
@@ -105,31 +78,6 @@ class TrainingConfig:
     Note that you may want to lower the training steps to avoid generating too
     many temporary files.
     """
-
-    dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
-    """DataLoader configuration"""
-
-
-@dataclass(kw_only=True, slots=True)
-class JobConfig:
-    hf_assets_path: str = "./tests/assets/tokenizer"
-    """
-    Path to HF assets folder. This folder contains local copies of Hugging Face assets,
-    including model weights in .safetensors format, the model.safetensor.index.json file
-    (fqn to file mapping), the config.json file, generation_config.json, and tokenizer files.
-    """
-
-    dump_folder: str = "./outputs"
-    """Folder to dump job outputs"""
-
-    description: str = "no description"
-    """Description of the job"""
-
-    print_config: bool = False
-    """Print the job configs to terminal"""
-
-    save_config_file: str | None = None
-    """Path to save job config into"""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -352,7 +300,7 @@ class ActivationCheckpointConfig:
     """
     This dumps out a SVG visualization of the expected runtime vs. activation
     memory tradeoffs for all memory budget values from 0 to 1 in increments of
-    0.05 in {--job.dump_folder}/memory_budget_pareto folder. See an example here:
+    0.05 in {--dump_folder}/memory_budget_pareto folder. See an example here:
     https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
     """
 
@@ -438,3 +386,9 @@ class DebugConfig:
 
     moe_force_load_balance: bool = False
     """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
+
+    print_config: bool = False
+    """Print the job configs to terminal"""
+
+    save_config_file: str | None = None
+    """Path to save job config into"""

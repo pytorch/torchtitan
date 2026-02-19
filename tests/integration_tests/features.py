@@ -323,7 +323,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model llama3 --config llama3_debugmodel_flex_attn",
+                    "--modulellama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode='full'",
                 ]
@@ -335,7 +335,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model llama3 --config llama3_debugmodel_flex_attn",
+                    "--modulellama3 --config llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
                     "--activation_checkpoint.selective_ac_option=op",
@@ -348,7 +348,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model llama3 --config llama3_debugmodel_varlen_attn",
+                    "--modulellama3 --config llama3_debugmodel_varlen_attn",
                     "--parallelism.data_parallel_shard_degree=4",
                     "--activation_checkpoint.mode=selective",
                     "--activation_checkpoint.selective_ac_option=op",
@@ -443,14 +443,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model llama3 --config llama3_debugmodel_opt_in_bwd",
+                    "--modulellama3 --config llama3_debugmodel_opt_in_bwd",
                     "--checkpoint.enable",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
                     "--training.enable_cpu_offload",
                 ],
                 [
-                    "--model llama3 --config llama3_debugmodel_opt_in_bwd",
+                    "--modulellama3 --config llama3_debugmodel_opt_in_bwd",
                     "--parallelism.tensor_parallel_degree=2",
                     "--parallelism.context_parallel_degree=2",
                     "--parallelism.data_parallel_replicate_degree=2",
@@ -505,7 +505,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model llama3 --config llama3_debugmodel_float8_emulate",
+                    "--modulellama3 --config llama3_debugmodel_float8_emulate",
                 ],
             ],
             "Float8 emulation test",
@@ -544,11 +544,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--training.dataloader.num_workers",
+                    "--dataloader.num_workers",
                     "2",
-                    "--training.dataloader.pin_memory",
-                    "--training.dataloader.persistent_workers",
-                    "--training.dataloader.prefetch_factor",
+                    "--dataloader.pin_memory",
+                    "--dataloader.persistent_workers",
+                    "--dataloader.prefetch_factor",
                     "4",
                 ],
             ],

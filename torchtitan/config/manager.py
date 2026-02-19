@@ -18,12 +18,12 @@ from torchtitan.tools.logging import logger
 
 class ConfigManager:
     """
-    Parses, merges, and validates a config from --model/--config and CLI sources.
+    Parses, merges, and validates a config from --module/--config and CLI sources.
 
     Configuration precedence:
         CLI args > config_registry function defaults
 
-    --model selects the model (e.g., llama3, deepseek_v3).
+    --module selects the module (e.g., llama3, deepseek_v3).
     --config selects a config_registry function (e.g., llama3_debugmodel).
     CLI arguments use the format <section>.<key> to override config values.
     """
@@ -44,12 +44,12 @@ class ConfigManager:
         return self.config
 
     def _load_config(self, args: list[str]) -> tuple[object, list[str]]:
-        """Parse --model and --config from args, load config from config_registry.
+        """Parse --module and --config from args, load config from config_registry.
 
-        Both --model and --config are required.
-        Returns (loaded_config, filtered_args) with --model/--config stripped.
+        Both --module and --config are required.
+        Returns (loaded_config, filtered_args) with --module/--config stripped.
         """
-        model_name = None
+        module_name = None
         config_name = None
         filtered_args = []
 
@@ -57,15 +57,15 @@ class ConfigManager:
         while i < len(args):
             arg = args[i]
 
-            # Handle --model=X and --model X forms
-            if arg.startswith("--model="):
-                model_name = arg.split("=", 1)[1]
-            elif arg == "--model":
+            # Handle --module=X and --module X forms
+            if arg.startswith("--module="):
+                module_name = arg.split("=", 1)[1]
+            elif arg == "--module":
                 if i + 1 < len(args):
-                    model_name = args[i + 1]
+                    module_name = args[i + 1]
                     i += 1
                 else:
-                    raise ValueError("--model requires a value")
+                    raise ValueError("--module requires a value")
             # Handle --config=X and --config X forms
             elif arg.startswith("--config="):
                 config_name = arg.split("=", 1)[1]
@@ -80,31 +80,31 @@ class ConfigManager:
 
             i += 1
 
-        if model_name is None:
+        if module_name is None:
             raise ValueError(
-                "--model is required. Example: --model llama3 --config llama3_debugmodel"
+                "--module is required. Example: --module llama3 --config llama3_debugmodel"
             )
         if config_name is None:
             raise ValueError(
-                "--config is required. Example: --model llama3 --config llama3_debugmodel"
+                "--config is required. Example: --module llama3 --config llama3_debugmodel"
             )
 
         from torchtitan.experiments import _supported_experiments
 
-        # Validate model name
+        # Validate module name
         from torchtitan.models import _supported_models
 
         all_supported = _supported_models | _supported_experiments
-        if model_name not in all_supported:
+        if module_name not in all_supported:
             raise ValueError(
-                f"Unknown model '{model_name}'. "
-                f"Supported models: {sorted(all_supported)}"
+                f"Unknown module '{module_name}'. "
+                f"Supported modules: {sorted(all_supported)}"
             )
 
         # Import config_registry module (search models first, then experiments)
         module = None
         for prefix in ("torchtitan.models", "torchtitan.experiments"):
-            module_path = f"{prefix}.{model_name}.config_registry"
+            module_path = f"{prefix}.{module_name}.config_registry"
             try:
                 module = importlib.import_module(module_path)
                 break
@@ -112,7 +112,7 @@ class ConfigManager:
                 continue
         if module is None:
             raise ImportError(
-                f"Cannot import config_registry for model '{model_name}' "
+                f"Cannot import config_registry for module '{module_name}' "
                 f"from torchtitan.models or torchtitan.experiments"
             )
 
@@ -176,22 +176,22 @@ class ConfigManager:
     def _validate_config(self) -> None:
         # TODO: temporary mitigation of BC breaking change in hf_assets_path
         #       tokenizer default path, need to remove later
-        if not os.path.exists(self.config.job.hf_assets_path):
+        if not os.path.exists(self.config.hf_assets_path):
             logger.warning(
-                f"HF assets path {self.config.job.hf_assets_path} does not exist!"
+                f"HF assets path {self.config.hf_assets_path} does not exist!"
             )
             old_tokenizer_path = (
                 "torchtitan/datasets/tokenizer/original/tokenizer.model"
             )
             if os.path.exists(old_tokenizer_path):
-                self.config.job.hf_assets_path = old_tokenizer_path
+                self.config.hf_assets_path = old_tokenizer_path
                 logger.warning(
                     f"Temporarily switching to previous default tokenizer path {old_tokenizer_path}. "
                     "Please download the new tokenizer files (python scripts/download_hf_assets.py) and update your config."
                 )
         else:
             # Check if we are using tokenizer.model, if so then we need to alert users to redownload the tokenizer
-            if self.config.job.hf_assets_path.endswith("tokenizer.model"):
+            if self.config.hf_assets_path.endswith("tokenizer.model"):
                 raise Exception(
                     "You are using the old tokenizer.model, please redownload the tokenizer ",
                     "(python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer) ",
@@ -224,10 +224,10 @@ if __name__ == "__main__":
     #
     # Examples:
     #   Parse and print a config with CLI arguments:
-    #     > python -m torchtitan.config.manager --model llama3 --config llama3_debugmodel
+    #     > python -m torchtitan.config.manager --module llama3 --config llama3_debugmodel
     #
     #   Show help message:
-    #     > python -m torchtitan.config.manager --model llama3 --config llama3_debugmodel --help
+    #     > python -m torchtitan.config.manager --module llama3 --config llama3_debugmodel --help
     #
     # -----------------------------------------------------------------------------
 

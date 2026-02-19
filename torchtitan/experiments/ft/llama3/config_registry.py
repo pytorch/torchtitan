@@ -8,12 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.validate import Validator
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CommConfig,
-    JobConfig,
-    TrainingConfig,
-)
+from torchtitan.config import ActivationCheckpointConfig, CommConfig, TrainingConfig
 from torchtitan.experiments.ft.config.job_config import FaultTolerance
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
 from torchtitan.experiments.ft.trainer import FaultTolerantTrainer
@@ -25,10 +20,7 @@ from . import model_registry
 
 def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
     return FaultTolerantTrainer.Config(
-        job=JobConfig(
-            description="Llama 3 fault-tolerant debug training",
-            hf_assets_path="./tests/assets/tokenizer",
-        ),
+        hf_assets_path="./tests/assets/tokenizer",
         profiling=ProfilingConfig(
             enable_profiling=True,
             profile_freq=10,

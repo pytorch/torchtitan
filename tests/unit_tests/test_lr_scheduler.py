@@ -41,7 +41,7 @@ class TestLRScheduler(unittest.TestCase):
     ):
         # Create a job config with the specified parameters
         args = [
-            "--model",
+            "--module",
             "llama3",
             "--config",
             "llama3_debugmodel",

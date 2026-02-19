@@ -9,7 +9,6 @@ from typing import cast, Optional
 import torch
 import torch.nn as nn
 from torch import Tensor
-
 from torch.distributed.pipelining.schedules import (
     _Action,
     _PipelineContext,
@@ -22,8 +21,9 @@ from torch.profiler import record_function
 
 from torchtitan.config import ActivationCheckpointConfig, ParallelismConfig
 from torchtitan.distributed.expert_parallel import BaseExpertParallel
-
 from torchtitan.tools.utils import get_device_info
+
+from .parallel_dims import ParallelDims
 
 """
 Below are optimizations related to pipeline parallelism with expert parallelism
@@ -34,7 +34,7 @@ def get_dual_pipe_v_flag(
     *,
     parallelism: ParallelismConfig,
     ac_config: ActivationCheckpointConfig,
-    parallel_dims,
+    parallel_dims: ParallelDims,
 ) -> bool:
     """
     Determine if DualPipeV should be enabled based on config and

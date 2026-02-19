@@ -13,60 +13,60 @@ from torchtitan.trainer import Trainer
 
 class TestJobConfig(unittest.TestCase):
     def test_model_config_args(self):
-        """--model and --config together load the correct config."""
+        """--module and --config together load the correct config."""
         config_manager = ConfigManager()
         config = config_manager.parse_args(
-            ["--model", "llama3", "--config", "llama3_debugmodel"]
+            ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
         assert config.model_spec.name == "llama3"
         assert config.model_spec.flavor == "debugmodel"
         assert config.training.steps == 10
 
     def test_model_config_args_equals_form(self):
-        """--model=X --config=Y form works."""
+        """--module=X --config=Y form works."""
         config_manager = ConfigManager()
         config = config_manager.parse_args(
-            ["--model=llama3", "--config=llama3_debugmodel"]
+            ["--module=llama3", "--config=llama3_debugmodel"]
         )
         assert config.model_spec.name == "llama3"
         assert config.model_spec.flavor == "debugmodel"
 
     def test_model_without_config_errors(self):
-        """--model alone raises ValueError."""
+        """--module alone raises ValueError."""
         config_manager = ConfigManager()
         with pytest.raises(ValueError, match="--config is required"):
-            config_manager.parse_args(["--model", "llama3"])
+            config_manager.parse_args(["--module", "llama3"])
 
     def test_config_without_model_errors(self):
         """--config alone raises ValueError."""
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="--model is required"):
+        with pytest.raises(ValueError, match="--module is required"):
             config_manager.parse_args(["--config", "llama3_debugmodel"])
 
     def test_missing_both_errors(self):
-        """No --model or --config raises ValueError."""
+        """No --module or --config raises ValueError."""
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="--model is required"):
+        with pytest.raises(ValueError, match="--module is required"):
             config_manager.parse_args([])
 
     def test_invalid_model_errors(self):
-        """--model with unknown model name raises ValueError."""
+        """--module with unknown module name raises ValueError."""
         config_manager = ConfigManager()
-        with pytest.raises(ValueError, match="Unknown model"):
-            config_manager.parse_args(["--model", "nonexistent", "--config", "foo"])
+        with pytest.raises(ValueError, match="Unknown module"):
+            config_manager.parse_args(["--module", "nonexistent", "--config", "foo"])
 
     def test_invalid_config_errors(self):
         """--config with unknown function name lists available functions."""
         config_manager = ConfigManager()
         with pytest.raises(ValueError, match="Available config functions"):
-            config_manager.parse_args(["--model", "llama3", "--config", "nonexistent"])
+            config_manager.parse_args(["--module", "llama3", "--config", "nonexistent"])
 
     def test_cli_overrides(self):
         """CLI args override config defaults."""
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
-                "--model",
+                "--module",
                 "llama3",
                 "--config",
                 "llama3_debugmodel",
@@ -81,21 +81,21 @@ class TestJobConfig(unittest.TestCase):
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
-                "--model",
+                "--module",
                 "llama3",
                 "--config",
                 "llama3_debugmodel",
-                "--job.dump_folder",
+                "--dump_folder",
                 "/tmp/test_tt/",
             ]
         )
-        assert config.job.dump_folder == "/tmp/test_tt/"
+        assert config.dump_folder == "/tmp/test_tt/"
 
     def test_parse_module_fqns_per_model_part(self):
         """module_fqns_per_model_part defaults to None."""
         config_manager = ConfigManager()
         config = config_manager.parse_args(
-            ["--model", "llama3", "--config", "llama3_debugmodel"]
+            ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
         assert config.parallelism.module_fqns_per_model_part is None
 
@@ -103,14 +103,14 @@ class TestJobConfig(unittest.TestCase):
         """exclude_from_loading defaults to [] and can be overridden."""
         config_manager = ConfigManager()
         config = config_manager.parse_args(
-            ["--model", "llama3", "--config", "llama3_debugmodel"]
+            ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
         assert config.checkpoint.exclude_from_loading == []
 
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             [
-                "--model",
+                "--module",
                 "llama3",
                 "--config",
                 "llama3_debugmodel",
@@ -126,7 +126,7 @@ class TestJobConfig(unittest.TestCase):
     def test_job_config_model_converters_default(self):
         config_manager = ConfigManager()
         config = config_manager.parse_args(
-            ["--model", "llama3", "--config", "llama3_debugmodel"]
+            ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
         assert config.model_converters.converters == []
 
@@ -161,19 +161,19 @@ class TestJobConfig(unittest.TestCase):
         assert hasattr(merged, "model_spec")
 
     def test_flux_config_via_cli(self):
-        """Test that --model flux --config flux_debugmodel works."""
+        """Test that --module flux --config flux_debugmodel works."""
         config_manager = ConfigManager()
         config = config_manager.parse_args(
-            ["--model", "flux", "--config", "flux_debugmodel"]
+            ["--module", "flux", "--config", "flux_debugmodel"]
         )
         assert config.model_spec.name == "flux"
         assert hasattr(config, "encoder")
 
     def test_deepseek_config(self):
-        """Test that --model deepseek_v3 --config deepseek_v3_debugmodel works."""
+        """Test that --module deepseek_v3 --config deepseek_v3_debugmodel works."""
         config_manager = ConfigManager()
         config = config_manager.parse_args(
-            ["--model", "deepseek_v3", "--config", "deepseek_v3_debugmodel"]
+            ["--module", "deepseek_v3", "--config", "deepseek_v3_debugmodel"]
         )
         assert config.model_spec.name == "deepseek_v3"
         assert config.model_spec.flavor == "debugmodel"

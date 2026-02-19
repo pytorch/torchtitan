@@ -10,7 +10,6 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
     ActivationCheckpointConfig,
-    JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -31,10 +30,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
     )
     hf_assets_path = "tests/assets/tokenizer"
     return FluxTrainer.Config(
-        job=JobConfig(
-            description="Flux debug model",
-            hf_assets_path=hf_assets_path,
-        ),
+        hf_assets_path=hf_assets_path,
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("flux-debug"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
@@ -94,7 +90,6 @@ def flux_dev() -> FluxTrainer.Config:
         autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
     )
     return FluxTrainer.Config(
-        job=JobConfig(description="Flux-dev model"),
         metrics=MetricsProcessor.Config(log_freq=100),
         model_spec=model_registry("flux-dev"),
         optimizer=OptimizersContainer.Config(lr=1e-4),
@@ -144,7 +139,6 @@ def flux_schnell() -> FluxTrainer.Config:
         autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
     )
     return FluxTrainer.Config(
-        job=JobConfig(description="Flux-schnell model"),
         metrics=MetricsProcessor.Config(log_freq=100),
         model_spec=model_registry("flux-schnell"),
         optimizer=OptimizersContainer.Config(lr=1e-4),

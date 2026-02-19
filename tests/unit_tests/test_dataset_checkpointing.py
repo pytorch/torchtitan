@@ -60,15 +60,12 @@ class TestDatasetCheckpointing(unittest.TestCase):
     def _build_dataloader(self, dataset_name, batch_size, seq_len, world_size, rank):
         tokenizer = HuggingFaceTokenizer("./tests/assets/tokenizer")
 
-        dl_config = HuggingFaceTextDataLoader.Config(
-            dataset=dataset_name,
-            local_batch_size=batch_size,
-            seq_len=seq_len,
-        )
+        dl_config = HuggingFaceTextDataLoader.Config(dataset=dataset_name)
 
-        return HuggingFaceTextDataLoader(
-            dl_config,
+        return dl_config.build(
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=tokenizer,
+            seq_len=seq_len,
+            local_batch_size=batch_size,
         )

@@ -98,7 +98,7 @@ def generate_image(
 
     enable_classifier_free_guidance = (
         # pyrefly: ignore [missing-attribute]
-        job_config.validator.dataloader.enable_classifier_free_guidance
+        job_config.validation.enable_classifier_free_guidance
     )
 
     # Tokenize the prompt. Unsqueeze to add a batch dimension.

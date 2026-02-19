@@ -72,7 +72,7 @@ We look forward to your contributions!
 11. Flexible learning rate scheduler (warmup-stable-decay)
 12. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
 13. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
-14. All options easily configured via [Python config registry](torchtitan/models/llama3/config_registry.py) with `--model` and `--config` CLI flags
+14. All options easily configured via [Python config registry](torchtitan/models/llama3/config_registry.py) with `--module` and `--config` CLI flags
 15. [Helper scripts](scripts/) to
     - download tokenizers from Hugging Face
     - convert original Llama 3 checkpoints into the expected DCP format

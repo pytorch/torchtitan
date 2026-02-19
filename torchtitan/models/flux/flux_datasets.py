@@ -6,7 +6,7 @@
 
 import itertools
 import math
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -19,7 +19,6 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import BaseDataLoader, ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import DataLoaderConfig
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.models.flux.tokenizer import build_flux_tokenizer, FluxTokenizer
 from torchtitan.tools.logging import logger
@@ -371,13 +370,14 @@ class FluxDataLoader(ParallelAwareDataloader):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseDataLoader.Config):
+    class Config(ParallelAwareDataloader.Config):
         dataset: str = "cc12m-test"
         """Dataset to use"""
 
         infinite: bool = True
         """Whether to loop the dataset infinitely"""
 
+        # TODO: In validation it should always be 0.0. Find a way to enforce this.
         classifier_free_guidance_prob: float = 0.0
         """Classifier-free guidance with probability `p` to dropout each text encoding independently.
         If `n` text encoders are used, the unconditional model is trained in `p ^ n` of all steps.
@@ -388,9 +388,6 @@ class FluxDataLoader(ParallelAwareDataloader):
 
         generate_timesteps: bool = False
         """Generate stratified timesteps in round-robin style (for validation)"""
-
-        dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
-        """DataLoader configuration"""
 
         # TODO: Remove after the tokenizer is properly built from the trainer. E.g.,
         # we can have a tokenizer container which holds the t5 and clip tokenizers.
@@ -444,7 +441,10 @@ class FluxDataLoader(ParallelAwareDataloader):
             )
 
         dataloader_kwargs = {
-            **asdict(config.dataloader),
+            "num_workers": config.num_workers,
+            "persistent_workers": config.persistent_workers,
+            "pin_memory": config.pin_memory,
+            "prefetch_factor": config.prefetch_factor,
             "batch_size": local_batch_size,
         }
 
