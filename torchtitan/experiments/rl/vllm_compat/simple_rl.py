@@ -19,13 +19,21 @@ This demonstrates:
 
 import os
 import re
+import time
 
 import torch
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
 from torch.utils.tensorboard import SummaryWriter
-
+from torchtitan.components.metrics import DeviceMemoryMonitor, gpu_timer
+from torchtitan.experiments.rl.metrics import (
+    CumulativeMetrics,
+    PhaseMetrics,
+    print_step_metrics,
+    print_training_summary,
+    update_cumulative_metrics,
+)
 from torchtitan.experiments.rl.vllm_compat.weights.converter import (
     torchtitan_to_vllm,
     vllm_to_torchtitan,
@@ -33,10 +41,8 @@ from torchtitan.experiments.rl.vllm_compat.weights.converter import (
 from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
-
 from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
 from transformers import AutoConfig, AutoTokenizer
-
 from vllm import LLM, SamplingParams
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -835,6 +841,9 @@ def rl_update_step(
     reward_fn=None,
     grpo_beta: float = 0.1,
     use_stable_grpo: bool = False,
+    cuda_sync_for_metrics: bool = True,
+    device_memory_monitor: DeviceMemoryMonitor | None = None,
+    enable_profiling: bool = True,
 ) -> dict:
     """
     Perform one RL update step using vLLM for rollouts.
@@ -854,10 +863,13 @@ def rl_update_step(
         reward_fn: Reward function (defaults to trivial_reward_function)
         grpo_beta: Beta parameter for GRPO exponential weighting (lower = more unstable)
         use_stable_grpo: If True, use stable GRPO (mean-centering) instead of exponential
+        cuda_sync_for_metrics: If True, synchronize CUDA before timing for accurate GPU measurements
+        device_memory_monitor: Reusable memory monitor (created once to avoid per-step cache clears)
 
     Returns:
         metrics: Dict of training metrics
     """
+
     # Default reward function
     if reward_fn is None:
         reward_fn = trivial_reward_function
@@ -867,6 +879,13 @@ def rl_update_step(
     vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
     vllm_engine.update_weights(vllm_compat_state)
 
+    if device_memory_monitor is None:
+        device_memory_monitor = DeviceMemoryMonitor()
+
+    if enable_profiling:
+        total_t0 = time.perf_counter()
+
+    # --- Rollout + training batch loop ---
     # Accumulate gradients over multiple rollout batches
     optimizer.zero_grad()
 
@@ -875,55 +894,86 @@ def rl_update_step(
     all_advantages = []
     total_loss = 0.0
     batch_metrics = []
+    rollout_time_s = 0.0
+    train_time_s = 0.0
+    rollout_peak_gib = 0.0
+    rollout_peak_pct = 0.0
+    train_peak_gib = 0.0
+    train_peak_pct = 0.0
 
     for batch_idx in range(num_rollout_batches):
-        # Generate samples using vLLM
-        (
-            completions,
-            vllm_log_probs,
-            vllm_token_ids,
-            vllm_token_log_probs,
-            prompt_token_ids,
-        ) = vllm_engine.generate(
-            prompt_texts,
-            max_new_tokens,
-            temperature,
-            n_samples_per_prompt=group_size,
-        )
-
-        # Compute rewards using provided reward function
-        rewards = reward_fn(completions, expected_answers, group_size)
-
-        # Normalize rewards for stability (mean=0, std=1)
-        reward_mean = rewards.mean()
-        reward_std = rewards.std()
-        if reward_std > 1e-8:
-            rewards_normalized = (rewards - reward_mean) / reward_std
-        else:
-            rewards_normalized = rewards - reward_mean
-
-        # Compute advantages using GRPO
-        if use_stable_grpo:
-            advantages = compute_grpo_advantages_stable(rewards_normalized, group_size)
-        else:
-            advantages = compute_grpo_advantages(
-                rewards_normalized, group_size, beta=grpo_beta
+        # --- Rollout phase ---
+        if enable_profiling:
+            device_memory_monitor.reset_peak_stats()
+        with gpu_timer(
+            sync=cuda_sync_for_metrics, enabled=enable_profiling
+        ) as rollout_t:
+            # Generate samples using vLLM
+            (
+                completions,
+                vllm_log_probs,
+                vllm_token_ids,
+                vllm_token_log_probs,
+                prompt_token_ids,
+            ) = vllm_engine.generate(
+                prompt_texts,
+                max_new_tokens,
+                temperature,
+                n_samples_per_prompt=group_size,
             )
 
-        # Compute loss using current policy
-        loss, loss_metrics = compute_policy_gradient_loss_vllm(
-            model,
-            vllm_token_ids,
-            vllm_token_log_probs,
-            prompt_token_ids,
-            advantages,
-            kl_coef=0.1,
-        )
+            # Compute rewards using provided reward function
+            rewards = reward_fn(completions, expected_answers, group_size)
 
-        # Accumulate loss (will be averaged later)
-        loss = loss / num_rollout_batches
-        loss.backward()
+            # Normalize rewards for stability (mean=0, std=1)
+            reward_mean = rewards.mean()
+            reward_std = rewards.std()
+            if reward_std > 1e-8:
+                rewards_normalized = (rewards - reward_mean) / reward_std
+            else:
+                rewards_normalized = rewards - reward_mean
+
+            # Compute advantages using GRPO
+            if use_stable_grpo:
+                advantages = compute_grpo_advantages_stable(
+                    rewards_normalized, group_size
+                )
+            else:
+                advantages = compute_grpo_advantages(
+                    rewards_normalized, group_size, beta=grpo_beta
+                )
+
+        if enable_profiling:
+            rollout_time_s += rollout_t.get("elapsed_s", 0.0)
+            rollout_mem = device_memory_monitor.get_peak_stats()
+            rollout_peak_gib = max(rollout_peak_gib, rollout_mem.max_active_gib)
+            rollout_peak_pct = max(rollout_peak_pct, rollout_mem.max_active_pct)
+
+        # --- Train phase ---
+        if enable_profiling:
+            device_memory_monitor.reset_peak_stats()
+        with gpu_timer(sync=cuda_sync_for_metrics, enabled=enable_profiling) as train_t:
+            # Compute loss using current policy
+            loss, loss_metrics = compute_policy_gradient_loss_vllm(
+                model,
+                vllm_token_ids,
+                vllm_token_log_probs,
+                prompt_token_ids,
+                advantages,
+                kl_coef=0.1,
+            )
+
+            # Accumulate loss (will be averaged later)
+            loss = loss / num_rollout_batches
+            loss.backward()
+
         total_loss += loss.item()
+
+        if enable_profiling:
+            train_time_s += train_t.get("elapsed_s", 0.0)
+            train_mem = device_memory_monitor.get_peak_stats()
+            train_peak_gib = max(train_peak_gib, train_mem.max_active_gib)
+            train_peak_pct = max(train_peak_pct, train_mem.max_active_pct)
 
         # Track metrics
         all_completions.extend(completions[:2])  # Sample 2 from each batch
@@ -931,11 +981,32 @@ def rl_update_step(
         all_advantages.append(advantages.mean().item())
         batch_metrics.append(loss_metrics)
 
-    # Gradient clipping
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    if enable_profiling:
+        # --- Optimizer phase ---
+        device_memory_monitor.reset_peak_stats()
+    with gpu_timer(sync=cuda_sync_for_metrics, enabled=enable_profiling) as opt_t:
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-    # Update weights
-    optimizer.step()
+        # Update weights
+        optimizer.step()
+
+    if enable_profiling:
+        optimizer_time_s = opt_t["elapsed_s"]
+        optimizer_mem = device_memory_monitor.get_peak_stats()
+
+        # --- Weight sync phase ---
+        device_memory_monitor.reset_peak_stats()
+    with gpu_timer(sync=cuda_sync_for_metrics, enabled=enable_profiling) as wsync_t:
+        # Update vLLM weights from current policy (only once per update)
+        titan_state = model.state_dict()
+        vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
+        vllm_engine.update_weights(vllm_compat_state)
+
+    if enable_profiling:
+        weight_sync_time_s = wsync_t["elapsed_s"]
+        wsync_mem = device_memory_monitor.get_peak_stats()
+        total_time_s = time.perf_counter() - total_t0
 
     # Aggregate metrics across batches
     avg_reward = sum(all_rewards) / len(all_rewards)
@@ -956,6 +1027,30 @@ def rl_update_step(
         "total_samples": len(prompt_texts) * group_size * num_rollout_batches,
         **final_metrics,  # Include final batch metrics
     }
+
+    # Add timing/memory metrics only if profiling is enabled
+    if enable_profiling:
+        metrics.update(
+            {
+                # Timing metrics
+                "time/total_s": total_time_s,
+                "time/weight_sync_s": weight_sync_time_s,
+                "time/rollout_s": rollout_time_s,
+                "time/train_s": train_time_s,
+                "time/optimizer_s": optimizer_time_s,
+                # Memory metrics
+                "memory/weight_sync_peak_active_gib": wsync_mem.max_active_gib,
+                "memory/weight_sync_peak_active_pct": wsync_mem.max_active_pct,
+                "memory/weight_sync_peak_reserved_gib": wsync_mem.max_reserved_gib,
+                "memory/rollout_peak_active_gib": rollout_peak_gib,
+                "memory/rollout_peak_active_pct": rollout_peak_pct,
+                "memory/train_peak_active_gib": train_peak_gib,
+                "memory/train_peak_active_pct": train_peak_pct,
+                "memory/optimizer_peak_active_gib": optimizer_mem.max_active_gib,
+                "memory/optimizer_peak_active_pct": optimizer_mem.max_active_pct,
+                "memory/optimizer_peak_reserved_gib": optimizer_mem.max_reserved_gib,
+            }
+        )
 
     return metrics
 
@@ -1030,7 +1125,7 @@ def main():
     # Training config
     group_size = 8  # Samples per prompt for GRPO (increased from 4)
     num_rollout_batches = 2  # Multiple rollout batches per update (NEW!)
-    num_steps = 100
+    num_steps = 5
     learning_rate = 1e-5
 
     # GRPO config
@@ -1093,6 +1188,12 @@ def main():
     print("\nInitializing vLLM engine for rollouts...")
     vllm_engine = VLLMRolloutEngine(model_path)
 
+    # Initial weight sync to vLLM engine
+    print("Performing initial weight sync to vLLM...")
+    titan_state = model.state_dict()
+    vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
+    vllm_engine.update_weights(vllm_compat_state)
+
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
@@ -1140,6 +1241,11 @@ def main():
     print("TensorBoard logging enabled at: ./outputs/rl_training")
     print("=" * 80)
 
+    # Metrics config
+    cuda_sync_for_metrics = True
+    enable_profiling = True  # Set to False to disable timing/memory output
+    device_memory_monitor = DeviceMemoryMonitor()
+
     # Training loop
     print(f"\nStarting RL training for {num_steps} steps...")
     print(f"  Prompts: {len(prompt_texts)}")
@@ -1152,6 +1258,8 @@ def main():
         f"  GRPO mode: {'Stable (mean-centering)' if use_stable_grpo else f'Exponential (beta={grpo_beta})'}"
     )
     print("=" * 80)
+
+    cumulative = CumulativeMetrics()
 
     for step in range(num_steps):
         metrics = rl_update_step(
@@ -1169,7 +1277,25 @@ def main():
             reward_fn=reward_fn,
             grpo_beta=grpo_beta,
             use_stable_grpo=use_stable_grpo,
+            cuda_sync_for_metrics=cuda_sync_for_metrics,
+            device_memory_monitor=device_memory_monitor,
+            enable_profiling=enable_profiling,
         )
+
+        # Accumulate timing using helper function (only if profiling is enabled)
+        if enable_profiling:
+            update_cumulative_metrics(
+                cumulative,
+                metrics["time/rollout_s"],
+                metrics["time/train_s"],
+                metrics["time/optimizer_s"],
+                metrics["time/weight_sync_s"],
+                metrics["time/total_s"],
+                rollout_peak_gib=metrics["memory/rollout_peak_active_gib"],
+                train_peak_gib=metrics["memory/train_peak_active_gib"],
+                optimizer_peak_gib=metrics["memory/optimizer_peak_active_gib"],
+                weight_sync_peak_gib=metrics["memory/weight_sync_peak_active_gib"],
+            )
 
         # Compute weight deltas from initial state
         weight_deltas = compute_weight_deltas(model, initial_state)
@@ -1187,6 +1313,11 @@ def main():
         writer.add_scalar("rl/advantage_std", metrics.get("advantage_std", 0.0), step)
         writer.add_scalar("rl/total_samples", metrics["total_samples"], step)
 
+        # Log timing and memory metrics to TensorBoard
+        for key in metrics:
+            if key.startswith(("time/", "memory/")):
+                writer.add_scalar(f"rl/{key}", metrics[key], step)
+
         # Log weight deltas
         for key, value in weight_deltas.items():
             writer.add_scalar(key, value, step)
@@ -1196,6 +1327,39 @@ def main():
             f"Reward: {metrics['reward_mean']:+.3f} | "
             f"Samples: {metrics['total_samples']}"
         )
+        # Per-phase timing and memory breakdown (only if profiling enabled)
+        if enable_profiling:
+            m = metrics
+            print_step_metrics(
+                [
+                    PhaseMetrics(
+                        "rollout",
+                        m["time/rollout_s"],
+                        m["memory/rollout_peak_active_gib"],
+                        m["memory/rollout_peak_active_pct"],
+                    ),
+                    PhaseMetrics(
+                        "train",
+                        m["time/train_s"],
+                        m["memory/train_peak_active_gib"],
+                        m["memory/train_peak_active_pct"],
+                    ),
+                    PhaseMetrics(
+                        "optimizer",
+                        m["time/optimizer_s"],
+                        m["memory/optimizer_peak_active_gib"],
+                        m["memory/optimizer_peak_active_pct"],
+                    ),
+                    PhaseMetrics(
+                        "weight_sync",
+                        m["time/weight_sync_s"],
+                        m["memory/weight_sync_peak_active_gib"],
+                        m["memory/weight_sync_peak_active_pct"],
+                    ),
+                ],
+                m["time/total_s"],
+                include_mem_pct=True,
+            )
         print(f"  Sample: {metrics['sample_completions'][0][:80]}...")
 
         # Check for NaN/Inf (sign of instability)
@@ -1208,6 +1372,10 @@ def main():
             print("Try setting use_stable_grpo=True or enabling batch invariance mode.")
             print("!" * 80)
             break
+
+    # Training summary
+    if enable_profiling:
+        print_training_summary(cumulative)
 
     print("\n" + "=" * 80)
     print("Training complete!")
