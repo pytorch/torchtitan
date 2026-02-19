@@ -45,6 +45,32 @@ LLEP_MERGE_A2A = os.environ.get("LLEP_MERGE_A2A", "1") == "1"
 # Set LLEP_W_TRANSFER_AUTOGRAD=1 to enable differentiable weight transfer + A2A
 LLEP_W_TRANSFER_AUTOGRAD = os.environ.get("LLEP_W_TRANSFER_AUTOGRAD", "1") == "1"
 
+# Use grouped GEMM (torch._grouped_mm) to replace the Python for-loop in SwiGLU FFN.
+# Set LLEP_USE_GROUPED_MM=0 to fall back to the original per-expert for-loop.
+LLEP_USE_GROUPED_MM = os.environ.get("LLEP_USE_GROUPED_MM", "1") == "1"
+
+# Token alignment for grouped_mm (must be 8 for bf16)
+_TOKEN_ALIGN = 8
+
+# Threshold for vectorized pad/unpad: use for-loop below this, vectorized above.
+# Benchmarked on B200: forloop faster for <32 experts, vectorized wins at 64+.
+_PAD_VECTORIZE_THRESHOLD = 32
+
+# Lazy-cached fused SiLU-gate function (avoids try/import on every forward call)
+_fused_silu_gate_fn = None
+
+# Lazy-cached Triton pad/unpad functions
+_triton_pad_fn = None
+_triton_unpad_fn = None
+
+# Lazy-cached vectorized send_matrix function
+_send_matrix_fn = None
+
+# Cached env overrides for llep_moe_forward (read once at import, not per call)
+_ENV_MAX_TOKENS_FACTOR = os.environ.get("EP_MAX_TOKENS_FACTOR")
+_ENV_MIN_TOKENS_PER_GEMM = os.environ.get("EP_MIN_TOKENS_PER_GEMM")
+_ENV_ADAPTIVE_THRESHOLD = os.environ.get("EP_ADAPTIVE_THRESHOLD")
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -114,7 +140,9 @@ def compute_llep_lpt_plan(
     total_tokens = sum(expert_counts_cpu)
     balanced_tokens = total_tokens // ep_size if ep_size > 0 else total_tokens
     max_tokens_per_gpu = (
-        int(max_tokens_factor * balanced_tokens) if balanced_tokens > 0 else total_tokens
+        int(max_tokens_factor * balanced_tokens)
+        if balanced_tokens > 0
+        else total_tokens
     )
     max_tokens_per_gpu = max(max_tokens_per_gpu, 1)
 
@@ -128,13 +156,14 @@ def compute_llep_lpt_plan(
     assigned_load = [0] * ep_size
 
     # Sort experts by token count (LPT ordering)
-    expert_counts_list = [
-        (e, expert_counts_cpu[e]) for e in range(num_experts)
-    ]
+    expert_counts_list = [(e, expert_counts_cpu[e]) for e in range(num_experts)]
     expert_counts_sorted = sorted(expert_counts_list, key=lambda x: -x[1])
 
     lpt_plan: dict[int, list[tuple[int, int, int]]] = {}
     weight_transfers: list[WeightTransferPlan] = []
+
+    def get_effective_load(gpu_id):
+        return assigned_load[gpu_id] + pending_native_load[gpu_id]
 
     for expert_id, expert_tokens in expert_counts_sorted:
         if expert_tokens == 0:
@@ -144,9 +173,6 @@ def compute_llep_lpt_plan(
 
         # Remove from pending native load (this expert is now being processed)
         pending_native_load[native_gpu] -= expert_tokens
-
-        def get_effective_load(gpu_id):
-            return assigned_load[gpu_id] + pending_native_load[gpu_id]
 
         native_available = max_tokens_per_gpu - get_effective_load(native_gpu)
         assignments = []
@@ -188,9 +214,7 @@ def compute_llep_lpt_plan(
                     if chunk < min_tokens_per_gemm and remaining > chunk:
                         continue
 
-                    assignments.append(
-                        (helper_gpu, token_offset, token_offset + chunk)
-                    )
+                    assignments.append((helper_gpu, token_offset, token_offset + chunk))
                     assigned_load[helper_gpu] += chunk
                     weight_transfers.append(
                         WeightTransferPlan(
@@ -245,9 +269,7 @@ def compute_llep_lpt_plan(
                 if chunk < min_tokens_per_gemm and remaining > chunk:
                     continue
 
-                assignments.append(
-                    (helper_gpu, token_offset, token_offset + chunk)
-                )
+                assignments.append((helper_gpu, token_offset, token_offset + chunk))
                 assigned_load[helper_gpu] += chunk
                 weight_transfers.append(
                     WeightTransferPlan(
@@ -303,16 +325,33 @@ def compute_llep_lpt_plan(
 # ---------------------------------------------------------------------------
 # GPU imbalance ratio
 # ---------------------------------------------------------------------------
+_triton_imbalance_fn = None
+
+
 def compute_gpu_imbalance_ratio(
     global_expert_counts: torch.Tensor,
     ep_size: int,
     num_local_experts: int,
 ) -> float:
     """Compute max_gpu_load / mean_gpu_load. Returns 1.0 for perfect balance."""
-    # Reshape and sum to get per-GPU loads in one op (no per-element indexing)
-    # Truncate to ep_size * num_local_experts in case bincount returned a larger tensor
+    global _triton_imbalance_fn
+    if _triton_imbalance_fn is None:
+        try:
+            from torchtitan.distributed.llep_kernels import triton_imbalance_ratio
+
+            _triton_imbalance_fn = triton_imbalance_ratio
+        except (ImportError, RuntimeError):
+            _triton_imbalance_fn = False
+
+    if _triton_imbalance_fn and global_expert_counts.is_cuda:
+        return _triton_imbalance_fn(global_expert_counts, ep_size, num_local_experts)
+
     effective = ep_size * num_local_experts
-    counts = global_expert_counts[:effective] if global_expert_counts.size(0) > effective else global_expert_counts
+    counts = (
+        global_expert_counts[:effective]
+        if global_expert_counts.size(0) > effective
+        else global_expert_counts
+    )
     gpu_loads = counts.view(ep_size, num_local_experts).sum(dim=1).float()
     mean_load = gpu_loads.mean()
     if mean_load == 0:
@@ -332,7 +371,12 @@ def transfer_expert_weights(
     w3_local: torch.Tensor,  # (num_local_experts, hidden_dim, dim)
     num_local_experts: int,
     return_handles: bool = False,
-) -> tuple[dict[int, torch.Tensor], dict[int, torch.Tensor], dict[int, torch.Tensor], Optional[list]]:
+) -> tuple[
+    dict[int, torch.Tensor],
+    dict[int, torch.Tensor],
+    dict[int, torch.Tensor],
+    Optional[list],
+]:
     """
     Transfer expert weights via P2P for LLEP weight spilling.
 
@@ -359,9 +403,15 @@ def transfer_expert_weights(
         recv_w1 = torch.empty_like(w1_local[0])
         recv_w2 = torch.empty_like(w2_local[0])
         recv_w3 = torch.empty_like(w3_local[0])
-        p2p_ops.append(dist.P2POp(dist.irecv, recv_w1, group_peer=src_rank, group=ep_group))
-        p2p_ops.append(dist.P2POp(dist.irecv, recv_w2, group_peer=src_rank, group=ep_group))
-        p2p_ops.append(dist.P2POp(dist.irecv, recv_w3, group_peer=src_rank, group=ep_group))
+        p2p_ops.append(
+            dist.P2POp(dist.irecv, recv_w1, group_peer=src_rank, group=ep_group)
+        )
+        p2p_ops.append(
+            dist.P2POp(dist.irecv, recv_w2, group_peer=src_rank, group=ep_group)
+        )
+        p2p_ops.append(
+            dist.P2POp(dist.irecv, recv_w3, group_peer=src_rank, group=ep_group)
+        )
         foreign_w1[expert_id] = recv_w1
         foreign_w2[expert_id] = recv_w2
         foreign_w3[expert_id] = recv_w3
@@ -369,9 +419,30 @@ def transfer_expert_weights(
     # Then send (use % for safety — matches reference implementation)
     for expert_id, dst_rank in plan.weights_to_send:
         local_idx = expert_id % num_local_experts
-        p2p_ops.append(dist.P2POp(dist.isend, w1_local[local_idx].contiguous(), group_peer=dst_rank, group=ep_group))
-        p2p_ops.append(dist.P2POp(dist.isend, w2_local[local_idx].contiguous(), group_peer=dst_rank, group=ep_group))
-        p2p_ops.append(dist.P2POp(dist.isend, w3_local[local_idx].contiguous(), group_peer=dst_rank, group=ep_group))
+        p2p_ops.append(
+            dist.P2POp(
+                dist.isend,
+                w1_local[local_idx].contiguous(),
+                group_peer=dst_rank,
+                group=ep_group,
+            )
+        )
+        p2p_ops.append(
+            dist.P2POp(
+                dist.isend,
+                w2_local[local_idx].contiguous(),
+                group_peer=dst_rank,
+                group=ep_group,
+            )
+        )
+        p2p_ops.append(
+            dist.P2POp(
+                dist.isend,
+                w3_local[local_idx].contiguous(),
+                group_peer=dst_rank,
+                group=ep_group,
+            )
+        )
 
     if p2p_ops:
         handles = dist.batch_isend_irecv(p2p_ops)
@@ -494,15 +565,9 @@ class WeightTransferAutograd(torch.autograd.Function):
             foreign_expert_id_mapping[int(expert_id)] = stacked_idx
 
         # Allocate stacked receive buffers
-        recv_w1 = torch.empty(
-            num_recv, *w1_local.shape[1:], dtype=dtype, device=device
-        )
-        recv_w2 = torch.empty(
-            num_recv, *w2_local.shape[1:], dtype=dtype, device=device
-        )
-        recv_w3 = torch.empty(
-            num_recv, *w3_local.shape[1:], dtype=dtype, device=device
-        )
+        recv_w1 = torch.empty(num_recv, *w1_local.shape[1:], dtype=dtype, device=device)
+        recv_w2 = torch.empty(num_recv, *w2_local.shape[1:], dtype=dtype, device=device)
+        recv_w3 = torch.empty(num_recv, *w3_local.shape[1:], dtype=dtype, device=device)
 
         p2p_ops = []
 
@@ -510,26 +575,56 @@ class WeightTransferAutograd(torch.autograd.Function):
         # NOTE: use group_peer= (EP-local rank), not peer= (global rank)
         for stacked_idx, (expert_id, src_rank) in enumerate(weights_to_receive):
             p2p_ops.append(
-                dist.P2POp(dist.irecv, recv_w1[stacked_idx], group_peer=int(src_rank), group=ep_group)
+                dist.P2POp(
+                    dist.irecv,
+                    recv_w1[stacked_idx],
+                    group_peer=int(src_rank),
+                    group=ep_group,
+                )
             )
             p2p_ops.append(
-                dist.P2POp(dist.irecv, recv_w2[stacked_idx], group_peer=int(src_rank), group=ep_group)
+                dist.P2POp(
+                    dist.irecv,
+                    recv_w2[stacked_idx],
+                    group_peer=int(src_rank),
+                    group=ep_group,
+                )
             )
             p2p_ops.append(
-                dist.P2POp(dist.irecv, recv_w3[stacked_idx], group_peer=int(src_rank), group=ep_group)
+                dist.P2POp(
+                    dist.irecv,
+                    recv_w3[stacked_idx],
+                    group_peer=int(src_rank),
+                    group=ep_group,
+                )
             )
 
         # Then send
         for expert_id, dst_rank in weights_to_send:
             local_idx = int(expert_id) % num_local_experts
             p2p_ops.append(
-                dist.P2POp(dist.isend, w1_local[local_idx].contiguous(), group_peer=int(dst_rank), group=ep_group)
+                dist.P2POp(
+                    dist.isend,
+                    w1_local[local_idx].contiguous(),
+                    group_peer=int(dst_rank),
+                    group=ep_group,
+                )
             )
             p2p_ops.append(
-                dist.P2POp(dist.isend, w2_local[local_idx].contiguous(), group_peer=int(dst_rank), group=ep_group)
+                dist.P2POp(
+                    dist.isend,
+                    w2_local[local_idx].contiguous(),
+                    group_peer=int(dst_rank),
+                    group=ep_group,
+                )
             )
             p2p_ops.append(
-                dist.P2POp(dist.isend, w3_local[local_idx].contiguous(), group_peer=int(dst_rank), group=ep_group)
+                dist.P2POp(
+                    dist.isend,
+                    w3_local[local_idx].contiguous(),
+                    group_peer=int(dst_rank),
+                    group=ep_group,
+                )
             )
 
         handles = []
@@ -632,13 +727,28 @@ class WeightTransferAutograd(torch.autograd.Function):
         # Send gradients for weights we received in forward
         for stacked_idx, (expert_id, src_rank) in enumerate(weights_to_receive):
             p2p_ops.append(
-                dist.P2POp(dist.isend, grad_recv_w1[stacked_idx].contiguous(), group_peer=int(src_rank), group=ep_group)
+                dist.P2POp(
+                    dist.isend,
+                    grad_recv_w1[stacked_idx].contiguous(),
+                    group_peer=int(src_rank),
+                    group=ep_group,
+                )
             )
             p2p_ops.append(
-                dist.P2POp(dist.isend, grad_recv_w2[stacked_idx].contiguous(), group_peer=int(src_rank), group=ep_group)
+                dist.P2POp(
+                    dist.isend,
+                    grad_recv_w2[stacked_idx].contiguous(),
+                    group_peer=int(src_rank),
+                    group=ep_group,
+                )
             )
             p2p_ops.append(
-                dist.P2POp(dist.isend, grad_recv_w3[stacked_idx].contiguous(), group_peer=int(src_rank), group=ep_group)
+                dist.P2POp(
+                    dist.isend,
+                    grad_recv_w3[stacked_idx].contiguous(),
+                    group_peer=int(src_rank),
+                    group=ep_group,
+                )
             )
 
         if p2p_ops:
@@ -691,16 +801,12 @@ def transfer_expert_weights_autograd(
     weights_to_receive = plan.weights_to_receive
 
     if weights_to_send:
-        wts_tensor = torch.tensor(
-            weights_to_send, dtype=torch.long, device=device
-        )
+        wts_tensor = torch.tensor(weights_to_send, dtype=torch.long, device=device)
     else:
         wts_tensor = torch.empty(0, 2, dtype=torch.long, device=device)
 
     if weights_to_receive:
-        wtr_tensor = torch.tensor(
-            weights_to_receive, dtype=torch.long, device=device
-        )
+        wtr_tensor = torch.tensor(weights_to_receive, dtype=torch.long, device=device)
     else:
         wtr_tensor = torch.empty(0, 2, dtype=torch.long, device=device)
 
@@ -754,11 +860,8 @@ def assign_tokens_to_gpus(
     flat_experts = selected_experts.view(-1)  # (num_tokens * top_k,)
     flat_scores = top_scores.view(-1)  # (num_tokens * top_k,)
 
-    # Vectorized default routing: one tensor op
-    target_gpus = (flat_experts // num_local_experts).to(torch.int64)
-
-    # Stack per-rank counts into numpy (single D2H sync per rank)
-    all_counts_np = np.stack([ec.cpu().numpy() for ec in all_expert_counts])
+    # Stack per-rank counts into numpy (single D2H sync instead of N separate ones)
+    all_counts_np = torch.stack(all_expert_counts).cpu().numpy()
 
     if lpt_plan:
         # Cumulative counts: cum[r, e] = total tokens for expert e from ranks 0..r-1
@@ -766,51 +869,66 @@ def assign_tokens_to_gpus(
         cum_counts_np[1:] = np.cumsum(all_counts_np, axis=0)
         global_offsets_np = cum_counts_np[ep_rank]
 
-        # Sort local tokens by expert for contiguous segments
-        sorted_expert_ids, sort_perm = flat_experts.sort(stable=True)
+        # Try Triton kernel: fused sort + plan lookup + scatter (1 kernel vs ~15 PyTorch ops)
+        _use_triton = flat_experts.is_cuda
+        if _use_triton:
+            try:
+                from torchtitan.distributed.llep_kernels import triton_assign_tokens
 
-        # Local expert boundaries (single GPU->CPU sync)
-        local_offsets = torch.zeros(num_experts + 1, dtype=torch.int64, device=device)
-        local_offsets[1:] = local_expert_counts.cumsum(0)
-        local_offsets_np = local_offsets.cpu().numpy()
+                global_offsets_gpu = torch.from_numpy(global_offsets_np).to(
+                    device, non_blocking=True
+                )
+                target_gpus = triton_assign_tokens(
+                    flat_experts,
+                    local_expert_counts,
+                    global_offsets_gpu,
+                    lpt_plan,
+                    num_local_experts,
+                    num_experts,
+                )
+            except (ImportError, RuntimeError):
+                _use_triton = False
 
-        # Batch assignments by type for efficiency
-        single_gpu_batches: dict[int, list[torch.Tensor]] = {}
-        multi_gpu_work: list[tuple[torch.Tensor, torch.Tensor, list[tuple[int, int, int]]]] = []
+        if not _use_triton:
+            # Fallback: vectorized PyTorch path
+            target_gpus = (flat_experts // num_local_experts).to(torch.int64)
+            _sorted_expert_ids, sort_perm = flat_experts.sort(stable=True)
+            local_offsets = torch.zeros(
+                num_experts + 1, dtype=torch.int64, device=device
+            )
+            local_offsets[1:] = local_expert_counts.cumsum(0)
+            local_offsets_np = local_offsets.cpu().numpy()
 
-        for expert_id, assignments in lpt_plan.items():
-            local_start = int(local_offsets_np[expert_id])
-            local_end = int(local_offsets_np[expert_id + 1])
-            local_count = local_end - local_start
-            if local_count == 0:
-                continue
+            single_gpu_batches: dict[int, list[torch.Tensor]] = {}
+            multi_gpu_work: list[
+                tuple[torch.Tensor, torch.Tensor, list[tuple[int, int, int]]]
+            ] = []
 
-            # Positions in the original flat_experts tensor
-            original_positions = sort_perm[local_start:local_end]
+            for expert_id, assignments in lpt_plan.items():
+                local_start = int(local_offsets_np[expert_id])
+                local_end = int(local_offsets_np[expert_id + 1])
+                local_count = local_end - local_start
+                if local_count == 0:
+                    continue
+                original_positions = sort_perm[local_start:local_end]
+                if len(assignments) == 1:
+                    gpu_id = assignments[0][0]
+                    single_gpu_batches.setdefault(gpu_id, []).append(original_positions)
+                else:
+                    my_offset = int(global_offsets_np[expert_id])
+                    global_pos = my_offset + torch.arange(local_count, device=device)
+                    multi_gpu_work.append((original_positions, global_pos, assignments))
 
-            if len(assignments) == 1:
-                # Single GPU -- batch these for a single scatter
-                gpu_id = assignments[0][0]
-                if gpu_id not in single_gpu_batches:
-                    single_gpu_batches[gpu_id] = []
-                single_gpu_batches[gpu_id].append(original_positions)
-            else:
-                # Multi-GPU -- need global position masks
-                my_offset = int(global_offsets_np[expert_id])
-                global_pos = my_offset + torch.arange(local_count, device=device)
-                multi_gpu_work.append((original_positions, global_pos, assignments))
-
-        # Apply single-GPU assignments in batches (one scatter per GPU)
-        for gpu_id, pos_list in single_gpu_batches.items():
-            all_pos = torch.cat(pos_list) if len(pos_list) > 1 else pos_list[0]
-            target_gpus[all_pos] = gpu_id
-
-        # Apply multi-GPU assignments with masks
-        for original_positions, global_pos, assignments in multi_gpu_work:
-            for gpu_id, start, end in assignments:
-                mask = (global_pos >= start) & (global_pos < end)
-                if mask.any():
-                    target_gpus[original_positions[mask]] = gpu_id
+            for gpu_id, pos_list in single_gpu_batches.items():
+                all_pos = torch.cat(pos_list) if len(pos_list) > 1 else pos_list[0]
+                target_gpus[all_pos] = gpu_id
+            for original_positions, global_pos, assignments in multi_gpu_work:
+                for gpu_id, start, end in assignments:
+                    mask = (global_pos >= start) & (global_pos < end)
+                    if mask.any():
+                        target_gpus[original_positions[mask]] = gpu_id
+    else:
+        target_gpus = (flat_experts // num_local_experts).to(torch.int64)
 
     # Sort by target GPU for AllToAll
     sorted_indices = torch.argsort(target_gpus, stable=True)
@@ -819,18 +937,37 @@ def assign_tokens_to_gpus(
     sorted_experts = flat_experts[sorted_indices]
 
     # Compute split sizes from send_matrix (no extra collective needed)
-    if lpt_plan:
-        # Re-use cum_counts_np from above
+    # Use vectorized numpy implementation (1.9x faster than nested loops)
+    global _send_matrix_fn
+    if _send_matrix_fn is None:
+        try:
+            from torchtitan.distributed.llep_kernels import (
+                compute_send_matrix_vectorized,
+            )
+
+            _send_matrix_fn = compute_send_matrix_vectorized
+        except (ImportError, RuntimeError):
+            _send_matrix_fn = False
+
+    if _send_matrix_fn and lpt_plan:
+        send_matrix_np = _send_matrix_fn(
+            all_counts_np,
+            cum_counts_np,
+            lpt_plan,
+            ep_size,
+            num_local_experts,
+            num_experts,
+        )
+    elif lpt_plan:
+        # Fallback: nested Python loops
         send_matrix_np = np.zeros((ep_size, ep_size), dtype=np.int64)
         lpt_expert_set = set(lpt_plan.keys())
 
-        # Default-routed experts (not in LPT plan)
         for eid in range(num_experts):
             if eid not in lpt_expert_set:
                 owner = eid // num_local_experts
                 send_matrix_np[:, owner] += all_counts_np[:, eid]
 
-        # LPT-routed experts: overlap of src_rank's token range with each assignment
         for expert_id, assignments in lpt_plan.items():
             for src_rank in range(ep_size):
                 src_start = int(cum_counts_np[src_rank, expert_id])
@@ -843,8 +980,9 @@ def assign_tokens_to_gpus(
                     if overlap_start < overlap_end:
                         send_matrix_np[src_rank, dst_gpu] += overlap_end - overlap_start
     else:
-        # Default routing: reshape per-rank expert counts and sum per dest GPU
-        send_matrix_np = all_counts_np.reshape(ep_size, ep_size, num_local_experts).sum(axis=2)
+        send_matrix_np = all_counts_np.reshape(ep_size, ep_size, num_local_experts).sum(
+            axis=2
+        )
 
     input_split_sizes = send_matrix_np[ep_rank].tolist()
     output_split_sizes = send_matrix_np[:, ep_rank].tolist()
@@ -860,41 +998,339 @@ def assign_tokens_to_gpus(
 
 
 # ---------------------------------------------------------------------------
-# SwiGLU FFN for native + foreign experts
+# Grouped GEMM helpers for SwiGLU FFN
 # ---------------------------------------------------------------------------
-def llep_swiglu_ffn(
-    x: torch.Tensor,  # (num_tokens, dim)
-    expert_ids: torch.Tensor,  # (num_tokens,) global expert IDs
-    w1_local: torch.Tensor,  # (num_local_experts, hidden_dim, dim)
-    w2_local: torch.Tensor,  # (num_local_experts, dim, hidden_dim)
-    w3_local: torch.Tensor,  # (num_local_experts, hidden_dim, dim)
+def _pack_expert_weights(
+    unique_experts: torch.Tensor,
+    w1_local: torch.Tensor,
+    w2_local: torch.Tensor,
+    w3_local: torch.Tensor,
+    foreign_w1: dict[int, torch.Tensor] | None,
+    foreign_w2: dict[int, torch.Tensor] | None,
+    foreign_w3: dict[int, torch.Tensor] | None,
+    foreign_w1_stacked: Optional[torch.Tensor],
+    foreign_w2_stacked: Optional[torch.Tensor],
+    foreign_w3_stacked: Optional[torch.Tensor],
+    foreign_expert_id_mapping: Optional[torch.Tensor],
+    ep_rank: int,
+    num_local_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[bool]]:
+    """
+    Pack weights for active experts into contiguous (num_active, ...) tensors.
+
+    Uses differentiable indexing (torch.stack) to preserve autograd graph.
+
+    Returns:
+        (w1_packed, w2_packed, w3_packed, valid_mask)
+        valid_mask[i] is True if expert i has valid weights, False if zero-filled.
+    """
+    native_start = ep_rank * num_local_experts
+    native_end = native_start + num_local_experts
+    use_stacked = foreign_expert_id_mapping is not None
+    num_active = unique_experts.shape[0]
+    device = w1_local.device
+
+    # Classify experts as native vs foreign using tensor ops (no per-element .item())
+    is_native = (unique_experts >= native_start) & (unique_experts < native_end)
+
+    # --- Native experts: batch index into w1/w2/w3_local ---
+    # Clamp to valid range for safe indexing (non-native entries are masked out by torch.where or zeroed)
+    native_local_indices = (unique_experts - native_start).clamp(
+        min=0, max=num_local_experts - 1
+    )
+
+    if (
+        use_stacked
+        and foreign_w1_stacked is not None
+        and foreign_w1_stacked.shape[0] > 0
+    ):
+        # --- Stacked foreign path (autograd-compatible) ---
+        # Selective indexing: only read native weights for native experts and
+        # foreign weights for foreign experts. Avoids materializing both full
+        # arrays in torch.where (halves memory bandwidth).
+        stacked_indices = foreign_expert_id_mapping[unique_experts]  # (num_active,)
+        is_valid_foreign = (~is_native) & (stacked_indices >= 0)
+        is_invalid = (~is_native) & (stacked_indices < 0)
+
+        # Allocate output
+        w1_packed = torch.zeros(
+            num_active, *w1_local.shape[1:], device=device, dtype=w1_local.dtype
+        )
+        w2_packed = torch.zeros(
+            num_active, *w2_local.shape[1:], device=device, dtype=w2_local.dtype
+        )
+        w3_packed = torch.zeros(
+            num_active, *w3_local.shape[1:], device=device, dtype=w3_local.dtype
+        )
+
+        # Fill native experts (selective gather from w_local)
+        if is_native.any():
+            native_pos = is_native.nonzero(as_tuple=True)[0]
+            w1_packed[native_pos] = w1_local[native_local_indices[native_pos]]
+            w2_packed[native_pos] = w2_local[native_local_indices[native_pos]]
+            w3_packed[native_pos] = w3_local[native_local_indices[native_pos]]
+
+        # Fill valid foreign experts (selective gather from w_stacked)
+        if is_valid_foreign.any():
+            foreign_pos = is_valid_foreign.nonzero(as_tuple=True)[0]
+            safe_stacked_idx = stacked_indices[foreign_pos].clamp(min=0)
+            w1_packed[foreign_pos] = foreign_w1_stacked[safe_stacked_idx]
+            w2_packed[foreign_pos] = foreign_w2_stacked[safe_stacked_idx]
+            w3_packed[foreign_pos] = foreign_w3_stacked[safe_stacked_idx]
+
+        # Invalid experts remain zero from initialization
+        valid_mask = (~is_invalid).tolist()
+        return w1_packed, w2_packed, w3_packed, valid_mask
+
+    elif foreign_w1 is not None:
+        # --- Dict-based foreign path (non-autograd, needs Python loop for dict lookups) ---
+        # Still vectorize native experts
+        w1_packed = torch.zeros(
+            num_active, *w1_local.shape[1:], device=device, dtype=w1_local.dtype
+        )
+        w2_packed = torch.zeros(
+            num_active, *w2_local.shape[1:], device=device, dtype=w2_local.dtype
+        )
+        w3_packed = torch.zeros(
+            num_active, *w3_local.shape[1:], device=device, dtype=w3_local.dtype
+        )
+
+        if is_native.any():
+            native_positions = is_native.nonzero(as_tuple=True)[0]
+            w1_packed[native_positions] = w1_local[
+                native_local_indices[native_positions]
+            ]
+            w2_packed[native_positions] = w2_local[
+                native_local_indices[native_positions]
+            ]
+            w3_packed[native_positions] = w3_local[
+                native_local_indices[native_positions]
+            ]
+
+        valid_mask = is_native.tolist()
+
+        # Fill foreign experts from dicts (only non-native)
+        foreign_positions = (~is_native).nonzero(as_tuple=True)[0]
+        for pos in foreign_positions:
+            eid = unique_experts[pos].item()
+            if eid in foreign_w1:
+                w1_packed[pos] = foreign_w1[eid]
+                w2_packed[pos] = foreign_w2[eid]
+                w3_packed[pos] = foreign_w3[eid]
+                valid_mask[pos] = True
+
+        return w1_packed, w2_packed, w3_packed, valid_mask
+
+    else:
+        # --- No foreign weights at all: only native experts are valid ---
+        w1_packed = torch.zeros(
+            num_active, *w1_local.shape[1:], device=device, dtype=w1_local.dtype
+        )
+        w2_packed = torch.zeros(
+            num_active, *w2_local.shape[1:], device=device, dtype=w2_local.dtype
+        )
+        w3_packed = torch.zeros(
+            num_active, *w3_local.shape[1:], device=device, dtype=w3_local.dtype
+        )
+
+        if is_native.any():
+            native_positions = is_native.nonzero(as_tuple=True)[0]
+            w1_packed[native_positions] = w1_local[
+                native_local_indices[native_positions]
+            ]
+            w2_packed[native_positions] = w2_local[
+                native_local_indices[native_positions]
+            ]
+            w3_packed[native_positions] = w3_local[
+                native_local_indices[native_positions]
+            ]
+
+        valid_mask = is_native.tolist()
+        return w1_packed, w2_packed, w3_packed, valid_mask
+
+
+def _pad_for_grouped_mm(
+    x_sorted: torch.Tensor,
+    counts: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Pad each expert's token group to a multiple of _TOKEN_ALIGN for grouped_mm.
+
+    Also clamps empty experts to _TOKEN_ALIGN minimum tokens (workaround for
+    grouped_mm gradient bug with zero-size groups).
+
+    Args:
+        x_sorted: (num_tokens, dim) tokens sorted by expert
+        counts: (num_experts,) token counts per expert
+
+    Returns:
+        (x_padded, counts_padded) where counts_padded are aligned.
+    """
+    # Compute padded counts: round up to _TOKEN_ALIGN, min _TOKEN_ALIGN
+    counts_padded = ((counts + _TOKEN_ALIGN - 1) // _TOKEN_ALIGN * _TOKEN_ALIGN).to(
+        torch.int64
+    )
+    counts_padded = torch.clamp_min(counts_padded, _TOKEN_ALIGN)
+
+    n = counts.shape[0]
+
+    # Try Triton kernel for large expert counts on CUDA (4.6x faster at 256 experts)
+    if n > _PAD_VECTORIZE_THRESHOLD and x_sorted.is_cuda:
+        global _triton_pad_fn
+        if _triton_pad_fn is None:
+            try:
+                from torchtitan.distributed.llep_kernels import (
+                    triton_pad_for_grouped_mm,
+                )
+
+                _triton_pad_fn = triton_pad_for_grouped_mm
+            except (ImportError, RuntimeError):
+                _triton_pad_fn = False
+
+        if _triton_pad_fn:
+            x_padded = _triton_pad_fn(x_sorted, counts, counts_padded)
+            return x_padded, counts_padded
+
+    total_padded = counts_padded.sum().item()
+    dim = x_sorted.shape[1]
+    device = x_sorted.device
+    dtype = x_sorted.dtype
+
+    x_padded = torch.zeros(total_padded, dim, device=device, dtype=dtype)
+
+    if n <= _PAD_VECTORIZE_THRESHOLD:
+        # Small expert count: for-loop is faster (less GPU overhead)
+        src_offset = 0
+        dst_offset = 0
+        counts_list = counts.tolist()
+        counts_padded_list = counts_padded.tolist()
+        for i in range(n):
+            c = int(counts_list[i])
+            cp = int(counts_padded_list[i])
+            if c > 0:
+                x_padded[dst_offset : dst_offset + c] = x_sorted[
+                    src_offset : src_offset + c
+                ]
+            src_offset += c
+            dst_offset += cp
+    else:
+        # Large expert count: vectorized GPU scatter (fallback when Triton unavailable)
+        src_offsets = torch.zeros(n + 1, dtype=torch.int64, device=device)
+        src_offsets[1:] = counts.cumsum(0)
+        dst_offsets = torch.zeros(n + 1, dtype=torch.int64, device=device)
+        dst_offsets[1:] = counts_padded.cumsum(0)
+
+        nonempty = counts > 0
+        if nonempty.any():
+            src_starts = src_offsets[:-1][nonempty]
+            dst_starts = dst_offsets[:-1][nonempty]
+            lens = counts[nonempty]
+
+            max_len = lens.max().item()
+            offsets_range = torch.arange(max_len, device=device).unsqueeze(0)
+            mask = offsets_range < lens.unsqueeze(1)
+            src_indices = (src_starts.unsqueeze(1) + offsets_range).masked_select(mask)
+            dst_indices = (dst_starts.unsqueeze(1) + offsets_range).masked_select(mask)
+            x_padded[dst_indices] = x_sorted[src_indices]
+
+    return x_padded, counts_padded
+
+
+def _unpad_output(
+    out_padded: torch.Tensor,
+    counts: torch.Tensor,
+    counts_padded: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Remove padding from grouped_mm output to recover original token counts.
+    """
+    n = counts.shape[0]
+
+    # Try Triton kernel for large expert counts on CUDA (6.5x faster at 256 experts)
+    if n > _PAD_VECTORIZE_THRESHOLD and out_padded.is_cuda:
+        global _triton_unpad_fn
+        if _triton_unpad_fn is None:
+            try:
+                from torchtitan.distributed.llep_kernels import triton_unpad_output
+
+                _triton_unpad_fn = triton_unpad_output
+            except (ImportError, RuntimeError):
+                _triton_unpad_fn = False
+
+        if _triton_unpad_fn:
+            return _triton_unpad_fn(out_padded, counts, counts_padded)
+
+    total_tokens = counts.sum().item()
+    dim = out_padded.shape[1]
+    device = out_padded.device
+    dtype = out_padded.dtype
+
+    out = torch.empty(total_tokens, dim, device=device, dtype=dtype)
+
+    if n <= _PAD_VECTORIZE_THRESHOLD:
+        # Small expert count: for-loop is faster
+        src_offset = 0
+        dst_offset = 0
+        counts_list = counts.tolist()
+        counts_padded_list = counts_padded.tolist()
+        for i in range(n):
+            c = int(counts_list[i])
+            cp = int(counts_padded_list[i])
+            if c > 0:
+                out[dst_offset : dst_offset + c] = out_padded[
+                    src_offset : src_offset + c
+                ]
+            src_offset += cp
+            dst_offset += c
+    else:
+        # Large expert count: vectorized GPU gather (fallback when Triton unavailable)
+        src_offsets = torch.zeros(n + 1, dtype=torch.int64, device=device)
+        src_offsets[1:] = counts_padded.cumsum(0)
+        dst_offsets = torch.zeros(n + 1, dtype=torch.int64, device=device)
+        dst_offsets[1:] = counts.cumsum(0)
+
+        nonempty = counts > 0
+        if nonempty.any():
+            src_starts = src_offsets[:-1][nonempty]
+            dst_starts = dst_offsets[:-1][nonempty]
+            lens = counts[nonempty]
+
+            max_len = lens.max().item()
+            offsets_range = torch.arange(max_len, device=device).unsqueeze(0)
+            mask = offsets_range < lens.unsqueeze(1)
+            src_indices = (src_starts.unsqueeze(1) + offsets_range).masked_select(mask)
+            dst_indices = (dst_starts.unsqueeze(1) + offsets_range).masked_select(mask)
+            out[dst_indices] = out_padded[src_indices]
+
+    return out
+
+
+def _llep_swiglu_ffn_grouped_mm(
+    x: torch.Tensor,
+    expert_ids: torch.Tensor,
+    w1_local: torch.Tensor,
+    w2_local: torch.Tensor,
+    w3_local: torch.Tensor,
     foreign_w1: dict[int, torch.Tensor] | None,
     foreign_w2: dict[int, torch.Tensor] | None,
     foreign_w3: dict[int, torch.Tensor] | None,
     ep_rank: int,
     num_local_experts: int,
-    # Stacked tensor interface (for autograd):
     foreign_w1_stacked: Optional[torch.Tensor] = None,
     foreign_w2_stacked: Optional[torch.Tensor] = None,
     foreign_w3_stacked: Optional[torch.Tensor] = None,
     foreign_expert_id_mapping: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
-    Run SwiGLU FFN on tokens using both native and foreign expert weights.
+    SwiGLU FFN using torch._grouped_mm — replaces the Python for-loop.
 
-    Groups tokens by expert, then for each expert:
-      h = silu(x @ w1.T) * (x @ w3.T)
-      out = h @ w2.T
+    3 batched kernel launches instead of 3*N per-expert launches.
     """
     if x.numel() == 0:
         return torch.empty(0, w2_local.shape[1], device=x.device, dtype=x.dtype)
 
     num_tokens, dim = x.shape
     orig_dtype = x.dtype
-    native_start = ep_rank * num_local_experts
-    native_end = native_start + num_local_experts
-
-    # Ensure consistent compute dtype (cast x once, not per-expert)
     compute_dtype = w1_local.dtype
     if x.dtype != compute_dtype:
         x = x.to(compute_dtype)
@@ -904,7 +1340,116 @@ def llep_swiglu_ffn(
     x_sorted = x[sort_perm]
 
     # Compute segment boundaries
-    unique_experts, counts = torch.unique_consecutive(sorted_expert_ids, return_counts=True)
+    unique_experts, counts = torch.unique_consecutive(
+        sorted_expert_ids, return_counts=True
+    )
+
+    # Pack weights for all active experts
+    w1_packed, w2_packed, w3_packed, valid_mask = _pack_expert_weights(
+        unique_experts,
+        w1_local,
+        w2_local,
+        w3_local,
+        foreign_w1,
+        foreign_w2,
+        foreign_w3,
+        foreign_w1_stacked,
+        foreign_w2_stacked,
+        foreign_w3_stacked,
+        foreign_expert_id_mapping,
+        ep_rank,
+        num_local_experts,
+    )
+
+    # Pad tokens for grouped_mm alignment
+    x_padded, counts_padded = _pad_for_grouped_mm(x_sorted, counts)
+
+    # Offsets for grouped_mm (cumulative sum of padded counts)
+    offsets = torch.cumsum(counts_padded, dim=0, dtype=torch.int32)
+
+    # 3 grouped GEMMs
+    x1 = torch._grouped_mm(
+        x_padded.bfloat16(), w1_packed.bfloat16().transpose(-2, -1), offs=offsets
+    )
+    x3 = torch._grouped_mm(
+        x_padded.bfloat16(), w3_packed.bfloat16().transpose(-2, -1), offs=offsets
+    )
+
+    # Fused activation: silu(x1) * x3 (cached import)
+    global _fused_silu_gate_fn
+    if _fused_silu_gate_fn is None:
+        try:
+            from torchtitan.distributed.llep_kernels import fused_silu_gate
+
+            _fused_silu_gate_fn = fused_silu_gate
+        except (ImportError, RuntimeError):
+            _fused_silu_gate_fn = lambda x1, x3: F.silu(x1) * x3
+    h = _fused_silu_gate_fn(x1, x3)
+
+    out_padded = torch._grouped_mm(
+        h, w2_packed.bfloat16().transpose(-2, -1), offs=offsets
+    )
+
+    # Unpad to original counts
+    out_sorted = _unpad_output(out_padded, counts, counts_padded)
+
+    # Zero out invalid experts
+    if not all(valid_mask):
+        offset = 0
+        counts_list = counts.tolist()
+        for i, valid in enumerate(valid_mask):
+            c = int(counts_list[i])
+            if not valid and c > 0:
+                out_sorted[offset : offset + c] = 0
+            offset += c
+
+    # Cast back if needed
+    if out_sorted.dtype != orig_dtype:
+        out_sorted = out_sorted.to(orig_dtype)
+
+    # Unsort
+    inverse_perm = sort_perm.argsort()
+    return out_sorted[inverse_perm]
+
+
+# ---------------------------------------------------------------------------
+# SwiGLU FFN for native + foreign experts (original for-loop, used as fallback)
+# ---------------------------------------------------------------------------
+def _llep_swiglu_ffn_forloop(
+    x: torch.Tensor,
+    expert_ids: torch.Tensor,
+    w1_local: torch.Tensor,
+    w2_local: torch.Tensor,
+    w3_local: torch.Tensor,
+    foreign_w1: dict[int, torch.Tensor] | None,
+    foreign_w2: dict[int, torch.Tensor] | None,
+    foreign_w3: dict[int, torch.Tensor] | None,
+    ep_rank: int,
+    num_local_experts: int,
+    foreign_w1_stacked: Optional[torch.Tensor] = None,
+    foreign_w2_stacked: Optional[torch.Tensor] = None,
+    foreign_w3_stacked: Optional[torch.Tensor] = None,
+    foreign_expert_id_mapping: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Original for-loop SwiGLU FFN (fallback when LLEP_USE_GROUPED_MM=0)."""
+    if x.numel() == 0:
+        return torch.empty(0, w2_local.shape[1], device=x.device, dtype=x.dtype)
+
+    num_tokens, dim = x.shape
+    orig_dtype = x.dtype
+    native_start = ep_rank * num_local_experts
+    native_end = native_start + num_local_experts
+
+    compute_dtype = w1_local.dtype
+    if x.dtype != compute_dtype:
+        x = x.to(compute_dtype)
+
+    sorted_expert_ids, sort_perm = expert_ids.sort(stable=True)
+    x_sorted = x[sort_perm]
+
+    unique_experts, counts = torch.unique_consecutive(
+        sorted_expert_ids, return_counts=True
+    )
     offsets = torch.zeros(len(counts) + 1, dtype=torch.int64, device=x.device)
     offsets[1:] = counts.cumsum(0)
 
@@ -935,20 +1480,72 @@ def llep_swiglu_ffn(
             w2 = foreign_w2[eid]
             w3 = foreign_w3[eid]
         else:
-            # Should not happen - fill with zeros as safety
             out_sorted[start:end] = 0
             continue
 
-        # SwiGLU: silu(x @ w1.T) * (x @ w3.T) @ w2.T
         h = F.silu(x_slice @ w1.T) * (x_slice @ w3.T)
         out_sorted[start:end] = h @ w2.T
 
-    # Unsort and cast back if needed
     inverse_perm = sort_perm.argsort()
     result = out_sorted[inverse_perm]
     if result.dtype != orig_dtype:
         result = result.to(orig_dtype)
     return result
+
+
+# ---------------------------------------------------------------------------
+# SwiGLU FFN for native + foreign experts
+# ---------------------------------------------------------------------------
+def llep_swiglu_ffn(
+    x: torch.Tensor,  # (num_tokens, dim)
+    expert_ids: torch.Tensor,  # (num_tokens,) global expert IDs
+    w1_local: torch.Tensor,  # (num_local_experts, hidden_dim, dim)
+    w2_local: torch.Tensor,  # (num_local_experts, dim, hidden_dim)
+    w3_local: torch.Tensor,  # (num_local_experts, hidden_dim, dim)
+    foreign_w1: dict[int, torch.Tensor] | None,
+    foreign_w2: dict[int, torch.Tensor] | None,
+    foreign_w3: dict[int, torch.Tensor] | None,
+    ep_rank: int,
+    num_local_experts: int,
+    # Stacked tensor interface (for autograd):
+    foreign_w1_stacked: Optional[torch.Tensor] = None,
+    foreign_w2_stacked: Optional[torch.Tensor] = None,
+    foreign_w3_stacked: Optional[torch.Tensor] = None,
+    foreign_expert_id_mapping: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Run SwiGLU FFN on tokens using both native and foreign expert weights.
+
+    Groups tokens by expert, then for each expert:
+      h = silu(x @ w1.T) * (x @ w3.T)
+      out = h @ w2.T
+
+    When LLEP_USE_GROUPED_MM=1 (default), uses torch._grouped_mm to batch
+    all expert computations into 3 kernel launches instead of 3*N.
+    Set LLEP_USE_GROUPED_MM=0 to fall back to the original per-expert for-loop.
+    """
+    args = (
+        x,
+        expert_ids,
+        w1_local,
+        w2_local,
+        w3_local,
+        foreign_w1,
+        foreign_w2,
+        foreign_w3,
+        ep_rank,
+        num_local_experts,
+    )
+    kwargs = dict(
+        foreign_w1_stacked=foreign_w1_stacked,
+        foreign_w2_stacked=foreign_w2_stacked,
+        foreign_w3_stacked=foreign_w3_stacked,
+        foreign_expert_id_mapping=foreign_expert_id_mapping,
+    )
+
+    if LLEP_USE_GROUPED_MM and x.is_cuda:
+        return _llep_swiglu_ffn_grouped_mm(*args, **kwargs)
+    return _llep_swiglu_ffn_forloop(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1032,16 +1629,13 @@ def llep_moe_forward(
     num_tokens, dim = hidden_states.shape
     top_k = selected_experts_indices.shape[1]
 
-    # Override from env
-    max_tokens_factor = float(
-        os.environ.get("EP_MAX_TOKENS_FACTOR", str(max_tokens_factor))
-    )
-    min_tokens_per_gemm = int(
-        os.environ.get("EP_MIN_TOKENS_PER_GEMM", str(min_tokens_per_gemm))
-    )
-    adaptive_threshold = float(
-        os.environ.get("EP_ADAPTIVE_THRESHOLD", str(adaptive_threshold))
-    )
+    # Override from env (cached at module level, not re-read per call)
+    if _ENV_MAX_TOKENS_FACTOR is not None:
+        max_tokens_factor = float(_ENV_MAX_TOKENS_FACTOR)
+    if _ENV_MIN_TOKENS_PER_GEMM is not None:
+        min_tokens_per_gemm = int(_ENV_MIN_TOKENS_PER_GEMM)
+    if _ENV_ADAPTIVE_THRESHOLD is not None:
+        adaptive_threshold = float(_ENV_ADAPTIVE_THRESHOLD)
 
     # ------------------------------------------------------------------
     # Step 1: Gather per-rank expert counts via all_gather
@@ -1133,16 +1727,25 @@ def llep_moe_forward(
             p2p_handles,
             gradient_anchor,
         ) = transfer_expert_weights_autograd(
-            ep_rank, ep_group, plan,
-            w1_local, w2_local, w3_local,
-            num_local_experts, effective_num_experts,
+            ep_rank,
+            ep_group,
+            plan,
+            w1_local,
+            w2_local,
+            w3_local,
+            num_local_experts,
+            effective_num_experts,
             return_handles=True,
         )
         foreign_w1 = foreign_w2 = foreign_w3 = None
     else:
         foreign_w1, foreign_w2, foreign_w3, p2p_handles = transfer_expert_weights(
-            ep_rank, ep_group, plan,
-            w1_local, w2_local, w3_local,
+            ep_rank,
+            ep_group,
+            plan,
+            w1_local,
+            w2_local,
+            w3_local,
             num_local_experts,
             return_handles=True,
         )
@@ -1158,9 +1761,14 @@ def llep_moe_forward(
         sorted_indices,
         undo_indices,
     ) = assign_tokens_to_gpus(
-        top_scores, selected_experts_indices,
-        plan.lpt_plan, ep_size, ep_rank, num_local_experts,
-        all_expert_counts, local_expert_counts,
+        top_scores,
+        selected_experts_indices,
+        plan.lpt_plan,
+        ep_size,
+        ep_rank,
+        num_local_experts,
+        all_expert_counts,
+        local_expert_counts,
     )
 
     # Expand hidden states for top_k and sort
@@ -1186,11 +1794,14 @@ def llep_moe_forward(
     if total_send > 0 or total_recv > 0:
         if can_merge:
             # Merge hidden (dim cols) + scores (1 col) + expert_ids (1 col)
-            merged_send = torch.cat([
-                sorted_hidden,
-                sorted_scores.unsqueeze(1).to(dtype),
-                sorted_experts.unsqueeze(1).to(dtype),
-            ], dim=1)  # (total_send, dim + 2)
+            merged_send = torch.cat(
+                [
+                    sorted_hidden,
+                    sorted_scores.unsqueeze(1).to(dtype),
+                    sorted_experts.unsqueeze(1).to(dtype),
+                ],
+                dim=1,
+            )  # (total_send, dim + 2)
 
             if use_autograd_a2a:
                 merged_recv = a2a_autograd(
@@ -1201,8 +1812,10 @@ def llep_moe_forward(
                     total_recv, dim + 2, device=device, dtype=dtype
                 )
                 dist.all_to_all_single(
-                    merged_recv, merged_send,
-                    output_split_sizes, input_split_sizes,
+                    merged_recv,
+                    merged_send,
+                    output_split_sizes,
+                    input_split_sizes,
                     group=ep_group,
                 )
 
@@ -1218,32 +1831,36 @@ def llep_moe_forward(
                 # A2A scores as 2D for all_to_all_single compatibility
                 recv_scores = a2a_autograd(
                     sorted_scores.unsqueeze(1).to(dtype),
-                    output_split_sizes, input_split_sizes, ep_group,
+                    output_split_sizes,
+                    input_split_sizes,
+                    ep_group,
                 ).squeeze(1)
             else:
-                recv_hidden = torch.empty(
-                    total_recv, dim, device=device, dtype=dtype
-                )
+                recv_hidden = torch.empty(total_recv, dim, device=device, dtype=dtype)
                 recv_scores = torch.empty(
                     total_recv, device=device, dtype=sorted_scores.dtype
                 )
                 dist.all_to_all_single(
-                    recv_hidden, sorted_hidden,
-                    output_split_sizes, input_split_sizes,
+                    recv_hidden,
+                    sorted_hidden,
+                    output_split_sizes,
+                    input_split_sizes,
                     group=ep_group,
                 )
                 dist.all_to_all_single(
-                    recv_scores, sorted_scores,
-                    output_split_sizes, input_split_sizes,
+                    recv_scores,
+                    sorted_scores,
+                    output_split_sizes,
+                    input_split_sizes,
                     group=ep_group,
                 )
             # Expert indices: always non-differentiable (integer)
-            recv_experts = torch.empty(
-                total_recv, device=device, dtype=torch.int64
-            )
+            recv_experts = torch.empty(total_recv, device=device, dtype=torch.int64)
             dist.all_to_all_single(
-                recv_experts, sorted_experts.to(torch.int64),
-                output_split_sizes, input_split_sizes,
+                recv_experts,
+                sorted_experts.to(torch.int64),
+                output_split_sizes,
+                input_split_sizes,
                 group=ep_group,
             )
     else:
@@ -1263,9 +1880,9 @@ def llep_moe_forward(
     # Step 9: Apply routing scores before experts (if configured)
     # ------------------------------------------------------------------
     if score_before_experts and recv_hidden.numel() > 0:
-        recv_hidden = (
-            recv_hidden.to(torch.float32) * recv_scores.reshape(-1, 1)
-        ).to(dtype)
+        recv_hidden = (recv_hidden.to(torch.float32) * recv_scores.reshape(-1, 1)).to(
+            dtype
+        )
 
     # ------------------------------------------------------------------
     # Step 10: Run SwiGLU FFN on received tokens
@@ -1274,9 +1891,14 @@ def llep_moe_forward(
         recv_output = llep_swiglu_ffn(
             recv_hidden,
             recv_experts.to(torch.int64),
-            w1_local, w2_local, w3_local,
-            foreign_w1, foreign_w2, foreign_w3,
-            ep_rank, num_local_experts,
+            w1_local,
+            w2_local,
+            w3_local,
+            foreign_w1,
+            foreign_w2,
+            foreign_w3,
+            ep_rank,
+            num_local_experts,
             foreign_w1_stacked=foreign_w1_stacked,
             foreign_w2_stacked=foreign_w2_stacked,
             foreign_w3_stacked=foreign_w3_stacked,
@@ -1289,20 +1911,24 @@ def llep_moe_forward(
         if LLEP_W_TRANSFER_AUTOGRAD:
             weight_touch = (w1_local.sum() + w2_local.sum() + w3_local.sum()) * 0.0
             if foreign_w1_stacked is not None and foreign_w1_stacked.numel() > 0:
-                weight_touch = weight_touch + (
-                    foreign_w1_stacked.sum()
-                    + foreign_w2_stacked.sum()
-                    + foreign_w3_stacked.sum()
-                ) * 0.0
+                weight_touch = (
+                    weight_touch
+                    + (
+                        foreign_w1_stacked.sum()
+                        + foreign_w2_stacked.sum()
+                        + foreign_w3_stacked.sum()
+                    )
+                    * 0.0
+                )
             recv_output = recv_output + weight_touch
 
     # ------------------------------------------------------------------
     # Step 11: Apply routing scores after experts (if configured)
     # ------------------------------------------------------------------
     if not score_before_experts and recv_output.numel() > 0:
-        recv_output = (
-            recv_output.to(torch.float32) * recv_scores.reshape(-1, 1)
-        ).to(dtype)
+        recv_output = (recv_output.to(torch.float32) * recv_scores.reshape(-1, 1)).to(
+            dtype
+        )
 
     # ------------------------------------------------------------------
     # Step 12: AllToAll combine - route outputs back
@@ -1314,12 +1940,12 @@ def llep_moe_forward(
                 recv_output, input_split_sizes, output_split_sizes, ep_group
             )
         else:
-            send_output = torch.empty(
-                total_send, dim, device=device, dtype=dtype
-            )
+            send_output = torch.empty(total_send, dim, device=device, dtype=dtype)
             dist.all_to_all_single(
-                send_output, recv_output,
-                input_split_sizes, output_split_sizes,
+                send_output,
+                recv_output,
+                input_split_sizes,
+                output_split_sizes,
                 group=ep_group,
             )
     else:
