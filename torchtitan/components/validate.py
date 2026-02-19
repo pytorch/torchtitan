@@ -6,7 +6,7 @@
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, field as dataclass_field, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, cast, TypeAlias
 
 import torch
@@ -79,7 +79,7 @@ class Validator(BaseValidator):
         WARNING: When setting to -1 there could be hangs due to mismatch among ranks
         """
 
-        dataloader: BaseDataLoader.Config = dataclass_field(
+        dataloader: BaseDataLoader.Config = field(
             default_factory=lambda: HuggingFaceTextDataLoader.Config(
                 dataset="c4_validation",
                 infinite=False,

@@ -5,13 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-import importlib
 import json
 import os
 import sys
 import time
 from pathlib import Path
-
 from typing import Optional
 
 import torch
@@ -89,7 +87,9 @@ def test_generate(
 
     # Load configuration from config_registry
     config_manager = ConfigManager()
-    config = config_manager.parse_args(["--model", model_name, "--config", config_name])
+    config = config_manager.parse_args(
+        ["--module", model_name, "--config", config_name]
+    )
 
     if len(args.prompt) == 0:
         logger.warning(
@@ -102,19 +102,16 @@ def test_generate(
     device_module.set_device(device)
     device_memory_monitor = build_device_memory_monitor()
 
-    model_module = importlib.import_module(
-        f"torchtitan.models.{config.model_spec.name}"
-    )
-    train_spec = model_module.model_registry(config.model_spec.flavor)
-
     logger.info(f"World Size: {world_size}, Local Rank: {local_rank} on {device}")
 
     # Tokenizer setup
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-    tokenizer = HuggingFaceTokenizer(config.job.hf_assets_path)
+    tokenizer = HuggingFaceTokenizer.Config().build(
+        tokenizer_path=config.hf_assets_path
+    )
 
-    model_config = train_spec.model
+    model_config = config.model_spec.model
     model_config.update_from_config(job_config=config)
 
     init_device = "meta" if world_size > 1 else device
@@ -264,7 +261,7 @@ def test_generate(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test generation")
     parser.add_argument(
-        "--model", type=str, required=True, help="Model name (e.g., llama3)"
+        "--module", type=str, required=True, help="Module name (e.g., llama3)"
     )
     parser.add_argument(
         "--config",
@@ -315,7 +312,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     test_generate(
-        model_name=args.model,
+        model_name=args.module,
         config_name=args.config,
         checkpoint_path=args.checkpoint,
         prompt=args.prompt,

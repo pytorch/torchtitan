@@ -26,7 +26,7 @@ def build_ft_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model ft.llama3 --config llama3_ft_debugmodel",
+                    "--module ft.llama3 --config llama3_ft_debugmodel",
                     "--training.steps 10",
                     "--checkpoint.enable",
                 ],
@@ -47,7 +47,7 @@ def _run_cmd(cmd):
 def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
 
     # Use all 8 GPUs in a single replica
     # TODO: Use two replica groups

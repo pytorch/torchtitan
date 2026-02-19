@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
 
@@ -16,7 +16,6 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import BaseDataLoader, ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import DataLoaderConfig
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
@@ -173,15 +172,12 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseDataLoader.Config):
+    class Config(ParallelAwareDataloader.Config):
         dataset: str = "c4_test"
         """Dataset to use"""
 
         infinite: bool = True
         """Whether to loop the dataset infinitely"""
-
-        dataloader: DataLoaderConfig = field(default_factory=DataLoaderConfig)
-        """DataLoader configuration"""
 
     def __init__(
         self,
@@ -205,7 +201,10 @@ class HuggingFaceTextDataLoader(ParallelAwareDataloader):
         )
 
         dataloader_kwargs = {
-            **asdict(config.dataloader),
+            "num_workers": config.num_workers,
+            "persistent_workers": config.persistent_workers,
+            "pin_memory": config.pin_memory,
+            "prefetch_factor": config.prefetch_factor,
             "batch_size": local_batch_size,
         }
 

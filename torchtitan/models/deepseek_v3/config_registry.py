@@ -15,7 +15,6 @@ from torchtitan.components.quantization.float8 import (
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
-    JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -28,10 +27,7 @@ from . import model_registry
 
 def deepseek_v3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="DeepSeek-V3 debug training",
-            hf_assets_path="./tests/assets/tokenizer",
-        ),
+        hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
         dataloader=HuggingFaceTextDataLoader.Config(dataset="c4_test"),
@@ -70,10 +66,7 @@ def deepseek_v3_debugmodel_flex_attn() -> Trainer.Config:
 
 def deepseek_v3_16b() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="DeepSeek-V3 16B model training",
-            hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        ),
+        hf_assets_path="./assets/hf/deepseek-moe-16b-base",
         model_spec=model_registry("16B"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
@@ -105,10 +98,7 @@ def deepseek_v3_16b() -> Trainer.Config:
 
 def deepseek_v3_671b() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="DeepSeek-V3 671B model training",
-            hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
-        ),
+        hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
         model_spec=model_registry("671B"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",

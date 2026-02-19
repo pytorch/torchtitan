@@ -114,7 +114,7 @@ def build_base_command(
 ) -> str:
     """Build the base command from config file, train file, and options."""
     cmd = f"TRAIN_FILE='{train_file}' CONFIG_FILE='{config_file}' ./run_train.sh"
-    cmd += f" --job.dump_folder={job_dump_folder}"
+    cmd += f" --dump_folder={job_dump_folder}"
     if options:
         cmd += f" {options}"
     return cmd
@@ -465,7 +465,7 @@ def create_seed_checkpoint(
         # Build seed checkpoint command
         seed_cmd = (
             f"TRAIN_FILE='{train_file}' CONFIG_FILE='{config_file}' "
-            f"./run_train.sh --job.dump_folder={job_dump_folder} "
+            f"./run_train.sh --dump_folder={job_dump_folder} "
             f"--checkpoint.create_seed_checkpoint "
             f"--checkpoint.enable {FIXED_OPTIONS}"
         )

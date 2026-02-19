@@ -188,7 +188,7 @@ class FluxValidator(Validator):
                 save_image(
                     name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
                     output_dir=os.path.join(
-                        self.trainer_config.job.dump_folder,
+                        self.trainer_config.dump_folder,
                         self.config.save_img_folder,
                     ),
                     x=image,

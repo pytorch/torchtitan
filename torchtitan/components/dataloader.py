@@ -67,6 +67,23 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
             pin_memory).
     """
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseDataLoader.Config):
+        num_workers: int = 0
+        """Number of worker processes for data loading."""
+
+        persistent_workers: bool = False
+        """Keep workers alive between epochs. Only valid when num_workers > 0."""
+
+        pin_memory: bool = False
+        """Copy tensors to CUDA pinned memory before returning them."""
+
+        prefetch_factor: int | None = None
+        """
+        Number of batches loaded in advance by each worker. Only valid when num_workers > 0.
+        Default is 2 when num_workers > 0, otherwise None.
+        """
+
     dp_rank: int
     dp_world_size: int
 

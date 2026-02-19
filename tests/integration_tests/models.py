@@ -22,7 +22,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--moduledeepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
                     "--compile.enable",
@@ -35,7 +35,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--moduledeepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule DualPipeV",
@@ -50,7 +50,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--moduledeepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -66,7 +66,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model deepseek_v3 --config deepseek_v3_debugmodel",
+                    "--moduledeepseek_v3 --config deepseek_v3_debugmodel",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -82,7 +82,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model deepseek_v3 --config deepseek_v3_debugmodel_flex_attn",
+                    "--moduledeepseek_v3 --config deepseek_v3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
@@ -99,7 +99,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model qwen3 --config qwen3_debugmodel",
+                    "--moduleqwen3 --config qwen3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                 ],
@@ -111,7 +111,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model qwen3 --config qwen3_moe_debug",
+                    "--moduleqwen3 --config qwen3_moe_debug",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 2",
@@ -126,7 +126,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model llama4 --config llama4_debugmodel",
+                    "--modulellama4 --config llama4_debugmodel",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
                     "--parallelism.data_parallel_shard_degree 2",
@@ -144,7 +144,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model gpt_oss --config gpt_oss_debugmodel",
+                    "--modulegpt_oss --config gpt_oss_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",

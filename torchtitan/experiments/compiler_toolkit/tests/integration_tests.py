@@ -21,7 +21,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model compiler_toolkit.llama3",
+                    "--module compiler_toolkit.llama3",
                     "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -34,7 +34,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model compiler_toolkit.llama3",
+                    "--module compiler_toolkit.llama3",
                     "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -48,7 +48,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model compiler_toolkit.llama3",
+                    "--module compiler_toolkit.llama3",
                     "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -62,7 +62,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model compiler_toolkit.llama3",
+                    "--module compiler_toolkit.llama3",
                     "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -77,7 +77,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model compiler_toolkit.llama3",
+                    "--module compiler_toolkit.llama3",
                     "--config compiler_toolkit_llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -90,7 +90,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model compiler_toolkit.llama3",
+                    "--module compiler_toolkit.llama3",
                     "--config compiler_toolkit_llama3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -105,7 +105,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         # OverrideDefinitions(
         #     [
         #         [
-        #             "--model compiler_toolkit.llama3",
+        #             "--module compiler_toolkit.llama3",
         #             "--config compiler_toolkit_llama3_debugmodel_flex_attn",
         #             "--parallelism.data_parallel_shard_degree 2",
         #             "--parallelism.tensor_parallel_degree 2",
@@ -119,7 +119,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model compiler_toolkit.llama3",
+                    "--module compiler_toolkit.llama3",
                     "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -134,7 +134,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model compiler_toolkit.llama3",
+                    "--module compiler_toolkit.llama3",
                     "--config compiler_toolkit_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -149,7 +149,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model compiler_toolkit.deepseek_v3",
+                    "--module compiler_toolkit.deepseek_v3",
                     "--config compiler_toolkit_deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -165,7 +165,7 @@ def build_compiler_toolkit_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model compiler_toolkit.deepseek_v3",
+                    "--module compiler_toolkit.deepseek_v3",
                     "--config compiler_toolkit_deepseek_v3_debugmodel_flex_attn",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",

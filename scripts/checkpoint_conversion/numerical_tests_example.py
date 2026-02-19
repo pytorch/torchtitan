@@ -64,7 +64,9 @@ def forward_hf(model_name, model_path: Optional[str], input_ids):
 def forward_tt(model_name, config_name, checkpoint_path, test_set):
 
     config_manager = ConfigManager()
-    config = config_manager.parse_args(["--model", model_name, "--config", config_name])
+    config = config_manager.parse_args(
+        ["--module", model_name, "--config", config_name]
+    )
 
     model_config = config.model_spec.model
     model_config.update_from_config(job_config=config)
@@ -117,11 +119,13 @@ if __name__ == "__main__":
     test_size = 100
 
     config_manager = ConfigManager()
-    config = config_manager.parse_args(["--model", model_name, "--config", config_name])
+    config = config_manager.parse_args(
+        ["--module", model_name, "--config", config_name]
+    )
 
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-    tokenizer = HuggingFaceTokenizer(config.job.hf_assets_path)
+    tokenizer = HuggingFaceTokenizer(config.hf_assets_path)
 
     # Build test set of randomly generated token ids
     test_set = [

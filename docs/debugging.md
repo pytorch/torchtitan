@@ -39,19 +39,19 @@ You can override it at runtime via CLI with:
 To inspect how configuration values are interpreted—including those from config_registry functions and CLI overrides—run the config manager directly:
 
 ```bash
-python -m torchtitan.config.manager --model llama3 --config llama3_8b [your cli args...]
+python -m torchtitan.config.manager --module llama3 --config llama3_8b [your cli args...]
 ```
 
 For example,
 
 ```bash
-python -m torchtitan.config.manager --model llama3 --config llama3_8b --profiling.enable_memory_snapshot
+python -m torchtitan.config.manager --module llama3 --config llama3_8b --profiling.enable_memory_snapshot
 ```
 
 To list all available CLI flags and usage:
 
 ```bash
-python -m torchtitan.config.manager --model llama3 --config llama3_debugmodel --help
+python -m torchtitan.config.manager --module llama3 --config llama3_debugmodel --help
 ```
 
 This will print a structured configuration to `stdout`, allowing you to verify that overrides are being applied correctly.
@@ -122,7 +122,7 @@ NGPU=16 COMM_MODE="local_tensor" ./run_train.sh \
 ## Troubleshooting jobs that timeout
 
 If you encounter jobs that timeout, you'll need to debug them to identify the root cause. To help with this process, we've enabled Flight Recorder, a tool that continuously collects diagnostic information about your jobs.
-When a job times out, Flight Recorder automatically generates dump files on every rank containing valuable debugging data. You can find these dump files in the `job.dump_folder` directory.
+When a job times out, Flight Recorder automatically generates dump files on every rank containing valuable debugging data. You can find these dump files in the `dump_folder` directory.
 To learn how to analyze and diagnose issues using these logs, follow our step-by-step tutorial [link](https://pytorch.org/tutorials/prototype/flight_recorder_tutorial.html).
 
 

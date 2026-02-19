@@ -11,7 +11,6 @@ import torch
 
 from torch.fx.traceback import annotate_fn
 
-from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.compiler_toolkit.common_utils import (
     disable_compile,
@@ -30,6 +29,7 @@ from torchtitan.experiments.compiler_toolkit.graph_utils import (
 from torchtitan.experiments.simple_fsdp.deepseek_v3.parallelize import (
     parallelize_deepseekv3 as simple_fsdp_parallelize_deepseekv3,
 )
+from torchtitan.trainer import Trainer
 
 
 def annotate_deepseekv3() -> None:
@@ -55,7 +55,7 @@ def annotate_deepseekv3() -> None:
 def parallelize_deepseekv3(
     model: torch.nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    job_config: Trainer.Config,
 ) -> CompiledModule:
     """
     Parallelize and compile a DeepSeek v3 model with optional custom compiler passes.
@@ -74,7 +74,16 @@ def parallelize_deepseekv3(
 
     # Disable torch.compile over the model in the compiler toolkit style workflow
     with disable_compile(job_config):
-        model = simple_fsdp_parallelize_deepseekv3(model, parallel_dims, job_config)
+        model = simple_fsdp_parallelize_deepseekv3(
+            model,
+            parallel_dims,
+            training=job_config.training,
+            model_converters=job_config.model_converters,
+            parallelism=job_config.parallelism,
+            compile_config=job_config.compile,
+            ac_config=job_config.activation_checkpoint,
+            dump_folder=job_config.dump_folder,
+        )
 
     # Get joint custom passes from config
     joint_custom_passes = get_joint_custom_passes_from_config(parallel_dims, job_config)
@@ -84,7 +93,7 @@ def parallelize_deepseekv3(
 
     # Create compilers with specified passes
     fw_compiler, bw_compiler = make_compiler_with_passes(
-        compiler_passes, dump_folder=job_config.job.dump_folder
+        compiler_passes, dump_folder=job_config.dump_folder
     )
 
     # Create custom joint_graph_builder with deepseekv3-specific compilers
@@ -93,7 +102,7 @@ def parallelize_deepseekv3(
         fw_compiler=fw_compiler,
         bw_compiler=bw_compiler,
         joint_custom_passes=joint_custom_passes,
-        dump_folder=job_config.job.dump_folder,
+        dump_folder=job_config.dump_folder,
         job_config=job_config,
     )
 

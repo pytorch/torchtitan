@@ -57,7 +57,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 config_manager = ConfigManager()
                 config = config_manager.parse_args(
                     [
-                        "--model",
+                        "--module",
                         "flux",
                         "--config",
                         "flux_debugmodel",

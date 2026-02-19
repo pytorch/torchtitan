@@ -11,10 +11,8 @@ from typing import Callable, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from autoparallel.api import AutoParallel
 from autoparallel.auto_bucketing import configure_inductor_for_autobucketing
-
 from torch.distributed.tensor.placement_types import Replicate, Shard
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -25,7 +23,6 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.autoparallel.configs import AutoParallelCompileConfig
 from torchtitan.models.common.moe.moe import _run_experts_grouped_mm
 from torchtitan.protocols.model_converter import ModelConvertersContainer
-
 from torchtitan.tools.logging import logger
 
 

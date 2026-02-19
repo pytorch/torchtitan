@@ -12,9 +12,9 @@ import torch
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.flux.configs import Encoder, Inference, Validation
-from torchtitan.models.flux.infra.parallelize import parallelize_encoders
 from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
+from torchtitan.models.flux.parallelize import parallelize_encoders
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,

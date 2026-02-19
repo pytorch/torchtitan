@@ -10,7 +10,6 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import DataLoaderConfig
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 
 
@@ -125,9 +124,7 @@ class TestParallelAwareDataloader(unittest.TestCase):
 
         dl_config = HuggingFaceTextDataLoader.Config(
             dataset="c4_test",
-            local_batch_size=8,
-            seq_len=512,
-            dataloader=DataLoaderConfig(num_workers=2),
+            num_workers=2,
         )
 
         dataloader = HuggingFaceTextDataLoader(
@@ -135,6 +132,8 @@ class TestParallelAwareDataloader(unittest.TestCase):
             dp_world_size=1,
             dp_rank=0,
             tokenizer=tokenizer,
+            seq_len=512,
+            local_batch_size=8,
         )
 
         self.assertEqual(dataloader.batch_size, 8)

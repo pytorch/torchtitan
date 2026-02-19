@@ -18,7 +18,6 @@ from torch._functorch.aot_autograd import (
 )
 from torch._guards import tracing, TracingContext
 from torch.distributed.tensor import DTensor
-from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.compiler_toolkit.common_utils import (
     create_extra_fsdp_pg,
@@ -26,6 +25,7 @@ from torchtitan.experiments.compiler_toolkit.common_utils import (
     get_extra_fsdp_pg_name,
 )
 from torchtitan.tools.logging import logger
+from torchtitan.trainer import Trainer
 
 
 def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> None:
@@ -112,7 +112,7 @@ def joint_graph_builder(
     bw_compiler: Optional[Callable] = None,
     joint_custom_passes: Optional[List[Callable]] = None,
     dump_folder: str | None = None,
-    job_config: Optional["JobConfig"] = None,
+    job_config: Optional["Trainer.Config"] = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -394,7 +394,7 @@ def validate_pass_names(pass_names: list[str], joint_pass_names: list[str]) -> N
 
 def get_compiler_passes_from_config(
     model: torch.nn.Module,
-    job_config: JobConfig,
+    job_config: Trainer.Config,
     parallel_dims: ParallelDims,
 ):
     """
@@ -466,7 +466,7 @@ def get_compiler_passes_from_config(
 
 def get_joint_custom_passes_from_config(
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    job_config: Trainer.Config,
 ):
     """
     Extract and validate joint custom passes from job config.

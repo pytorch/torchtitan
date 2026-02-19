@@ -10,7 +10,6 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
     ActivationCheckpointConfig,
-    JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -22,10 +21,7 @@ from . import model_registry
 
 def compiler_toolkit_deepseek_v3_debugmodel() -> CompilerToolkitTrainer.Config:
     return CompilerToolkitTrainer.Config(
-        job=JobConfig(
-            description="CompilerToolkit DeepSeek-V3 debug training",
-            hf_assets_path="./tests/assets/tokenizer",
-        ),
+        hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry("debugmodel"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(

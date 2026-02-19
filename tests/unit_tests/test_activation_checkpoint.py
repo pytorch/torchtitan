@@ -9,7 +9,6 @@ import unittest
 import torch
 import torch.nn as nn
 from torch.utils.flop_counter import FlopCounterMode
-
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
 

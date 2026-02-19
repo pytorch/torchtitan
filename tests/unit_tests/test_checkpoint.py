@@ -92,8 +92,8 @@ def fake_async_save(*args, **kwargs):
 
 
 class DummyJobConfig:
-    def __init__(self, job):
-        self.job = job
+    def __init__(self, dump_folder):
+        self.dump_folder = dump_folder
         self.checkpoint = CheckpointManager.Config(
             enable=True,
             async_mode="disabled",
@@ -138,11 +138,10 @@ class TestCheckpointManager(unittest.TestCase):
             initial_load_model_only=False,
         )
         ft_ns = SimpleNamespace(replica_id=0)
-        job_ns = SimpleNamespace(dump_folder=self.test_folder)
         self.job_config = SimpleNamespace(
             checkpoint=ckpt_cfg,
             fault_tolerance=ft_ns,
-            job=job_ns,
+            dump_folder=self.test_folder,
         )
 
         # Patch process group creation
@@ -189,7 +188,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -223,7 +222,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -265,7 +264,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
         manager.save(curr_step=1)
@@ -289,7 +288,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
         self.assertFalse(manager.load(step=-1))
@@ -314,7 +313,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
         res = manager.load(step=-1)
@@ -345,7 +344,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
         manager.save(curr_step=1)
@@ -380,7 +379,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
         manager1.save(curr_step=1, last_step=True)
@@ -392,7 +391,7 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.initial_load_model_only = True
         cfg.initial_load_path = path1
         cfg.folder = ""
-        self.job_config.job.dump_folder = self.test_folder
+        self.job_config.dump_folder = self.test_folder
         manager2 = CheckpointManager(
             dataloader=self.data_loader,
             model_parts=self.model_parts,
@@ -401,7 +400,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
         r1 = manager2.load(step=1)
@@ -445,7 +444,7 @@ class TestCheckpointManager(unittest.TestCase):
         to not wait properly for staging completion.
         """
         # Configure async mode with pinned memory
-        job_config = DummyJobConfig(job=self.job_config.job)
+        job_config = DummyJobConfig(dump_folder=self.job_config.dump_folder)
         checkpoint_config = job_config.checkpoint
         checkpoint_config.async_mode = "async_with_pinned_mem"
 
@@ -457,7 +456,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=checkpoint_config,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -487,7 +486,7 @@ class TestCheckpointManager(unittest.TestCase):
         Test that in AsyncMode.ASYNC, save() waits on previous async future.
         """
         # Configure async mode
-        job_config = DummyJobConfig(job=self.job_config.job)
+        job_config = DummyJobConfig(dump_folder=self.job_config.dump_folder)
         checkpoint_config = job_config.checkpoint
         checkpoint_config.async_mode = "async"
         ft_manager = DummyFTManager()
@@ -500,7 +499,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=states,
             checkpoint_config=checkpoint_config,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -531,7 +530,7 @@ class TestCheckpointManager(unittest.TestCase):
         """
         Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
         """
-        job_config = DummyJobConfig(job=self.job_config.job)
+        job_config = DummyJobConfig(dump_folder=self.job_config.dump_folder)
         checkpoint_config = job_config.checkpoint
         checkpoint_config.async_mode = "async"
         ft_manager = mock.Mock()
@@ -546,7 +545,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=checkpoint_config,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -583,7 +582,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -610,7 +609,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -657,7 +656,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -696,7 +695,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -724,7 +723,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 
@@ -766,7 +765,7 @@ class TestCheckpointManager(unittest.TestCase):
             states=self.states,
             checkpoint_config=self.job_config.checkpoint,
             sd_adapter=None,
-            base_folder=self.job_config.job.dump_folder,
+            base_folder=self.job_config.dump_folder,
             ft_manager=self.ft_manager,
         )
 

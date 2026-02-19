@@ -8,7 +8,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import ActivationCheckpointConfig, JobConfig, TrainingConfig
+from torchtitan.config import ActivationCheckpointConfig, TrainingConfig
 
 # TODO: refactor mm dataloader to replace this
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
@@ -19,11 +19,7 @@ from . import model_registry
 
 def vlm_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        model_spec=model_registry("debugmodel"),
-        job=JobConfig(
-            description="VLM debug training",
-            hf_assets_path="./tests/assets/tokenizer",
-        ),
+        hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry("debugmodel"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(

@@ -11,7 +11,6 @@ from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
     ActivationCheckpointConfig,
-    JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -23,10 +22,7 @@ from . import model_registry
 
 def gpt_oss_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Gpt-oss debug training",
-            hf_assets_path="./tests/assets/tokenizer",
-        ),
+        hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
         dataloader=HuggingFaceTextDataLoader.Config(

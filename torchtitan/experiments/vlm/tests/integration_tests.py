@@ -21,7 +21,7 @@ def build_vlm_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model vlm",
+                    "--module vlm",
                     "--config vlm_debugmodel",
                     "--dataloader.dataset cc12m-test",
                     "--parallelism.data_parallel_shard_degree 4",

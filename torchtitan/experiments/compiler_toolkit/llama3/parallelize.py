@@ -10,7 +10,6 @@ import functools
 import torch
 from torch.fx.traceback import annotate_fn
 
-from torchtitan.config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.compiler_toolkit.common_utils import (
     disable_compile,
@@ -28,6 +27,7 @@ from torchtitan.experiments.compiler_toolkit.graph_utils import (
 from torchtitan.experiments.simple_fsdp.llama3.parallelize import (
     parallelize_llama as simple_fsdp_parallelize_llama,
 )
+from torchtitan.trainer import Trainer
 
 
 def annotate_llama() -> None:
@@ -42,7 +42,7 @@ def annotate_llama() -> None:
 def parallelize_llama(
     model: torch.nn.Module,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    job_config: Trainer.Config,
 ) -> CompiledModule:
     """
     Parallelize and compile a Llama model with optional custom compiler passes.
@@ -61,7 +61,16 @@ def parallelize_llama(
 
     # Disable torch.compile over the model in the compiler toolkit style workflow
     with disable_compile(job_config):
-        model = simple_fsdp_parallelize_llama(model, parallel_dims, job_config)
+        model = simple_fsdp_parallelize_llama(
+            model,
+            parallel_dims,
+            training=job_config.training,
+            model_converters=job_config.model_converters,
+            parallelism=job_config.parallelism,
+            compile_config=job_config.compile,
+            ac_config=job_config.activation_checkpoint,
+            dump_folder=job_config.dump_folder,
+        )
 
     # Get joint custom passes from config
     joint_custom_passes = get_joint_custom_passes_from_config(parallel_dims, job_config)
@@ -71,7 +80,7 @@ def parallelize_llama(
 
     # Create compilers with specified passes
     fw_compiler, bw_compiler = make_compiler_with_passes(
-        compiler_passes, dump_folder=job_config.job.dump_folder
+        compiler_passes, dump_folder=job_config.dump_folder
     )
 
     # Create custom joint_graph_builder with llama-specific compilers
@@ -80,7 +89,7 @@ def parallelize_llama(
         fw_compiler=fw_compiler,
         bw_compiler=bw_compiler,
         joint_custom_passes=joint_custom_passes,
-        dump_folder=job_config.job.dump_folder,
+        dump_folder=job_config.dump_folder,
         job_config=job_config,
     )
 

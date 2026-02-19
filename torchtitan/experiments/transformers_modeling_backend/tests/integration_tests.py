@@ -21,9 +21,9 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
         OverrideDefinitions(
             [
                 [
-                    "--model transformers_modeling_backend",
+                    "--module transformers_modeling_backend",
                     "--config transformers_modeling_backend_debugmodel",
-                    "--job.hf_model Qwen/Qwen2.5-7B",
+                    "--hf_model Qwen/Qwen2.5-7B",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.pipeline_parallel_degree 2",

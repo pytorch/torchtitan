@@ -5,10 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.loss import build_mse_loss
-from torchtitan.models.flux.flux_datasets import FluxDataLoader
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .infra.parallelize import parallelize_flux
+from .flux_datasets import FluxDataLoader
 from .model.autoencoder import AutoEncoderParams
 from .model.layers import (
     DoubleStreamBlock,
@@ -19,6 +18,7 @@ from .model.layers import (
 )
 from .model.model import FluxModel
 from .model.state_dict_adapter import FluxStateDictAdapter
+from .parallelize import parallelize_flux
 
 __all__ = [
     "FluxModel",

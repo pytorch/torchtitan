@@ -10,7 +10,6 @@ from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
     ActivationCheckpointConfig,
-    JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -22,10 +21,7 @@ from . import model_registry
 
 def llama4_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Llama 4 debug training",
-            hf_assets_path="./tests/assets/tokenizer",
-        ),
+        hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("debugmodel"),
         dataloader=HuggingFaceTextDataLoader.Config(
@@ -60,10 +56,7 @@ def llama4_debugmodel() -> Trainer.Config:
 
 def llama4_17bx128e() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Llama 4 Maverick 17Bx128E training",
-            hf_assets_path="./assets/hf/Llama-4-Maverick-17B-128E",
-        ),
+        hf_assets_path="./assets/hf/Llama-4-Maverick-17B-128E",
         model_spec=model_registry("17bx128e"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",
@@ -91,10 +84,7 @@ def llama4_17bx128e() -> Trainer.Config:
 
 def llama4_17bx16e() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Llama 4 Scout 17Bx16E training",
-            hf_assets_path="./assets/hf/Llama-4-Scout-17B-16E",
-        ),
+        hf_assets_path="./assets/hf/Llama-4-Scout-17B-16E",
         model_spec=model_registry("17bx16e"),
         dataloader=HuggingFaceTextDataLoader.Config(
             dataset="c4",

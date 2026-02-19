@@ -16,7 +16,6 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
-    JobConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -30,10 +29,7 @@ from . import model_registry
 
 def llama3_debugmodel() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Llama 3 debug training",
-            hf_assets_path="./tests/assets/tokenizer",
-        ),
+        hf_assets_path="./tests/assets/tokenizer",
         model_spec=model_registry("debugmodel"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -114,10 +110,7 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
 
 def llama3_8b() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Llama 3 8B training",
-            hf_assets_path="./assets/hf/Llama-3.1-8B",
-        ),
+        hf_assets_path="./assets/hf/Llama-3.1-8B",
         profiling=ProfilingConfig(
             enable_profiling=True,
             profile_freq=100,
@@ -149,10 +142,7 @@ def llama3_8b() -> Trainer.Config:
 
 def llama3_70b() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Llama 3 70B training",
-            hf_assets_path="./assets/hf/Llama-3.1-70B",
-        ),
+        hf_assets_path="./assets/hf/Llama-3.1-70B",
         profiling=ProfilingConfig(
             enable_profiling=True,
             profile_freq=100,
@@ -184,10 +174,7 @@ def llama3_70b() -> Trainer.Config:
 
 def llama3_405b() -> Trainer.Config:
     return Trainer.Config(
-        job=JobConfig(
-            description="Llama 3 405B training",
-            hf_assets_path="./assets/hf/Llama-3.1-405B",
-        ),
+        hf_assets_path="./assets/hf/Llama-3.1-405B",
         profiling=ProfilingConfig(
             enable_profiling=True,
             profile_freq=100,

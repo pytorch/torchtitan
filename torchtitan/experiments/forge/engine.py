@@ -15,7 +15,6 @@ from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import TORCH_DTYPE_MAP
-
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
@@ -179,13 +178,13 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 self.pp_has_last_stage,
             ) = self.train_spec.pipelining_fn(
                 model,
-                parallel_dims,
+                parallel_dims=parallel_dims,
                 training=job_config.training,
                 model_converters=job_config.model_converters,
                 parallelism=job_config.parallelism,
                 compile_config=job_config.compile,
                 ac_config=job_config.activation_checkpoint,
-                dump_folder=job_config.job.dump_folder,
+                dump_folder=job_config.dump_folder,
                 device=self.device,
                 model_config=model_config,
                 parallelize_fn=self.train_spec.parallelize_fn,
@@ -210,7 +209,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 parallelism=job_config.parallelism,
                 compile_config=job_config.compile,
                 ac_config=job_config.activation_checkpoint,
-                dump_folder=job_config.job.dump_folder,
+                dump_folder=job_config.dump_folder,
             )
 
             model.to_empty(device=init_device)
@@ -243,12 +242,12 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
             checkpoint_config=job_config.checkpoint,
             sd_adapter=(
                 self.train_spec.state_dict_adapter(
-                    model_config, job_config.job.hf_assets_path
+                    model_config, job_config.hf_assets_path
                 )
                 if self.train_spec.state_dict_adapter
                 else None
             ),
-            base_folder=job_config.job.dump_folder,
+            base_folder=job_config.dump_folder,
         )
 
         loss_parallel_enabled = (

@@ -35,7 +35,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model llama3 --config llama3_debugmodel_float8",
+                    "--modulellama3 --config llama3_debugmodel_float8",
                 ],
             ],
             "Float8 test",
@@ -45,7 +45,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model llama3 --config llama3_debugmodel_float8",
+                    "--modulellama3 --config llama3_debugmodel_float8",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
@@ -61,7 +61,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model llama3 --config llama3_debugmodel_float8",
+                    "--modulellama3 --config llama3_debugmodel_float8",
                     "--compile.enable",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
@@ -77,7 +77,7 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model simple_fsdp.deepseek_v3 --config simple_fsdp_deepseek_v3_debugmodel",
+                    "--modulesimple_fsdp.deepseek_v3 --config simple_fsdp_deepseek_v3_debugmodel",
                     "--parallelism.tensor_parallel_degree 1",
                     "--parallelism.expert_parallel_degree 8",
                     "--compile.graph_passes auto_bucketing",

@@ -227,7 +227,7 @@ class OptimizersInBackwardContainer(OptimizersContainer):
 def register_moe_load_balancing_hook(
     optimizers: OptimizersContainer,
     model_parts: list[nn.Module],
-    parallel_dims: "ParallelDims",
+    parallel_dims: ParallelDims,
 ) -> None:
     """Register an optimizer step pre-hook for MoE auxiliary-loss-free load balancing.
 
@@ -257,7 +257,7 @@ def register_moe_load_balancing_hook(
 
     def _update_expert_bias(
         model_parts: list[nn.Module],
-        parallel_dims: "ParallelDims",
+        parallel_dims: ParallelDims,
     ):
         loss_mesh = parallel_dims.get_optional_mesh("loss")
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
