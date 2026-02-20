@@ -41,7 +41,7 @@ Some of the features require the updates from PyTorch, with which we are working
 |Distributed Checkpointing| ✅ |
 |Float8 Training| 🚧 |
 |Expert Parallelism | ✅ |
-|Expert Parallelism + Activation Checkpointing| 🚧 |
+|Expert Parallelism + Activation Checkpointing| ✅ |
 |Expert Parallelism + Pipeline Parallelism| 🚧 |
 
 
