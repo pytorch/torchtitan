@@ -10,7 +10,6 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed._tensor import Partial, Replicate
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.utils import trunc_normal_
@@ -154,17 +153,11 @@ class GroupedExperts(nn.Module):
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            
-            # Only enforce Partial grad placement if the weight is actually replicated (TP).
-            # If it's sharded (EP), we shouldn't reduce gradients across different experts.
-            is_replicated = isinstance(self.w1.placements[0], Replicate)
-            grad_placement = (Partial(),) if is_replicated else None
-
-            w1 = self.w1.to_local(grad_placements=grad_placement)
+            w1 = self.w1.to_local()
             # pyrefly: ignore [missing-attribute]
-            w2 = self.w2.to_local(grad_placements=grad_placement)
+            w2 = self.w2.to_local()
             # pyrefly: ignore [missing-attribute]
-            w3 = self.w3.to_local(grad_placements=grad_placement)
+            w3 = self.w3.to_local()
         else:
             w1 = self.w1
             w2 = self.w2
