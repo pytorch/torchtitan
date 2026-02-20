@@ -85,7 +85,7 @@ class Qwen3VLVisionEncoderArgs:
 
     # DeepStack: layer indices for extracting intermediate visual features
     # These features are added to the LLM hidden states at early layers
-    deepstack_visual_indexes: list[int] = field(default_factory=lambda: [7, 15, 23])
+    deepstack_visual_indicies: list[int] = field(default_factory=lambda: [7, 15, 23])
 
 
 @dataclass
