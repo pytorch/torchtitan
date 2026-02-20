@@ -66,7 +66,7 @@ qwen3_vl_args = {
             spatial_merge_size=2,
             out_hidden_size=256,
             num_position_embeddings=1024,  # 32x32 grid
-            deepstack_visual_indexes=[1, 2, 3],
+            deepstack_visual_indicies=[1, 2, 3],
         ),
         text_config=Qwen3VLTextConfig(mrope_section=[8, 8, 8]),
     ),
@@ -103,7 +103,7 @@ qwen3_vl_args = {
             spatial_merge_size=2,
             out_hidden_size=256,
             num_position_embeddings=1024,  # 32x32 grid
-            deepstack_visual_indexes=[1, 2, 3],
+            deepstack_visual_indicies=[1, 2, 3],
         ),
         text_config=Qwen3VLTextConfig(mrope_section=[8, 8, 8]),
     ),
@@ -129,7 +129,7 @@ qwen3_vl_args = {
             spatial_merge_size=2,
             out_hidden_size=1536,
             num_position_embeddings=4096,  # 64x64 grid
-            deepstack_visual_indexes=[7, 15, 23],
+            deepstack_visual_indicies=[7, 15, 23],
         ),
         text_config=Qwen3VLTextConfig(mrope_section=[24, 20, 20]),
     ),
@@ -155,7 +155,7 @@ qwen3_vl_args = {
             spatial_merge_size=2,
             out_hidden_size=4096,
             num_position_embeddings=4096,  # 64x64 grid
-            deepstack_visual_indexes=[7, 15, 23],
+            deepstack_visual_indicies=[7, 15, 23],
         ),
         text_config=Qwen3VLTextConfig(mrope_section=[24, 20, 20]),
     ),
@@ -181,7 +181,7 @@ qwen3_vl_args = {
             spatial_merge_size=2,
             out_hidden_size=8192,
             num_position_embeddings=4096,  # 64x64 grid
-            deepstack_visual_indexes=[7, 15, 23],
+            deepstack_visual_indicies=[7, 15, 23],
         ),
         text_config=Qwen3VLTextConfig(mrope_section=[24, 20, 20]),
     ),
