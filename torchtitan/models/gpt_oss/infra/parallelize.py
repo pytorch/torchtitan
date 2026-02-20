@@ -38,6 +38,37 @@ from torchtitan.tools.logging import logger
 from .expert_parallel import GptossExpertTensorParallel, GptossTensorParallel
 
 
+def freeze_moe_biases(
+    model: nn.Module,
+    freeze_router: bool = False,
+    freeze_expert: bool = False,
+) -> tuple[int, int]:
+    """
+    Freeze router gate biases and/or expert biases in all MoE layers.
+
+    This is recommended for fine-tuning MoE models to preserve pretrained
+    routing behavior and prevent instability from bias updates.
+
+    Args:
+        model: The model containing MoE layers with router gates and experts.
+        freeze_router: Whether to freeze router gate biases.
+        freeze_expert: Whether to freeze expert biases (mlp1_bias, mlp2_bias).
+
+    Returns:
+        Tuple of (router_frozen_count, expert_frozen_count).
+    """
+    router_frozen = 0
+    expert_frozen = 0
+    for name, param in model.named_parameters():
+        if freeze_router and "moe.router.gate.bias" in name:
+            param.requires_grad = False
+            router_frozen += 1
+        elif freeze_expert and ("experts.mlp1_bias" in name or "experts.mlp2_bias" in name):
+            param.requires_grad = False
+            expert_frozen += 1
+    return router_frozen, expert_frozen
+
+
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
@@ -69,6 +100,30 @@ def parallelize_gptoss(
         Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
+
+    # Freeze router gate biases and/or expert biases if configured (before parallelization)
+    # This preserves pretrained routing behavior and expert bias values during fine-tuning
+    freeze_router = job_config.training.freeze_router_bias
+    freeze_expert = job_config.training.freeze_expert_bias
+    if freeze_router or freeze_expert:
+        router_frozen, expert_frozen = freeze_moe_biases(model, freeze_router, freeze_expert)
+        if router_frozen > 0 or expert_frozen > 0:
+            logger.info(
+                f"Froze {router_frozen} router.gate.bias and {expert_frozen} expert bias "
+                f"parameters for fine-tuning. Router weights and expert weights remain trainable."
+            )
+        else:
+            # Warn when freeze options are enabled but no parameters found
+            if freeze_router and router_frozen == 0:
+                logger.warning(
+                    "freeze_router_bias=True but no router.gate.bias parameters found. "
+                    "Ensure model config has use_router_bias=True in MoEArgs."
+                )
+            if freeze_expert and expert_frozen == 0:
+                logger.warning(
+                    "freeze_expert_bias=True but no expert bias parameters found. "
+                    "Ensure model config has use_expert_bias=True in MoEArgs."
+                )
 
     model_compile_enabled = (
         job_config.compile.enable and "model" in job_config.compile.components

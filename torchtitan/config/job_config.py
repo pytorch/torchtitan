@@ -272,6 +272,22 @@ class Training:
     Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
     """
 
+    freeze_router_bias: bool = False
+    """
+    Whether to freeze router gate biases in MoE layers during fine-tuning.
+    This preserves the pretrained routing behavior, preventing instability from bias updates.
+    Only has effect when model config has use_router_bias=True in MoEArgs (e.g., GPT-OSS models).
+    A warning will be logged if enabled but no router biases are found.
+    """
+
+    freeze_expert_bias: bool = False
+    """
+    Whether to freeze expert biases (mlp1_bias, mlp2_bias) in MoE layers during fine-tuning.
+    This preserves the pretrained expert bias values.
+    Only has effect when model config has use_expert_bias=True in MoEArgs (e.g., GPT-OSS models).
+    A warning will be logged if enabled but no expert biases are found.
+    """
+
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will
