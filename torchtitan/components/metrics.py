@@ -7,7 +7,6 @@
 import os
 import time
 from collections import namedtuple
-from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
@@ -94,37 +93,6 @@ class DeviceMemoryMonitor:
 
     def reset_peak_stats(self):
         device_module.reset_peak_memory_stats()
-
-
-@contextmanager
-def gpu_timer(sync: bool = True, enabled: bool = True):
-    """Context manager that optionally synchronizes the device and measures wall-clock time.
-
-    Yields a dict; on exit it is populated with an ``elapsed_s`` key.
-
-    Args:
-        sync: If True, synchronizes the device before and after timing.
-        enabled: If False, skips all timing/sync overhead and yields an empty dict.
-
-    Usage::
-
-        with gpu_timer(sync=cuda_sync_for_metrics, enabled=enable_profiling) as t:
-            do_work()
-        print(t.get("elapsed_s", 0.0))
-    """
-    result: dict[str, float] = {}
-    if not enabled:
-        yield result
-        return
-    if sync:
-        device_module.synchronize()
-    t0 = time.perf_counter()
-    try:
-        yield result
-    finally:
-        if sync:
-            device_module.synchronize()
-        result["elapsed_s"] = time.perf_counter() - t0
 
 
 def build_device_memory_monitor():

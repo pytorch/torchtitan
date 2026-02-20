@@ -10,7 +10,8 @@ from typing import Any, Optional
 
 import torch
 from monarch.actor import Actor, endpoint
-from torchtitan.components.metrics import DeviceMemoryMonitor, gpu_timer
+from torchtitan.components.metrics import DeviceMemoryMonitor
+from torchtitan.experiments.rl.metrics import gpu_timer
 from torchtitan.experiments.rl.unified.actors.generator import TrajectoryData
 from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     create_trainer_parallel_dims,

@@ -26,9 +26,10 @@ import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
 from torch.utils.tensorboard import SummaryWriter
-from torchtitan.components.metrics import DeviceMemoryMonitor, gpu_timer
+from torchtitan.components.metrics import DeviceMemoryMonitor
 from torchtitan.experiments.rl.metrics import (
     CumulativeMetrics,
+    gpu_timer,
     PhaseMetrics,
     print_step_metrics,
     print_training_summary,
