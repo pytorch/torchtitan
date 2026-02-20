@@ -686,12 +686,10 @@ def compute_policy_gradient_loss_vllm(
     device = next(model.parameters()).device
     advantages = advantages.to(device)
 
-    # Compute reference log probs from per-token values
-    # Use PyTorch's sum() to match the reduction order used for total_log_probs
-    # This ensures exactly zero KL divergence with batch invariance
+    # Compute reference log probs from per-token values (per-token normalized)
     ref_log_probs = torch.stack(
         [
-            torch.tensor(lps, dtype=torch.float32, device=device).sum()
+            torch.tensor(lps, dtype=torch.float32, device=device).sum() / len(lps)
             for lps in vllm_token_log_probs
         ]
     )
@@ -731,7 +729,9 @@ def compute_policy_gradient_loss_vllm(
         )
 
         batch_token_log_probs.append(token_lps)
-        batch_total_log_probs.append(token_lps.sum())
+        # Per-token normalization: divide by number of generated tokens to prevent
+        # long responses from producing outsized log-prob sums
+        batch_total_log_probs.append(token_lps.sum() / len(gen_toks))
 
         # For the first sample, store raw tensors for bitwise comparison
         if idx == 0:

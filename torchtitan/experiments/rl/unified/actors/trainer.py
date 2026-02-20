@@ -99,7 +99,7 @@ class Trainer(Actor):
             Training metrics
         """
         logger.info(
-            f"{os.getpid()=} Trainer starts to train {self.policy_version} on traj:"
+            f"Process {os.getpid()} Starting training for {self.policy_version} on trajectory:"
         )
         # Compute loss
         loss, loss_metrics = compute_policy_gradient_loss_vllm(
@@ -108,7 +108,7 @@ class Trainer(Actor):
             trajectory.vllm_token_log_probs,
             trajectory.prompt_token_ids,
             trajectory.advantages,
-            kl_coef=0.1,
+            kl_coef=0.0,
         )
 
         # Update weights
@@ -132,5 +132,5 @@ class Trainer(Actor):
             "policy_version": self.policy_version,
             **loss_metrics,
         }
-        logger.info(f"{os.getpid()=} Trainer finish step {self.policy_version}")
+        logger.info(f"Process {os.getpid()} Finished training step {self.policy_version}")
         return metrics

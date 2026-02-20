@@ -20,11 +20,10 @@ from torchtitan.distributed import utils as dist_utils
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
 
+from torchtitan.experiments.rl.unified.sum_digits import sum_digits_reward_function
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
     compute_grpo_advantages_stable,
-    math_reward_function,
-    trivial_reward_function,
 )
 from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_to_vllm
 from vllm import LLM, SamplingParams
@@ -32,6 +31,9 @@ from vllm.config import AttentionConfig
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
+
+# Suppress noisy vLLM logs during engine creation/reload
+logging.getLogger("vllm").setLevel(logging.WARNING)
 
 
 @dataclass
@@ -330,7 +332,6 @@ class Generator(Actor):
         group_size: Number of samples per prompt
         max_new_tokens: Max tokens to generate
         temperature: Sampling temperature
-        use_real_dataset: Whether using real dataset (GSM8K)
         grpo_beta: Beta for GRPO advantages
         use_stable_grpo: Whether to use stable GRPO
         tp_size: Tensor Parallel size
@@ -344,7 +345,6 @@ class Generator(Actor):
         group_size: int = 8,
         max_new_tokens: int = 20,
         temperature: float = 1.0,
-        use_real_dataset: bool = False,
         grpo_beta: float = 0.1,
         use_stable_grpo: bool = False,
         tp_size: int = 1,
@@ -355,7 +355,6 @@ class Generator(Actor):
         self.group_size = group_size
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
-        self.use_real_dataset = use_real_dataset
         self.grpo_beta = grpo_beta
         self.use_stable_grpo = use_stable_grpo
         self.tp_size = tp_size
@@ -373,9 +372,7 @@ class Generator(Actor):
         self.policy_version = 0
 
         # Reward function
-        self.reward_fn = (
-            math_reward_function if use_real_dataset else trivial_reward_function
-        )
+        self.reward_fn = sum_digits_reward_function
 
         logger.info("Generator initialized with vLLM engine")
 
@@ -383,7 +380,7 @@ class Generator(Actor):
     async def generate(self) -> None:
         """Generate trajectories and compute rewards/advantages."""
         logger.info(
-            f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
+            f"Process {os.getpid()} Starting generation (policy v{self.policy_version})..."
         )
         async with self.cond:
             # Wait until ready to generate (weights have been updated)
@@ -444,13 +441,31 @@ class Generator(Actor):
             self.cond.notify_all()
 
             logger.info(
-                f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
+                f"Process {os.getpid()} Finished generation (policy v{self.policy_version})..."
             )
             return trajectory
 
     @endpoint
+    async def generate_text(self, prompts: List[str]) -> List[str]:
+        """Generate greedy completions for evaluation.
+
+        Args:
+            prompts: List of prompt strings
+
+        Returns:
+            List of generated completion texts
+        """
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=self.max_new_tokens,
+            n=1,
+        )
+        outputs = self.vllm_engine.llm.generate(prompts, sampling_params)
+        return [output.outputs[0].text for output in outputs]
+
+    @endpoint
     async def update(self, version: int, vllm_compat_state: dict) -> None:
-        """Update generate weights.
+        """Update generator weights.
 
         Args:
             version: New policy version number
@@ -463,5 +478,5 @@ class Generator(Actor):
             self.state = GeneratorState.READY_TO_GENERATE
             self.cond.notify_all()
             logger.info(
-                f"{os.getpid()=} Generator updating weights to policy v{version}..."
+                f"Process {os.getpid()} Generator updating weights to policy v{version}..."
             )

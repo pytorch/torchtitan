@@ -18,6 +18,7 @@ VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/expe
 """
 import asyncio
 import logging
+import re
 
 import torch
 from monarch.actor import this_host
@@ -25,9 +26,12 @@ from monarch.utils import setup_env_for_distributed
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.trainer import Trainer
 from torchtitan.experiments.rl.unified.models.utils import ModelMode
+from torchtitan.experiments.rl.unified.sum_digits import (
+    SumDigitsSpec,
+    extract_answer,
+)
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     download_and_convert_model,
-    load_gsm8k_dataset,
 )
 from vllm.model_executor.layers.batch_invariant import (
     init_batch_invariance,
@@ -36,6 +40,53 @@ from vllm.model_executor.layers.batch_invariant import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
+
+
+async def evaluate(generator, system_prompt: str, num_samples: int = 10, seed: int = 99):
+    """Run evaluation using the Generator's vLLM engine.
+
+    Args:
+        generator: Generator actor (has generate_text endpoint)
+        system_prompt: System prompt for the task
+        num_samples: Number of eval samples
+        seed: RNG seed (different from training seed to avoid overlap)
+
+    Returns:
+        Dict with accuracy, correct, total, format_rate
+    """
+    spec = SumDigitsSpec(seed=seed)
+    tasks = [spec.generate_task() for _ in range(num_samples)]
+    prompts = [system_prompt + "\n\n" + t.question for t in tasks]
+
+    # Batch generate all eval prompts in one vLLM call
+    responses = generator.generate_text.call(prompts).get().item(gpus=0)
+
+    correct = 0
+    format_ok = 0
+    for task, response_text in zip(tasks, responses):
+        extracted = extract_answer(response_text)
+        is_correct = extracted == task.correct_answer
+        has_tag = bool(re.search(r"\[ANSWER\]", response_text))
+
+        correct += int(is_correct)
+        format_ok += int(has_tag)
+
+        mark = "Y" if is_correct else "N"
+        logger.info(f"  [{mark}] Q: {task.question}")
+        logger.info(f"       A: {response_text[:200]}")
+        logger.info(f"       extracted={extracted} expected={task.correct_answer}")
+
+    result = {
+        "accuracy": correct / num_samples,
+        "correct": correct,
+        "total": num_samples,
+        "format_rate": format_ok / num_samples,
+    }
+    logger.info(
+        f"Eval: {result['accuracy']:.0%} ({result['correct']}/{result['total']}) "
+        f"format={result['format_rate']:.0%}"
+    )
+    return result
 
 
 async def main():
@@ -47,17 +98,16 @@ async def main():
 
     # Training config
     group_size = 8
-    num_steps = 10
-    learning_rate = 1e-5
-    max_new_tokens = 20
+    num_steps = 20
+    learning_rate = 5e-6
+    max_new_tokens = 256
 
     # GRPO config
     use_stable_grpo = False
     grpo_beta = 0.1
 
-    # Dataset config
-    use_real_dataset = False
-    num_dataset_samples = 5
+    # Task config
+    num_prompts = 5
 
     # Parallelism sizes
     trainer_ddp_size = 2
@@ -66,7 +116,7 @@ async def main():
 
     init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
     batch_invariant = vllm_is_batch_invariant()
-    mode = ModelMode.UNIFIED
+    mode = ModelMode.VLLM_COMPAT
 
     # Set up batch invariant
     if batch_invariant:
@@ -84,29 +134,18 @@ async def main():
         model_name, cache_dir, output_dir
     )
 
-    # Load dataset
-    if use_real_dataset:
-        logger.info(f"Loading GSM8K dataset ({num_dataset_samples} samples)...")
-        # TODO: Refactor into loading torchtitan dataset
-        prompt_texts, expected_answers = load_gsm8k_dataset(
-            split="train", num_samples=num_dataset_samples
-        )
-        if prompt_texts is None or len(prompt_texts) == 0:
-            use_real_dataset = False
+    # Generate prompts from task spec
+    task_spec = SumDigitsSpec(seed=42)
+    system_prompt = task_spec.get_system_prompt()
 
-    if not use_real_dataset:
-        logger.info("Using default prompts")
-        prompts_with_answers = [
-            ("The capital of France is", "paris"),
-            ("What is 7 times 8?", "56"),
-            ("The first president of the United States was", "washington"),
-            ("The chemical symbol for water is", "h2o"),
-            ("The largest planet in our solar system is", "jupiter"),
-        ]
-        prompt_texts = [p[0] for p in prompts_with_answers]
-        expected_answers = [p[1] for p in prompts_with_answers]
+    prompt_texts = []
+    expected_answers = []
+    for _ in range(num_prompts):
+        task = task_spec.generate_task()
+        prompt_texts.append(system_prompt + "\n\n" + task.question)
+        expected_answers.append(str(task.correct_answer))
 
-    logger.info(f"Loaded {len(prompt_texts)} prompts")
+    logger.info(f"Generated {len(prompt_texts)} sum_digits prompts")
 
     # Create process meshes
     trainer_mesh = this_host().spawn_procs(per_host={"gpus": 2})
@@ -147,7 +186,6 @@ async def main():
         group_size,
         max_new_tokens,
         1.0,  # temperature
-        use_real_dataset,
         grpo_beta,
         use_stable_grpo,
         generator_tp_size,
@@ -156,6 +194,11 @@ async def main():
     # Initialize generator with trainer weights
     initial_weights = trainer.get_weights.call().get().item(gpus=0)
     await generator.update.call(0, initial_weights)
+
+    # Pre-training evaluation
+    eval_samples = 10
+    logger.info("Evaluating pre-training baseline...")
+    pre_eval = await evaluate(generator, system_prompt, num_samples=eval_samples)
 
     # Training loop
     logger.info("\n" + "=" * 80)
@@ -169,11 +212,23 @@ async def main():
         weights = trainer.get_weights.call().get().item(gpus=0)
         await generator.update.call(metrics["policy_version"], weights)
 
+        correct_count = sum(1 for r in batch.rewards.tolist() if r > 0)
+        total_count = len(batch.rewards)
         logger.info(
-            f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
-            f"Reward: {metrics['reward_mean']:+.3f}"
+            f"Step {step:3d} | Loss: {metrics['loss']:.4f} | "
+            f"Reward: {metrics['reward_mean']:+.3f} | "
+            f"Correct: {correct_count}/{total_count}"
         )
-        logger.info(f"  Sample: {metrics['sample_completion']}...")
+        # Show one sample per prompt
+        for p in range(num_prompts):
+            idx = p * group_size  # first sample for this prompt
+            rew = batch.rewards[idx].item()
+            mark = "+" if rew > 0 else "-"
+            # Extract question from prompt (after system prompt)
+            question = prompt_texts[p].split("\n\n")[-1]
+            answer = expected_answers[p]
+            comp = batch.completions[idx].replace("\n", " ")[:120]
+            logger.info(f"  [{mark}] {question} (expected={answer}) -> {comp}")
 
         # Check for divergence
         if not torch.isfinite(torch.tensor(metrics["loss"])):
@@ -182,8 +237,17 @@ async def main():
             logger.info("!" * 80)
             break
 
+    # Post-training evaluation
+    logger.info("Evaluating post-training performance...")
+    post_eval = await evaluate(generator, system_prompt, num_samples=eval_samples)
+
     logger.info("\n" + "=" * 80)
-    logger.info("RL Training complete")
+    logger.info(
+        f"Pre-training:  {pre_eval['accuracy']:.0%} ({pre_eval['correct']}/{pre_eval['total']})"
+    )
+    logger.info(
+        f"Post-training: {post_eval['accuracy']:.0%} ({post_eval['correct']}/{post_eval['total']})"
+    )
     logger.info("=" * 80)
 
 

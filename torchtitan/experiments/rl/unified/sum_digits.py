@@ -1,0 +1,105 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import random
+import re
+from dataclasses import dataclass, field
+
+import torch
+
+
+@dataclass
+class Task:
+    question: str
+    correct_answer: int
+    metadata: dict = field(default_factory=dict)
+
+
+def extract_answer(text: str) -> int | None:
+    """Extract a numeric answer from model output.
+
+    Tries in order:
+    1. [ANSWER] <number> tag
+    2. "the answer is" / "answer:" patterns
+    3. Last number in text
+    """
+    # 1. [ANSWER] tag
+    answer_match = re.findall(r"\[ANSWER\]\s*(-?\d+)", text)
+    if answer_match:
+        return int(answer_match[-1])
+
+    # 2. Natural language patterns
+    patterns = [
+        r"(?:the answer is|answer is|answer:)\s*(-?\d+)",
+        r"=\s*(-?\d+)\.?\s*(?:The answer|$)",
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            return int(matches[-1])
+
+    # 3. Last number in text
+    numbers = re.findall(r"-?\d+", text)
+    return int(numbers[-1]) if numbers else None
+
+
+_SYSTEM_PROMPT = """You are a helpful assistant. Solve the problem step by step. When you have your final answer, state it as [ANSWER] <number>. Do not write anything after the answer.
+
+Example:
+User: What is the total digit sum of [12, 345, 67]?
+Assistant: Break each number into digits:
+12 → 1, 2
+345 → 3, 4, 5
+67 → 6, 7
+Sum all digits: 1 + 2 + 3 + 4 + 5 + 6 + 7 = 28
+[ANSWER] 28"""
+
+
+class SumDigitsSpec:
+    """Generates sum-of-digits tasks with sequences of 2-4 integers (10-99)."""
+
+    def __init__(self, seed: int = 42):
+        self.seed = seed
+        self._rng = random.Random(seed)
+
+    def generate_task(self) -> Task:
+        n = self._rng.randint(2, 4)
+        numbers = [self._rng.randint(10, 99) for _ in range(n)]
+        answer = sum(int(d) for num in numbers for d in str(num))
+        question = f"What is the total digit sum of {numbers}?"
+        return Task(question=question, correct_answer=answer, metadata={"numbers": numbers})
+
+    def get_system_prompt(self) -> str:
+        return _SYSTEM_PROMPT
+
+
+def sum_digits_reward_function(
+    completions: list[str],
+    expected_answers: list[str],
+    group_size: int,
+) -> torch.Tensor:
+    """Compute rewards for sum digits task.
+
+    Args:
+        completions: List of completion strings
+        expected_answers: List of expected answer strings (one per prompt,
+            each repeated group_size times in completions)
+        group_size: Number of samples per prompt
+
+    Returns:
+        Tensor of rewards (+1.0 correct, -1.0 wrong, +0.2 format bonus)
+    """
+    rewards = []
+    for i, completion in enumerate(completions):
+        prompt_idx = i // group_size
+        expected = int(expected_answers[prompt_idx])
+        extracted = extract_answer(completion)
+        reward = 1.0 if extracted == expected else -1.0
+        # Format bonus for using [ANSWER] tag
+        if re.search(r"\[ANSWER\]\s*-?\d+", completion):
+            reward += 0.2
+        rewards.append(reward)
+    return torch.tensor(rewards, dtype=torch.float32)
