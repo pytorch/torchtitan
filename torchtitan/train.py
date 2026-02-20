@@ -574,7 +574,24 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Process each microbatch: move to GPU, forward/backward, then free
         accumulated_losses = []
-        for input_dict, labels in microbatches:
+        num_microbatches = len(microbatches)
+
+        # Check if we're using DDP (not FSDP) and need to manage gradient sync
+        # DDP syncs gradients on every backward, so we need to disable sync
+        # for intermediate microbatches to avoid redundant all-reduces
+        using_ddp = (
+            parallel_dims.dp_replicate_enabled and not parallel_dims.fsdp_enabled
+        )
+
+        for microbatch_idx, (input_dict, labels) in enumerate(microbatches):
+            is_last_microbatch = microbatch_idx == num_microbatches - 1
+
+            # For DDP with gradient accumulation: disable gradient sync for
+            # all but the last microbatch to avoid redundant all-reduces
+            if using_ddp and num_microbatches > 1:
+                for model in self.model_parts:
+                    model.set_requires_gradient_sync(is_last_microbatch)
+
             # Move tensors to GPU
             for k, v in input_dict.items():
                 if isinstance(v, torch.Tensor):
