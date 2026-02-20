@@ -218,9 +218,39 @@ class VLLMRolloutEngine:
             )
             logger.info("Created new vLLM engine")
         else:
-            # Use collective_rpc to call reload_weights on all workers
-            # This reloads weights from temp_model_dir without recreating the engine
-            self.llm.collective_rpc("reload_weights")
+            # Direct parameter copy into model tensors.
+            # This bypasses vLLM's reload_weights() which uses a layerwise
+            # reload mechanism that moves params to meta device — incompatible
+            # with TorchTitanVLLMModelWrapper.load_weights().
+            # Same approach as MSL RL's VllmLoadSnapshotMethod.update_tensor_shard().
+            self._direct_weight_update(vllm_compat_state)
+
+    def _direct_weight_update(self, vllm_state: dict) -> None:
+        """Update model weights by copying directly into GPU parameters."""
+        from torchtitan.experiments.rl.vllm_compat.weights.converter import (
+            vllm_to_torchtitan,
+        )
+
+        # Convert vLLM/HF format → TorchTitan format
+        titan_state = vllm_to_torchtitan(vllm_state)
+
+        # Access model from vLLM engine (same as MSL RL)
+        model = self.llm.llm_engine.model_executor.driver_worker.get_model()
+        params = dict(model.named_parameters())
+
+        updated = 0
+        for name, new_weight in titan_state.items():
+            # TorchTitanVLLMModelWrapper stores the model as self.model,
+            # so parameters have a "model." prefix
+            param_name = f"model.{name}"
+            if param_name in params:
+                param = params[param_name]
+                param.data.copy_(new_weight.to(device=param.device, dtype=param.dtype))
+                updated += 1
+            else:
+                logger.warning(f"Parameter {param_name} not found in vLLM model")
+
+        logger.info(f"Updated {updated}/{len(titan_state)} parameters via direct copy")
 
     @torch.no_grad()
     def generate(
