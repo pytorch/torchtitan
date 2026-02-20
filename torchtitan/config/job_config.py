@@ -718,6 +718,18 @@ class ActivationCheckpoint:
 
 
 @dataclass
+class LoRA:
+    rank: int = 8
+    """Rank of the low-rank approximation. Higher rank = more parameters but better quality."""
+
+    alpha: float = 16.0
+    """
+    Scaling factor for the low-rank approximation.
+    The LoRA output is scaled by (alpha / rank), so higher alpha means stronger LoRA effect.
+    """
+
+
+@dataclass
 class Compile:
     enable: bool = False
     """Whether to apply torch.compile"""
@@ -1014,6 +1026,7 @@ class JobConfig:
     activation_checkpoint: ActivationCheckpoint = field(
         default_factory=ActivationCheckpoint
     )
+    lora: LoRA = field(default_factory=LoRA)
     compile: Compile = field(default_factory=Compile)
     quantize: Quantize = field(default_factory=Quantize)
     comm: Comm = field(default_factory=Comm)
