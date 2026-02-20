@@ -333,6 +333,7 @@ def parallelize_deepseekv3(
         sparse_mesh,
         mp_policy=mp_policy,
         compile=job_config.compile,
+        repeated_subgraphs=False,  # switch to True to make it run faster
     ) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
 
