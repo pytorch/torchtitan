@@ -30,7 +30,7 @@ def disable_compile(job_config: JobConfig):
 
 def parallelize_inputs(parallel_dims, args, kwargs):
     def to_dtensor(tensor):
-        if isinstance(tensor, torch.Tensor):
+        if isinstance(tensor, torch.Tensor) and parallel_dims.tp_enabled:
             return DTensor.from_local(
                 tensor, parallel_dims.get_mesh("tp"), [Replicate()]
             )
