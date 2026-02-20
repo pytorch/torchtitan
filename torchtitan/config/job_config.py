@@ -696,7 +696,7 @@ class ActivationCheckpoint:
     https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
     """
 
-    preserve_rng_state: bool = False
+    preserve_rng_state: bool = True
     """
     If deterministic output compared to non-checkpointed passes is required, set
     to true. Results in stashing and restoring the RNG state during each checkpoint,
