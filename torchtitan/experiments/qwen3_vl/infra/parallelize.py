@@ -12,24 +12,31 @@ This module applies PT-D parallelisms and various training techniques
 """
 
 import torch
+import torch._inductor.config
 import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
+    parallelize_module,
+    PrepareModuleInput,
+    RowwiseParallel,
+    SequenceParallel,
+)
 
 from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
-from torchtitan.models.llama3.infra.parallelize import (
-    _op_sac_save_list,
-    apply_ddp,
-)
+from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama4.infra.parallelize import (
     apply_compile,
     apply_fsdp,
     apply_moe_ep_tp,
 )
+from torchtitan.models.qwen3.infra.parallelize import _op_sac_save_list
 from torchtitan.tools.logging import logger
 
 
@@ -56,14 +63,47 @@ def parallelize_qwen3_vl(
         """
 
     # Check attention type compatibility
-    attn_type = getattr(model.model_args, "attn_type", "sdpa")
-    if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
-        raise NotImplementedError("CP support is only supported for SDPA.")
-
-    # TP is not yet supported for VLM training
-    if parallel_dims.tp_enabled:
+    if parallel_dims.cp_enabled:
         raise NotImplementedError(
-            "Tensor Parallelism for Qwen3-VL training is still in progress."
+            "Context Parallel is not yet supported for Qwen3-VL."
+        )
+
+    model_compile_enabled = (
+        job_config.compile.enable and "model" in job_config.compile.components
+    )
+
+    if parallel_dims.tp_enabled:
+        if (
+            job_config.parallelism.enable_async_tensor_parallel
+            and not model_compile_enabled
+        ):
+            raise RuntimeError("Async TP requires torch.compile")
+
+        enable_float8_linear = "float8" in job_config.model.converters
+        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
+            "rowwise",
+            "rowwise_with_gw_hp",
+        )
+
+        # For now, float8 all-gather with TP is only supported for tensorwise
+        # float8 scaling recipes. For rowwise recipes, we use regular TP and
+        # all-gather happens in high precision.
+        enable_float8_tensorwise_tp = enable_float8_linear and not float8_is_rowwise
+
+        tp_mesh = parallel_dims.get_mesh("tp")
+
+        # Apply TP to vision encoder
+        _apply_tp_to_visual(model.visual, tp_mesh)
+
+        # Apply TP to decoder without SequenceParallel.
+        # VLM needs full-sequence access between decoder blocks for vision
+        # scatter and DeepStack, so hidden states stay Replicate.
+        _apply_decoder_tp(
+            model,
+            tp_mesh,
+            loss_parallel=not job_config.parallelism.disable_loss_parallel,
+            enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
+            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
         )
 
     # Apply MoE expert parallelism to decoder layers
@@ -75,10 +115,6 @@ def parallelize_qwen3_vl(
             etp_mesh=parallel_dims.get_optional_mesh("etp"),
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
         )
-
-    model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
-    )
 
     # Apply activation checkpointing
     if job_config.activation_checkpoint.mode != "none":
@@ -157,6 +193,136 @@ def parallelize_qwen3_vl(
         )
 
     return model
+
+
+def _apply_decoder_tp(
+    model: nn.Module,
+    tp_mesh: DeviceMesh,
+    loss_parallel: bool,
+    enable_float8_tensorwise_tp: bool,
+    enable_async_tp: bool,
+):
+    """Apply tensor parallelism to the decoder without SequenceParallel.
+
+    Unlike Qwen3's apply_non_moe_tp which uses SequenceParallel (hidden states
+    are Shard(1) between blocks), this keeps hidden states as Replicate. This is
+    necessary for VLM because vision scatter and DeepStack operate on the full
+    sequence with boolean masks that aren't DTensor-aware.
+
+    The trade-off is slightly higher activation memory (full sequence on each
+    rank instead of 1/TP), but it avoids costly all-gather/re-shard at every
+    vision scatter and DeepStack layer.
+    """
+    # Parallelize embedding, norm, and output — no SequenceParallel
+    parallelize_module(
+        model,
+        tp_mesh,
+        {
+            "tok_embeddings": RowwiseParallel(
+                input_layouts=Replicate(),
+                output_layouts=Replicate(),
+            ),
+            "output": ColwiseParallel(
+                input_layouts=Replicate(),
+                output_layouts=Shard(-1) if loss_parallel else Replicate(),
+                use_local_output=not loss_parallel,
+            ),
+        },
+    )
+
+    if enable_float8_tensorwise_tp:
+        from torchao.float8.float8_tensor_parallel import (
+            Float8ColwiseParallel,
+            Float8RowwiseParallel,
+        )
+
+        rowwise_parallel, colwise_parallel = (
+            Float8RowwiseParallel,
+            Float8ColwiseParallel,
+        )
+    else:
+        rowwise_parallel, colwise_parallel = (
+            RowwiseParallel,
+            ColwiseParallel,
+        )
+
+    # Apply TP to every transformer block's linear layers.
+    # Norms run redundantly on Replicate data (cheap).
+    for transformer_block in model.layers.values():
+        layer_plan = {
+            # Wrap attention inputs so rope_cache becomes a Replicate DTensor,
+            # needed because wq/wk/wv outputs are DTensors and apply_rotary_emb
+            # multiplies them with cos/sin from rope_cache.
+            "attention": PrepareModuleInput(
+                input_layouts=(Replicate(), Replicate(), None, None),
+                desired_input_layouts=(Replicate(), Replicate(), None, None),
+            ),
+            "attention.wq": colwise_parallel(use_local_output=False),
+            "attention.wk": colwise_parallel(use_local_output=False),
+            "attention.wv": colwise_parallel(use_local_output=False),
+            "attention.q_norm": SequenceParallel(sequence_dim=2),
+            "attention.k_norm": SequenceParallel(sequence_dim=2),
+            "attention.wo": rowwise_parallel(output_layouts=Replicate()),
+        }
+
+        if not transformer_block.moe_enabled:
+            layer_plan.update(
+                {
+                    "feed_forward.w1": colwise_parallel(),
+                    "feed_forward.w2": rowwise_parallel(output_layouts=Replicate()),
+                    "feed_forward.w3": colwise_parallel(),
+                }
+            )
+
+        parallelize_module(
+            module=transformer_block,
+            device_mesh=tp_mesh,
+            parallelize_plan=layer_plan,
+        )
+
+    if enable_async_tp:
+        torch._inductor.config._micro_pipeline_tp = True
+
+    logger.info(
+        f"Applied {'Float8 tensorwise ' if enable_float8_tensorwise_tp else ''}{'Async ' if enable_async_tp else ''}"
+        "Tensor Parallelism to the decoder (no SequenceParallel)"
+    )
+
+
+def _apply_tp_to_visual(
+    visual: nn.Module,
+    tp_mesh: DeviceMesh,
+):
+    """Apply tensor parallelism to the vision encoder.
+
+    Uses TP without SequenceParallel: data between blocks stays Replicate
+    (all ranks hold full hidden_states). This is simpler because norms and
+    position embeddings don't need DTensor conversion, and vision encoder
+    sequence lengths are short enough that redundant norm computation is cheap.
+    Memory savings come from sharding the linear layer weights.
+    """
+    # TP plan for each vision transformer block
+    layer_plan = {
+        "attn.qkv": ColwiseParallel(),
+        "attn.proj": RowwiseParallel(),
+        "mlp.linear_fc1": ColwiseParallel(),
+        "mlp.linear_fc2": RowwiseParallel(),
+    }
+
+    for transformer_block in visual.layers.values():
+        parallelize_module(transformer_block, tp_mesh, layer_plan)
+
+    # TP plan for patch mergers (main + deepstack)
+    merger_plan = {
+        "linear_fc1": ColwiseParallel(),
+        "linear_fc2": RowwiseParallel(),
+    }
+
+    parallelize_module(visual.merger, tp_mesh, merger_plan)
+    for merger in visual.deepstack_merger_list:
+        parallelize_module(merger, tp_mesh, merger_plan)
+
+    logger.info("Applied Tensor Parallelism to the vision encoder")
 
 
 def _apply_fsdp_to_visual(
