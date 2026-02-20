@@ -16,10 +16,6 @@ from functools import partial
 import torch
 import torch.nn as nn
 from torch.distributed._tensor import DTensor, Replicate
-from torch.distributed.checkpoint.state_dict import (
-    set_model_state_dict,
-    StateDictOptions,
-)
 
 from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     create_job_config_from_vllm_config,
@@ -279,12 +275,20 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         Load weights from HF checkpoint using the provided state dict adapter.
         vLLM engine would call this function to load model weights.
 
+        Supports both initial loading (params on real device) and vLLM's
+        layerwise reload mechanism (params on META device). During reload,
+        initialize_layerwise_reload wraps each parameter's weight_loader with
+        online_process_loader. We must call param.weight_loader() per parameter
+        to trigger the reload mechanism correctly.
+
         Args:
             weights_iter: Iterator of (name, tensor) pairs from HF checkpoint
 
         Returns:
             Set of loaded parameter names
         """
+        from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
         # Collect weights from iterator
         hf_state_dict = {}
         for name, tensor in weights_iter:
@@ -297,26 +301,33 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         )
 
         torchtitan_state_dict = adapter.from_hf(hf_state_dict)
-        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
 
-        # Convert to DTensor if target is DTensor
-        for name, tensor in torchtitan_state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                target_dtensor = model_state_dict[name]
-                device_mesh = target_dtensor.device_mesh
-                torchtitan_state_dict[name] = DTensor.from_local(
-                    tensor.to(device_mesh.device_type),
+        # Build parameter lookup from model
+        param_dict = dict(self.model.named_parameters())
+        buffer_dict = dict(self.model.named_buffers())
+        all_params = {**param_dict, **buffer_dict}
+
+        loaded_params = set()
+        for name, loaded_weight in torchtitan_state_dict.items():
+            if name not in all_params:
+                logger.warning(f"Skipping weight {name}: not found in model")
+                continue
+
+            param = all_params[name]
+
+            # Handle DTensor conversion for tensor parallelism
+            if isinstance(param, DTensor):
+                device_mesh = param.device_mesh
+                loaded_weight = DTensor.from_local(
+                    loaded_weight.to(device_mesh.device_type),
                     device_mesh=device_mesh,
                     placements=[Replicate()],
                 )
 
-        # Load state dict
-        set_model_state_dict(
-            model=self.model,
-            model_state_dict=torchtitan_state_dict,
-            options=StateDictOptions(strict=False),
-        )
-
-        loaded_params = {f"model.{name}" for name in torchtitan_state_dict.keys()}
+            # Use weight_loader if available (set by vLLM's layerwise reload),
+            # otherwise fall back to default_weight_loader for direct copy
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
+            loaded_params.add(f"model.{name}")
 
         return loaded_params
