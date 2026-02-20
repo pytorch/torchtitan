@@ -9,7 +9,7 @@ import os
 import sys
 import warnings
 from dataclasses import field, fields, is_dataclass, make_dataclass
-from typing import Type
+from typing import Any
 
 import tyro
 
@@ -135,7 +135,7 @@ class ConfigManager:
         return loaded_config, filtered_args
 
     @staticmethod
-    def _merge_configs(base, custom) -> Type:
+    def _merge_configs(base, custom) -> type:
         """
         Merges a base config class with user-defined extensions.
         """

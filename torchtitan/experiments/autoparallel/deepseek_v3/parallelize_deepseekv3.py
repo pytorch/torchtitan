@@ -6,7 +6,8 @@
 
 import time
 import types
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 
 import torch
 import torch.nn as nn

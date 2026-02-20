@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
-from typing import Iterable
+from collections.abc import Iterable
 
 import torch
 

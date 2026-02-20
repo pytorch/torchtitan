@@ -6,8 +6,9 @@
 
 import itertools
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import numpy as np
 import PIL.Image

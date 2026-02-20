@@ -5,8 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+from collections.abc import Generator
 from dataclasses import asdict, dataclass, field
-from typing import Any, Generator
+from typing import Any
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record

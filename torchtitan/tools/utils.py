@@ -8,9 +8,10 @@ import contextlib
 import gc
 import subprocess
 import time
+from collections.abc import Generator
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Generator, Optional
+from typing import Optional
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
