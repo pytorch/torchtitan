@@ -6,6 +6,9 @@
 
 from importlib.metadata import version
 
+# Import to register lora module.
+import torchtitan.components.lora  # noqa: F401
+
 # Import to register quantization modules.
 import torchtitan.components.quantization  # noqa: F401
 
