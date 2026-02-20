@@ -23,7 +23,7 @@ CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_trai
 #### Training DeepSeek_v3 models
 
 ```bash
-CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name simple_fsdp.deepseek_v3 --compile.enable --activation_checkpoint.mode "none" --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config
+CONFIG_FILE="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml" ./run_train.sh --model.name simple_fsdp.deepseek_v3 --compile.enable --job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config
 ```
 
 ### Composability Support
@@ -41,7 +41,7 @@ Some of the features require the updates from PyTorch, with which we are working
 |Distributed Checkpointing| ✅ |
 |Float8 Training| 🚧 |
 |Expert Parallelism | ✅ |
-|Expert Parallelism + Activation Checkpointing| 🚧 |
+|Expert Parallelism + Activation Checkpointing| ✅ |
 |Expert Parallelism + Pipeline Parallelism| 🚧 |
 
 
