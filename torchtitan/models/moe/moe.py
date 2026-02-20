@@ -311,6 +311,8 @@ class TokenChoiceTopKRouter(nn.Module):
         # scores shape (bs*slen, num_experts)
         scores = self.gate(x)
 
+        dtype = scores.dtype
+
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.score_func == "sigmoid":
             scores = torch.sigmoid(scores.to(torch.float32))
@@ -318,6 +320,8 @@ class TokenChoiceTopKRouter(nn.Module):
             scores = F.softmax(scores.to(torch.float32), dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
+
+        scores = scores.to(dtype)
 
         scores_for_choice = scores if expert_bias is None else scores + expert_bias
         # Apply node-limited routing if configured
@@ -542,9 +546,8 @@ class MoE(nn.Module):
             out_experts = (
                 torch.bmm(
                     top_scores.reshape(-1, 1, self.router.top_k),
-                    routed_output_unsorted.float(),
+                    routed_output_unsorted,
                 )
-                .to(x.dtype)
                 .squeeze(1)
             )
         else:
