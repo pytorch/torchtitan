@@ -183,36 +183,36 @@ class Qwen3VLModel(Qwen3Model):
         hidden_states[visual_pos_masks] = hidden_states[visual_pos_masks] + visual_embeds
         return hidden_states
 
-    def forward(
+    def _process_vision(
         self,
         tokens: torch.Tensor,
-        pixel_values: torch.Tensor | None = None,
-        pixel_values_videos: torch.Tensor | None = None,
-        grid_thw: torch.Tensor | None = None,
-        grid_thw_videos: torch.Tensor | None = None,
-        special_tokens: SpecialTokens | None = None,
-        positions: torch.Tensor | None = None,
-    ):
-        """
-        Forward pass of Qwen3-VL.
+        pixel_values: torch.Tensor | None,
+        pixel_values_videos: torch.Tensor | None,
+        grid_thw: torch.Tensor | None,
+        grid_thw_videos: torch.Tensor | None,
+        special_tokens: SpecialTokens | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor] | None]:
+        """Run tok_embeddings + vision encoder + scatter + DeepStack preparation.
+
+        This is the shared vision processing used by both prepare_vision_inputs()
+        (PP mode) and forward() (non-PP mode).
 
         Args:
             tokens: Input token IDs (batch_size, seq_len)
-            pixel_values: Flattened image patches (num_images, max_num_patches, patch_dim)
-            pixel_values_videos: Flattened video patches (num_videos, max_num_patches, patch_dim)
-            grid_thw: Grid dimensions for images (num_images, 3)
-            grid_thw_videos: Grid dimensions for videos (num_videos, 3)
+            pixel_values: Image patches or None
+            pixel_values_videos: Video patches or None
+            grid_thw: Grid dimensions for images or None
+            grid_thw_videos: Grid dimensions for videos or None
             special_tokens: Special token definitions
-            positions: Position IDs for RoPE (optional)
 
         Returns:
-            logits: Output logits (batch_size, seq_len, vocab_size)
+            inputs_embeds: (batch, seq_len, dim) with vision tokens scattered in
+            visual_pos_masks: (batch, seq_len) bool mask or None
+            deepstack_visual_embeds: list of (num_visual_tokens, dim) or None
         """
-        # Use special tokens from input if provided, otherwise fall back to model defaults
         img_token_id = special_tokens.img_id if special_tokens is not None else self.image_token_id
-        vid_token_id = self.video_token_id  # Video not yet in special_tokens
+        vid_token_id = self.video_token_id
 
-        # Get token embeddings (passthrough for nonexistent layers in PP)
         inputs_embeds = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         # Process image inputs
@@ -223,7 +223,6 @@ class Qwen3VLModel(Qwen3Model):
                 pixel_values, grid_thw
             )
             image_embeds = torch.cat(image_embeds_list, dim=0)
-            # Scatter image embeddings into text embeddings at placeholder positions
             inputs_embeds, image_scatter_success = self._scatter_vision_embeds(
                 inputs_embeds, tokens, image_embeds, img_token_id=img_token_id
             )
@@ -254,7 +253,6 @@ class Qwen3VLModel(Qwen3Model):
         if image_mask is not None and video_mask is not None:
             visual_pos_masks = image_mask | video_mask
             deepstack_visual_embeds = []
-            # Build joint visual masks, and joint visual embeddings with the same relative positions
             image_mask_joint = image_mask[visual_pos_masks]
             video_mask_joint = video_mask[visual_pos_masks]
             for img_embed, vid_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
@@ -269,6 +267,88 @@ class Qwen3VLModel(Qwen3Model):
             visual_pos_masks = video_mask
             deepstack_visual_embeds = deepstack_video_embeds
 
+        return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
+
+    def prepare_vision_inputs(
+        self,
+        tokens: torch.Tensor,
+        pixel_values: torch.Tensor | None,
+        pixel_values_videos: torch.Tensor | None,
+        grid_thw: torch.Tensor | None,
+        grid_thw_videos: torch.Tensor | None,
+        special_tokens: SpecialTokens | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Preprocess vision inputs for pipeline parallelism.
+
+        Runs tok_embeddings + vision encoder + scatter + dense DeepStack on the
+        full batch, producing batch-aligned tensors that can be microbatch-split
+        by the PP schedule along dim 0.
+
+        Returns:
+            inputs_embeds: (batch, seq_len, dim) with vision tokens scattered in
+            pp_deepstack_embeds: (batch, num_ds_layers, seq_len, dim) or None
+        """
+        inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._process_vision(
+            tokens, pixel_values, pixel_values_videos,
+            grid_thw, grid_thw_videos, special_tokens,
+        )
+
+        # Convert sparse DeepStack to dense format for PP microbatch splitting
+        pp_deepstack_embeds = None
+        if deepstack_visual_embeds is not None and visual_pos_masks is not None:
+            B, S = tokens.shape
+            num_ds = len(deepstack_visual_embeds)
+            dim = deepstack_visual_embeds[0].shape[-1]
+            dense_ds = inputs_embeds.new_zeros(B, num_ds, S, dim)
+            for ds_idx, ds_embed in enumerate(deepstack_visual_embeds):
+                dense_ds[:, ds_idx][visual_pos_masks] = ds_embed.to(dense_ds.dtype)
+            pp_deepstack_embeds = dense_ds
+
+        return inputs_embeds, pp_deepstack_embeds
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        pixel_values: torch.Tensor | None = None,
+        pixel_values_videos: torch.Tensor | None = None,
+        grid_thw: torch.Tensor | None = None,
+        grid_thw_videos: torch.Tensor | None = None,
+        special_tokens: SpecialTokens | None = None,
+        positions: torch.Tensor | None = None,
+        pp_deepstack_embeds: torch.Tensor | None = None,
+    ):
+        """
+        Forward pass of Qwen3-VL.
+
+        Args:
+            tokens: Input token IDs (batch_size, seq_len) or pre-processed
+                inputs_embeds (batch_size, seq_len, dim) when in PP mode.
+            pixel_values: Flattened image patches (num_images, max_num_patches, patch_dim)
+            pixel_values_videos: Flattened video patches (num_videos, max_num_patches, patch_dim)
+            grid_thw: Grid dimensions for images (num_images, 3)
+            grid_thw_videos: Grid dimensions for videos (num_videos, 3)
+            special_tokens: Special token definitions
+            positions: Position IDs for RoPE (optional)
+            pp_deepstack_embeds: Dense DeepStack embeddings (batch, num_ds, seq_len, dim)
+                from prepare_vision_inputs() in PP mode, or None.
+
+        Returns:
+            logits: Output logits (batch_size, seq_len, vocab_size)
+        """
+        # PP mode: tokens is already inputs_embeds (float) from prepare_vision_inputs
+        deepstack_visual_embeds = None
+        visual_pos_masks = None
+
+        if tokens.dtype.is_floating_point:
+            # PP mode: vision processing already done in prepare_vision_inputs
+            inputs_embeds = tokens
+        else:
+            # Non-PP mode: full vision processing
+            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._process_vision(
+                tokens, pixel_values, pixel_values_videos,
+                grid_thw, grid_thw_videos, special_tokens,
+            )
+
         # Apply transformer layers with DeepStack
         hidden_states = inputs_embeds
         for layer_idx, layer in self.layers.items():
@@ -276,18 +356,24 @@ class Qwen3VLModel(Qwen3Model):
 
             # Apply DeepStack: add visual features to early layer hidden states
             layer_idx_int = int(layer_idx)
-            if (
-                deepstack_visual_embeds is not None
-                and visual_pos_masks is not None
-                and layer_idx_int in self.deepstack_layer_indices
-            ):
+            if layer_idx_int in self.deepstack_layer_indices:
                 ds_idx = self.deepstack_layer_indices.index(layer_idx_int)
-                if ds_idx < len(deepstack_visual_embeds):
-                    hidden_states = self._deepstack_process(
-                        hidden_states,
-                        visual_pos_masks,
-                        deepstack_visual_embeds[ds_idx],
-                    )
+                if pp_deepstack_embeds is not None:
+                    # Dense PP mode: (batch, num_ds, seq_len, dim)
+                    # Zeros at non-visual positions act as no-op additions
+                    if ds_idx < pp_deepstack_embeds.shape[1]:
+                        hidden_states = hidden_states + pp_deepstack_embeds[:, ds_idx].to(hidden_states.dtype)
+                elif (
+                    deepstack_visual_embeds is not None
+                    and visual_pos_masks is not None
+                ):
+                    # Sparse non-PP mode
+                    if ds_idx < len(deepstack_visual_embeds):
+                        hidden_states = self._deepstack_process(
+                            hidden_states,
+                            visual_pos_masks,
+                            deepstack_visual_embeds[ds_idx],
+                        )
 
         # Final normalization and output
         hidden_states = self.norm(hidden_states) if self.norm is not None else hidden_states
