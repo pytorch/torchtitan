@@ -472,7 +472,8 @@ def clip_grad_norm_(
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
             total_norm **= 1.0 / norm_type
 
-    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+    if max_norm > 0:
+        torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
     return total_norm
 
 
@@ -538,7 +539,10 @@ def _clip_grad_norm_with_ep(
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
             total_norm **= 1.0 / norm_type
 
-    torch.nn.utils.clip_grads_with_norm_(ep_params, max_norm, total_norm, foreach)
-    torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
+    if max_norm > 0:
+        torch.nn.utils.clip_grads_with_norm_(ep_params, max_norm, total_norm, foreach)
+        torch.nn.utils.clip_grads_with_norm_(
+            non_ep_params, max_norm, total_norm, foreach
+        )
 
     return total_norm
