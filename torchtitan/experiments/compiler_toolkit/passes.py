@@ -21,6 +21,9 @@ import torch
 from torch._functorch.aot_autograd import JointWithDescriptors
 from torch._guards import TracingContext
 from torch._inductor.compile_fx import compile_fx_inner
+from torch._inductor.fx_passes.bucketing import (
+    is_all_gather_into_tensor as is_all_gather,
+)
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
@@ -260,6 +263,45 @@ def full_inductor_compilation_pass(
         The compiled graph module
     """
     return compile_fx_inner(gm, example_inputs)
+
+
+def reassign_to_pg_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs,
+    source_pg_name: str,
+    target_pg_name: str,
+) -> torch.fx.GraphModule:
+    """
+    Reassign all-gather nodes from one process group to another.
+
+    This pass rewrites all-gather nodes whose PG matches ``source_pg_name`` to use
+    ``target_pg_name`` instead.  Since each NCCL PG gets its own CUDA stream, this
+    can be used to separate AG and RS onto different streams (e.g. for AG/RS
+    overlap in the backward pass).
+
+    Must be applied BEFORE bucketing passes so that bucketed all-gathers inherit
+    the new PG name.
+
+    Args:
+        gm: The graph module (forward or backward)
+        example_inputs: Example inputs (unused, required by pass interface)
+        source_pg_name: The group_name of the process group to match
+        target_pg_name: The group_name of the process group to assign
+    """
+    count = 0
+    for node in gm.graph.nodes:
+        if is_all_gather(node):
+            # AG args: (input_tensor, group_size, group_name)
+            if node.args[2] == source_pg_name:
+                node.args = (node.args[0], node.args[1], target_pg_name)
+                count += 1
+    if count > 0:
+        logger.info(
+            f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
+            f"to PG {target_pg_name}"
+        )
+    gm.recompile()
+    return gm
 
 
 # Registry mapping pass names to pass functions
