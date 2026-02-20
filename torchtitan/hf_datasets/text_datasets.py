@@ -165,6 +165,15 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
 
         return _state_dict
 
+    def reset(self) -> None:
+        """Reset dataset state for a new epoch.
+
+        Clears the token buffer and resets the sample index to start
+        iteration from the beginning of the dataset.
+        """
+        self._sample_idx = 0
+        self._token_buffer = []
+
 
 def build_text_dataloader(
     dp_world_size: int,

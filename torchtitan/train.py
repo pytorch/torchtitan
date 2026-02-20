@@ -70,6 +70,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
     # additional training states
     step: int
     ntokens_seen: int
+    epoch: int
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
@@ -293,6 +294,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
         self.ntokens_seen = 0
+        self.epoch = 0
 
         self.checkpointer = CheckpointManager(
             dataloader=self.dataloader,
@@ -351,13 +353,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 pp_has_last_stage=pp_has_last_stage,
             )
 
+        # Determine training termination mode for logging
+        epochs = job_config.training.epochs
+        if epochs > 0:
+            termination_info = f"total epochs {epochs}"
+        else:
+            termination_info = f"total steps {job_config.training.steps}"
+
         logger.info(
             "Trainer is initialized with "
             f"local batch size {job_config.training.local_batch_size}, "
             f"global batch size {global_batch_size}, "
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"sequence length {job_config.training.seq_len}, "
-            f"total steps {job_config.training.steps} "
+            f"{termination_info} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
 
@@ -639,6 +648,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+        # Add epoch info for epoch-based training
+        if self.job_config.training.epochs > 0:
+            extra_metrics["epoch"] = self.epoch + 1  # 1-indexed for display
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -652,7 +664,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         job_config = self.job_config
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
-        logger.info(f"Training starts at step {self.step + 1}")
+        if job_config.training.epochs > 0:
+            logger.info(
+                f"Training starts at step {self.step + 1}, epoch {self.epoch + 1}"
+            )
+        else:
+            logger.info(f"Training starts at step {self.step + 1}")
 
         with (
             maybe_enable_profiling(
@@ -674,12 +691,39 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 try:
                     self.train_step(data_iterator)
                 except DataloaderExhaustedError:
-                    logger.warning("Ran out of data; last step was canceled.")
-                    break
+                    epochs = job_config.training.epochs
+                    if epochs > 0:
+                        # Epoch-based training: advance to next epoch
+                        self.epoch += 1
+                        if self.epoch < epochs:
+                            logger.info(
+                                f"Epoch {self.epoch} completed at step {self.step}. "
+                                f"Starting epoch {self.epoch + 1}/{epochs}."
+                            )
+                            self.dataloader.reset()
+                            data_iterator = self.batch_generator(self.dataloader)
+                            continue
+                        else:
+                            logger.info(
+                                f"All {epochs} epochs completed at step {self.step}."
+                            )
+                            # Save final checkpoint for epoch-based training
+                            self.checkpointer.save(self.step, last_step=True)
+                            break
+                    else:
+                        # Step-based training: data exhausted before reaching target steps
+                        logger.warning("Ran out of data; last step was canceled.")
+                        break
 
-                self.checkpointer.save(
-                    self.step, last_step=(self.step == job_config.training.steps)
-                )
+                # Determine if this is the last step for checkpointing purposes
+                epochs = job_config.training.epochs
+                if epochs > 0:
+                    # For epoch-based training, we don't know the last step upfront
+                    # It will be determined when training completes
+                    is_last_step = False
+                else:
+                    is_last_step = self.step == job_config.training.steps
+                self.checkpointer.save(self.step, last_step=is_last_step)
 
                 # Run validation if validator is available
                 if (
@@ -710,14 +754,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             logger.info("Training completed")
 
     def should_continue_training(self) -> bool:
-        return self.step < self.job_config.training.steps
+        epochs = self.job_config.training.epochs
+        if epochs > 0:
+            # Epoch-based training: continue until we've completed all epochs
+            return self.epoch < epochs
+        else:
+            # Step-based training (default)
+            return self.step < self.job_config.training.steps
 
     def state_dict(self) -> dict[str, Any]:
-        return {"step": self.step, "ntokens_seen": self.ntokens_seen}
+        return {"step": self.step, "ntokens_seen": self.ntokens_seen, "epoch": self.epoch}
 
     def load_state_dict(self, state_dict: dict[str, Any]):
         self.step = state_dict["step"]
         self.ntokens_seen = state_dict["ntokens_seen"]
+        self.epoch = state_dict.get("epoch", 0)  # Backward compatible
 
     def close(self) -> None:
         if hasattr(self, "checkpointer") and self.checkpointer:

@@ -43,6 +43,18 @@ class BaseDataLoader(Stateful, ABC):
     def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         ...
 
+    def reset(self) -> None:
+        """Reset the dataloader state for a new epoch.
+
+        This method is called when epoch-based training transitions to a new epoch.
+        Subclasses should override this if they need to clear any internal state
+        that would prevent re-iteration from the beginning of the dataset.
+
+        The default implementation does nothing, as most dataloaders automatically
+        reset when __iter__ is called again.
+        """
+        pass
+
 
 class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
     """Dataloader that is aware of distributed data parallelism.
@@ -140,3 +152,13 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
         # We don't have to use pickle as DCP will serialize the state_dict. However, we have to
         # keep this for backward compatibility.
         super().load_state_dict(pickle.loads(state_dict[self._rank_id]))
+
+    def reset(self) -> None:
+        """Reset the dataloader state for a new epoch.
+
+        Delegates to the underlying dataset's reset method if available,
+        allowing stateful datasets to clear their internal state and
+        restart iteration from the beginning.
+        """
+        if hasattr(self.dataset, "reset"):
+            self.dataset.reset()
