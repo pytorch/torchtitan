@@ -1,5 +1,1 @@
 example_checkpoint/
-
-# Downloaded HF models and converted checkpoints (only at root level)
-/models/
-/converted/

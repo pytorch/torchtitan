@@ -43,9 +43,9 @@ Sessionx.vim
 # env files
 .env
 
-# Local checkpoints/models
-converted/
-models/
+# Downloaded HF models and converted checkpoints (RL experiments)
+/models/
+/converted/
 
 # Vibe coding
 .claude
