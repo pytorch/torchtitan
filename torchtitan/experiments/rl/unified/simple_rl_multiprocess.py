@@ -18,10 +18,18 @@ VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/expe
 """
 import asyncio
 import logging
+import time
 
 import torch
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
+from torchtitan.experiments.rl.metrics import (
+    CumulativeMetrics,
+    PhaseMetrics,
+    print_step_metrics,
+    print_training_summary,
+    update_cumulative_metrics,
+)
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.trainer import Trainer
 from torchtitan.experiments.rl.unified.models.utils import ModelMode
@@ -63,6 +71,10 @@ async def main():
     trainer_ddp_size = 2
     trainer_tp_size = 1
     generator_tp_size = 1
+
+    # Metrics config
+    cuda_sync_for_metrics = True
+    enable_profiling = True  # Set to False to disable timing/memory output
 
     init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
     batch_invariant = vllm_is_batch_invariant()
@@ -136,6 +148,8 @@ async def main():
         mode,
         trainer_ddp_size,
         trainer_tp_size,
+        cuda_sync_for_metrics,
+        enable_profiling,
     )
 
     generator = gen_mesh.spawn(
@@ -151,6 +165,8 @@ async def main():
         grpo_beta,
         use_stable_grpo,
         generator_tp_size,
+        cuda_sync_for_metrics,
+        enable_profiling,
     )
 
     # Initialize generator with trainer weights
@@ -162,17 +178,83 @@ async def main():
     logger.info(f"Starting RL training for {num_steps} steps")
     logger.info("=" * 80)
 
+    cumulative = CumulativeMetrics()
+
     for step in range(num_steps):
-        # Fully sync RL loop
+        if enable_profiling:
+            step_t0 = time.perf_counter()
+
+            # Rollout phase
+            rollout_t0 = time.perf_counter()
         batch = generator.generate.call().get().item(gpus=0)
+        if enable_profiling:
+            rollout_time_s = time.perf_counter() - rollout_t0
+
+            # Training phase
+            train_t0 = time.perf_counter()
         metrics = trainer.step.call(batch).get().item(gpus=0)
+        if enable_profiling:
+            train_time_s = time.perf_counter() - train_t0
+
+            # Weight sync phase
+            wsync_t0 = time.perf_counter()
         weights = trainer.get_weights.call().get().item(gpus=0)
         await generator.update.call(metrics["policy_version"], weights)
+        if enable_profiling:
+            weight_sync_time_s = time.perf_counter() - wsync_t0
+            step_time_s = time.perf_counter() - step_t0
+
+            # Extract timing/memory from actor metrics
+            gen_peak_gib = getattr(batch, "gen_peak_active_gib", 0.0)
+            gen_peak_pct = getattr(batch, "gen_peak_active_pct", 0.0)
+            train_peak_gib = metrics.get("train_peak_active_gib", 0.0)
+            train_peak_pct = metrics.get("train_peak_active_pct", 0.0)
+            optimizer_time_s = metrics.get("optimizer_time_s", 0.0)
+            optimizer_peak_gib = metrics.get("optimizer_peak_active_gib", 0.0)
+            optimizer_peak_pct = metrics.get("optimizer_peak_active_pct", 0.0)
+
+            # Accumulate timing using helper function
+            update_cumulative_metrics(
+                cumulative,
+                rollout_time_s,
+                train_time_s,
+                optimizer_time_s,
+                weight_sync_time_s,
+                step_time_s,
+                rollout_peak_gib=gen_peak_gib,
+                train_peak_gib=train_peak_gib,
+                optimizer_peak_gib=optimizer_peak_gib,
+                weight_sync_peak_gib=0.0,
+            )
 
         logger.info(
             f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
             f"Reward: {metrics['reward_mean']:+.3f}"
         )
+
+        if enable_profiling:
+            # Per-phase timing and memory breakdown
+            print_step_metrics(
+                [
+                    PhaseMetrics("rollout", rollout_time_s, gen_peak_gib, gen_peak_pct),
+                    PhaseMetrics("train", train_time_s, train_peak_gib, train_peak_pct),
+                    PhaseMetrics(
+                        "optimizer",
+                        optimizer_time_s,
+                        optimizer_peak_gib,
+                        optimizer_peak_pct,
+                    ),
+                    PhaseMetrics(
+                        "weight_sync",
+                        weight_sync_time_s,
+                        0.0,
+                        0.0,
+                    ),
+                ],
+                step_time_s,
+                include_mem_pct=True,
+            )
+
         logger.info(f"  Sample: {metrics['sample_completion']}...")
 
         # Check for divergence
@@ -181,6 +263,10 @@ async def main():
             logger.info("ERROR: Loss is NaN/Inf! Training diverged.")
             logger.info("!" * 80)
             break
+
+    # Training summary
+    if enable_profiling:
+        print_training_summary(cumulative, only_print_memory_if_nonzero=True)
 
     logger.info("\n" + "=" * 80)
     logger.info("RL Training complete")

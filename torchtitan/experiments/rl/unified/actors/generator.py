@@ -7,19 +7,19 @@
 import asyncio
 import logging
 import os
-
 from dataclasses import dataclass
 from typing import List
 
 import torch
 from monarch.actor import Actor, endpoint
 from safetensors.torch import save_file
+from torchtitan.components.metrics import DeviceMemoryMonitor
 from torchtitan.config.job_config import Comm
 from torchtitan.distributed import utils as dist_utils
 
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
-
+from torchtitan.experiments.rl.metrics import gpu_timer
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
     compute_grpo_advantages_stable,
@@ -47,6 +47,10 @@ class TrajectoryData:
         prompt_token_ids: List of prompt token ID lists
         rewards: Computed rewards for each completion
         advantages: Computed advantages for each completion
+        gen_time_s: Generation wall-clock time in seconds
+        gen_peak_active_gib: Peak active GPU memory during generation (GiB)
+        gen_peak_active_pct: Peak active GPU memory as percentage of capacity
+        gen_peak_reserved_gib: Peak reserved GPU memory during generation (GiB)
     """
 
     policy_version: int
@@ -56,6 +60,10 @@ class TrajectoryData:
     prompt_token_ids: List[List[int]]
     rewards: torch.Tensor
     advantages: torch.Tensor
+    gen_time_s: float = 0.0
+    gen_peak_active_gib: float = 0.0
+    gen_peak_active_pct: float = 0.0
+    gen_peak_reserved_gib: float = 0.0
 
 
 class VLLMRolloutEngine:
@@ -348,6 +356,8 @@ class Generator(Actor):
         grpo_beta: float = 0.1,
         use_stable_grpo: bool = False,
         tp_size: int = 1,
+        cuda_sync_for_metrics: bool = True,
+        enable_profiling: bool = True,
     ):
         self.model_path = model_path
         self.prompt_texts = prompt_texts
@@ -359,6 +369,8 @@ class Generator(Actor):
         self.grpo_beta = grpo_beta
         self.use_stable_grpo = use_stable_grpo
         self.tp_size = tp_size
+        self.cuda_sync_for_metrics = cuda_sync_for_metrics
+        self.enable_profiling = enable_profiling
 
         # Initialize distributed environment for SPMD generator
         world_size = dist_utils.init_distributed(
@@ -366,6 +378,9 @@ class Generator(Actor):
         )
         # Initialize vLLM engine
         self.vllm_engine = VLLMRolloutEngine(model_path, tp_size=self.tp_size)
+
+        if enable_profiling:
+            self.device_memory_monitor = DeviceMemoryMonitor()
 
         # State machine
         self.state = GeneratorState.READY_TO_UPDATE
@@ -391,42 +406,60 @@ class Generator(Actor):
                 lambda: self.state == GeneratorState.READY_TO_GENERATE
             )
 
-            # Generate samples using vLLM
-            (
-                completions,
-                vllm_log_probs,
-                vllm_token_ids,
-                vllm_token_log_probs,
-                prompt_token_ids,
-            ) = self.vllm_engine.generate(
-                self.prompt_texts,
-                self.max_new_tokens,
-                self.temperature,
-                n_samples_per_prompt=self.group_size,
-            )
+            if self.enable_profiling:
+                self.device_memory_monitor.reset_peak_stats()
 
-            # Compute rewards
-            rewards = self.reward_fn(
-                completions, self.expected_answers, self.group_size
-            )
-
-            # Normalize rewards
-            reward_mean = rewards.mean()
-            reward_std = rewards.std()
-            if reward_std > 1e-8:
-                rewards_normalized = (rewards - reward_mean) / reward_std
-            else:
-                rewards_normalized = rewards - reward_mean
-
-            # Compute advantages using GRPO
-            if self.use_stable_grpo:
-                advantages = compute_grpo_advantages_stable(
-                    rewards_normalized, self.group_size
+            with gpu_timer(
+                sync=self.cuda_sync_for_metrics, enabled=self.enable_profiling
+            ) as gen_t:
+                # Generate samples using vLLM
+                (
+                    completions,
+                    vllm_log_probs,
+                    vllm_token_ids,
+                    vllm_token_log_probs,
+                    prompt_token_ids,
+                ) = self.vllm_engine.generate(
+                    self.prompt_texts,
+                    self.max_new_tokens,
+                    self.temperature,
+                    n_samples_per_prompt=self.group_size,
                 )
-            else:
-                advantages = compute_grpo_advantages(
-                    rewards_normalized, self.group_size, beta=self.grpo_beta
+
+                # Compute rewards
+                rewards = self.reward_fn(
+                    completions, self.expected_answers, self.group_size
                 )
+
+                # Normalize rewards
+                reward_mean = rewards.mean()
+                reward_std = rewards.std()
+                if reward_std > 1e-8:
+                    rewards_normalized = (rewards - reward_mean) / reward_std
+                else:
+                    rewards_normalized = rewards - reward_mean
+
+                # Compute advantages using GRPO
+                if self.use_stable_grpo:
+                    advantages = compute_grpo_advantages_stable(
+                        rewards_normalized, self.group_size
+                    )
+                else:
+                    advantages = compute_grpo_advantages(
+                        rewards_normalized, self.group_size, beta=self.grpo_beta
+                    )
+
+            if self.enable_profiling:
+                mem_stats = self.device_memory_monitor.get_peak_stats()
+                gen_time_s = gen_t.get("elapsed_s", 0.0)
+                gen_peak_active_gib = mem_stats.max_active_gib
+                gen_peak_active_pct = mem_stats.max_active_pct
+                gen_peak_reserved_gib = mem_stats.max_reserved_gib
+            else:
+                gen_time_s = 0.0
+                gen_peak_active_gib = 0.0
+                gen_peak_active_pct = 0.0
+                gen_peak_reserved_gib = 0.0
 
             # Create trajectory data
             trajectory = TrajectoryData(
@@ -437,6 +470,10 @@ class Generator(Actor):
                 prompt_token_ids=prompt_token_ids,
                 rewards=rewards,
                 advantages=advantages,
+                gen_time_s=gen_time_s,
+                gen_peak_active_gib=gen_peak_active_gib,
+                gen_peak_active_pct=gen_peak_active_pct,
+                gen_peak_reserved_gib=gen_peak_reserved_gib,
             )
 
             # Signal ready for update

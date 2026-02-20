@@ -10,6 +10,8 @@ from typing import Any, Optional
 
 import torch
 from monarch.actor import Actor, endpoint
+from torchtitan.components.metrics import DeviceMemoryMonitor
+from torchtitan.experiments.rl.metrics import gpu_timer
 from torchtitan.experiments.rl.unified.actors.generator import TrajectoryData
 from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     create_trainer_parallel_dims,
@@ -37,6 +39,7 @@ class Trainer(Actor):
         learning_rate: Learning rate for optimizer
         model_mode: Indicates which model to use. Train inferece unified model, batch invariant Torchtitan model,
             or plain Torchtitan model
+        enable_profiling: If True, track timing and memory metrics
     """
 
     def __init__(
@@ -47,11 +50,18 @@ class Trainer(Actor):
         model_mode: str = ModelMode.VLLM_COMPAT,
         ddp_size: int = 1,
         tp_size: int = 1,
+        cuda_sync_for_metrics: bool = True,
+        enable_profiling: bool = True,
     ):
         # Explicitly set cuda device for each trainer, otherwise different processes will use the same CUDA device
         local_rank = int(os.environ["LOCAL_RANK"])
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(local_rank)
+
+        self.cuda_sync_for_metrics = cuda_sync_for_metrics
+        self.enable_profiling = enable_profiling
+        if enable_profiling:
+            self.device_memory_monitor = DeviceMemoryMonitor(f"cuda:{local_rank}")
 
         self.model = load_model(
             titan_checkpoint_path, model_path, model_mode=model_mode
@@ -101,21 +111,41 @@ class Trainer(Actor):
         logger.info(
             f"{os.getpid()=} Trainer starts to train {self.policy_version} on traj:"
         )
-        # Compute loss
-        loss, loss_metrics = compute_policy_gradient_loss_vllm(
-            self.model,
-            trajectory.vllm_token_ids,
-            trajectory.vllm_token_log_probs,
-            trajectory.prompt_token_ids,
-            trajectory.advantages,
-            kl_coef=0.1,
-        )
 
-        # Update weights
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        self.optimizer.step()
+        if self.enable_profiling:
+            self.device_memory_monitor.reset_peak_stats()
+        with gpu_timer(
+            sync=self.cuda_sync_for_metrics, enabled=self.enable_profiling
+        ) as train_t:
+            # Compute loss
+            loss, loss_metrics = compute_policy_gradient_loss_vllm(
+                self.model,
+                trajectory.vllm_token_ids,
+                trajectory.vllm_token_log_probs,
+                trajectory.prompt_token_ids,
+                trajectory.advantages,
+                kl_coef=0.1,
+            )
+
+            # Backward pass
+            self.optimizer.zero_grad()
+            loss.backward()
+
+        if self.enable_profiling:
+            train_time_s = train_t["elapsed_s"]
+            train_mem = self.device_memory_monitor.get_peak_stats()
+            self.device_memory_monitor.reset_peak_stats()
+
+        with gpu_timer(
+            sync=self.cuda_sync_for_metrics, enabled=self.enable_profiling
+        ) as opt_t:
+            # Gradient clipping + optimizer step
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.optimizer.step()
+
+        if self.enable_profiling:
+            optimizer_time_s = opt_t["elapsed_s"]
+            optimizer_mem = self.device_memory_monitor.get_peak_stats()
 
         self.policy_version += 1
 
@@ -132,5 +162,18 @@ class Trainer(Actor):
             "policy_version": self.policy_version,
             **loss_metrics,
         }
+        if self.enable_profiling:
+            metrics.update(
+                {
+                    "train_time_s": train_time_s,
+                    "train_peak_active_gib": train_mem.max_active_gib,
+                    "train_peak_active_pct": train_mem.max_active_pct,
+                    "train_peak_reserved_gib": train_mem.max_reserved_gib,
+                    "optimizer_time_s": optimizer_time_s,
+                    "optimizer_peak_active_gib": optimizer_mem.max_active_gib,
+                    "optimizer_peak_active_pct": optimizer_mem.max_active_pct,
+                    "optimizer_peak_reserved_gib": optimizer_mem.max_reserved_gib,
+                }
+            )
         logger.info(f"{os.getpid()=} Trainer finish step {self.policy_version}")
         return metrics
