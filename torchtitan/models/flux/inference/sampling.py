@@ -6,7 +6,7 @@
 
 import math
 import os
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 from einops import rearrange

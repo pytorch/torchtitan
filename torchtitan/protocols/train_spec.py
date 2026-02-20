@@ -4,10 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Mapping, TypeAlias
+from typing import TypeAlias
 
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule

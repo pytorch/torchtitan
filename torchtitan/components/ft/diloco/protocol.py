@@ -4,8 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, TypeAlias
+from typing import TypeAlias
 
 import torch.nn as nn
 from torchtitan.protocols.train_spec import TrainSpec

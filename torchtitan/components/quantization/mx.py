@@ -6,7 +6,7 @@
 
 from functools import partial
 from importlib.util import find_spec
-from typing import Any, List
+from typing import Any
 
 import torch.nn as nn
 from torchtitan.components.quantization import (
@@ -27,7 +27,7 @@ from .utils import module_filter_fn
 class MXLinearConverter(QuantizationConverter):
     """Converts the linear layers of `model` to `MXLinear`."""
 
-    filter_fqns: List[str]
+    filter_fqns: list[str]
     mx_config: Any  # MXLinearConfig type when imported
 
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):

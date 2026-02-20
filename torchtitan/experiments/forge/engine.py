@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Generator
+from collections.abc import Generator
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record

@@ -6,8 +6,9 @@
 
 import contextlib
 import functools
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Optional
 
 import torch
 from torch._dynamo.functional_export import dynamo_graph_capture_for_export
@@ -106,7 +107,7 @@ def joint_graph_builder(
     model_kwargs: dict,
     fw_compiler: Optional[Callable] = None,
     bw_compiler: Optional[Callable] = None,
-    joint_custom_passes: Optional[List[Callable]] = None,
+    joint_custom_passes: Optional[list[Callable]] = None,
     dump_folder: str | None = None,
     job_config: Optional["JobConfig"] = None,
 ):
@@ -258,7 +259,7 @@ def compiler(
     name: str,
     gm: torch.fx.GraphModule,
     example_inputs,
-    passes: List[Callable] = None,
+    passes: list[Callable] = None,
     dump_folder: str | None = None,
     is_forward: bool = True,
 ):
@@ -318,7 +319,7 @@ def compiler(
 
 
 def make_compiler_with_passes(
-    passes: List[Callable] = None,
+    passes: list[Callable] = None,
     dump_folder: str | None = None,
 ):
     """

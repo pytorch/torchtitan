@@ -12,14 +12,12 @@ Converts between:
 - vLLM compat format (merged gate_up_proj = [w1; w3])
 """
 
-from typing import Dict
-
 import torch
 
 
 def torchtitan_to_vllm_compat(
-    torchtitan_state_dict: Dict[str, torch.Tensor]
-) -> Dict[str, torch.Tensor]:
+    torchtitan_state_dict: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
     """
     Convert TorchTitan Qwen3 state dict to vLLM-compatible format.
 
@@ -68,8 +66,8 @@ def torchtitan_to_vllm_compat(
 
 
 def vllm_compat_to_torchtitan(
-    vllm_compat_state_dict: Dict[str, torch.Tensor]
-) -> Dict[str, torch.Tensor]:
+    vllm_compat_state_dict: dict[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
     """
     Convert vLLM-compatible state dict back to TorchTitan format.
 
