@@ -192,7 +192,9 @@ class Attention(nn.Module):
         self.inner_attention: nn.Module
         match self.attn_type:
             case "flex":
-                self.inner_attention = FlexAttentionWrapper()
+                self.inner_attention = FlexAttentionWrapper(
+                    kernel_options=model_args.flex_attention_kernel_options
+                )
             case "varlen":
                 self.inner_attention = VarlenAttentionWrapper()
             case "sdpa":
@@ -537,8 +539,18 @@ class Qwen3Model(ModelProtocol):
                 raise ValueError(
                     f"Unknown attention mask type: {self.model_args.attn_mask_type}"
                 )
+
+        kwargs = {}
+        if self.model_args.flex_attention_block_size is not None:
+            kwargs["BLOCK_SIZE"] = self.model_args.flex_attention_block_size
+
         return create_attention_mask(
-            and_masks(*mask_mods), B, None, input_batch.shape[1], input_batch.shape[1]
+            and_masks(*mask_mods),
+            B,
+            None,
+            input_batch.shape[1],
+            input_batch.shape[1],
+            **kwargs,
         )
 
     def get_attention_masks(

@@ -1,0 +1,58 @@
+# 8B FlexAttention Flash for local testing with TP=8
+
+[job]
+dump_folder = "./outputs"
+description = "8B with FlexAttention Flash backend"
+
+[profiling]
+enable_profiling = false
+
+[metrics]
+log_freq = 1
+enable_tensorboard = false
+
+[model]
+name = "llama3"
+flavor = "8B_flex_flash"
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 10
+
+[training]
+local_batch_size = 1
+seq_len = 2048
+max_norm = 1.0
+steps = 5
+dataset = "c4"
+dtype = "bfloat16"
+mixed_precision_param = "bfloat16"
+mixed_precision_reduce = "float32"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+tensor_parallel_degree = 8
+pipeline_parallel_degree = 1
+context_parallel_degree = 1
+
+[checkpoint]
+enable = false
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = false
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output"]
+
+[validation]
+enable = false

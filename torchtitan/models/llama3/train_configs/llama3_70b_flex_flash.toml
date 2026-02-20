@@ -1,0 +1,68 @@
+# NOTE: this toml config is a preset for 64 Blackwell GPUs with FlexAttention Flash backend.
+
+[job]
+dump_folder = "./outputs"
+description = "Llama 3 70B training with FlexAttention Flash backend"
+
+[profiling]
+enable_profiling = true
+save_traces_folder = "profile_trace"
+profile_freq = 100
+
+[metrics]
+log_freq = 10
+enable_tensorboard = true
+save_tb_folder = "tb"
+
+[model]
+name = "llama3"
+flavor = "70B_flex_flash"
+hf_assets_path = "./assets/hf/Llama-3.1-70B"
+
+[optimizer]
+name = "AdamW"
+lr = 1.5e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 200
+
+[training]
+local_batch_size = 8
+seq_len = 8192
+max_norm = 1.0
+steps = 1000
+dataset = "c4"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+tensor_parallel_degree = 8
+pipeline_parallel_degree = 1
+context_parallel_degree = 1
+
+[checkpoint]
+enable = false
+folder = "checkpoint"
+interval = 500
+last_save_model_only = true
+export_dtype = "float32"
+async_mode = "disabled"
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable=false
+components = ["model", "loss"]
+
+[quantize.linear.float8]
+enable_fsdp_float8_all_gather = false
+precompute_float8_dynamic_scale_for_fsdp = false
+filter_fqns = ["output"]
+
+[validation]
+enable = false
+dataset = "c4_validation"
+freq = 500
+steps = 1200
