@@ -43,5 +43,9 @@ Sessionx.vim
 # env files
 .env
 
+# Local checkpoints/models
+converted/
+models/
+
 # Vibe coding
 .claude
