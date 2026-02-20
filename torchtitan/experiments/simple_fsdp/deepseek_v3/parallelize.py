@@ -30,7 +30,6 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
         [model.norm, model.output],
     ]
     for layer_id, transformer_block in model.layers.items():
-        # [TODO](ruisizhang123) add EP support for transformer block bucketing
         module_list.append(transformer_block)
 
     def convert_modules_to_fqns(modules, module_to_fqn_mapping):
@@ -38,9 +37,13 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
         result = []
         for m in modules:
             if isinstance(m, list):
-                result.append(convert_modules_to_fqns(m, module_to_fqn_mapping))
+                # check if fqn_list is valid. In PP, bucketed module may
+                # not be in the current rank, and fqn_list is None.
+                if fqn_list := convert_modules_to_fqns(m, module_to_fqn_mapping):
+                    result.append(fqn_list)
             else:
-                result.append(module_to_fqn_mapping.get(m, None))
+                if fqn := module_to_fqn_mapping.get(m):
+                    result.append(fqn)
         return result
 
     module_to_name = {m: n for n, m in model.named_modules()}

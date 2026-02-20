@@ -8,6 +8,7 @@ from typing import Any
 
 import torch
 import torch._functorch.config as functorch_config
+from functorch.compile import min_cut_rematerialization_partition
 from torchtitan.tools.logging import logger
 
 from .job_config import Compile as CompileConfig
@@ -60,6 +61,7 @@ def get_compile_backend_with_passes(
             backend = aot_autograd_backend(
                 fw_compiler=aot_eager_autobucketing_reordering_pass,
                 bw_compiler=aot_eager_autobucketing_reordering_pass,
+                partition_fn=min_cut_rematerialization_partition,
                 keep_inference_input_mutations=True,
             )
         elif compile_config.backend == "inductor":
@@ -108,6 +110,7 @@ def get_compile_backend_with_passes(
             backend = aot_autograd_backend(
                 fw_compiler=aot_eager_transformer_block_bucketing_reordering_pass,
                 bw_compiler=aot_eager_transformer_block_bucketing_reordering_pass,
+                partition_fn=min_cut_rematerialization_partition,
                 keep_inference_input_mutations=True,
             )
         elif compile_config.backend == "inductor":
