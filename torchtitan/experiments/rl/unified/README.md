@@ -31,19 +31,19 @@ uv pip install torch vllm xformers  --pre \
 **NOTE:** The pre-built vLLM wheels are only compatible with CUDA 12.8, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu128, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
 
 
-3. Download Qwen/Qwen3-0.6B checkpoint from HuggingFace and put into `torchtitan/experiments/rl/example_checkpoint` folder.
+3. Download `Qwen/Qwen3-0.6B` checkpoint from HuggingFace to `torchtitan/experiments/rl/example_checkpoint` folder.
 ```bash
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torchtitan/experiments/rl/example_checkpoint --all --hf_token=...
 ```
 
 4. Run inference:
 ```bash
-python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint>
+python torchtitan/experiments/rl/unified/infer.py
 ```
 
-Run with TP: (work in progress)
+Run with TP:
 ```bash
-python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint> --tensor-parallel-size 2
+python torchtitan/experiments/rl/unified/infer.py --tensor-parallel-size 2
 
 ```
 

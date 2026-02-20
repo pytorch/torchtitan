@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument(
         "--model-ckpt-path",
         type=str,
-        default="torchtitan/experiments/rl/example_checkpoint",
+        default="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B/",
         help="Path to TorchTitan checkpoint directory",
     )
     parser.add_argument(
