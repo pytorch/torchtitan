@@ -17,7 +17,7 @@ from torchtitan.config.job_config import JobConfig as BaseJobConfig, Parallelism
 
 
 @dataclass
-class Sampling:
+class VLLMSamplingParams:
     """
     Sampling configuration for vLLM generation.
 
@@ -43,7 +43,7 @@ class Sampling:
 
 
 @dataclass
-class Generate:
+class Generation:
     """
     Generation configuration for vLLM engine.
 
@@ -68,7 +68,7 @@ class Generate:
     parallelism: Parallelism = field(default_factory=Parallelism)
     """Parallelism configuration for generation"""
 
-    sampling: Sampling = field(default_factory=Sampling)
+    sampling: VLLMSamplingParams = field(default_factory=VLLMSamplingParams)
     """Sampling configuration for generation"""
 
 
@@ -101,6 +101,6 @@ class JobConfig(BaseJobConfig):
     for vLLM-specific generation configurations.
     """
 
-    generation: Generate = field(default_factory=Generate)
+    generation: Generation = field(default_factory=Generation)
     """Generation configuration for vLLM engine"""
     policy_optimization: PolicyOptimization = field(default_factory=PolicyOptimization)

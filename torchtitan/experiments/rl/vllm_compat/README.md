@@ -71,7 +71,8 @@ Initialize vLLM's batch-invariant mode before training:
 
 ```python
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
-init_batch_invariance()
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 ```
 
 ## Usage
