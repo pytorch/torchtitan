@@ -201,7 +201,7 @@ class VisionAttention(nn.Module):
         num_images, max_num_patch, _ = hidden_states.shape
 
         # QKV projection
-        qkv = self.qkv(hidden_states).reshape(num_images, max_num_patch, 3, self.num_heads, self.head_dim)
+        qkv = self.qkv(hidden_states).reshape(num_images, max_num_patch, 3, -1, self.head_dim)
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)  # Each: (num_images, max_num_patch, heads, head_dim)
 
         # Apply rotary embeddings
@@ -371,7 +371,11 @@ class Qwen3VLVisionEncoder(nn.Module):
         freq_table = self.rotary_pos_emb(max_hw)
 
         # Get pos_embed weights for direct indexing (avoid nn.Embedding forward overhead)
+        # Convert to local tensor if DTensor (from FSDP/TP wrapping) to allow
+        # regular tensor indexing operations.
         pos_embed_weight = self.pos_embed.weight
+        if hasattr(pos_embed_weight, "to_local"):
+            pos_embed_weight = pos_embed_weight.to_local()
 
         # Pre-allocate output tensors
         pos_embeds = torch.zeros(num_images, max_num_patch, self.args.dim, device=device, dtype=dtype)
