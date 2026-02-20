@@ -57,8 +57,22 @@ class Qwen3VLModel(Qwen3Model):
         self.deepstack_layer_indices = list(range(len(model_args.encoder.deepstack_visual_indicies)))
 
     def init_weights(self, buffer_device: torch.device | None = None):
-        """Initialize all weights."""
+        """Initialize all weights.
+
+        Handles enable_weight_tying gracefully for PP where tok_embeddings
+        and output may not both be present on the same stage.
+        """
+        # Temporarily disable weight tying to avoid the base class assert,
+        # then tie manually with a softer check.
+        orig_weight_tying = self.enable_weight_tying
+        self.enable_weight_tying = False
         super().init_weights(buffer_device=buffer_device)
+        self.enable_weight_tying = orig_weight_tying
+
+        if self.enable_weight_tying:
+            if self.tok_embeddings is not None and self.output is not None:
+                self.output.weight = self.tok_embeddings.weight
+
         if self.visual is not None:
             self.visual.init_weights()
 
