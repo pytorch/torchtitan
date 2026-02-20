@@ -548,8 +548,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         self, data_iterator: Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ):
         self.optimizers.zero_grad()
-        # Save the current step learning rate for logging
-        lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+        # Save the current step learning rate(s) for logging
+        # Support multiple param groups with different LRs
+        lr_list = self.lr_schedulers.schedulers[0].get_last_lr()
+        lr = lr_list[0]  # Primary LR for backward compatibility
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -639,6 +641,21 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+
+        # If using differential learning rates, log each group's LR
+        if len(lr_list) > 1:
+            # Try to get group names from optimizer
+            try:
+                optimizer = self.optimizers.optimizers[0]
+                for i, (lr_val, param_group) in enumerate(zip(lr_list, optimizer.param_groups)):
+                    group_name = param_group.get('group_name', f'group_{i}')
+                    extra_metrics[f"lr/{group_name}"] = lr_val
+            except (AttributeError, IndexError) as e:
+                # Fallback: just use numeric indices (optimizer may not have group_name keys)
+                logger.debug(f"Using numeric indices for LR logging (no group_name): {e}")
+                for i, lr_val in enumerate(lr_list):
+                    extra_metrics[f"lr/group_{i}"] = lr_val
+
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
