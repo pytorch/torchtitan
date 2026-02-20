@@ -121,6 +121,17 @@ class VisionRotaryEmbedding(nn.Module):
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
+    def init_weights(self, device: torch.device | None = None):
+        """Re-compute inv_freq on the target device after to_empty()."""
+        device = device or self.inv_freq.device
+        self.inv_freq = (
+            1.0
+            / (
+                self.theta
+                ** (torch.arange(0, self.dim, 2, dtype=torch.float, device=device) / self.dim)
+            )
+        )
+
     def forward(self, seqlen: int) -> torch.Tensor:
         """Compute rotary embeddings for a sequence."""
         seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
@@ -129,22 +140,35 @@ class VisionRotaryEmbedding(nn.Module):
 
 
 class PatchMerger(nn.Module):
-    """Merge spatial patches to reduce sequence length."""
+    """Merge spatial patches to reduce sequence length.
+
+    Args:
+        hidden_size: Hidden dimension of input features.
+        out_hidden_size: Output hidden dimension after merging.
+        spatial_merge_size: Number of patches to merge per spatial dimension.
+        use_postshuffle_norm: If True, apply LayerNorm after spatial reshape
+            (norm dim = hidden_size * spatial_merge_size^2). If False, apply
+            before reshape (norm dim = hidden_size). DeepStack mergers use
+            postshuffle norm; the main merger uses pre-shuffle norm.
+    """
 
     def __init__(
         self,
         hidden_size: int,
         out_hidden_size: int,
         spatial_merge_size: int = 2,
+        use_postshuffle_norm: bool = False,
     ):
         super().__init__()
         self.spatial_merge_size = spatial_merge_size
-        self.hidden_size = hidden_size * (spatial_merge_size ** 2)
+        self.merged_hidden_size = hidden_size * (spatial_merge_size ** 2)
+        self.use_postshuffle_norm = use_postshuffle_norm
 
-        self.norm = nn.LayerNorm(hidden_size, eps=1e-6)
-        self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)
+        norm_dim = self.merged_hidden_size if use_postshuffle_norm else hidden_size
+        self.norm = nn.LayerNorm(norm_dim, eps=1e-6)
+        self.linear_fc1 = nn.Linear(self.merged_hidden_size, self.merged_hidden_size)
         self.act_fn = nn.GELU()
-        self.linear_fc2 = nn.Linear(self.hidden_size, out_hidden_size)
+        self.linear_fc2 = nn.Linear(self.merged_hidden_size, out_hidden_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -154,9 +178,14 @@ class PatchMerger(nn.Module):
             (batch, seq_len // spatial_merge_size^2, out_hidden_size)
         """
         batch_size, seq_len, _ = x.shape
-        x = self.norm(x)
-        # Reshape to merge spatial patches
-        x = x.view(batch_size, seq_len // (self.spatial_merge_size ** 2), self.hidden_size)
+        if self.use_postshuffle_norm:
+            # Reshape first, then norm
+            x = x.view(batch_size, seq_len // (self.spatial_merge_size ** 2), self.merged_hidden_size)
+            x = self.norm(x)
+        else:
+            # Norm first, then reshape
+            x = self.norm(x)
+            x = x.view(batch_size, seq_len // (self.spatial_merge_size ** 2), self.merged_hidden_size)
         x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
         return x
 
@@ -325,12 +354,14 @@ class Qwen3VLVisionEncoder(nn.Module):
         )
 
         # DeepStack mergers for intermediate layers
+        # DeepStack mergers use postshuffle norm (norm after spatial reshape)
         self.deepstack_visual_indicies = args.deepstack_visual_indicies
         self.deepstack_merger_list = nn.ModuleList([
             PatchMerger(
                 hidden_size=args.dim,
                 out_hidden_size=args.out_hidden_size,
                 spatial_merge_size=args.spatial_merge_size,
+                use_postshuffle_norm=True,
             )
             for _ in range(len(args.deepstack_visual_indicies))
         ])
@@ -338,6 +369,7 @@ class Qwen3VLVisionEncoder(nn.Module):
     def init_weights(self):
         self.patch_embed.init_weights()
         nn.init.trunc_normal_(self.pos_embed.weight, mean=0.0, std=0.02)
+        self.rotary_pos_emb.init_weights()
         self.merger.init_weights()
         for merger in self.deepstack_merger_list:
             merger.init_weights()
