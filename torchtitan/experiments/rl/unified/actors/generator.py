@@ -13,11 +13,12 @@ import torch
 from monarch.actor import Actor, endpoint
 from safetensors.torch import save_file
 from torchtitan.config import CommConfig
-from torchtitan.components.metrics import DeviceMemoryMonitor, gpu_timer
+from torchtitan.components.metrics import DeviceMemoryMonitor
 from torchtitan.distributed import utils as dist_utils
 
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
+from torchtitan.experiments.rl.metrics import gpu_timer
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
     compute_grpo_advantages_stable,
