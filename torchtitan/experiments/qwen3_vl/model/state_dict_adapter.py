@@ -15,20 +15,24 @@ Key differences from Qwen3 text-only adapter:
 - HF uses Conv3d for patch embedding, TT uses Linear (requires weight reshape)
 - Vision encoder has fused QKV, LayerNorm with bias
 - DeepStack merger list parameters
+- HF MoE checkpoints use grouped expert weights (3D tensors) with fused
+  gate_up_proj and no `.weight` suffix, requiring split/fuse and transpose
 """
 
 import re
 from typing import Any
 
-from torch.distributed.tensor import DTensor
-from torchtitan.models.utils import MoEStateDictAdapter
+import torch
+
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .args import Qwen3VLModelArgs
 
 
-class Qwen3VLStateDictAdapter(MoEStateDictAdapter):
+class Qwen3VLStateDictAdapter(StateDictAdapter):
     def __init__(self, model_args: Qwen3VLModelArgs, hf_assets_path: str | None):
         super().__init__(model_args, hf_assets_path)
+        self.model_args = model_args
 
         self.from_hf_map = {
             # ===== Language Model =====
@@ -48,10 +52,9 @@ class Qwen3VLStateDictAdapter(MoEStateDictAdapter):
             # Layer norms
             "model.language_model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.language_model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
-            # MoE
-            "model.language_model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.experts.w1",
-            "model.language_model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.experts.w3",
-            "model.language_model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.experts.w2",
+            # MoE (grouped experts, handled specially due to fused gate_up_proj and transpose)
+            # gate_up_proj is mapped to w1+w3 via custom logic, not through from_hf_map
+            "model.language_model.layers.{}.mlp.experts.down_proj": "layers.{}.moe.experts.w2",
             "model.language_model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             # Final norm and output
             "model.language_model.norm.weight": "norm.weight",
@@ -100,58 +103,38 @@ class Qwen3VLStateDictAdapter(MoEStateDictAdapter):
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
 
+        # Collect MoE w1/w3 per layer to fuse into gate_up_proj
+        moe_w1_by_layer: dict[str, Any] = {}
+        moe_w3_by_layer: dict[str, Any] = {}
+
         for key, value in state_dict.items():
-            if "moe.experts" in key:
-                # MoE expert handling (same pattern as Qwen3)
+            if self._is_indexed_key(key):
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                if abstract_key not in to_hf_map:
-                    continue
-                # pyrefly: ignore [missing-attribute]
-                layer_num = re.search(r"\d+", key).group(0)
-                new_abstract_key = to_hf_map[abstract_key]
-
-                if isinstance(value, DTensor):
-                    self.grouped_expert_weight_placements[
-                        abstract_key
-                    ] = value.placements
-                    self.grouped_expert_weight_shape[abstract_key] = value.shape
-                    self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
-
-                    local_expert_fqn = self._get_local_experts_weights(
-                        new_abstract_key,
-                        abstract_key,
-                        layer_num,
-                        value,
-                    )
-                    hf_state_dict.update(local_expert_fqn)
-                else:
-                    split_values = self._split_experts_weights(
-                        value,
-                        # pyrefly: ignore [missing-attribute]
-                        self.model_args.moe_args.num_experts,
-                    )
-                    # pyrefly: ignore [missing-attribute]
-                    for expert_num in range(self.model_args.moe_args.num_experts):
-                        new_key = new_abstract_key.format(layer_num, expert_num)
-                        hf_state_dict[new_key] = split_values[expert_num].squeeze()
-
-            elif self._is_indexed_key(key):
-                # Keys with layer/block/merger indices
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
-                if abstract_key not in to_hf_map:
-                    continue
                 # pyrefly: ignore [missing-attribute]
                 idx = re.search(r"\d+", key).group(0)
+
+                # Collect w1/w3 for fusing into gate_up_proj
+                if abstract_key == "layers.{}.moe.experts.w1":
+                    moe_w1_by_layer[idx] = value
+                    continue
+                elif abstract_key == "layers.{}.moe.experts.w3":
+                    moe_w3_by_layer[idx] = value
+                    continue
+
+                # Handle down_proj transpose: TT w2 [E, dim, hidden] -> HF [E, hidden, dim]
+                if abstract_key == "layers.{}.moe.experts.w2":
+                    new_key = f"model.language_model.layers.{idx}.mlp.experts.down_proj"
+                    hf_state_dict[new_key] = value.transpose(-2, -1)
+                    continue
+
+                if abstract_key not in to_hf_map:
+                    continue
                 new_key = to_hf_map[abstract_key].format(idx)
                 hf_state_dict[new_key] = value
 
             else:
-                # Direct mapping (tok_embeddings, norm, output, visual.patch_embed, etc.)
                 if key not in to_hf_map:
                     continue
-                # Some HF Qwen3-VL variants (e.g. 2B) tie lm_head.weight
-                # with embed_tokens.weight. Skip output.weight so DCP
-                # doesn't try to load the non-existent lm_head.weight.
                 # pyrefly: ignore [missing-attribute]
                 if key == "output.weight" and self.model_args.enable_weight_tying:
                     continue
@@ -169,12 +152,20 @@ class Qwen3VLStateDictAdapter(MoEStateDictAdapter):
                     )
                 hf_state_dict[new_key] = new_value
 
+        # Fuse w1 (gate) and w3 (up) into gate_up_proj per layer
+        # TT w1/w3: [E, hidden_dim, dim] -> transpose to [E, dim, hidden_dim] -> cat on last dim
+        for layer_idx in moe_w1_by_layer:
+            w1 = moe_w1_by_layer[layer_idx].transpose(-2, -1)  # [E, dim, hidden_dim]
+            w3 = moe_w3_by_layer[layer_idx].transpose(-2, -1)  # [E, dim, hidden_dim]
+            gate_up = torch.cat([w1, w3], dim=-1)  # [E, dim, 2*hidden_dim]
+            hf_key = f"model.language_model.layers.{layer_idx}.mlp.experts.gate_up_proj"
+            hf_state_dict[hf_key] = gate_up
+
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert HuggingFace state dict to torchtitan format."""
         state_dict = {}
-        expert_weights_by_layer = {}
 
         # HF Qwen3-VL ties lm_head.weight with embed_tokens.weight,
         # so lm_head.weight may not be stored in the checkpoint.
@@ -185,58 +176,33 @@ class Qwen3VLStateDictAdapter(MoEStateDictAdapter):
             ]
 
         for key, value in hf_state_dict.items():
-            if "mlp.experts" in key:
-                # MoE expert handling (same pattern as Qwen3)
-                abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
-                if abstract_key not in self.from_hf_map:
-                    continue
-                layer_num, expert_num = re.findall(r"\d+", key)[:2]
-                titan_abstract_key = self.from_hf_map[abstract_key]
-                if titan_abstract_key is None:
-                    continue
-                new_key = titan_abstract_key.format(layer_num)
-
-                if layer_num not in expert_weights_by_layer:
-                    expert_weights_by_layer[layer_num] = {}
-                if titan_abstract_key not in expert_weights_by_layer[layer_num]:
-                    expert_weights_by_layer[layer_num][titan_abstract_key] = {}
-                expert_weights_by_layer[layer_num][titan_abstract_key][
-                    int(expert_num)
-                ] = value
-
-                if titan_abstract_key in self.local_experts_indices:
-                    stacked_value = self._concatenate_expert_weights_dtensor(
-                        expert_weights_by_layer,
-                        titan_abstract_key,
-                        layer_num,
-                    )
-                else:
-                    stacked_value = self._concatenate_expert_weights(
-                        expert_weights_by_layer,
-                        titan_abstract_key,
-                        layer_num,
-                        # pyrefly: ignore [missing-attribute]
-                        self.model_args.moe_args.num_experts,
-                    )
-
-                if stacked_value is not None:
-                    state_dict[new_key] = stacked_value
-
-            elif self._is_indexed_key(key):
-                # Keys with layer/block/merger indices
+            if self._is_indexed_key(key):
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
+                # pyrefly: ignore [missing-attribute]
+                idx = re.search(r"\d+", key).group(0)
+
+                # Handle fused gate_up_proj: split and transpose
+                # HF gate_up_proj: [E, dim, 2*hidden_dim] -> split -> transpose each to [E, hidden_dim, dim]
+                if abstract_key == "model.language_model.layers.{}.mlp.experts.gate_up_proj":
+                    w1_hf, w3_hf = value.chunk(2, dim=-1)  # each [E, dim, hidden_dim]
+                    state_dict[f"layers.{idx}.moe.experts.w1"] = w1_hf.transpose(-2, -1)
+                    state_dict[f"layers.{idx}.moe.experts.w3"] = w3_hf.transpose(-2, -1)
+                    continue
+
+                # Handle down_proj transpose: HF [E, hidden, dim] -> TT w2 [E, dim, hidden]
+                if abstract_key == "model.language_model.layers.{}.mlp.experts.down_proj":
+                    state_dict[f"layers.{idx}.moe.experts.w2"] = value.transpose(-2, -1)
+                    continue
+
                 if abstract_key not in self.from_hf_map:
                     continue
                 new_key = self.from_hf_map[abstract_key]
                 if new_key is None:
                     continue
-                # pyrefly: ignore [missing-attribute]
-                idx = re.search(r"\d+", key).group(0)
                 new_key = new_key.format(idx)
                 state_dict[new_key] = value
 
             else:
-                # Direct mapping
                 if key not in self.from_hf_map:
                     continue
                 new_key = self.from_hf_map[key]
