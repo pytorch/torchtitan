@@ -248,10 +248,40 @@ class Attention(nn.Module):
             enable_gqa=self.enable_gqa,
         )
 
-        # Apply attention sink rescaling: rescale by σ(lse - w[h])
-        # This is mathematically equivalent to concatenating learnable sink weights
-        sink_scale = torch.sigmoid(lse - self.sinks.view(1, -1, 1)).unsqueeze(-1)
-        output = output * sink_scale.to(output.dtype)
+        # Apply attention sinks using LSE renormalization
+        # This is mathematically equivalent to HuggingFace's implementation which:
+        # 1. Concatenates sink logits to attention logits
+        # 2. Applies softmax over K+1 positions (including sink)
+        # 3. Drops the sink position after softmax
+        #
+        # The sink "absorbs" probability mass, effectively down-weighting attention.
+        # Using LSE: log(sum(exp(scores)) + exp(sink)) = logsumexp([lse, sink])
+        # Renorm factor: exp(old_lse - new_lse) redistributes probability correctly.
+        #
+        # Reference: HuggingFace transformers/integrations/flex_attention.py lines 309-322
+        batch_size, num_heads, seq_len_q, _ = output.shape
+
+        # Expand dimensions for broadcasting
+        lse_expanded = lse.unsqueeze(-1)  # [B, H, Q, 1]
+        sinks_expanded = self.sinks.view(1, -1, 1, 1).expand(
+            batch_size, num_heads, seq_len_q, 1
+        )
+
+        # Compute combined LSE that includes the sink
+        combined_lse = torch.logsumexp(
+            torch.cat([lse_expanded, sinks_expanded], dim=-1), dim=-1, keepdim=True
+        )
+
+        # Renormalization factor: exp(old_lse - new_lse)
+        # Clamp for numerical stability: when lse and sink have very different magnitudes,
+        # the difference can be extreme. Clamping to [-20, 0] ensures:
+        # - exp(-20) ≈ 2e-9 (effectively zero, sink absorbed almost all attention)
+        # - exp(0) = 1 (no change, sink has no effect)
+        # The upper bound is 0 because combined_lse >= lse_expanded by definition of logsumexp.
+        renorm_factor = torch.exp(
+            torch.clamp(lse_expanded - combined_lse, min=-20.0, max=0.0)
+        )
+        output = output * renorm_factor.to(output.dtype)
 
         output = output.transpose(1, 2).contiguous()  # (B, H, T, D) -> (B, T, H, D)
 
