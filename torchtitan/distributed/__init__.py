@@ -11,6 +11,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import DeviceMesh, distribute_module, DTensor, Replicate
+from torch.distributed._tensor import Partial
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
@@ -76,8 +77,13 @@ class NoParallel(ParallelStyle):
         if outputs.placements != (output_layout,):
             outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
         # back to local tensor
-        return outputs.to_local() if use_local_output else outputs
-
+        if use_local_output:
+            # Enforce Partial grad placement if the output layout is Replicated
+            # to ensure gradients are AllReduced during the backward pass.
+            grad_placement = (Partial(),) if isinstance(output_layout, Replicate) else None
+            return outputs.to_local(grad_placements=grad_placement)
+        
+        return outputs
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
             module,
