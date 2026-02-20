@@ -24,7 +24,7 @@ from torchtitan.models.attention import (
     VarlenAttentionWrapper,
     VarlenMetadata,
 )
-from torchtitan.models.moe import MoE
+from torchtitan.models.moe import build_moe, MoE
 from torchtitan.models.utils import trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
@@ -365,10 +365,11 @@ class TransformerBlock(nn.Module):
 
         self.moe_enabled = model_args.moe_enabled
         if self.moe_enabled:
-            self.moe = MoE(
+            self.moe = build_moe(
                 model_args.moe_args,
                 dim=model_args.dim,
                 hidden_dim=model_args.moe_inter_dim,
+                moe_impl=model_args.moe_impl,
             )
         else:
             self.feed_forward = FeedForward(
@@ -417,7 +418,7 @@ class TransformerBlock(nn.Module):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            self.moe.init_weights(self.weight_init_std, buffer_device)
+            cast(MoE, self.moe).init_weights(self.weight_init_std, buffer_device)
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 

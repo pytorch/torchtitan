@@ -42,6 +42,9 @@ class Qwen3ModelArgs(BaseModelArgs):
 
     enable_weight_tying: bool = False
 
+    # Expert parallel communication backend (set from config)
+    expert_parallel_comm_backend: str = "standard"  # "standard" or "deepep"
+
     # MoE params
     moe_enabled: bool = False
     moe_inter_dim: int = 768
@@ -58,6 +61,8 @@ class Qwen3ModelArgs(BaseModelArgs):
         self.moe_args._debug_force_load_balance = (
             job_config.debug.moe_force_load_balance
         )
+
+        self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(self, model, 2 * self.head_dim, seq_len)
