@@ -12,13 +12,14 @@ from torchtitan.tools.logging import logger
 
 from .job_config import Compile as CompileConfig
 
-from .reshard_after_forward import annotate_fsdp_all_gather
+from .reshard_after_forward import annotate_ep_must_save, annotate_fsdp_all_gather
 
 
 def get_compile_backend_with_passes(
     compile_config: CompileConfig,
     fsdp_reshard_after_forward: bool,
     fsdp_manual_buckets: list[list[str] | str] | None,
+    ep_enabled: bool = False,
 ) -> callable:
     """
     Apply compile backend and additional graph passes.
@@ -143,6 +144,8 @@ def get_compile_backend_with_passes(
         # when fsdp_reshard_after_forward set to False, it will annotate simple_fsdp AG
         #   to CheckpointPolicy.MUST_SAVE.
         gm = annotate_fsdp_all_gather(gm, fsdp_reshard_after_forward)
+        if ep_enabled:
+            gm = annotate_ep_must_save(gm)
         gm.recompile()
         return gm
 

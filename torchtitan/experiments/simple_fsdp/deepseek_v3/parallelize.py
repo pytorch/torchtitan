@@ -23,6 +23,22 @@ from ..backend import get_compile_backend_with_passes
 
 from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
 
+# Selective op AC: save compute-expensive ops (matmuls, attention kernels,
+# collectives). Cheap ops like MoE routing (softmax, topk, argsort) are
+# recomputed. See also ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
+# which defaults to ["moe.router.gate"] to force-recompute the gate mm.
+_op_sac_save_list = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    torch.ops.aten._scaled_dot_product_attention_math.default,
+    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
+    torch._higher_order_ops.flex_attention,
+    torch.ops._c10d_functional.all_to_all_single.default,
+}
+
+
 
 def get_transformer_block_buckets(model) -> list[list[str] | str]:
     module_list = [
@@ -103,7 +119,11 @@ def parallelize_deepseekv3(
         )
 
     if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
+        apply_ac(
+            model,
+            job_config.activation_checkpoint,
+            op_sac_save_list=_op_sac_save_list,
+        )
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
@@ -171,6 +191,7 @@ def parallelize_deepseekv3(
     if job_config.compile.enable:
         torch._inductor.config.reorder_for_peak_memory = False
         torch._dynamo.config.capture_scalar_outputs = True
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
 
         match job_config.parallelism.fsdp_reshard_after_forward:
             case "always":
@@ -190,6 +211,7 @@ def parallelize_deepseekv3(
             job_config.compile,
             fsdp_reshard_after_forward,
             get_transformer_block_buckets(model),
+            ep_enabled=parallel_dims.ep_enabled,
         )
         model = torch.compile(
             model,
