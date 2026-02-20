@@ -53,8 +53,8 @@ class Qwen3VLModel(Qwen3Model):
         # MRoPE section for interleaved multi-dimensional RoPE
         self.mrope_section = model_args.text_config.mrope_section
 
-        # DeepStack layer indices (which LLM layers receive visual features)
-        self.deepstack_layer_indices = list(range(len(model_args.encoder.deepstack_visual_indexes)))
+        # Inject deepstack features from ViT layers deepstack_visual_indicies[i] into LLM decoder layer i
+        self.deepstack_layer_indices = list(range(len(model_args.encoder.deepstack_visual_indicies)))
 
     def init_weights(self, buffer_device: torch.device | None = None):
         """Initialize all weights."""

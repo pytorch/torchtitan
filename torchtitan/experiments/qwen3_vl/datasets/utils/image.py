@@ -197,7 +197,7 @@ def image_to_patches(
     #   W = bw x n x pw
     #   c = c, channels
     # On the right side:
-    #   (t bh bw m n), sequence of tokens before merging
+    #   (t bh bw m n), sequence of patches before merging
     #   (pt ph pw c), patch dimensions
     patches = E.rearrange(
         img,
