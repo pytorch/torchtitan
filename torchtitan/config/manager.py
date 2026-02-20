@@ -9,7 +9,7 @@ import os
 import sys
 
 from dataclasses import field, fields, is_dataclass, make_dataclass
-from typing import Any, Type
+from typing import Any
 
 import tyro
 
@@ -38,7 +38,7 @@ class ConfigManager:
         name
     """
 
-    def __init__(self, config_cls: Type[JobConfig] = JobConfig):
+    def __init__(self, config_cls: type[JobConfig] = JobConfig):
         self.config_cls = config_cls
         self.config: JobConfig = config_cls()
         self.register_tyro_rules(custom_registry)
@@ -85,7 +85,7 @@ class ConfigManager:
 
     def _maybe_add_custom_config(
         self, args: list[str], toml_values: dict[str, Any] | None
-    ) -> Type[JobConfig]:  # noqa: B006
+    ) -> type[JobConfig]:  # noqa: B006
         """
         Find and merge custom config module with current JobConfig class, if it is given.
         The search order is first searching CLI args, then toml config file.
@@ -116,7 +116,7 @@ class ConfigManager:
         return self._merge_configs(self.config_cls, JobConfigExtended)
 
     @staticmethod
-    def _merge_configs(base, custom) -> Type:
+    def _merge_configs(base, custom) -> type:
         """
         Merges a base JobConfig class with user-defined extensions.
 

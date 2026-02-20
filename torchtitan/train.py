@@ -9,8 +9,9 @@ import importlib
 import json
 import os
 import time
+from collections.abc import Iterable, Iterator
 from datetime import timedelta
-from typing import Any, cast, Iterable, Iterator
+from typing import Any, cast
 
 import torch
 import torch.distributed.checkpoint.stateful

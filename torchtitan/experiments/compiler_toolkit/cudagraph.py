@@ -12,7 +12,8 @@ during compilation.
 """
 
 import warnings
-from typing import Any, Callable, Optional, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any, Optional
 
 import torch
 from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager

@@ -6,8 +6,9 @@
 
 import importlib
 import time
+from collections.abc import Iterable
 from datetime import timedelta
-from typing import Any, Iterable
+from typing import Any
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record

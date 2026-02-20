@@ -5,9 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import importlib.util
-from contextlib import nullcontext
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
-from typing import Callable, cast, ContextManager, Optional, TYPE_CHECKING, Union
+from typing import cast, Optional, TYPE_CHECKING, Union
 
 import torch
 import torch.distributed as dist
@@ -116,7 +117,7 @@ def maybe_semi_sync_training(
     n_layers: int,
     optimizer: torch.optim.Optimizer,
     fragment_fn: Optional[Callable[..., list[nn.Module]]] = None,
-) -> ContextManager[Union["local_sgd.DiLoCo", "local_sgd.LocalSGD", None]]:
+) -> AbstractContextManager[Union["local_sgd.DiLoCo", "local_sgd.LocalSGD", None]]:
     """
     If TorchFT is enabled and the config is set, use semi_sync_method
     """

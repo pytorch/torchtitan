@@ -6,7 +6,6 @@
 
 
 import unittest
-from typing import Tuple
 
 import numpy as np
 import torch
@@ -71,9 +70,9 @@ class TestOptimizedKernel(unittest.TestCase):
         self,
         experts_per_rank: int,
         num_ranks: int,
-        token_range: Tuple[int, int] = (1, 16),
+        token_range: tuple[int, int] = (1, 16),
         alignment: int = 32,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         """Create test data"""
         # Create token counts
         tokens_per_expert_group = torch.randint(

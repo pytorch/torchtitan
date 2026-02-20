@@ -8,7 +8,7 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any
 
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
@@ -27,7 +27,7 @@ class BaseStateDictAdapter(ABC):
         hf_assets_path: path to HF assets folder containing tokenizer, model weights, etc.
     """
 
-    fqn_to_index_mapping: Dict[Any, int] | None
+    fqn_to_index_mapping: dict[Any, int] | None
     hf_assets_path: str | None
 
     @abstractmethod

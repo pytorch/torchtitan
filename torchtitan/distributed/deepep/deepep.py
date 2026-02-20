@@ -12,7 +12,7 @@ Used by DeepEPExpertParallel in expert_parallel.py.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 from torch.distributed import ProcessGroup
@@ -81,7 +81,7 @@ def _dispatch_op_impl(
     num_tokens_per_rdma_rank: torch.Tensor,
     is_token_in_rank: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Execute DeepEP dispatch."""
     global _buffer
 
@@ -321,7 +321,7 @@ def _permute_tokens(
     hidden_states: torch.Tensor,
     dispatched_indices: torch.Tensor,
     dispatched_scores: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Convert dispatch output to grouped_mm format with permutation and token expansion.
 
     Each token may be routed to multiple experts (top-k), so tokens are expanded and sorted
@@ -398,7 +398,7 @@ def dispatch_tokens(
     num_experts: int,
     group: ProcessGroup,
     score_before_experts: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor, DispatchState]:
+) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP.
 
     Args:
