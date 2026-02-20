@@ -28,12 +28,14 @@ from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
 
 from .datasets.mm_datasets import build_mm_dataloader
-from .infra.parallelize import parallelize_qwen3_vl
+from .infra.parallelize import parallelize_qwen3_vl, pipeline_qwen3_vl
 from .model.args import Qwen3VLModelArgs, Qwen3VLVisionEncoderArgs, Qwen3VLTextConfig
 from .model.model import Qwen3VLModel
+from .model.state_dict_adapter import Qwen3VLStateDictAdapter
 
 __all__ = [
     "parallelize_qwen3_vl",
+    "pipeline_qwen3_vl",
     "Qwen3VLModelArgs",
     "Qwen3VLVisionEncoderArgs",
     "Qwen3VLModel",
@@ -107,29 +109,30 @@ qwen3_vl_args = {
         ),
         text_config=Qwen3VLTextConfig(mrope_section=[8, 8, 8]),
     ),
-    # Qwen3-VL 2B variant (based on Qwen3 0.6B LLM + ViT)
+    # Qwen3-VL 2B variant (based on Qwen3 1.7B LLM + ViT)
     "2B": Qwen3VLModelArgs(
         vocab_size=151936,
         max_seq_len=32768,
         head_dim=128,
-        dim=1536,
+        dim=2048,
         n_layers=28,
-        n_heads=12,
-        n_kv_heads=2,
+        n_heads=16,
+        n_kv_heads=8,
         qk_norm=True,
-        hidden_dim=8960,
-        rope_theta=1000000,
+        hidden_dim=6144,
+        rope_theta=5000000,
+        enable_weight_tying=True,
         encoder=Qwen3VLVisionEncoderArgs(
-            dim=1280,
-            ffn_dim=5120,
-            n_layers=32,
+            dim=1024,
+            ffn_dim=4096,
+            n_layers=24,
             n_heads=16,
-            patch_size=14,
+            patch_size=16,
             temporal_patch_size=2,
             spatial_merge_size=2,
-            out_hidden_size=1536,
-            num_position_embeddings=4096,  # 64x64 grid
-            deepstack_visual_indicies=[7, 15, 23],
+            out_hidden_size=2048,
+            num_position_embeddings=2304,  # 48x48 grid
+            deepstack_visual_indicies=[5, 11, 17],
         ),
         text_config=Qwen3VLTextConfig(mrope_section=[24, 20, 20]),
     ),
@@ -139,23 +142,23 @@ qwen3_vl_args = {
         max_seq_len=32768,
         head_dim=128,
         dim=4096,
-        n_layers=32,
+        n_layers=36,
         n_heads=32,
         n_kv_heads=8,
         qk_norm=True,
-        hidden_dim=14336,
-        rope_theta=1000000,
+        hidden_dim=12288,
+        rope_theta=5000000,
         encoder=Qwen3VLVisionEncoderArgs(
-            dim=1280,
-            ffn_dim=5120,
-            n_layers=32,
+            dim=1152,
+            ffn_dim=4304,
+            n_layers=27,
             n_heads=16,
-            patch_size=14,
+            patch_size=16,
             temporal_patch_size=2,
             spatial_merge_size=2,
             out_hidden_size=4096,
-            num_position_embeddings=4096,  # 64x64 grid
-            deepstack_visual_indicies=[7, 15, 23],
+            num_position_embeddings=2304,  # 48x48 grid
+            deepstack_visual_indicies=[8, 16, 24],
         ),
         text_config=Qwen3VLTextConfig(mrope_section=[24, 20, 20]),
     ),
@@ -194,11 +197,12 @@ def get_train_spec() -> TrainSpec:
         model_cls=Qwen3VLModel,
         model_args=qwen3_vl_args,
         parallelize_fn=parallelize_qwen3_vl,
-        pipelining_fn=None,
+        pipelining_fn=pipeline_qwen3_vl,
         build_optimizers_fn=build_optimizers,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_mm_dataloader,
         build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
         build_validator_fn=build_validator,
+        state_dict_adapter=Qwen3VLStateDictAdapter,
     )
