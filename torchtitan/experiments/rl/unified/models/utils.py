@@ -122,11 +122,12 @@ def load_trainer_model(model_path: str):
         ),
         hidden_dim=hf_config.intermediate_size,
         norm_eps=hf_config.rms_norm_eps,
-        rope_theta=getattr(hf_config.rope_parameters, "rope_theta", 1000000),
+        rope_theta=getattr(hf_config, "rope_theta", 1000000),
         max_seq_len=getattr(hf_config, "max_position_embeddings", 32768),
         qk_norm=True,
         depth_init=True,
         eos_id=getattr(hf_config, "eos_token_id", 151645),
+        enable_weight_tying=getattr(hf_config, "tie_word_embeddings", False),
     )
     # convert to torchtitan state_dict. TODO: Use torchtitan components
     titan_state_dict = vllm_to_torchtitan(model_path)
