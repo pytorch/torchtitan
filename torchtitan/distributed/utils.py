@@ -515,12 +515,49 @@ def _clip_grad_norm_with_ep(
     if isinstance(ep_grads_total_norm, DTensor):
         ep_grads_total_norm = ep_grads_total_norm.full_tensor()
 
-    non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
-        non_ep_grads, norm_type, error_if_nonfinite, foreach
-    )
-    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
-    if isinstance(non_ep_grads_total_norm, DTensor):
-        non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
+    # Group non-EP grads by mesh to handle mixed meshes (e.g., VLM models
+    # where vision encoder params are on (fsdp) mesh while decoder params
+    # with TP are on (fsdp, tp) mesh).
+    non_ep_by_mesh: dict[int, tuple[list[torch.Tensor], list[torch.Tensor]]] = {}
+    for p, grad in zip(non_ep_params, non_ep_grads):
+        mesh_id = id(grad.device_mesh)
+        if mesh_id not in non_ep_by_mesh:
+            non_ep_by_mesh[mesh_id] = ([], [])
+        non_ep_by_mesh[mesh_id][0].append(p)
+        non_ep_by_mesh[mesh_id][1].append(grad)
+
+    if len(non_ep_by_mesh) <= 1:
+        # All on same mesh (or empty), use standard path
+        non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
+            non_ep_grads, norm_type, error_if_nonfinite, foreach
+        )
+        if isinstance(non_ep_grads_total_norm, DTensor):
+            non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
+    else:
+        # Mixed meshes — compute per-mesh norms and combine
+        if math.isinf(norm_type):
+            non_ep_grads_total_norm = torch.tensor(
+                0.0, device=non_ep_grads[0].device
+            )
+            for _, mesh_grads in non_ep_by_mesh.values():
+                norm = torch.nn.utils.get_total_norm(
+                    mesh_grads, norm_type, error_if_nonfinite, foreach
+                )
+                if isinstance(norm, DTensor):
+                    norm = norm.full_tensor()
+                non_ep_grads_total_norm = torch.maximum(
+                    non_ep_grads_total_norm, norm
+                )
+        else:
+            total_norm_sq = torch.tensor(0.0, device=non_ep_grads[0].device)
+            for _, mesh_grads in non_ep_by_mesh.values():
+                norm = torch.nn.utils.get_total_norm(
+                    mesh_grads, norm_type, error_if_nonfinite, foreach
+                )
+                if isinstance(norm, DTensor):
+                    norm = norm.full_tensor()
+                total_norm_sq = total_norm_sq + norm**norm_type
+            non_ep_grads_total_norm = total_norm_sq ** (1.0 / norm_type)
 
     if math.isinf(norm_type):
         total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
@@ -539,6 +576,15 @@ def _clip_grad_norm_with_ep(
             total_norm **= 1.0 / norm_type
 
     torch.nn.utils.clip_grads_with_norm_(ep_params, max_norm, total_norm, foreach)
-    torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
+    if len(non_ep_by_mesh) <= 1:
+        torch.nn.utils.clip_grads_with_norm_(
+            non_ep_params, max_norm, total_norm, foreach
+        )
+    else:
+        # Clip each mesh group separately to avoid mixed-mesh foreach ops
+        for mesh_params, _ in non_ep_by_mesh.values():
+            torch.nn.utils.clip_grads_with_norm_(
+                mesh_params, max_norm, total_norm, foreach
+            )
 
     return total_norm

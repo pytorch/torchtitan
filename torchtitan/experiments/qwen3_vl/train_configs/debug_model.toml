@@ -1,0 +1,76 @@
+[job]
+dump_folder = "./outputs"
+description = "Qwen3-VL debug training"
+print_config = false
+custom_config_module = "torchtitan.experiments.qwen3_vl.job_config"
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 10
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "qwen3_vl"
+flavor = "debugmodel"
+# Must use a Qwen3-VL tokenizer that has the special tokens (<|image_pad|>, etc.)
+hf_assets_path = "assets/hf/Qwen3-VL-8B-Instruct"
+# converters = ["float8"]
+
+[optimizer]
+name = "AdamW"
+lr = 8e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 2  # lr scheduler warm up, normally 20% of the train steps
+decay_ratio = 0.8  # lr scheduler decay ratio, 80% of the train steps
+decay_type = "linear"
+min_lr_factor = 0.0
+
+[training]
+local_batch_size = 32
+seq_len = 4096
+max_norm = 1.0  # grad norm clipping
+steps = 10
+dataset = "cc12m"
+
+[data]
+patch_size = 14
+temporal_patch_size = 2
+spatial_merge_size = 2
+max_patches_per_image = 320  # merged patches with headroom (raw = 1280)
+max_images_per_batch = 128
+# packing_buffer_size = 100 # > 0 to enable sample packing
+
+[compile]
+enable = true
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = 8
+fsdp_reshard_after_forward = "default" # default / never / always
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+pipeline_parallel_degree = 1
+expert_parallel_degree = 1
+context_parallel_degree = 1
+
+[checkpoint]
+enable = false
+folder = "checkpoint"
+interval = 10
+last_save_model_only = false
+export_dtype = "float32"
+async_mode = "disabled"  # ["disabled", "async", "async_with_pinned_mem"]
+
+[activation_checkpoint]
+mode = "full"
