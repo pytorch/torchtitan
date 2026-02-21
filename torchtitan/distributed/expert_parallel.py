@@ -286,6 +286,7 @@ class ReordererSequenceParallel(ParallelStyle):
 
             return output
 
+        top_scores = DTensor.from_local(top_scores, device_mesh, (Replicate(),)).to_local(grad_placements=(Partial(),))
         top_scores = _split_along_first_dim(top_scores)
         selected_experts_indices = _split_along_first_dim(selected_experts_indices)
 

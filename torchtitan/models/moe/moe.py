@@ -10,7 +10,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Partial, Replicate
 
 from torchtitan.models.utils import trunc_normal_
 
@@ -539,6 +539,20 @@ class MoE(nn.Module):
             -1, self.router.top_k, dim
         )
         if not self.score_before_experts:
+            # NOTE: When score_before_experts=False, top_scores is multiplied
+            #       with routed_output_unsorted via bmm. routed_output_unsorted
+            #       is Partial across TP ranks (from row-parallel expert weights)
+            #       or EP ranks (each rank fills only its token positions).
+            #       The backward gradient d_top_scores = bmm(d_out, routed_output^T)
+            #       is therefore Partial. We use from_local/to_local to trigger
+            #       an all-reduce in backward so the router gate gets the correct
+            #       full gradient.
+            gate_weight = self.router.gate.weight
+            if isinstance(gate_weight, DTensor):
+                tp_mesh = gate_weight.device_mesh
+                top_scores = DTensor.from_local(
+                    top_scores, tp_mesh, (Replicate(),)
+                ).to_local(grad_placements=(Partial(),))
             out_experts = (
                 torch.bmm(
                     top_scores.reshape(-1, 1, self.router.top_k),
