@@ -286,6 +286,11 @@ class ReordererSequenceParallel(ParallelStyle):
 
             return output
 
+        # NOTE: top_scores is Replicate across EP ranks, but the split below
+        #       gives each rank only its local slice. In backward, the gradient
+        #       of the slice is nonzero only for the local tokens (Partial).
+        #       We declare grad_placements=(Partial(),) to trigger an all-reduce
+        #       so the router gate receives the correct full gradient.
         top_scores = DTensor.from_local(top_scores, device_mesh, (Replicate(),)).to_local(grad_placements=(Partial(),))
         top_scores = _split_along_first_dim(top_scores)
         selected_experts_indices = _split_along_first_dim(selected_experts_indices)
