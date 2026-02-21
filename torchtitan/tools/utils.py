@@ -73,7 +73,8 @@ class GarbageCollection:
         logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
 
 
-# hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU and AMD MI250, MI300X, MI325X, MI355X and Intel PVC
+# hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU,
+# AMD MI250, MI300X, MI325X, MI355X, Intel PVC, and AWS Trainium/Inferentia
 def get_peak_flops(device_name: str) -> float:
     try:
         # Run the lspci command and capture the output
@@ -138,6 +139,27 @@ def get_peak_flops(device_name: str) -> float:
     elif "l40s" in device_name:
         # data from: "https://resources.nvidia.com/en-us-l40s/l40s-datasheet-28413"
         return 362e12
+    elif "neuron" in device_name:
+        # AWS Trainium/Inferentia: query chip type via torch.neuron
+        # TensorEngine BF16 TFLOPS per NeuronCore × default Logical NeuronCore (LNC) count per device
+        neuron_device_name = device_module.get_device_properties().name
+        if neuron_device_name in ("trn1", "trn1n", "inf2"):
+            # NeuronCore-v2 TensorEngine: 90 BF16 TFLOPS/core, LNC=1
+            # https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/neuron-core-v2.html
+            return 90e12 * 1
+        elif neuron_device_name in ("trn2", "trn2n", "trn2u"):
+            # NeuronCore-v3 TensorEngine: 79 BF16 TFLOPS/core, LNC=2
+            # https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/neuron-core-v3.html
+            return 79e12 * 2
+        elif neuron_device_name in ("trn3", "trn3u"):
+            # NeuronCore-v4 TensorEngine: 79 BF16 TFLOPS/core, LNC=2
+            # https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/neuron-core-v4.html
+            return 79e12 * 2
+        else:
+            logger.warning(
+                f"Unknown neuron device: {neuron_device_name}, fallback to trn2/trn3"
+            )
+            return 79e12 * 2
 
     else:  # for other GPU types, assume A100
         logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
