@@ -12,7 +12,7 @@ Used by DeepEPExpertParallel in expert_parallel.py.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 from torch.distributed import ProcessGroup
@@ -44,7 +44,7 @@ _handle_counter: int = 0
 # shared_experts computation with combine communication.
 # This is process-local state (each GPU process has its own Python interpreter),
 # and execution is single-threaded, so a simple module variable suffices.
-_pending_combine_event: Optional[EventOverlap] = None
+_pending_combine_event: EventOverlap | None = None
 
 
 def _get_next_handle_id() -> torch.Tensor:
@@ -387,7 +387,7 @@ class DispatchState:
     handle_id: torch.Tensor  # CPU tensor used to retrieve cached handle
     permuted_indices: torch.Tensor
     num_recv_tokens: int
-    permuted_scores: Optional[torch.Tensor] = None
+    permuted_scores: torch.Tensor | None = None
 
 
 def dispatch_tokens(

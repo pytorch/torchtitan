@@ -9,7 +9,7 @@ import json
 
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Union
+from typing import Any
 
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import JobConfig
@@ -74,7 +74,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         self._infer_special_tokens()
         self._infer_should_add_bos_eos()
 
-    def _load_config(self, config_path: str) -> Optional[dict]:
+    def _load_config(self, config_path: str) -> dict | None:
         """Load configuration from JSON file if it exists."""
         if os.path.exists(config_path):
             with open(config_path, "r") as f:
@@ -175,7 +175,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 "Looking for: tokenizer.json, vocab.txt+merges.txt, or vocab.json+merges.txt"
             )
 
-    def _get_token_from_config(self, config: dict[str, Any], key: str) -> Optional[str]:
+    def _get_token_from_config(self, config: dict[str, Any], key: str) -> str | None:
         """
         Parse special tokens from config that can be either strings or dicts.
         HF tokens are stored as either {'bos_token': '<bos>'} or {'bos_token': {'content': '<bos>', ...}}.
@@ -192,7 +192,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         return token
 
     def _process_special_token(
-        self, token_str: str, token_config: dict, token_id: Optional[int] = None
+        self, token_str: str, token_config: dict, token_id: int | None = None
     ) -> AddedToken:
         """
         Process a special token and update BOS/EOS attributes if applicable.
@@ -403,18 +403,18 @@ class HuggingFaceTokenizer(BaseTokenizer):
         """Get the vocabulary as a dictionary."""
         return self.tokenizer.get_vocab()
 
-    def token_to_id(self, token: str) -> Optional[int]:
+    def token_to_id(self, token: str) -> int | None:
         """Convert token to ID."""
         return self.tokenizer.token_to_id(token)
 
-    def id_to_token(self, token_id: int) -> Optional[str]:
+    def id_to_token(self, token_id: int) -> str | None:
         """Convert ID to token."""
         return self.tokenizer.id_to_token(token_id)
 
 
 def build_hf_tokenizer(
     job_config: JobConfig,
-) -> Union[HuggingFaceTokenizer, BaseTokenizer]:
+) -> HuggingFaceTokenizer | BaseTokenizer:
     """
     Builds a HuggingFaceTokenizer from the specified path.
 

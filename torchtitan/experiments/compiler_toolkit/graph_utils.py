@@ -4,10 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import contextlib
 import functools
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List
 
 import torch
 from torch._dynamo.functional_export import dynamo_graph_capture_for_export
@@ -104,11 +106,11 @@ def joint_graph_builder(
     model: torch.nn.Module,
     model_args: tuple,
     model_kwargs: dict,
-    fw_compiler: Optional[Callable] = None,
-    bw_compiler: Optional[Callable] = None,
-    joint_custom_passes: Optional[List[Callable]] = None,
+    fw_compiler: Callable | None = None,
+    bw_compiler: Callable | None = None,
+    joint_custom_passes: List[Callable] | None = None,
     dump_folder: str | None = None,
-    job_config: Optional["JobConfig"] = None,
+    job_config: "JobConfig" | None = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.

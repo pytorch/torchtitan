@@ -6,7 +6,7 @@
 
 import time
 import types
-from typing import Callable, Optional
+from typing import Callable
 
 import torch
 import torch.nn as nn
@@ -81,7 +81,7 @@ def create_functional_router_forward(
 def _moe_forward(
     x: torch.Tensor,
     router_gate_weight: torch.nn.Parameter,
-    expert_bias: Optional[torch.Tensor],
+    expert_bias: torch.Tensor | None,
     experts_w1: torch.Tensor,
     experts_w3: torch.Tensor,
     experts_w2: torch.Tensor,

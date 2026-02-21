@@ -7,7 +7,7 @@
 import itertools
 import math
 from dataclasses import asdict
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import numpy as np
 import PIL.Image
@@ -32,7 +32,7 @@ from torchtitan.tools.logging import logger
 def _process_cc12m_image(
     img: PIL.Image.Image,
     output_size: int = 256,
-) -> Optional[torch.Tensor]:
+) -> torch.Tensor | None:
     """Process CC12M image to the desired size."""
 
     width, height = img.size
@@ -160,7 +160,7 @@ DATASETS = {
 
 
 def _validate_dataset(
-    dataset_name: str, dataset_path: Optional[str] = None
+    dataset_name: str, dataset_path: str | None = None
 ) -> tuple[str, Callable, Callable]:
     """Validate dataset name and path."""
     if dataset_name not in DATASETS:
@@ -190,10 +190,10 @@ class FluxDataset(IterableDataset, Stateful):
     def __init__(
         self,
         dataset_name: str,
-        dataset_path: Optional[str],
+        dataset_path: str | None,
         t5_tokenizer: BaseTokenizer,
         clip_tokenizer: BaseTokenizer,
-        job_config: Optional[JobConfig] = None,
+        job_config: JobConfig | None = None,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
@@ -367,10 +367,10 @@ class FluxValidationDataset(FluxDataset):
     def __init__(
         self,
         dataset_name: str,
-        dataset_path: Optional[str],
+        dataset_path: str | None,
         t5_tokenizer: BaseTokenizer,
         clip_tokenizer: BaseTokenizer,
-        job_config: Optional[JobConfig] = None,
+        job_config: JobConfig | None = None,
         dp_rank: int = 0,
         dp_world_size: int = 1,
         generate_timesteps: bool = True,
