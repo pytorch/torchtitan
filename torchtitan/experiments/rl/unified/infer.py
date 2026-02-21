@@ -90,6 +90,7 @@ def infer():
         enforce_eager=True,  # Use eager mode
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=0.5,
+        attention_backend="CUSTOM",
     )
 
     logger.info("vLLM engine initialized successfully")
