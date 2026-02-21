@@ -45,7 +45,9 @@ def get_dual_pipe_v_flag(job_config, parallel_dims) -> bool:
     if dual_pipe_v and job_config.activation_checkpoint.mode != "none":
         raise NotImplementedError(
             "Expert Parallel with DualPipeV and Activation Checkpointing "
-            "cannot be used together. Please disable one of them."
+            "cannot be used together. Please set mode='none'. "
+            "You can use cpu_offload=true with mode='none' to reduce "
+            "GPU memory usage without recomputation."
         )
 
     return dual_pipe_v

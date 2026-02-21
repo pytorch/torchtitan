@@ -77,7 +77,7 @@ def parallelize_hf_transformers(
         job_config.compile.enable and "model" in job_config.compile.components
     )
 
-    if job_config.activation_checkpoint.mode != "none":
+    if job_config.activation_checkpoint.mode != "none" or job_config.activation_checkpoint.cpu_offload:
         apply_ac(model, job_config.activation_checkpoint)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
