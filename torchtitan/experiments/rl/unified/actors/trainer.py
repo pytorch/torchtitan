@@ -14,13 +14,12 @@ from torchtitan.experiments.rl.unified.actors.generator import TrajectoryData
 from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     create_trainer_parallel_dims,
 )
-from torchtitan.experiments.rl.unified.models.utils import load_model, ModelMode
+from torchtitan.experiments.rl.unified.job_config import JobConfig
+from torchtitan.experiments.rl.unified.models.utils import load_trainer_model
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_policy_gradient_loss_vllm,
 )
-from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
-    torchtitan_to_vllm_compat,
-)
+from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_to_vllm
 
 logger = logging.getLogger(__name__)
 
@@ -30,34 +29,30 @@ class Trainer(Actor):
     Updates policy based on collected trajectories.
 
     Run model forward on trajectories, computes loss, and run backward.
+    TODO: Use torchtitan Trainer
 
     Args:
-        titan_checkpoint_path: Path to TorchTitan checkpoint
-        model_path: Path to HuggingFace model
-        learning_rate: Learning rate for optimizer
-        model_mode: Indicates which model to use. Train inferece unified model, batch invariant Torchtitan model,
-            or plain Torchtitan model
+        job_config: JobConfig dataclass containing all configuration
     """
 
     def __init__(
         self,
-        titan_checkpoint_path: str,
-        model_path: str,
-        learning_rate: float = 1e-5,
-        model_mode: str = ModelMode.VLLM_COMPAT,
-        ddp_size: int = 1,
-        tp_size: int = 1,
+        job_config: JobConfig,
     ):
+        # Extract needed fields from job_config
+        model_path = job_config.checkpoint.initial_load_path  # path to HF checkpoint
+        learning_rate = job_config.optimizer.lr
+        self.ddp_size = job_config.parallelism.data_parallel_replicate_degree
+        self.tp_size = job_config.parallelism.tensor_parallel_degree
+
         # Explicitly set cuda device for each trainer, otherwise different processes will use the same CUDA device
         local_rank = int(os.environ["LOCAL_RANK"])
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(local_rank)
 
-        self.model = load_model(
-            titan_checkpoint_path, model_path, model_mode=model_mode
-        )
-        self.ddp_size = ddp_size
-        self.tp_size = tp_size
+        # load trainer model and patch to vllm.Attention()
+        self.model = load_trainer_model(model_path)
+
         self.parallel_dims = create_trainer_parallel_dims(self.ddp_size, self.tp_size)
 
         # apply PT-D Parallelism
@@ -82,14 +77,14 @@ class Trainer(Actor):
 
     @endpoint
     async def get_weights(self) -> dict:
-        """Get vLLM-compatible weights for generator.
+        """Get vLLM weights for generator.
 
         Returns:
-            vLLM-compatible state dict
+            vLLM state dict
         """
         titan_state = self.model.state_dict()
-        vllm_compat_state = torchtitan_to_vllm_compat(titan_state)
-        return vllm_compat_state
+        vllm_state = torchtitan_to_vllm(titan_state)
+        return vllm_state
 
     @endpoint
     async def step(self, trajectory: TrajectoryData) -> dict:
