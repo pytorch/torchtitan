@@ -13,6 +13,7 @@ from typing import List
 
 import torch
 from monarch.actor import Actor, endpoint
+from safetensors.torch import save_file
 from torchtitan.config.job_config import Comm
 from torchtitan.distributed import utils as dist_utils
 
@@ -31,7 +32,6 @@ from vllm.config import AttentionConfig
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
-
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ class TrajectoryData:
     advantages: torch.Tensor
 
 
-class VLLMGenerator:
+class VLLMRolloutEngine:
     """
     vLLM engine for fast rollouts with weight updates.
 
@@ -83,70 +83,90 @@ class VLLMGenerator:
         self.job_config = job_config
         self.base_model_path = model_path
 
-        # Load TorchTitan plugin at runtime
-        from torchtitan.experiments.rl.unified import register
-
-        register()
-        logger.info("Loaded TorchTitan vLLM plugin")
-
-        # Create the vLLM engine at initialization time
-        generation_config = self.job_config.generation
-        model_path = job_config.checkpoint.initial_load_path
-
-        engine_args = EngineArgs(
-            # Model configuration
-            model=model_path,
-            trust_remote_code=True,
-            dtype=generation_config.dtype,
-            # Parallelism configuration
-            tensor_parallel_size=generation_config.parallelism.tensor_parallel_degree,
-            distributed_executor_backend=generation_config.distributed_executor_backend,
-            # Memory and performance
-            gpu_memory_utilization=generation_config.gpu_memory_utilization,
-            enforce_eager=generation_config.enforce_eager,
-            # Seed
-            seed=generation_config.seed,
-            # HuggingFace overrides to use TorchTitan model.
-            # TODO: make this field configurable and align with model registration
-            hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
+        self.temp_model_dir = os.path.abspath(
+            os.path.join(job_config.job.dump_folder, "vllm_temp_model")
         )
+        os.makedirs(self.temp_model_dir, exist_ok=True)
 
-        logger.info("Initializing LLMEngine from EngineArgs...")
-        self.engine = LLMEngine.from_engine_args(engine_args)
-        logger.info("vLLM rollout engine initialized")
+        import glob
 
-    def _get_model(self):
-        """Access the model from the vLLM engine tensor operations.
-        Returns a TorchTitanVLLMModelWrapper instance.
+        # Copy config/tokenizer files from base model to temp dir
+        import shutil
+
+        for file in [
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "merges.txt",
+            "vocab.json",
+        ]:
+            src = os.path.join(model_path, file)
+            if os.path.exists(src):
+                shutil.copy2(src, self.temp_model_dir)
+
+        # Copy the original model shard files if they exist
+        # We'll overwrite these with our single model.safetensors later
+        for shard_file in glob.glob(os.path.join(model_path, "model-*.safetensors")):
+            dst = os.path.join(self.temp_model_dir, os.path.basename(shard_file))
+            shutil.copy2(shard_file, dst)
+
+        # Copy index file if it exists
+        index_file = os.path.join(model_path, "model.safetensors.index.json")
+        if os.path.exists(index_file):
+            shutil.copy2(index_file, self.temp_model_dir)
+
+        self.engine = None
+        logger.info("vLLM rollout engine initialized (will load on first use)")
+
+    def update_weights(self, vllm_state: dict) -> None:
         """
-        return self.engine.model_executor.driver_worker.get_model()
-
-    def update_weights(self, state_dict: dict) -> None:
-        """
-        Update vLLM actor model weights from torchtitan state dict.
+        Update vLLM model weights from vLLM-compat state dict.
 
         This converts weights to vLLM format, saves them, and reloads using
-        vLLM's reload_weights() API.
+        vLLM's reload_weights() API after updating the model path config.
 
         Args:
-            state_dict: vLLM model state dict
+            vllm_state: vLLM model state dict
         """
+        # Save to temp model directory
+        import os
 
-        # directly update model weights in place
-        load_weights = self._get_model().load_weights_from_state_dict(state_dict)
+        checkpoint_path = os.path.join(self.temp_model_dir, "model.safetensors")
 
+        # Update the shard files that vLLM will actually load
+        # We need to split our weights to match the original 2-shard structure
+        import glob
+
+        shard_files = sorted(
+            glob.glob(os.path.join(self.temp_model_dir, "model-*.safetensors"))
+        )
+        index_file = os.path.join(self.temp_model_dir, "model.safetensors.index.json")
+
+        # TODO: need to replace this with Torchtitan's checkpoint save and load
+        # right now we hardcoded to work with 2 safetensor files which we only
+        # tested on Qwen3 0.6B model. In the longer term, need to use TorchStore
+        # to achieve the weight communication.
+        # only generator rank 0 saves the weight
+        if torch.distributed.get_rank() == 0:
+            logger.info(f"Saving weights to {checkpoint_path}")
+
+            # Ensure weights stay in bfloat16
+            vllm_state = {
+                k: v.to(torch.bfloat16) if v.dtype == torch.float32 else v
+                for k, v in vllm_state.items()
+            }
+            # Fallback: save as single file
+            save_file(vllm_state, checkpoint_path)
+
+        # Synchronize all ranks before reloading to ensure rank 0 finished writing
+        torch.distributed.barrier()
         logger.info(
-            f"Updated weights into vLLM engine actor model. Number of parameters: {len(load_weights)}"
+            f"[Rank {torch.distributed.get_rank()}] Synchronized after weight save"
         )
 
         # First time: create the engine using LLMEngine and EngineArgs
         if self.engine is None:
-            # Load TorchTitan plugin at runtime
-            from torchtitan.experiments.rl.unified.plugin import register
-
-            register()
-            logger.info("Loaded TorchTitan vLLM plugin")
-
             generation = self.job_config.generation
 
             engine_args = EngineArgs(
@@ -370,7 +390,7 @@ class Generator(Actor):
             Comm(),
         )
         # Initialize vLLM engine with job_config
-        self.vllm_engine = VLLMGenerator(job_config, self.model_path)
+        self.vllm_engine = VLLMRolloutEngine(job_config, self.model_path)
 
         # State machine
         self.state = GeneratorState.READY_TO_UPDATE
