@@ -69,6 +69,18 @@ class Profiling:
     save_memory_snapshot_folder: str = "memory_snapshot"
     """Memory snapshot files location"""
 
+    experimental_diagnostics: bool = False
+    """
+    Enable experimental diagnostic analysis after each profiler trace.
+
+    When set to true, an OverlapAnalyzer is run after each trace export to
+    report compute-communication overlap efficiency. This is only active when
+    profiling is enabled and the process group is initialized (distributed run).
+
+    Suggested use: enable via --profiling.experimental_diagnostics in TOML or
+    CLI for debugging FSDP2 communication bottlenecks.
+    """
+
 
 @dataclass
 class Metrics:
