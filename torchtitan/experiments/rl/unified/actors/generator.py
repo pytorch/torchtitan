@@ -176,37 +176,33 @@ class VLLMGenerator:
         else:
             # Direct parameter copy into model tensors.
             # This bypasses vLLM's reload_weights() which uses a layerwise
-            # reload mechanism that moves params to meta device — incompatible
-            # with TorchTitanVLLMModelWrapper.load_weights().
-            # Same approach as MSL RL's VllmLoadSnapshotMethod.update_tensor_shard().
-            self._direct_weight_update(vllm_state)
+            # reload mechanism that moves params to meta device
+            from torchtitan.experiments.rl.vllm_compat.weights import (
+                vllm_to_torchtitan,
+            )
 
-    def _direct_weight_update(self, vllm_state: dict) -> None:
-        """Update model weights by copying directly into GPU parameters."""
-        from torchtitan.experiments.rl.vllm_compat.weights.converter import (
-            vllm_to_torchtitan,
-        )
+            titan_state = vllm_to_torchtitan(vllm_state)
+            self._direct_weight_update(titan_state)
 
-        # Convert vLLM/HF format → TorchTitan format
-        titan_state = vllm_to_torchtitan(vllm_state)
+    def _direct_weight_update(self, titan_state: dict) -> None:
+        """Update model weights by copying directly into GPU parameters.
 
-        # Access model from vLLM engine (same as MSL RL)
+        Args:
+            titan_state: TorchTitan format state dict (w1/w2/w3, wq/wk/wv/wo, etc.)
+        """
+
+        # Access model from vLLM engine
         model = self.llm.llm_engine.model_executor.driver_worker.get_model()
         params = dict(model.named_parameters())
 
-        updated = 0
         for name, new_weight in titan_state.items():
             # TorchTitanVLLMModelWrapper stores the model as self.model,
             # so parameters have a "model." prefix
             param_name = f"model.{name}"
             if param_name in params:
                 param = params[param_name]
-                param.data.copy_(new_weight.to(device=param.device, dtype=param.dtype))
-                updated += 1
-            else:
-                logger.warning(f"Parameter {param_name} not found in vLLM model")
-
-        logger.info(f"Updated {updated}/{len(titan_state)} parameters via direct copy")
+                new_w = new_weight.to(device=param.device, dtype=param.dtype)
+                param.data.copy_(new_w)
 
     @torch.no_grad()
     def generate(
