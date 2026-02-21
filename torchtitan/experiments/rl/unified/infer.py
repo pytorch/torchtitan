@@ -16,6 +16,9 @@ import argparse
 
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
+from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
+    build_compilation_config,
+)
 from vllm import LLM, SamplingParams
 from vllm.logger import init_logger
 
@@ -58,6 +61,12 @@ def parse_args():
         default=1,
         help="Number of GPUs for tensor parallelism (default: 1 for single GPU)",
     )
+    parser.add_argument(
+        "--disable-vllm-compile-and-cudagraph",
+        action="store_true",
+        default=False,
+        help="Enable vLLM compilation with piecewise CUDA graphs and eager backend.",
+    )
     return parser.parse_args()
 
 
@@ -79,6 +88,11 @@ def infer():
     # and will be available in vllm_config in worker processes
     logger.info("Creating vLLM LLM engine...")
 
+    compilation_config = build_compilation_config(
+        not args.disable_vllm_compile_and_cudagraph,
+        tp_size=args.tensor_parallel_size,
+    )
+
     llm = LLM(
         model=args.model_ckpt_path,  # Model checkpoint path
         hf_overrides={
@@ -87,7 +101,8 @@ def infer():
         },
         dtype="bfloat16",
         trust_remote_code=True,
-        enforce_eager=True,  # Use eager mode
+        enforce_eager=args.disable_vllm_compile_and_cudagraph,
+        compilation_config=compilation_config,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=0.5,
     )

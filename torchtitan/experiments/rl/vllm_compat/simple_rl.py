@@ -26,6 +26,10 @@ from huggingface_hub import snapshot_download
 from safetensors.torch import load_file, save_file
 from torch.utils.tensorboard import SummaryWriter
 
+from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
+    build_compilation_config,
+)
+
 from torchtitan.experiments.rl.vllm_compat.weights.converter import (
     torchtitan_to_vllm,
     vllm_to_torchtitan,
@@ -40,7 +44,6 @@ from transformers import AutoConfig, AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
 
 init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 
@@ -58,8 +61,14 @@ class VLLMRolloutEngine:
         temp_checkpoint_dir: Directory to save temporary weight checkpoints
     """
 
-    def __init__(self, model_path: str, temp_checkpoint_dir: str = "./converted"):
+    def __init__(
+        self,
+        model_path: str,
+        temp_checkpoint_dir: str = "./converted",
+        vllm_compile_and_cudagraph: bool = False,
+    ):
         self.base_model_path = model_path
+        self.vllm_compile_and_cudagraph = vllm_compile_and_cudagraph
         self.temp_model_dir = os.path.abspath(
             os.path.join(temp_checkpoint_dir, "vllm_temp_model")
         )
@@ -171,7 +180,10 @@ class VLLMRolloutEngine:
                 dtype="bfloat16",
                 gpu_memory_utilization=0.3,  # Reduced from 0.5
                 seed=42,  # Fixed seed for determinism
-                enforce_eager=True,
+                enforce_eager=not self.vllm_compile_and_cudagraph,
+                compilation_config=build_compilation_config(
+                    self.vllm_compile_and_cudagraph
+                ),
                 attention_config={"backend": AttentionBackendEnum.FLASH_ATTN},
             )
             print("✓ Created new vLLM engine")
@@ -1045,6 +1057,9 @@ def main():
     )
     num_dataset_samples = 10  # Number of prompts from dataset
 
+    # vLLM compilation
+    vllm_compile_and_cudagraph = True
+
     # Check if batch invariance is enabled
     from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
@@ -1091,7 +1106,9 @@ def main():
 
     # Initialize persistent vLLM engine for rollouts
     print("\nInitializing vLLM engine for rollouts...")
-    vllm_engine = VLLMRolloutEngine(model_path)
+    vllm_engine = VLLMRolloutEngine(
+        model_path, vllm_compile_and_cudagraph=vllm_compile_and_cudagraph
+    )
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)

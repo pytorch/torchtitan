@@ -64,6 +64,9 @@ async def main():
     trainer_tp_size = 1
     generator_tp_size = 1
 
+    # vLLM compilation config
+    vllm_compile_and_cudagraph = True
+
     init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
     batch_invariant = vllm_is_batch_invariant()
     mode = ModelMode.UNIFIED
@@ -151,6 +154,7 @@ async def main():
         grpo_beta,
         use_stable_grpo,
         generator_tp_size,
+        vllm_compile_and_cudagraph,
     )
 
     # Initialize generator with trainer weights
