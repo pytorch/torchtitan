@@ -18,77 +18,87 @@ from torchtitan.tools.utils import device_module
 # how much memory allocation/free ops to record in memory snapshots
 MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
 
-# Kernel name fragments used to classify events by type.
 _COMM_KEYWORDS: tuple[str, ...] = ("nccl",)
-_COMPUTE_KEYWORDS: tuple[str, ...] = ("gemm", "aten", "cublas")
+_COMPUTE_KEYWORDS: tuple[str, ...] = (
+    "gemm", "aten", "cublas", "cutlass", "cudnn", "triton", "flash",
+)
 
 
 class OverlapAnalyzer:
     """Analyzes compute-communication overlap from a PyTorch profiler trace.
 
-    Uses ``prof.key_averages()`` to extract Kineto events and computes three
-    aggregate metrics:
+    Computes overlap efficiency: the fraction of NCCL communication time that
+    runs concurrently with compute kernels. Values close to 100% indicate
+    optimal overlap; values near 0% indicate the workload is communication bound.
 
-    * **Total NCCL time** – sum of CUDA time for kernels whose name contains
-      ``"nccl"``.
-    * **Total compute time** – sum of CUDA time for kernels whose name contains
-      ``"gemm"``, ``"aten"``, or ``"cublas"``.
-    * **Overlap efficiency** – fraction of communication time that is hidden
-      behind compute, expressed as a percentage::
-
-          (compute_us + comm_us - trace_duration_us) / comm_us * 100
-
-      Values close to 100 % indicate that nearly all communication is
-      overlapped with compute (*OPTIMAL*); values near 0 % indicate that the
-      workload is *COMMUNICATION BOUND*.
+    Note:
+        This analysis uses aggregated kernel times from ``key_averages()``, which
+        sums durations across all invocations. When multiple kernels run concurrently
+        on different CUDA streams, this may underestimate actual overlap. For precise
+        timeline analysis, inspect the exported Chrome trace directly.
 
     Args:
-        prof: A ``torch.profiler.profile`` object whose trace has been
-            collected (i.e. the profiler context has already been stepped or
-            exited so that events are available via ``key_averages()``).
+        prof: A ``torch.profiler.profile`` object with collected trace data.
     """
 
     def __init__(self, prof: torch.profiler.profile) -> None:
         self._prof = prof
 
-    def analyze(self) -> None:
-        """Run the overlap analysis and log a summary to the console.
+    def _get_trace_duration_us(self) -> float:
+        """Compute trace duration from raw event timestamps."""
+        try:
+            events = self._prof.events()
+        except (AttributeError, RuntimeError, AssertionError):
+            return 0.0
 
-        The summary includes Total Compute Time, Total NCCL Time, Overlap
-        Efficiency, and a qualitative Status recommendation. When communication
-        time is zero (e.g. single-device run) the method logs a notice and
-        returns early instead of dividing by zero.
-        """
-        events = self._prof.key_averages()
+        if not events:
+            return 0.0
+
+        min_start = float("inf")
+        max_end = float("-inf")
+
+        for evt in events:
+            if hasattr(evt, "time_range") and hasattr(evt.time_range, "start"):
+                try:
+                    min_start = min(min_start, evt.time_range.start)
+                    max_end = max(max_end, evt.time_range.end)
+                except (AttributeError, TypeError):
+                    continue
+
+        if min_start == float("inf") or max_end == float("-inf"):
+            return 0.0
+
+        return max(0.0, max_end - min_start)
+
+    def analyze(self) -> None:
+        """Run overlap analysis and log a summary to the console."""
+        key_averages = self._prof.key_averages()
 
         comm_us: float = 0.0
         compute_us: float = 0.0
-        trace_duration_us: float = 0.0
 
-        for evt in events:
+        for evt in key_averages:
             name_lower = evt.key.lower()
-            cuda_time = evt.cuda_time_total  # microseconds
+            device_time = evt.self_device_time_total
 
             if any(kw in name_lower for kw in _COMM_KEYWORDS):
-                comm_us += cuda_time
+                comm_us += device_time
             elif any(kw in name_lower for kw in _COMPUTE_KEYWORDS):
-                compute_us += cuda_time
-
-            # Accumulate total trace wall-time via self_cpu_time_total for all
-            # top-level events; use the maximum single-event self CUDA time as
-            # a proxy for the profiled window duration when the profiler does
-            # not expose it directly.
-            trace_duration_us = max(trace_duration_us, cuda_time)
+                compute_us += device_time
 
         if comm_us == 0.0:
             logger.info(
-                "[OverlapAnalyzer] No NCCL kernels found in trace "
-                "(single-device run or comm kernels not captured). Skipping overlap report."
+                "[OverlapAnalyzer] No NCCL kernels found in trace. "
+                "Skipping overlap report."
             )
             return
 
-        # Clamp numerator to [0, comm_us] to avoid nonsensical values caused
-        # by the coarse trace_duration_us proxy.
+        trace_duration_us = self._get_trace_duration_us()
+        if trace_duration_us == 0.0:
+            trace_duration_us = compute_us + comm_us
+
+        trace_duration_us = max(trace_duration_us, compute_us, comm_us)
+
         raw_overlap = compute_us + comm_us - trace_duration_us
         overlap_pct = max(0.0, min(raw_overlap / comm_us * 100.0, 100.0))
 
@@ -98,7 +108,8 @@ class OverlapAnalyzer:
             "[OverlapAnalyzer] Compute-Communication Overlap Report\n"
             f"  Total Compute Time : {compute_us / 1e3:.2f} ms\n"
             f"  Total NCCL Time    : {comm_us / 1e3:.2f} ms\n"
-            f"  Overlap Efficiency : {overlap_pct:.1f} %\n"
+            f"  Total Trace Time   : {trace_duration_us / 1e3:.2f} ms\n"
+            f"  Overlap Efficiency : {overlap_pct:.1f}% (conservative lower bound)\n"
             f"  Status             : {status}"
         )
 
