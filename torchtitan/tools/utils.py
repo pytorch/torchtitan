@@ -10,7 +10,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Generator, Optional
+from typing import Generator
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
@@ -182,7 +182,7 @@ assert set(NoColor.__dataclass_fields__.keys()) == set(
 def check_if_feature_in_pytorch(
     feature_name: str,
     pull_request: str,
-    min_nightly_version: Optional[str] = None,
+    min_nightly_version: str | None = None,
 ) -> None:
     if "git" in torch.__version__:  # pytorch is built from source
         # notify users to check if the pull request is included in their pytorch

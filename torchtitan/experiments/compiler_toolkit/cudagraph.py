@@ -12,7 +12,7 @@ during compilation.
 """
 
 import warnings
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Sequence
 
 import torch
 from torch._inductor.cudagraph_trees import _use_cuda_memory_pool_manager
@@ -61,7 +61,7 @@ class CUDAGraphWrapper:
         self,
         runnable: Callable,
         example_inputs: Sequence[Any],
-        static_input_indices: Optional[tuple[int]] = None,
+        static_input_indices: tuple[int] | None = None,
         should_check_address: bool = False,
     ):
         self.runnable = runnable
@@ -75,7 +75,7 @@ class CUDAGraphWrapper:
             for i, inp in enumerate(example_inputs)
             if isinstance(inp, torch.Tensor) and i not in self.static_input_indices
         ]
-        self.cudagraph: Optional[torch.cuda.CUDAGraph] = None
+        self.cudagraph: torch.cuda.CUDAGraph | None = None
         self.has_warmup = False
 
         self.args = None

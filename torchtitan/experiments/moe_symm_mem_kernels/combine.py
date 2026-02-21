@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional
-
 import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
@@ -34,7 +32,7 @@ def _all_to_all_vdev_2d_copy_cuda(
     in_splits: torch.Tensor,
     out_splits_offsets: torch.Tensor,
     group_name: str,
-    major_align: Optional[int] = None,
+    major_align: int | None = None,
 ) -> None:
     if symm_in_buf.shape[0] < input.shape[0]:
         raise RuntimeError(

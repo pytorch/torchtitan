@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import threading
-from typing import cast, Optional
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -118,7 +118,7 @@ class HookCoordinator:
         except threading.BrokenBarrierError:
             pass
 
-    def enable_coordination(self, num_layers: Optional[int] = None):
+    def enable_coordination(self, num_layers: int | None = None):
         if num_layers is not None and num_layers > 0:
             self._coordination_enabled = True
             self._cycle_count = 0

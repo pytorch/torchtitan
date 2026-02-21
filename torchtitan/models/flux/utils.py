@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional
-
 import torch
 
 from torch import Tensor
@@ -20,7 +18,7 @@ def preprocess_data(
     dtype: torch.dtype,
     *,
     # arguments from the config
-    autoencoder: Optional[AutoEncoder],
+    autoencoder: AutoEncoder | None,
     clip_encoder: FluxEmbedder,
     t5_encoder: FluxEmbedder,
     batch: dict[str, Tensor],

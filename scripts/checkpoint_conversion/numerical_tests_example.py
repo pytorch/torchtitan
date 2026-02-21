@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional
-
 import torch
 
 import torch.distributed.checkpoint as dcp
@@ -31,7 +29,7 @@ def loss_fn(logits1, logits2):
 
 
 @torch.no_grad
-def forward_hf(model_name, model_path: Optional[str], input_ids):
+def forward_hf(model_name, model_path: str | None, input_ids):
     # Load the tokenizer and model
     model_path = model_path if model_path else model_name
     model = AutoModelForCausalLM.from_pretrained(model_path)

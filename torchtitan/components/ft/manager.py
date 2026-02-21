@@ -4,10 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import importlib.util
 from contextlib import nullcontext
 from datetime import timedelta
-from typing import Callable, cast, ContextManager, Optional, TYPE_CHECKING, Union
+from typing import Callable, cast, ContextManager, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -101,7 +103,7 @@ class FTManager:
     @property
     def loss_sync_pg(
         self,
-    ) -> Optional["ft.process_group.ManagedProcessGroup"]:
+    ) -> "ft.process_group.ManagedProcessGroup" | None:
         if self.enabled and self.use_async_quorum:
             return self.replicate_pg
         else:
@@ -115,8 +117,8 @@ def maybe_semi_sync_training(
     model: torch.nn.Module,
     n_layers: int,
     optimizer: torch.optim.Optimizer,
-    fragment_fn: Optional[Callable[..., list[nn.Module]]] = None,
-) -> ContextManager[Union["local_sgd.DiLoCo", "local_sgd.LocalSGD", None]]:
+    fragment_fn: Callable[..., list[nn.Module]] | None = None,
+) -> ContextManager["local_sgd.DiLoCo" | "local_sgd.LocalSGD" | None]:
     """
     If TorchFT is enabled and the config is set, use semi_sync_method
     """
