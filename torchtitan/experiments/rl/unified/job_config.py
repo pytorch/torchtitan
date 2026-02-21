@@ -85,8 +85,8 @@ class PolicyOptimization:
     grpo_group_size: int = 8
     """Number of samples in each GRPO group for policy optimization"""
 
-    vllm_batch_invariant: bool = True
-    """Enable vLLM batch invariant mode for deterministic backward pass"""
+    batch_invariant_mode: bool = True
+    """Enable batch invariant mode for deterministic forward and backward pass"""
 
     vllm_attention_backend: str = "FLASH_ATTN"
     """vLLM attention backend to use (e.g., FLASH_ATTN, XFORMERS)"""
