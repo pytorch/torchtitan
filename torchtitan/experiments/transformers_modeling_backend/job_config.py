@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 class HFTransformers:
     model: str = ""
     """HuggingFace model ID (e.g., 'Qwen/Qwen3-4B-Instruct-2507')"""
+    tie_word_embeddings: bool = False
+    """Whether to tie input embeddings and output projection weights (default: True for HF models)"""
 
 
 @dataclass
