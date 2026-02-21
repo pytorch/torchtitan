@@ -9,6 +9,7 @@ import math
 
 import torch
 from torch import nn
+from torch.distributed.tensor import DTensor
 from torch.nn import init
 from torchtitan.models.utils import trunc_normal_
 from torchtitan.tools.logging import logger
@@ -271,7 +272,10 @@ class HFTransformerModel(nn.Module):
                     module.weight.data.normal_(mean=0.0, std=std)
 
                 if module.padding_idx is not None:
-                    module.weight.data[module.padding_idx].zero_()
+                    if isinstance(module.weight.data, DTensor):
+                        module.weight.data._local_tensor[module.padding_idx].zero_()
+                    else:
+                        module.weight.data[module.padding_idx].zero_()
 
             elif (
                 isinstance(
@@ -429,10 +433,6 @@ class HFTransformerModel(nn.Module):
     def init_weights(self, *args, **kwargs):
         # This method replicates the behavior of the original PreTrainedModel.init_weights,
         # but with a custom weight initialization function that skips nn.Identity modules (when PP is enabled)
-
-        if self.model.config.pruned_heads:
-            logger.info("Pruning heads as per model configuration.")
-            self.model.prune_heads(self.model.config.pruned_heads)
 
         original_init_weights_fn = self.model._init_weights
 
