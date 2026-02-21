@@ -308,6 +308,64 @@ class TokenChoiceTopKRouter(nn.Module):
                 - num_tokens_per_expert (torch.Tensor):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
+        # === DEBUG: Check gate weight consistency across ranks ===
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            rank = dist.get_rank()
+            gate_weight = self.gate.weight
+            if isinstance(gate_weight, DTensor):
+                gate_weight_local = gate_weight.to_local()
+            else:
+                gate_weight_local = gate_weight
+            # allgather gate weights from all ranks
+            gathered = [torch.zeros_like(gate_weight_local) for _ in range(dist.get_world_size())]
+            dist.all_gather(gathered, gate_weight_local.contiguous())
+            # check if all ranks have the same gate weight
+            for other_rank, other_weight in enumerate(gathered):
+                if other_rank != rank:
+                    if not torch.equal(gate_weight_local, other_weight):
+                        max_diff = (gate_weight_local - other_weight).abs().max().item()
+                        print(
+                            f"[DEBUG] GATE WEIGHT DIVERGED! rank {rank} vs rank {other_rank}, "
+                            f"max_diff={max_diff:.6e}, "
+                            f"rank_{rank}_norm={gate_weight_local.norm().item():.6f}, "
+                            f"rank_{other_rank}_norm={other_weight.norm().item():.6f}"
+                        )
+                    else:
+                        print(f"[DEBUG] Gate weights match: rank {rank} == rank {other_rank}")
+        # === END DEBUG ===
+
+        # === DEBUG: Register hook to check gate.weight.grad consistency ===
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            rank = dist.get_rank()
+            ws = dist.get_world_size()
+            gate_w = self.gate.weight
+            if isinstance(gate_w, DTensor):
+                gate_w_local = gate_w.to_local()
+            else:
+                gate_w_local = gate_w
+            def _gate_grad_hook(grad, rank=rank, ws=ws):
+                if isinstance(grad, DTensor):
+                    grad_local = grad.to_local()
+                else:
+                    grad_local = grad
+                gathered = [torch.zeros_like(grad_local) for _ in range(ws)]
+                dist.all_gather(gathered, grad_local.contiguous())
+                for other_rank, other_grad in enumerate(gathered):
+                    if other_rank != rank:
+                        if torch.equal(grad_local, other_grad):
+                            print(f"[DEBUG gate.weight.grad] rank {rank} == rank {other_rank} (SAME)")
+                        else:
+                            max_diff = (grad_local - other_grad).abs().max().item()
+                            print(
+                                f"[DEBUG gate.weight.grad DIVERGED] rank {rank} vs rank {other_rank}: "
+                                f"max_diff={max_diff:.6e}, "
+                                f"rank_{rank}_grad_norm={grad_local.norm().item():.6f}, "
+                                f"rank_{other_rank}_grad_norm={other_grad.norm().item():.6f}"
+                            )
+            gate_w_local.register_hook(_gate_grad_hook)
+        # === END DEBUG ===
+
         # scores shape (bs*slen, num_experts)
         scores = self.gate(x)
 
