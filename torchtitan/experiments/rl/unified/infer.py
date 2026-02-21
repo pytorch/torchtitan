@@ -5,6 +5,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""
+Example inference script using TorchTitan models with vLLM LLMEngine.
+
+This script uses JobConfig loaded from a TOML file to configure both
+the vLLM engine and sampling parameters.
+
+Run: torchrun --nproc_per_node=2 \
+      torchtitan/experiments/rl/unified/infer.py \
+      --job.config_file torchtitan/experiments/rl/unified/run_configs/qwen3_0.6b.toml
+"""
 import os
 
 # Must set spawn method before any CUDA operations or vLLM imports
@@ -12,113 +22,93 @@ import os
 # See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-import argparse
+from torchtitan.config import ConfigManager
 
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
-from vllm import LLM, SamplingParams
+
+from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.logger import init_logger
 
 
 logger = init_logger(__name__)
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Run TorchTitan model inference with vLLM Engine",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument(
-        "--model-ckpt-path",
-        type=str,
-        default="torchtitan/experiments/rl/example_checkpoint",
-        help="Path to TorchTitan checkpoint directory",
-    )
-    parser.add_argument(
-        "--prompt",
-        type=str,
-        default="Hello, my name is",
-        help="Prompt text for generation",
-    )
-    parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=100,
-        help="Maximum number of tokens to generate",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.8,
-        help="Sampling temperature",
-    )
-    parser.add_argument(
-        "--tensor-parallel-size",
-        type=int,
-        default=1,
-        help="Number of GPUs for tensor parallelism (default: 1 for single GPU)",
-    )
-    return parser.parse_args()
+def generate():
 
+    config_manager = ConfigManager()
+    job_config = config_manager.parse_args()
 
-def infer():
-    args = parse_args()
+    logger.info("Initializing vLLM LLMEngine with TorchTitan model")
+    logger.info(f"Model: {job_config.checkpoint.initial_load_path}")
+    logger.info(
+        f"Tensor Parallel Size: {job_config.generation.parallelism.tensor_parallel_degree}"
+    )
 
-    logger.info("Initializing vLLM with TorchTitan model")
-    logger.info(f"Model: {args.model_ckpt_path}")
-    logger.info(f"Tensor Parallel Size: {args.tensor_parallel_size}")
+    # Create EngineArgs from JobConfig
+    # Map TorchTitan parallelism to vLLM parallelism
+    generation = job_config.generation
 
-    # Initialize vLLM with custom TorchTitan model
-    # The LLM initialization will internally:
-    # 1. Load TrainSpec for Qwen3 (from models/__init__.py register())
-    # 2. Create TorchTitanVLLMModel instance
-    # 3. Create JobConfig and ParallelDims from vLLM config
-    # 4. Apply parallelization using parallelize_qwen3
-    # 5. Load model weights and prepare for inference
-    # The tensor_parallel_size will be used by vLLM to configure parallelization
-    # and will be available in vllm_config in worker processes
-    logger.info("Creating vLLM LLM engine...")
-
-    llm = LLM(
-        model=args.model_ckpt_path,  # Model checkpoint path
-        hf_overrides={
-            # Override architectures to use our registered TorchTitan model class
-            "architectures": ["Qwen3TorchTitanForCausalLM"],
-        },
-        dtype="bfloat16",
+    engine_args = EngineArgs(
+        # Model configuration
+        model=job_config.checkpoint.initial_load_path,
         trust_remote_code=True,
-        enforce_eager=True,  # Use eager mode
-        tensor_parallel_size=args.tensor_parallel_size,
-        gpu_memory_utilization=0.5,
+        dtype=generation.dtype,
+        # Parallelism configuration
+        tensor_parallel_size=generation.parallelism.tensor_parallel_degree,
+        distributed_executor_backend="external_launcher",
+        # Memory and performance
+        gpu_memory_utilization=generation.gpu_memory_utilization,
+        enforce_eager=generation.enforce_eager,
+        # Seed
+        seed=job_config.debug.seed,
+        # HuggingFace overrides
+        hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
     )
 
-    logger.info("vLLM engine initialized successfully")
-    logger.info(f"Prompt: {args.prompt}")
+    logger.info("Initializing LLMEngine from EngineArgs...")
+    engine = LLMEngine.from_engine_args(engine_args)
 
-    # Prepare prompt and sampling parameters
-    prompts = [args.prompt]
+    logger.info("vLLM LLMEngine initialized successfully")
+
+    # Create sampling parameters from JobConfig
+    sampling = job_config.generation.sampling
     sampling_params = SamplingParams(
-        temperature=args.temperature,
-        top_p=0.95,
-        max_tokens=args.max_tokens,
+        temperature=sampling.temperature,
+        top_p=sampling.top_p,
+        max_tokens=sampling.max_tokens,
     )
 
-    # Generate text
+    logger.info(
+        f"Sampling params: temperature={sampling.temperature}, "
+        f"top_p={sampling.top_p}, max_tokens={sampling.max_tokens}"
+    )
+
+    # Example prompt
+    prompt = "Hello, my name is"
+    logger.info(f"Prompt: {prompt}")
+
+    # Add request to engine
+    logger.info("Adding request to engine...")
+    request_id = "0"
+    engine.add_request(request_id, prompt, sampling_params)
+
+    # Generate text by stepping through engine
     logger.info("Generating text...")
-    outputs = llm.generate(
-        prompts=prompts,
-        sampling_params=sampling_params,
-    )
+    while engine.has_unfinished_requests():
+        request_outputs = engine.step()
 
-    # Print results
-    logger.info("Generation complete")
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
+        # Process finished requests
+        for request_output in request_outputs:
+            if request_output.finished:
+                prompt = request_output.prompt
+                generated_text = request_output.outputs[0].text
 
-        print(f"\nPrompt: {prompt}")
-        print(f"Generated text: {generated_text!r}\n")
+                # Print results
+                logger.info("Generation complete")
+                print(f"\nPrompt: {prompt}")
+                print(f"Generated text: {generated_text!r}\n")
 
 
 if __name__ == "__main__":
-    infer()
+    generate()
