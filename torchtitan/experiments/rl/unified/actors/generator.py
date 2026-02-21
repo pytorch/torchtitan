@@ -211,16 +211,42 @@ class VLLMRolloutEngine:
                 distributed_executor_backend="external_launcher",  # vllm do not spawn processes
                 seed=42,  # Fixed seed for determinism
                 enforce_eager=True,
-                tensor_parallel_size=self.tp_size,  # Explicitly single GPU
+                tensor_parallel_size=self.tp_size,
                 attention_config=AttentionConfig(
                     backend=AttentionBackendEnum.FLASH_ATTN,
                 ),
             )
             logger.info("Created new vLLM engine")
         else:
-            # Use collective_rpc to call reload_weights on all workers
-            # This reloads weights from temp_model_dir without recreating the engine
-            self.llm.collective_rpc("reload_weights")
+            # Direct parameter copy into model tensors.
+            # This bypasses vLLM's reload_weights() which uses a layerwise
+            # reload mechanism that moves params to meta device
+            from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
+                vllm_compat_to_torchtitan,
+            )
+
+            titan_state = vllm_compat_to_torchtitan(vllm_compat_state)
+            self._direct_weight_update(titan_state)
+
+    def _direct_weight_update(self, titan_state: dict) -> None:
+        """Update model weights by copying directly into GPU parameters.
+
+        Args:
+            titan_state: TorchTitan format state dict (w1/w2/w3, wq/wk/wv/wo, etc.)
+        """
+
+        # Access model from vLLM engine
+        model = self.llm.llm_engine.model_executor.driver_worker.get_model()
+        params = dict(model.named_parameters())
+
+        for name, new_weight in titan_state.items():
+            # TorchTitanVLLMModelWrapper stores the model as self.model,
+            # so parameters have a "model." prefix
+            param_name = f"model.{name}"
+            if param_name in params:
+                param = params[param_name]
+                new_w = new_weight.to(device=param.device, dtype=param.dtype)
+                param.data.copy_(new_w)
 
     @torch.no_grad()
     def generate(
