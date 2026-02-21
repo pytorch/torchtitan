@@ -6,7 +6,7 @@
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from monarch.actor import Actor, endpoint
@@ -76,7 +76,7 @@ class Trainer(Actor):
         # Optimizer
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
         self.policy_version = 0
-        self.generator: Optional[Any] = None
+        self.generator: Any | None = None
 
         logger.info("Trainer initialized with TorchTitan model")
 
