@@ -283,34 +283,21 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         return logits
 
-    def load_weights_from_state_dict(self, trainer_state_dict):
+    def load_weights_from_state_dict(self, state_dict):
         """
-        Load model weights directly from a state dict containing DTensor.
+        Load model weights from a state dict.
+
+        Expects DTensor-wrapped tensors matching the model's placements.
+        The caller is responsible for reconstructing DTensors from plain
+        local tensors before calling this method.
         """
-
-        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
-
-        # Convert to DTensor if target is DTensor (when the target model is sharded)
-        for name, tensor in trainer_state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                target_dtensor = model_state_dict[name]
-                device_mesh = target_dtensor.device_mesh
-                trainer_state_dict[name] = DTensor.from_local(
-                    tensor.to(device_mesh.device_type),
-                    device_mesh=device_mesh,
-                    placements=[Replicate()],
-                )
-
-        # Load state dict
         set_model_state_dict(
             model=self.model,
-            model_state_dict=trainer_state_dict,
+            model_state_dict=state_dict,
             options=StateDictOptions(strict=False),
         )
 
-        loaded_params = trainer_state_dict.keys()
-
-        return loaded_params
+        return state_dict.keys()
 
     def _initial_load_weights(self, checkpoint_path):
         """
@@ -334,6 +321,22 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Convert HF state dict to TorchTitan format
         torchtitan_state_dict = adapter.from_hf(hf_state_dict)
+
+        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
+
+        # Convert to DTensor if target is DTensor (when the target model is sharded)
+        # This only happens when initial loading from HF full state dict
+        for name, tensor in torchtitan_state_dict.items():
+            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
+                if isinstance(tensor, DTensor):
+                    continue
+                target_dtensor = model_state_dict[name]
+                device_mesh = target_dtensor.device_mesh
+                torchtitan_state_dict[name] = DTensor.from_local(
+                    tensor.to(device_mesh.device_type),
+                    device_mesh=device_mesh,
+                    placements=[Replicate()],
+                )
 
         return self.load_weights_from_state_dict(torchtitan_state_dict)
 

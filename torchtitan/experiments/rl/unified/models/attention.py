@@ -82,8 +82,8 @@ class VLLMAttention(torch.nn.Module):
         batch_size, num_heads, seq_len, head_dim = q.shape
         _, num_kv_heads, _, _ = k.shape
 
-        # vLLM expects (num_tokens, num_heads, head_dim) where num_tokens = batch * seq_len
-        # First transpose to (batch, seq_len, num_heads, head_dim)
+        # Transpose to (batch, seq_len, num_heads, head_dim) for vLLM
+        # vLLM attention expects bfloat16 /  inputs
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
