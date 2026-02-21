@@ -134,6 +134,12 @@ def load_trainer_model(model_path: str):
 
     from torchtitan.models.qwen3 import Qwen3Model
 
+    # If weight tying is enabled but output.weight is missing from the checkpoint
+    # (HF models with tie_word_embeddings=True may not store lm_head.weight),
+    # synthesize it from tok_embeddings.weight so load_state_dict(strict=True) works.
+    if model_args.enable_weight_tying and "output.weight" not in titan_state_dict:
+        titan_state_dict["output.weight"] = titan_state_dict["tok_embeddings.weight"]
+
     model = Qwen3Model(model_args)
     # Set global default dtype to bfloat16. This is needed because vLLM's Attention
     # layer uses torch.get_default_dtype() and it doesn't support float32
