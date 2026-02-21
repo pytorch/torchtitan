@@ -211,7 +211,7 @@ class VLLMRolloutEngine:
                 distributed_executor_backend="external_launcher",  # vllm do not spawn processes
                 seed=42,  # Fixed seed for determinism
                 enforce_eager=True,
-                tensor_parallel_size=self.tp_size,  # Explicitly single GPU
+                tensor_parallel_size=self.tp_size,
                 attention_config=AttentionConfig(
                     backend=AttentionBackendEnum.FLASH_ATTN,
                 ),
@@ -239,19 +239,14 @@ class VLLMRolloutEngine:
         model = self.llm.llm_engine.model_executor.driver_worker.get_model()
         params = dict(model.named_parameters())
 
-        updated = 0
         for name, new_weight in titan_state.items():
             # TorchTitanVLLMModelWrapper stores the model as self.model,
             # so parameters have a "model." prefix
             param_name = f"model.{name}"
             if param_name in params:
                 param = params[param_name]
-                param.data.copy_(new_weight.to(device=param.device, dtype=param.dtype))
-                updated += 1
-            else:
-                logger.warning(f"Parameter {param_name} not found in vLLM model")
-
-        logger.info(f"Updated {updated}/{len(titan_state)} parameters via direct copy")
+                new_w = new_weight.to(device=param.device, dtype=param.dtype)
+                param.data.copy_(new_w)
 
     @torch.no_grad()
     def generate(
