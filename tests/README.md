@@ -77,3 +77,39 @@ To run a specific test function:
 ```bash
 pytest -s tests/unit_tests/test_job_config.py::TestJobConfig::test_command_line_args
 ```
+
+## Parity Testing (HF Baseline Comparison)
+
+To verify that torchtitan model implementations produce numerically identical outputs to their HuggingFace counterparts, use the parity test script in `scripts/checkpoint_conversion/`:
+
+```bash
+python scripts/checkpoint_conversion/numerical_tests_example.py
+```
+
+**What it does:**
+1. Loads the same weights into both a torchtitan model and HF `AutoModelForCausalLM`
+2. Runs forward passes on identical random inputs (100 prompts by default)
+3. Computes KL divergence between output logit distributions
+4. Reports average KL divergence per test configuration
+
+**Expected results:** With correct state dict conversion (including any necessary weight permutations), the KL divergence should be on the order of **1e-13** (essentially zero). For example, Llama 3 8B:
+```
+Average loss for test from_hf is -1.45365707318601e-13
+```
+
+**Prerequisites:**
+- A HuggingFace checkpoint for the model you want to test
+- A converted DCP checkpoint (use `scripts/checkpoint_conversion/convert_from_hf.py`)
+- GPU with enough memory to load the model
+
+**Running for a specific model:**
+1. Convert the HF checkpoint to DCP format:
+   ```bash
+   python scripts/checkpoint_conversion/convert_from_hf.py <hf_dir> <dcp_dir> --model_name <model> --model_flavor <flavor>
+   ```
+2. Update the paths in `numerical_tests_example.py` (or pass them as arguments) to point to your model and checkpoint
+3. Run the script and verify KL divergence is near zero
+
+For the full methodology and details, see [`scripts/checkpoint_conversion/README.md`](../scripts/checkpoint_conversion/README.md).
+
+**Supported models with StateDictAdapters:** Llama 3, Llama 4, DeepSeek-V3, Qwen3, Flux, GPT-OSS. See each model's README in `torchtitan/models/<model>/` for model-specific parity notes.

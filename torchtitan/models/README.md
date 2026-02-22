@@ -64,6 +64,35 @@ The folder should be organized as follows
   - There should be one `.toml` file for each model variant (e.g. Llama 3.1 8B / 70B / 405B) as well as a `debug_model.toml`.
   - They should be verified with real training jobs, in terms of optimized throughput and loss converging.
 
+## Model Status & Feature Matrix
+
+The table below summarizes the supported features across all production models. See each model's README for full details, parity check methodology, and performance numbers.
+
+| Feature | [Llama 3](llama3) | [Llama 3 FT](llama3_ft) | [Llama 4](llama4) | [DeepSeek-V3](deepseek_v3) | [Qwen 3](qwen3) | [Flux](flux) | [GPT-OSS](gpt_oss) |
+|---|---|---|---|---|---|---|---|
+| **FSDP** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **HSDP** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Tensor Parallel** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| **Pipeline Parallel** | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **Context Parallel** | ✅ | ✅ | ✅ | ✅ (sdpa) | ✅ (sdpa) | ✅ (sdpa) | ❌ |
+| **Expert Parallel** | — | — | ✅ | ✅ | ✅ (MoE) | — | ✅ |
+| **Expert TP (ETP)** | — | — | ✅ | ✅ | ✅ (MoE) | — | ✅ |
+| **DDP** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| **Activation Checkpoint** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **torch.compile** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **Float8** | ✅ | ✅ | ✅ | ✅ (rowwise) | ✅ | ❌ | ✅ (partial) |
+| **MXFP8** | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Async TP** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| **Loss Parallel** | ✅ | ✅ | ✅ | ✅ | ✅ | — | ✅ |
+| **HF Checkpoint Interop** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **DualPipeV** | — | — | ✅ | ✅ | ❌ | — | ❌ |
+| **Validation** | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ |
+| **MoE** | — | — | ✅ | ✅ | ✅ (select) | — | ✅ |
+| **Custom Trainer** | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **Benchmarks Published** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+
+Legend: ✅ = Supported, ❌ = Not supported, — = Not applicable (model architecture doesn't use this feature)
+
 ## Testing and Benchmarking
 - Numerics testing
   - One way of doing this E2E is to load the same model checkpoint into the `torchtitan` model and the HF model, and compare the model output given the same input. This assumes
