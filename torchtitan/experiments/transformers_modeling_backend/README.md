@@ -41,6 +41,15 @@ hf_assets_path = "./tests/assets/tokenizer"
         - `mistralai/Ministral-8B-Instruct-2410`
     - MoE (upcoming)
 
+## Parity Checks
+
+- HF Transformers modeling is validated against torchtitan's native modeling via loss curve comparison under identical parallelism configurations (FSDP, CP, TP, PP).
+- **Known gap:** `FSDP=2 vs FSDP=2 + PP=2` does not produce bitwise-matching loss/grad_norm with HF modeling, though the runs converge.
+
+## Performance
+
+No formal performance benchmarks comparing HF Transformers backend vs. native torchtitan have been published yet. It is known that HF modeling has **lower MFU** than native torchtitan modeling. Community benchmarks are welcome — see [`benchmarks/README.md`](/benchmarks/README.md) for submission guidelines.
+
 ## Known issues to address later
 
 - When using HF modeling, the test `FSDP=2 vs FSDP=2 + PP=2`, the `loss` and `grad_norm` not bitwise matching (but converging) while it is the case with Torchtitan modeling. This will be addressed in another PR but the culprit is probably `register_buffer` when loading `seed_checkpoint`

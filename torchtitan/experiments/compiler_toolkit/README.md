@@ -67,3 +67,11 @@ NCCL_GRAPH_REGISTER=0 NGPU=8 TRAIN_FILE=torchtitan.experiments.compiler_toolkit.
 ```shell
 NGPU=8 CONFIG_FILE=./torchtitan/models/llama3/train_configs/debug_model.toml TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train ./run_train.sh --model.name $MODEL_NAME compiler_toolkit.llama3 --parallelism.data_parallel_shard_degree=2 --parallelism.tensor_parallel_degree=4 --job.custom_config_module=torchtitan.experiments.compiler_toolkit.job_config --compile.joint_passes inductor_decomposition --compile.passes full_inductor_compilation
 ```
+
+## Parity Checks
+
+Compiler Toolkit strategies are validated against standard torchtitan training via loss curve comparison. The compiler-optimized joint graph should produce numerically equivalent results to the standard execution path.
+
+## Performance
+
+No formal performance benchmarks have been published yet. The primary expected benefits are improved communication-computation overlap via bucketing/prefetching and regional inductor compilation. Community benchmarks are welcome — see [`benchmarks/README.md`](/benchmarks/README.md) for submission guidelines.
