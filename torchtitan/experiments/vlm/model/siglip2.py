@@ -11,16 +11,16 @@ from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.attention import (
+from torchtitan.models.common import trunc_normal_
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
     create_attention_mask,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.models.utils import trunc_normal_
-from torchtitan.protocols.model import AttentionMasksType
 
-from .args import Siglip2ModelArgs
+from .args import Siglip2Config
 
 
 def resize_positional_embeddings(
@@ -73,7 +73,7 @@ def resize_positional_embeddings(
 
 
 class VisionEmbeddings(nn.Module):
-    def __init__(self, args: Siglip2ModelArgs):
+    def __init__(self, args: Siglip2Config):
         super().__init__()
         self.patch_embedding = nn.Linear(
             in_features=args.n_channels * args.patch_size * args.patch_size,
@@ -112,7 +112,7 @@ class Attention(nn.Module):
     Multi-head attention module.
 
     Args:
-        model_args (TransformerModelArgs): Model configuration arguments.
+        model_args (Transformer.Config): Model configuration arguments.
 
     Attributes:
         n_heads (int): Number of query heads.
@@ -124,7 +124,7 @@ class Attention(nn.Module):
 
     """
 
-    def __init__(self, args: Siglip2ModelArgs):
+    def __init__(self, args: Siglip2Config):
         super().__init__()
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
@@ -158,7 +158,7 @@ class Attention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, args: Siglip2ModelArgs):
+    def __init__(self, args: Siglip2Config):
         super().__init__()
         self.fc1 = nn.Linear(args.dim, args.ffn_dim)
         self.fc2 = nn.Linear(args.ffn_dim, args.dim)
@@ -175,7 +175,7 @@ class FeedForward(nn.Module):
 
 
 class TransformerLayer(nn.Module):
-    def __init__(self, args: Siglip2ModelArgs):
+    def __init__(self, args: Siglip2Config):
         super().__init__()
         self.layer_norm1 = nn.LayerNorm(args.dim, eps=args.layer_norm_eps)
         self.self_attn = Attention(args)
@@ -197,7 +197,7 @@ class TransformerLayer(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, args: Siglip2ModelArgs):
+    def __init__(self, args: Siglip2Config):
         super().__init__()
         self.args = args
         self.eos_id = 11

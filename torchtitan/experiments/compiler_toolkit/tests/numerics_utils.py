@@ -144,8 +144,6 @@ def run_training(
     if passes:
         cmd.extend(
             [
-                "--job.custom_config_module",
-                "torchtitan.experiments.compiler_toolkit.job_config",
                 "--compile.passes",
                 passes,
             ]

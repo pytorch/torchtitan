@@ -76,11 +76,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument(
-        "--config_path",
-        default="./tests/integration_tests/base_config.toml",
-        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
-    )
-    parser.add_argument(
         "--test_name",
         default="all",
         help="test to run, acceptable values: `test_name` in `build_test_list` (default: all)",

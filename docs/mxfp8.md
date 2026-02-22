@@ -12,7 +12,7 @@ MXFP8 training can provide substantial training speedups for models where the ma
   - [Usage](#usage)
 - [MXFP8 for Grouped GEMMs (MoE)](#mxfp8-for-grouped-gemms-moe)
   - [Usage](#usage-1)
-- [Example TOML Configuration](#example-toml-configuration)
+- [Example Python Configuration](#example-python-configuration)
 - [Performance](#performance)
   - [Dense Models](#dense-models)
   - [MoE models](#moe-models)
@@ -40,24 +40,29 @@ MXFP8 differs from standard Float8 training in its scaling approach:
 
 #### Usage
 
-To enable MXFP8 training for linear layers, launch your training job with the following command (or alternatively set configs in toml files):
+To enable MXFP8 training for linear layers, configure it in your config_registry function:
 
-```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh \
-  --model.converters="quantize.linear.mx" \
-  --quantize.linear.mx.recipe_name="mxfp8_cublas" \
-  --compile.enable
+```python
+from torchtitan.components.quantization.mx import MXLinearConverter
+from torchtitan.protocols.model_converter import ModelConvertersContainer
+
+# In your config_registry function:
+model_converters=ModelConvertersContainer.Config(
+    converters=[
+        MXLinearConverter.Config(recipe_name="mxfp8_cublas"),
+    ],
+),
+compile=CompileConfig(enable=True),
 ```
 
 **Configuration Options:**
 
-* `--model.converters="quantize.linear.mx"`: Swap `nn.Linear` with `MXLinear` to perform MXFP8 matmul.
-* `--quantize.linear.mx.recipe_name="mxfp8_cublas"`: Use the cuBLAS-based MXFP8 recipe for best performance on B200 GPUs. Alternative: `"mxfp8_cublas_rceil"` uses round-ceiling mode for scale calculation.
-* `--quantize.linear.mx.mxfp8_dim1_cast_kernel_choice="triton"`: Choose the kernel for dimension-1 quantization. Options: `"triton"` (default), `"cuda"`, or `"torch"`.
-* `--quantize.linear.mx.filter_fqns="..."` (optional): Comma-separated list of fully qualified names of modules not to convert to MXFP8 training.
-  * Example: `--quantize.linear.mx.filter_fqns="attention.wq,attention.wk,attention.wv,output"`
+* `recipe_name="mxfp8_cublas"`: Use the cuBLAS-based MXFP8 recipe for best performance on B200 GPUs. Alternative: `"mxfp8_cublas_rceil"` uses round-ceiling mode for scale calculation.
+* `mxfp8_dim1_cast_kernel_choice="triton"`: Choose the kernel for dimension-1 quantization. Options: `"triton"` (default), `"cuda"`, or `"torch"`.
+* `filter_fqns` (optional): List of fully qualified names of modules not to convert to MXFP8 training.
+  * Example: `filter_fqns=["attention.wq", "attention.wk", "attention.wv", "output"]`
   * This allows you to selectively apply MXFP8 only to layers that will benefit from it.
-* `--compile.enable` (required for competitive performance): Use `torch.compile` to fuse the MXFP8 scaling/casting kernels.
+* `compile.enable` (required for competitive performance): Use `torch.compile` to fuse the MXFP8 scaling/casting kernels.
 
 **Hardware Requirements:**
 
@@ -69,29 +74,38 @@ For Mixture-of-Experts (MoE) models, MXFP8 can accelerate the expert computation
 
 #### Usage
 
-To enable MXFP8 for MoE expert layers:
+To enable MXFP8 for MoE expert layers, configure it in your config_registry function:
 
-```bash
-CONFIG_FILE="./torchtitan/models/llama4/train_configs/llama4_17bx16e.toml" ./run_train.sh \
-  --model.converters="quantize.grouped_mm.mx" \
-  --quantize.grouped_mm.mx.fqns="experts" \
-  --quantize.grouped_mm.mx.recipe_name="mxfp8" \
-  --compile.enable \
-  --model.print_after_conversion
+```python
+from torchtitan.components.quantization.mx import MXGroupedMMConverter
+from torchtitan.protocols.model_converter import ModelConvertersContainer
+
+# In your config_registry function:
+model_converters=ModelConvertersContainer.Config(
+    converters=[
+        MXGroupedMMConverter.Config(fqns=["experts"], recipe_name="mxfp8"),
+    ],
+    print_after_conversion=True,
+),
+compile=CompileConfig(enable=True),
 ```
 
 **Combined usage**: You can use MXFP8 for both linear modules and grouped GEMMs simultaneously by specifying both converters:
-  ```bash
-  --model.converters="quantize.linear.mx,quantize.grouped_mm.mx"
+  ```python
+  from torchtitan.components.quantization.mx import MXLinearConverter, MXGroupedMMConverter
+
+  converters=[
+      MXLinearConverter.Config(recipe_name="mxfp8_cublas"),
+      MXGroupedMMConverter.Config(fqns=["experts"], recipe_name="mxfp8"),
+  ]
   ```
 
 **Configuration Options:**
 
-* `--model.converters="quantize.grouped_mm.mx"`: Enable MXFP8 grouped GEMM conversion for MoE layers.
-* `--quantize.grouped_mm.mx.fqns="experts"`: Comma-separated list of fully qualified names of MoE modules to apply MXFP8 dynamic quantization on grouped GEMM operations. Any module that matches the FQN will be converted, if it has (1) experts represented as 3d nn.Parameter instances (which is the case for TorchTitan MoEs), and (2) a `torch._grouped_mm` op performs the actual routed expert computation using those 3d expert weights.
+* `fqns`: List of fully qualified names of MoE modules to apply MXFP8 dynamic quantization on grouped GEMM operations. Any module that matches the FQN will be converted, if it has (1) experts represented as 3d nn.Parameter instances (which is the case for TorchTitan MoEs), and (2) a `torch._grouped_mm` op performs the actual routed expert computation using those 3d expert weights.
   * You can specify multiple FQNs to target different MoE layers in your model.
-* `--quantize.grouped_mm.mx.recipe_name="mxfp8"`: Quantization recipe for grouped GEMMs (currently only `"mxfp8"` is supported).
-* `--compile.enable`: Use `torch.compile` for best performance.
+* `recipe_name="mxfp8"`: Quantization recipe for grouped GEMMs (currently only `"mxfp8"` is supported).
+* `compile.enable`: Use `torch.compile` for best performance.
 
 **Important Notes:**
 
@@ -99,26 +113,32 @@ CONFIG_FILE="./torchtitan/models/llama4/train_configs/llama4_17bx16e.toml" ./run
 
 * **torch.compile recommendation**: All benchmarks in this document were run with `torch.compile` enabled. We recommend using `torch.compile` for best performance.
 
-### Example TOML Configuration
+### Example Python Configuration
 
-Here's an example configuration for MXFP8 training in a TOML file:
+Here's an example configuration for MXFP8 training in a config_registry function:
 
-```toml
-[model]
-converters = ["quantize.linear.mx", "quantize.grouped_mm.mx"]
+```python
+from torchtitan.components.quantization.mx import MXLinearConverter, MXGroupedMMConverter
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
-[quantize.linear.mx]
-recipe_name = "mxfp8_cublas"
-mxfp8_dim1_cast_kernel_choice = "cuda"
-filter_fqns = ["output", "router.gate"]
-
-[quantize.grouped_mm.mx]
-recipe_name = "mxfp8"
-fqns = ["experts"]
-
-[compile]
-enable = true
-components = ["model"]
+# In your config_registry function:
+model_converters=ModelConvertersContainer.Config(
+    converters=[
+        MXLinearConverter.Config(
+            recipe_name="mxfp8_cublas",
+            mxfp8_dim1_cast_kernel_choice="cuda",
+            filter_fqns=["output", "router.gate"],
+        ),
+        MXGroupedMMConverter.Config(
+            recipe_name="mxfp8",
+            fqns=["experts"],
+        ),
+    ],
+),
+compile=CompileConfig(
+    enable=True,
+    components=["model"],
+),
 ```
 
 ### Performance

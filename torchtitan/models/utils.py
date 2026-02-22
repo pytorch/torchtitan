@@ -10,7 +10,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import _StridedShard, Replicate, Shard
 
-from torchtitan.protocols.model import BaseModelArgs
+from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from torchtitan.tools.logging import logger
@@ -28,11 +28,11 @@ class MoEStateDictAdapter(StateDictAdapter):
 
     def __init__(
         self,
-        model_args: BaseModelArgs,
+        model_config: BaseModel.Config,
         hf_assets_path: str | None,
     ):
-        super().__init__(model_args, hf_assets_path)
-        self.model_args = model_args
+        super().__init__(model_config, hf_assets_path)
+        self.model_config = model_config
         self.hf_assets_path = hf_assets_path
         # Store metadata for GroupedExperts <-> individual experts conversion
         self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}
@@ -218,12 +218,13 @@ class MoEStateDictAdapter(StateDictAdapter):
             elif isinstance(placement, Shard):
                 # Shards on non-expert dim, keep in sub-mesh
                 sub_mesh_names.append(name)
+                # pyrefly: ignore [bad-argument-type]
                 sub_placements.append(Shard(placement.dim))
             elif isinstance(placement, _StridedShard):
                 # Strided shard on non-expert dim, keep in sub-mesh
                 sub_mesh_names.append(name)
                 sub_placements.append(
-                    # pyrefly: ignore [unexpected-positional-argument]
+                    # pyrefly: ignore [bad-argument-type, unexpected-positional-argument]
                     _StridedShard(placement.dim, placement.split_factor)
                 )
             else:
@@ -386,15 +387,17 @@ class MoEStateDictAdapter(StateDictAdapter):
 
 
 def get_dense_model_nparams_and_flops(
-    model_args: BaseModelArgs,
+    model_config: BaseModel.Config,
     model: nn.Module,
+    n_heads: int,
     head_dims: int,
     seq_len: int,
 ) -> tuple[int, int]:
     """
     Args:
-        model_args: BaseModelArgs object containing model configuration parameters.
+        model_config: BaseModel.Config object containing model configuration parameters.
         model: nn.Module representing the model.
+        n_heads: The number of attention heads.
         head_dims: The sum of qk and v head dimensions.
         seq_len: The sequence length in training configs.
 
@@ -421,19 +424,23 @@ def get_dense_model_nparams_and_flops(
     num_flops_per_token = (
         6 * (nparams - nparams_embedding)
         # pyrefly: ignore [missing-attribute]
-        + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
+        + 6 * model_config.n_layers * n_heads * head_dims * seq_len
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
-    if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
+    if (
+        hasattr(model_config, "enable_weight_tying")
+        and model_config.enable_weight_tying
+    ):
         nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token
 
 
 def get_moe_model_nparams_and_flops(
-    model_args: BaseModelArgs,
+    model_config: BaseModel.Config,
     model: nn.Module,
+    n_heads: int,
     head_dims: int,
     seq_len: int,
 ) -> tuple[int, int]:
@@ -441,8 +448,9 @@ def get_moe_model_nparams_and_flops(
     Calculate nparams and nflops for MoE models.
 
     Args:
-        model_args: BaseModelArgs object containing model configuration parameters including MoE settings.
+        model_config: BaseModel.Config object containing model configuration parameters including MoE settings.
         model: nn.Module representing the MoE model.
+        n_heads: The number of attention heads.
         head_dims: The sum of qk and v head dimensions.
         seq_len: The sequence length in training configs.
 
@@ -473,12 +481,17 @@ def get_moe_model_nparams_and_flops(
 
     nparams_sparse = nparams_moe_router + nparams_shared_experts + nparams_experts
     nparams = nparams_dense + nparams_sparse
-    nparams_sparse_active = (
-        nparams_moe_router
-        + nparams_shared_experts
-        # pyrefly: ignore [missing-attribute]
-        + nparams_experts * model_args.moe_args.top_k // model_args.moe_args.num_experts
-    )
+
+    # pyrefly: ignore [missing-attribute]
+    moe_config = model_config.layer.moe
+    if moe_config is not None:
+        nparams_sparse_active = (
+            nparams_moe_router
+            + nparams_shared_experts
+            + nparams_experts * moe_config.top_k // moe_config.num_experts
+        )
+    else:
+        nparams_sparse_active = 0
 
     logger.info(
         f"Total parameter count: dense {nparams_dense:,}, "
@@ -488,44 +501,14 @@ def get_moe_model_nparams_and_flops(
     num_flops_per_token = (
         6 * (nparams_dense - nparams_embedding + nparams_sparse_active)
         # pyrefly: ignore [missing-attribute]
-        + 6 * model_args.n_layers * model_args.n_heads * head_dims * seq_len
+        + 6 * model_config.n_layers * n_heads * head_dims * seq_len
     )
 
     # If weight tying is enabled, subtract embedding parameters from total count
-    if hasattr(model_args, "enable_weight_tying") and model_args.enable_weight_tying:
+    if (
+        hasattr(model_config, "enable_weight_tying")
+        and model_config.enable_weight_tying
+    ):
         nparams = nparams - nparams_embedding
 
     return nparams, num_flops_per_token
-
-
-def trunc_normal_(
-    tensor: torch.Tensor,
-    mean: float = 0.0,
-    std: float = 1.0,
-    a: float = -2.0,
-    b: float = 2.0,
-):
-    """
-    Fills the input tensor with values sampled from a truncated normal distribution.
-    Values are drawn from a normal distribution with the given mean and standard
-    deviation. Any sampled values outside the range defined by a and b are resampled
-    until they fall within the bounds.
-
-    To avoid numerical instability in torch.nn.init.trunc_normal_, the initialization
-    is always performed using float32 precision. The result is then cast back to the
-    original data type of the input tensor.
-
-    Args:
-        tensor: an n dimensional torch Tensor
-        mean: the mean of the normal distribution
-        std: the standard deviation of the normal distribution
-        a: the lower bound for truncation
-        b: the upper bound for truncation
-
-    Returns:
-        The input tensor filled with values from the truncated normal distribution.
-    """
-
-    tmp = tensor.float()
-    nn.init.trunc_normal_(tmp, mean=mean, std=std, a=a, b=b)
-    tensor.copy_(tmp)

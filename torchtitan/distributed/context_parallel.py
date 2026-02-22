@@ -20,7 +20,7 @@ from torch.distributed.tensor.experimental._attention import (
 from torch.distributed.tensor.parallel import parallelize_module
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.protocols.model import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.tools.logging import logger
 
 

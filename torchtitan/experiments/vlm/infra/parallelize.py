@@ -13,23 +13,36 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import (
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
-from torchtitan.models.llama3.infra.parallelize import (
+from torchtitan.models.llama3.parallelize import (
     _op_sac_save_list,
     apply_compile,
     apply_ddp,
     disable_fsdp_gradient_division,
 )
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
 def parallelize_vlm(
     model: nn.Module,
+    *,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpointConfig,
+    dump_folder: str,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
@@ -43,34 +56,34 @@ def parallelize_vlm(
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
     assert (
-        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
-        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
-    attn_type = getattr(model.model_args, "attn_type", "sdpa")
-    if job_config.parallelism.context_parallel_degree > 1 and attn_type != "sdpa":
+    attn_backend = getattr(model.config, "attn_backend", "sdpa")
+    if parallelism.context_parallel_degree > 1 and attn_backend != "sdpa":
         raise NotImplementedError("CP support is only supported for SDPA.")
 
     if parallel_dims.tp_enabled:
         raise NotImplementedError("TP support for VLM training is still in progress.")
 
     model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
+        compile_config.enable and "model" in compile_config.components
     )
-    if job_config.activation_checkpoint.mode != "none":
+    if ac_config.mode != "none":
         apply_ac(
             model,
-            job_config.activation_checkpoint,
+            ac_config,
             model_compile_enabled=model_compile_enabled,
             op_sac_save_list=_op_sac_save_list,
         )
-        apply_ac(model.encoder, job_config.activation_checkpoint)
+        apply_ac(model.encoder, ac_config)
 
     # turn on per-TransformerBlock compile after AC wrapping and before FSDP
-    if job_config.compile.enable:
-        apply_compile(model, job_config.compile)
-        apply_compile(model.encoder, job_config.compile)
+    if compile_config.enable:
+        apply_compile(model, compile_config)
+        apply_compile(model.encoder, compile_config)
 
     if parallel_dims.fsdp_enabled:
         # apply FSDP or HSDP, potentially with Context Parallel
@@ -81,11 +94,11 @@ def parallelize_vlm(
         apply_fsdp(
             model,
             parallel_dims.get_mesh(names),
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -96,7 +109,7 @@ def parallelize_vlm(
         if parallel_dims.cp_enabled:
             logger.info("Applied Context Parallel to the model")
 
-        if job_config.training.enable_cpu_offload:
+        if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
         dp_mesh = parallel_dims.get_mesh("dp_replicate")
@@ -105,7 +118,7 @@ def parallelize_vlm(
         apply_ddp(
             model,
             dp_mesh,
-            enable_compile=job_config.compile.enable,
+            enable_compile=compile_config.enable,
         )
 
     return model

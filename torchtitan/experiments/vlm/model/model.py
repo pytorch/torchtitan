@@ -4,18 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass, field
+
 import einops as E
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.llama3 import Transformer as Llama3
-from torchtitan.protocols.model import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.llama3 import Llama3Model as Llama3
 
-from ..datasets.mm_datasets import SpecialTokens
-
-from .args import Llama3Siglip2ModelArgs
+from .args import Siglip2Config, SpecialTokens
 from .siglip2 import VisionTransformer
 
 
@@ -59,13 +59,15 @@ class Projector(nn.Module):
 
 
 class Llama3Siglip2Transformer(Llama3):
-    def __init__(self, model_args: Llama3Siglip2ModelArgs):
-        super().__init__(model_args)
-        self.model_args = model_args
-        self.encoder = VisionTransformer(model_args.encoder)
-        self.projector = Projector(
-            in_dim=model_args.encoder.dim, out_dim=model_args.dim
-        )
+    @dataclass(kw_only=True, slots=True)
+    class Config(Llama3.Config):
+        encoder: Siglip2Config = field(default_factory=Siglip2Config)
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.config = config
+        self.encoder = VisionTransformer(config.encoder)
+        self.projector = Projector(in_dim=config.encoder.dim, out_dim=config.dim)
 
     def init_weights(self, buffer_device=None):
         super().init_weights(buffer_device=buffer_device)

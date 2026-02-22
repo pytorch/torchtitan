@@ -10,7 +10,7 @@ import torch
 import torch._functorch.config as functorch_config
 from torchtitan.tools.logging import logger
 
-from .job_config import Compile as CompileConfig
+from .configs import SimpleFSDPCompileConfig as CompileConfig
 
 from .reshard_after_forward import annotate_fsdp_all_gather
 

@@ -6,18 +6,22 @@
 
 
 import json
-
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Optional
 
 from tokenizers import AddedToken, Tokenizer
-from torchtitan.config import JobConfig
+from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 from typing_extensions import override
 
 
-class BaseTokenizer(ABC):
+class BaseTokenizer(ABC, Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
     # base tokenizer interface, for typing purpose mainly
     eos_id: int | None
 
@@ -46,11 +50,18 @@ class HuggingFaceTokenizer(BaseTokenizer):
     BOS/EOS tokens based on whether the underlying tokenizer adds them automatically.
 
     Args:
+        config (Config): Configurable config (currently empty).
         tokenizer_path (str): Path to directory containing tokenizer files
     """
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseTokenizer.Config):
+        pass  # no fields — tokenizer_path passed at build time
+
     def __init__(
         self,
+        config: Config | None = None,
+        *,
         tokenizer_path: str,
     ):
         super().__init__()
@@ -66,7 +77,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         self.tokenizer = self._load_tokenizer_from_path(tokenizer_path)
 
         # Load configuration files
-        self.config = self._load_config(
+        self._hf_config = self._load_config(
             os.path.join(tokenizer_path, "tokenizer_config.json")
         )
 
@@ -146,10 +157,13 @@ class HuggingFaceTokenizer(BaseTokenizer):
                 tokenizer = Tokenizer(bpe_model)
 
                 # Configure GPT-2 style components for proper space handling
+                # pyrefly: ignore [read-only]
                 tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
                     add_prefix_space=False
                 )
+                # pyrefly: ignore [read-only]
                 tokenizer.decoder = decoders.ByteLevel()
+                # pyrefly: ignore [read-only]
                 tokenizer.post_processor = processors.ByteLevel(trim_offsets=True)
 
                 return tokenizer
@@ -207,13 +221,13 @@ class HuggingFaceTokenizer(BaseTokenizer):
         """
         # Get reference BOS/EOS tokens from config for comparison
         config_bos_token = (
-            self._get_token_from_config(self.config, "bos_token")
-            if self.config
+            self._get_token_from_config(self._hf_config, "bos_token")
+            if self._hf_config
             else None
         )
         config_eos_token = (
-            self._get_token_from_config(self.config, "eos_token")
-            if self.config
+            self._get_token_from_config(self._hf_config, "eos_token")
+            if self._hf_config
             else None
         )
 
@@ -271,20 +285,20 @@ class HuggingFaceTokenizer(BaseTokenizer):
         # List to collect AddedToken objects for updating the underlying tokenizer
         added_tokens_to_add = []
 
-        if not self.config:
+        if not self._hf_config:
             return
 
         # Process standard top-level token keys
         for key in standard_keys:
-            token_config = self.config.get(key)
+            token_config = self._hf_config.get(key)
             if token_config is not None:
-                token_str = self._get_token_from_config(self.config, key)
+                token_str = self._get_token_from_config(self._hf_config, key)
                 if token_str is not None:
                     added_token = self._process_special_token(token_str, token_config)
                     added_tokens_to_add.append(added_token)
 
         # Process added_tokens_decoder (comprehensive special token definitions)
-        added_tokens_decoder = self.config.get("added_tokens_decoder", {})
+        added_tokens_decoder = self._hf_config.get("added_tokens_decoder", {})
         for token_id_str, token_config in added_tokens_decoder.items():
             if isinstance(token_config, dict) and "content" in token_config:
                 token_str = token_config["content"]
@@ -323,9 +337,9 @@ class HuggingFaceTokenizer(BaseTokenizer):
             self.hf_adds_eos = True
 
         # Check tokenizer_config.json for explicit settings - these override empirical detection
-        if self.config:
-            config_add_bos = self.config.get("add_bos_token")
-            config_add_eos = self.config.get("add_eos_token")
+        if self._hf_config:
+            config_add_bos = self._hf_config.get("add_bos_token")
+            config_add_eos = self._hf_config.get("add_eos_token")
             if config_add_bos is not None:
                 self.default_add_bos = bool(config_add_bos)
             if config_add_eos is not None:
@@ -410,23 +424,3 @@ class HuggingFaceTokenizer(BaseTokenizer):
     def id_to_token(self, token_id: int) -> Optional[str]:
         """Convert ID to token."""
         return self.tokenizer.id_to_token(token_id)
-
-
-def build_hf_tokenizer(
-    job_config: JobConfig,
-) -> Union[HuggingFaceTokenizer, BaseTokenizer]:
-    """
-    Builds a HuggingFaceTokenizer from the specified path.
-
-    This function creates a HuggingFaceTokenizer instance that handles BOS/EOS token
-    inference and intelligent encoding. The tokenizer automatically detects and loads
-    from various file formats and infers special token behavior.
-
-    Args:
-        JobConfig: A JobConfig object containing the path to the tokenizer directory.
-
-    Returns:
-        tokenizer (HuggingFaceTokenizer): Loaded tokenizer instance with intelligent BOS/EOS handling
-    """
-    tokenizer = HuggingFaceTokenizer(job_config.model.hf_assets_path)
-    return tokenizer

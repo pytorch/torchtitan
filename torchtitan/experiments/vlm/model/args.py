@@ -4,11 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-
-from torchtitan.models.llama3 import TransformerModelArgs as Llama3Args
 
 
 @dataclass
@@ -41,7 +39,7 @@ class SpecialTokens:
 
 
 @dataclass
-class Siglip2ModelArgs:
+class Siglip2Config:
     dim: int = 768
     ffn_dim: int = 3072
     n_layers: int = 12
@@ -53,10 +51,5 @@ class Siglip2ModelArgs:
     spatial_merge_size: int = 1
 
     layer_norm_eps: float = 1e-6
-    attn_type: str = "flex"
+    attn_backend: str = "flex"
     attn_mask_type: str = "causal"
-
-
-@dataclass
-class Llama3Siglip2ModelArgs(Llama3Args):
-    encoder: Siglip2ModelArgs = field(default_factory=Siglip2ModelArgs)

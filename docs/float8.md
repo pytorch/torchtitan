@@ -9,24 +9,43 @@ Please install latest [TorchAO](https://github.com/pytorch/ao/tree/main/torchao/
 USE_CPP=0 python -m pip install git+https://github.com/pytorch/ao.git
 ```
 
-For float8 with tensorwise scaling, launch training job with the following command (or alternatively set configs in toml files)
-```
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.converters="quantize.linear.float8" --quantize.linear.float8.enable_fsdp_float8_all_gather --quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp --compile.enable
-```
-* `--model.converters="quantize.linear.float8"`: swap `nn.Linear` with `Float8Linear` to perform float8 matmul.
-* `--quantize.linear.float8.enable_fsdp_float8_all_gather`: cast `Float8Linear.weight` from high precision to float8 before FSDP all-gather so we can communicate in float8 to save bandwidth.
-* `--quantize.linear.float8.precompute_float8_dynamic_scale_for_fsdp` (optional): communicate AMAX/scales efficiently in a single all-reduce for all parameters instead of doing many small all-reduce for each parameter.
-* `--quantize.linear.float8.filter_fqns="..."` (optional): a comma separated list of fully qualified names of modules not to convert to float8 training. Example: `--quantize.linear.float8.filter_fqns="attention.wk,attention.wv"`. You can determine which layers to convert by looking at the microbenchmarks in the [performance section](https://github.com/pytorch/ao/tree/main/torchao/float8#performance) of the torchao documentation for the float8 recipe you're using.
-    * **Auto-filter**: add `"auto_filter_small_kn"` as one of the `filter_fqns` to to enable automatic module filtering, which will automatically not convert linear layers are not large enough to benefit from float8 training, since the GEMM has to be big enough that the speedup from using FP8 tensorcores is greater than the overhead of creating dynamically quantized inputs. The thresholds for conversion are based on microbenchmarks measured on NVIDIA H100 GPUs, where (K,N) represents the linear layer weight shape. For best performance, you should still manually filter out layers that are too small to benefit from float8 training.
-* `--compile.enable` (required for competitive performance): use `torch.compile` to fuse the float8 scaling/casting kernels
+For float8 with tensorwise scaling, configure it in your config_registry function:
+```python
+from torchtitan.components.quantization.float8 import Float8LinearConverter
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 
-For float8 with rowwise scaling, launch training job with the following command (or alternatively set configs in toml files)
+# In your config_registry function:
+model_converters=ModelConvertersContainer.Config(
+    converters=[
+        Float8LinearConverter.Config(
+            enable_fsdp_float8_all_gather=True,
+            precompute_float8_dynamic_scale_for_fsdp=True,
+        ),
+    ],
+),
+compile=CompileConfig(enable=True),
 ```
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh --model.converters="quantize.linear.float8" --quantize.linear.float8.recipe_name rowwise --training.compile
+* `enable_fsdp_float8_all_gather`: cast `Float8Linear.weight` from high precision to float8 before FSDP all-gather so we can communicate in float8 to save bandwidth.
+* `precompute_float8_dynamic_scale_for_fsdp` (optional): communicate AMAX/scales efficiently in a single all-reduce for all parameters instead of doing many small all-reduce for each parameter.
+* `filter_fqns` (optional): a list of fully qualified names of modules not to convert to float8 training. Example: `filter_fqns=["attention.wk", "attention.wv"]`. You can determine which layers to convert by looking at the microbenchmarks in the [performance section](https://github.com/pytorch/ao/tree/main/torchao/float8#performance) of the torchao documentation for the float8 recipe you're using.
+    * **Auto-filter**: add `"auto_filter_small_kn"` as one of the `filter_fqns` to to enable automatic module filtering, which will automatically not convert linear layers are not large enough to benefit from float8 training, since the GEMM has to be big enough that the speedup from using FP8 tensorcores is greater than the overhead of creating dynamically quantized inputs. The thresholds for conversion are based on microbenchmarks measured on NVIDIA H100 GPUs, where (K,N) represents the linear layer weight shape. For best performance, you should still manually filter out layers that are too small to benefit from float8 training.
+* `compile.enable` (required for competitive performance): use `torch.compile` to fuse the float8 scaling/casting kernels
+
+For float8 with rowwise scaling, configure it in your config_registry function:
+```python
+from torchtitan.components.quantization.float8 import Float8LinearConverter
+from torchtitan.protocols.model_converter import ModelConvertersContainer
+
+# In your config_registry function:
+model_converters=ModelConvertersContainer.Config(
+    converters=[
+        Float8LinearConverter.Config(recipe_name="rowwise"),
+    ],
+),
+compile=CompileConfig(enable=True),
 ```
-* `--model.converters="quantize.linear.float8"`: swap `nn.Linear` with `Float8Linear` to perform float8 matmul.
-* `--quantize.linear.float8.recipe_name="rowwise"`: use the rowwise scaling recipe for higher accuracy compared to tensorwise scaling
-* `--compile.enable` (required for competitive performance): use `torch.compile` to fuse the float8 scaling/casting kernels
+* `recipe_name="rowwise"`: use the rowwise scaling recipe for higher accuracy compared to tensorwise scaling
+* `compile.enable` (required for competitive performance): use `torch.compile` to fuse the float8 scaling/casting kernels
 
 For parallelisms, for float8 with tensorwise scaling we support float8 all-gather for FSDP (optional) and for TP (by default for `Float8Linear`). For float8 with rowwise scaling, all distributed communication is done in high precision.
 

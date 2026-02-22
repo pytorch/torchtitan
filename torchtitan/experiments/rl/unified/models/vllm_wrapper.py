@@ -27,10 +27,10 @@ from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
 )
 
 from torchtitan.experiments.rl.unified.models.utils import replace_with_vllm_attention
-from torchtitan.models.qwen3.model.model import precompute_rope_cache
-from torchtitan.protocols.model import BaseModelArgs, ModelProtocol
+from torchtitan.models.qwen3.model import precompute_rope_cache
+from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
-from torchtitan.protocols.train_spec import ParallelizeFunction
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -61,8 +61,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
     def __init__(
         self,
         *,
-        model_cls: type[ModelProtocol],
-        model_args: BaseModelArgs,
+        model_config: BaseModel.Config,
         state_dict_adapter: type[BaseStateDictAdapter],
         parallelize_fn: ParallelizeFunction,
         vllm_config: VllmConfig,
@@ -73,14 +72,13 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         assert vllm_config is not None, "vllm_config is required"
 
         # Store components
-        self.model_cls = model_cls
         self.state_dict_adapter = state_dict_adapter
         self.parallelize_fn = parallelize_fn
 
-        # Use TorchTitan model args directly (no HF config mapping)
-        self.config = model_args
-        logger.info(f"Creating {self.model_cls.__name__} with config: {model_args}")
-        self.model = self.model_cls(model_args)
+        # Use TorchTitan model config directly (no HF config mapping)
+        self.config = model_config
+        logger.info(f"Creating model with config: {model_config}")
+        self.model = model_config.build()
 
         # Setup RoPE cache extension function if provided
         self.rope_cache_extension_fn = partial(
@@ -100,7 +98,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         tp_size = self.parallel_dims.tp
         if tp_size > 1:
             assert (
-                model_args.n_heads % tp_size == 0
+                self.config.layer.attention.n_heads % tp_size == 0
             ), "Only support when n_heads can be divided by tp_size"
 
         replace_with_vllm_attention(self.model, tp_degree=tp_size)
@@ -292,7 +290,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Use adapter to convert HF → TorchTitan format
         adapter = self.state_dict_adapter(
-            model_args=self.config,
+            model_config=self.config,
             hf_assets_path=None,
         )
 

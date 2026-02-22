@@ -51,7 +51,7 @@ Note: To accelerate contributions to and innovations around `torchtitan`, we are
   - After the model change, it should still load the original checkpoint correctly.
   - Document the reasons for the code change, similar to [composability.md](docs/composability.md).
 - Keep code modularized, especially for [train.py](train.py), so that it remains easy to copy-paste into a minimal code example. If necessary:
-  - Introduce new config options/category in [job_config.py](torchtitan/config/job_config.py).
+  - Introduce new config options/category in [configs.py](torchtitan/config/configs.py).
   - Create separate functions/files.
 
 ### Proof of Value
@@ -75,7 +75,7 @@ When appropriate, one should consider
 
 - Adding CPU/GPU unit/integration tests.
   - To add a unit test, put it in the [tests](tests/) folder and follow the existing test files.
-  - To add a GPU integration test, create a new `OverrideDefinitions` in [integration_tests.py](tests/integration_tests.py). It will override the default config to run on the Llama 3 [debug model](torchtitan/models/llama/train_configs/debug_model.toml).
+  - To add a GPU integration test, create a new `OverrideDefinitions` in [integration_tests](tests/integration_tests/). It will override the default config to run on the Llama 3 debug model (see [config_registry.py](torchtitan/models/llama3/config_registry.py)).
 - Updating [README](README.md) and writing a new note in the [docs](docs/) folder on installation and usage, similar to [float8.md](docs/float8.md).
 - Updating [performance.md](docs/performance.md) with new performance results.
 - Creating GitHub issues for things that cannot be addressed at the moment.

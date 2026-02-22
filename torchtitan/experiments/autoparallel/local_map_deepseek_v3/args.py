@@ -12,12 +12,12 @@ from autoparallel._testing.models.dsv3 import (
     DeepSeekV3ModelArgs as _DeepSeekV3ModelArgs,
     MoEArgs as _MoEArgs,
 )
-from torchtitan.protocols.model import BaseModelArgs
+from torchtitan.protocols.model import BaseModel
 
 
 # Need to share same base class with torchtitan models
 @dataclass
-class DeepSeekV3ModelArgs(_DeepSeekV3ModelArgs, BaseModelArgs):
+class DeepSeekV3ModelArgs(_DeepSeekV3ModelArgs, BaseModel.Config):
     pass
 
 

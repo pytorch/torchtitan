@@ -5,114 +5,142 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
-from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.components.validate import build_validator
+from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.models.moe import MoEArgs
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.models.common import (
+    compute_ffn_hidden_dim,
+    FeedForward,
+    GQAttention,
+    RoPE,
+)
+from torchtitan.models.common.moe import MoE
+from torchtitan.protocols.model_spec import ModelSpec
+from .model import compute_moe_hidden_dim, Llama4Model, Llama4TransformerBlock
 
-from .infra.parallelize import parallelize_llama
-from .model.args import RoPEScalingArgs, TransformerModelArgs
-from .model.model import Transformer
-from .model.state_dict_adapter import Llama4StateDictAdapter
+from .parallelize import parallelize_llama
+from .state_dict_adapter import Llama4StateDictAdapter
 
 __all__ = [
-    "TransformerModelArgs",
-    "Transformer",
-    "llama4_args",
+    "Llama4Model",
+    "llama4_configs",
 ]
 
 
-llama4_args = {
-    "debugmodel": TransformerModelArgs(
+llama4_configs = {
+    "debugmodel": Llama4Model.Config(
         dim=256,
         n_layers=6,
-        n_heads=16,
         vocab_size=2048,
-        rope_theta=500000,
-        rope_scaling_args=RoPEScalingArgs(),
+        layer=Llama4TransformerBlock.Config(
+            every_n_layers_nope=4,
+            fixed_attn_block_size=256,
+            feed_forward=FeedForward.Config(
+                hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
+            ),
+            attention=GQAttention.Config(
+                n_heads=16,
+                attn_backend="flex",
+                attn_mask_type="block_causal",
+                rope_backend="complex",
+            ),
+            moe=MoE.Config(hidden_dim=compute_moe_hidden_dim(256)),
+        ),
+        rope=RoPE.Config(
+            dim=256 // 16,
+            max_seq_len=1048576,
+            theta=500000,
+            backend="complex",
+            scaling="llama",
+            scaling_factor=16.0,
+            high_freq_factor=1.0,
+        ),
     ),
-    "17bx16e": TransformerModelArgs(
+    "17bx16e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
-        n_heads=40,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.2,
-        multiple_of=2048,
-        rope_theta=500000,
-        rope_scaling_args=RoPEScalingArgs(),
-        max_seq_len=10485760,
-        moe_args=MoEArgs(num_experts=16),
-        interleave_moe_layer_step=1,
+        layer=Llama4TransformerBlock.Config(
+            every_n_layers_nope=4,
+            interleave_moe_layer_step=1,
+            moe=MoE.Config(
+                num_experts=16,
+                hidden_dim=compute_moe_hidden_dim(
+                    5120,
+                    multiple_of=2048,
+                    ffn_dim_multiplier=1.2,
+                    top_k=1,
+                    num_shared_experts=1,
+                ),
+            ),
+            feed_forward=FeedForward.Config(
+                hidden_dim=compute_ffn_hidden_dim(
+                    5120, multiple_of=2048, ffn_dim_multiplier=1.2
+                ),
+            ),
+            attention=GQAttention.Config(
+                n_heads=40,
+                n_kv_heads=8,
+                attn_backend="flex",
+                attn_mask_type="block_causal",
+                rope_backend="complex",
+            ),
+        ),
+        rope=RoPE.Config(
+            dim=5120 // 40,
+            max_seq_len=10485760,
+            theta=500000,
+            backend="complex",
+            scaling="llama",
+            scaling_factor=16.0,
+            high_freq_factor=1.0,
+        ),
     ),
-    "17bx128e": TransformerModelArgs(
+    "17bx128e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
-        n_heads=40,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.2,
-        multiple_of=2048,
-        rope_theta=500000,
-        moe_args=MoEArgs(num_experts=128),
-    ),
-    "debugmodel_irope": TransformerModelArgs(
-        dim=256,
-        n_layers=6,
-        n_heads=16,
-        vocab_size=2048,
-        rope_theta=500000,
-        rope_scaling_args=RoPEScalingArgs(),
-        every_n_layers_nope=4,
-        fixed_attn_block_size=256,
-        attn_type="flex",
-        attn_mask_type="block_causal",
-    ),
-    "17bx16e_irope": TransformerModelArgs(
-        dim=5120,
-        n_layers=48,
-        n_heads=40,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.2,
-        multiple_of=2048,
-        rope_theta=500000,
-        rope_scaling_args=RoPEScalingArgs(),
-        max_seq_len=10485760,
-        moe_args=MoEArgs(num_experts=16),
-        interleave_moe_layer_step=1,
-        every_n_layers_nope=4,
-        attn_type="flex",
-        attn_mask_type="block_causal",
-    ),
-    "17bx128e_irope": TransformerModelArgs(
-        dim=5120,
-        n_layers=48,
-        n_heads=40,
-        n_kv_heads=8,
-        ffn_dim_multiplier=1.2,
-        multiple_of=2048,
-        rope_theta=500000,
-        moe_args=MoEArgs(num_experts=128),
-        every_n_layers_nope=4,
-        attn_type="flex",
-        attn_mask_type="block_causal",
+        layer=Llama4TransformerBlock.Config(
+            every_n_layers_nope=4,
+            moe=MoE.Config(
+                num_experts=128,
+                hidden_dim=compute_moe_hidden_dim(
+                    5120,
+                    multiple_of=2048,
+                    ffn_dim_multiplier=1.2,
+                    top_k=1,
+                    num_shared_experts=1,
+                ),
+            ),
+            feed_forward=FeedForward.Config(
+                hidden_dim=compute_ffn_hidden_dim(
+                    5120, multiple_of=2048, ffn_dim_multiplier=1.2
+                ),
+            ),
+            attention=GQAttention.Config(
+                n_heads=40,
+                n_kv_heads=8,
+                attn_backend="flex",
+                attn_mask_type="block_causal",
+                rope_backend="complex",
+            ),
+        ),
+        rope=RoPE.Config(
+            dim=5120 // 40,
+            max_seq_len=1048576,
+            theta=500000,
+            backend="complex",
+            scaling="none",
+        ),
     ),
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_cls=Transformer,
-        model_args=llama4_args,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="llama4",
+        flavor=flavor,
+        model=llama4_configs[flavor],
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
-        build_optimizers_fn=build_optimizers_with_moe_load_balancing,
-        build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
-        build_validator_fn=build_validator,
+        post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=Llama4StateDictAdapter,
     )

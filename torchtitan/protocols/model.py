@@ -7,67 +7,37 @@
 from abc import abstractmethod
 from dataclasses import dataclass
 
-import torch
-import torch.nn as nn
-
-from torch.nn.attention.flex_attention import BlockMask
-
-from torchtitan.components.tokenizer import BaseTokenizer
-
-from torchtitan.config import JobConfig
-from torchtitan.models.attention import VarlenMetadata
+from .module import Module
 
 
-AttentionMasksType = dict[str, BlockMask] | BlockMask | VarlenMetadata
+class BaseModel(Module):
+    """Base class for all model classes.
 
+    Models inherit from BaseModel (which is Module = nn.Module + Configurable).
+    Each model defines a nested Config(BaseModel.Config) with model hyperparameters.
+    The model is constructed via ``config.build()``.
 
-@dataclass
-class BaseModelArgs:
-    """All ModelArgs should inherit from this class.
-
-    The only usage of this class is type checking but allows us to extend common
-    arguments to all models in the future.
+    All models must implement ``init_weights`` (from Module).
     """
 
-    _enforced: str = "This field is used to enforce all fields have defaults."
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        """Base config for all models.
 
-    @abstractmethod
-    def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
-        pass
-
-    @abstractmethod
-    def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
-        pass
-
-
-class ModelProtocol(nn.Module):
-    """Defines the interface for a model class.
-
-    This is used to enforce that all model classes have some methods that are
-    required by the trainer.
-
-    NOTE: We keep protocol name for backward compatibility even though it is
-          not a Protocol anymore.
-    """
-
-    def __init__(self, model_args: BaseModelArgs) -> None:
-        super().__init__()
-
-    @abstractmethod
-    def init_weights(self, buffer_device: torch.device | None = None) -> None:
-        """Initialize model weights.
-
-        Args:
-            buffer_device: Optional device to place buffers on during initialization.
+        Subclasses define model-specific hyperparameters.
         """
-        pass
 
-    def get_attention_masks(
-        self,
-        input_batch: torch.Tensor,
-        tokenizer: BaseTokenizer,
-        extra_inputs: dict[str, torch.Tensor] | None = None,
-    ) -> AttentionMasksType:
-        raise NotImplementedError(
-            "This model does not support attention masking/Flex Attention."
-        )
+        # TODO: This function violates encapsulation;
+        # maybe replace it with config passes from outside.
+        @abstractmethod
+        def update_from_config(
+            self,
+            *,
+            trainer_config,
+            **kwargs,
+        ) -> None:
+            pass
+
+        @abstractmethod
+        def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
+            pass

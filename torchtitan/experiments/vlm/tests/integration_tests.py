@@ -21,12 +21,11 @@ def build_vlm_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--job.custom_config_module torchtitan.experiments.vlm.job_config",
-                    "--model.name vlm",
-                    "--training.dataset cc12m-test",
+                    "--module vlm",
+                    "--config vlm_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
-                    "--data.max_patches_per_image 1024",
-                    "--data.max_images_per_batch 64",
+                    "--dataloader.max_patches_per_image 1024",
+                    "--dataloader.max_images_per_batch 64",
                 ],
             ],
             "VLM FSDP",
@@ -45,11 +44,6 @@ _TEST_SUITES_FUNCTION = {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
-    parser.add_argument(
-        "--config_path",
-        default="./tests/integration_tests/base_config.toml",
-        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
-    )
     parser.add_argument(
         "--test_name",
         default="all",

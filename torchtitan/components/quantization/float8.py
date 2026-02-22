@@ -3,20 +3,18 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from dataclasses import dataclass, field
 from functools import partial
+from typing import ClassVar, Literal
 
 import torch
 import torch._inductor.config
 import torch.nn as nn
-from torchtitan.components.quantization import (
-    FP8_GROUP_ALIGNMENT_SIZE,
-    QuantizationConverter,
-)
+from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
 
-from torchtitan.config.job_config import Float8Linear, JobConfig
+from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.moe.utils import set_token_group_alignment_size_m
-from torchtitan.protocols.model_converter import register_model_converter
+from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -25,14 +23,45 @@ from .utils import module_filter_fn
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
-class Float8LinearConverter(QuantizationConverter):
-    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        super().__init__(job_config, parallel_dims)
-        float8_config: Float8Linear = job_config.quantize.linear.float8
-        compile_config = job_config.compile
-        model_compile_enabled = (
-            compile_config.enable and "model" in compile_config.components
-        )
+class Float8LinearConverter(Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        _quantization_type: ClassVar[str] = "float8"
+
+        enable_fsdp_float8_all_gather: bool = False
+        """Whether enable float8 all-gather in FSDP, recommended for tensorwise scaling"""
+
+        precompute_float8_dynamic_scale_for_fsdp: bool = False
+        """Whether precompute float8 scales dynamically for FSDP, recommended for tensorwise scaling"""
+
+        recipe_name: Literal[
+            "tensorwise", "rowwise", "rowwise_with_gw_hp"
+        ] | None = None
+        """If specified, creates float8 config from recipe name"""
+
+        filter_fqns: list[str] = field(default_factory=list)
+        """
+        List of fully qualified names of modules to skip applying float8 training to.
+        nn.Linear modules with any dim size not divisible by 16 are always skipped due to hardware requirements.
+        Example: filter_fqns=["attention.wq", "attention.wk", "attention.wv", "output"]
+        """
+
+        emulate: bool = False
+        """
+        If True, emulation is used instead of hardware accelerated gemm. This is for test purpose only,
+        as the current CI does not have sm_89 capability, required by Float8.
+        Not compatible with torch.compile.
+        """
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        parallel_dims: ParallelDims,
+        model_compile_enabled: bool,
+    ):
+        self.enabled = False
+        float8_config = config
 
         if has_cuda_capability(8, 9) or (
             float8_config.emulate and not model_compile_enabled
@@ -68,7 +97,7 @@ class Float8LinearConverter(QuantizationConverter):
                 "with `float8_config.recipe_name` is not supported"
             )
 
-            self.config = TorchAOFloat8LinearConfig.from_recipe_name(
+            self.torchao_config = TorchAOFloat8LinearConfig.from_recipe_name(
                 float8_config.recipe_name
             )
             self.precompute_scale = False
@@ -88,7 +117,7 @@ class Float8LinearConverter(QuantizationConverter):
                 parallel_dims.dp_shard_enabled
                 and float8_config.enable_fsdp_float8_all_gather
             )
-            self.config = TorchAOFloat8LinearConfig(
+            self.torchao_config = TorchAOFloat8LinearConfig(
                 enable_fsdp_float8_all_gather=enable_fsdp_float8_all_gather,
                 emulate=float8_config.emulate,
             )
@@ -101,7 +130,7 @@ class Float8LinearConverter(QuantizationConverter):
 
         self.enabled = True
 
-    def _init_filter_fn(self, float8_config: Float8Linear):
+    def _init_filter_fn(self, float8_config: Config):
         # use auto_filter if filter_fqns "auto_filter_small_kn" is one of the given fqns.
         use_auto_filter = AUTO_FILTER_SMALL_KN_FLAG in float8_config.filter_fqns
         if use_auto_filter:
@@ -151,12 +180,12 @@ class Float8LinearConverter(QuantizationConverter):
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
         convert_to_float8_training(
             model,
-            config=self.config,
+            config=self.torchao_config,
             module_filter_fn=self.filter_fn,
         )
         logger.info(
             "Swapped to Float8Linear layers with enable_fsdp_float8_all_gather="
-            f"{self.config.enable_fsdp_float8_all_gather}"
+            f"{self.torchao_config.enable_fsdp_float8_all_gather}"
         )
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
@@ -173,14 +202,28 @@ class Float8LinearConverter(QuantizationConverter):
             precompute_float8_dynamic_scale_for_fsdp(m)
 
 
-class Float8GroupedMMConverter(QuantizationConverter):
-    def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
-        super().__init__(job_config, parallel_dims)
-        self.fqns = job_config.quantize.grouped_mm.float8.fqns
-        compile_config = job_config.compile
-        model_compile_enabled = (
-            compile_config.enable and "model" in compile_config.components
-        )
+class Float8GroupedMMConverter(Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        _quantization_type: ClassVar[str] = "float8"
+
+        fqns: list[str] | str = field(default_factory=list)
+        """
+        *Prototype feature, performance optimization still in progress*
+        Comma-separated list of fully qualified names of MoE Layers to apply FP8 dynamic quantization
+        on grouped GEMM operations.
+        This is a prototype feature that requires the torchao nightly build.
+        Example: fqns=["experts"]
+        """
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        parallel_dims: ParallelDims,
+        model_compile_enabled: bool,
+    ):
+        self.fqns = config.fqns
         if not has_cuda_capability(8, 9):
             raise ValueError("Float8 MoE training only supported on SM89 or later.")
 
@@ -191,10 +234,10 @@ class Float8GroupedMMConverter(QuantizationConverter):
 
         # Validate MoE training prototype limitations.
         assert (
-            job_config.parallelism.pipeline_parallel_degree == 1
+            not parallel_dims.pp_enabled
         ), "Float8 MoE training prototype does not yet support pipeline parallelism"
         assert (
-            job_config.parallelism.context_parallel_degree == 1
+            not parallel_dims.cp_enabled
         ), "Float8 MoE training prototype does not yet support context parallelism"
 
         # For fp8 grouped GEMM, token group sizes must be multiples of 16
@@ -235,5 +278,11 @@ class Float8GroupedMMConverter(QuantizationConverter):
         pass
 
 
-register_model_converter(Float8LinearConverter, "quantize.linear.float8")
-register_model_converter(Float8GroupedMMConverter, "quantize.grouped_mm.float8")
+def find_float8_linear_config(
+    converters: list,
+) -> Float8LinearConverter.Config | None:
+    """Find the Float8LinearConverter.Config in a list of converter configs, if any."""
+    return next(
+        (c for c in converters if isinstance(c, Float8LinearConverter.Config)),
+        None,
+    )

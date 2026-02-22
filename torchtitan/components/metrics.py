@@ -7,21 +7,19 @@
 import os
 import time
 from collections import namedtuple
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import JobConfig
+from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type, NoColor
-
-if TYPE_CHECKING:
-    from torchtitan.protocols import BaseModelArgs
 
 
 # named tuple for passing device memory stats for logging
@@ -134,7 +132,12 @@ class TensorBoardLogger(BaseLogger):
 class WandBLogger(BaseLogger):
     """Logger implementation for Weights & Biases."""
 
-    def __init__(self, log_dir: str, job_config: JobConfig, tag: str | None = None):
+    def __init__(
+        self,
+        log_dir: str,
+        config_dict: dict[str, Any] | None = None,
+        tag: str | None = None,
+    ):
         # Import wandb here to avoid startup import
         import wandb
 
@@ -156,7 +159,7 @@ class WandBLogger(BaseLogger):
             resume_from=os.getenv("WANDB_RESUME_FROM", None),
             fork_from=os.getenv("WANDB_FORK_FROM", None),
             dir=log_dir,
-            config=job_config.to_dict(),
+            config=config_dict,
         )
         logger.info("WandB logging enabled")
 
@@ -195,7 +198,7 @@ class LoggerContainer(BaseLogger):
 
 
 def ensure_pp_loss_visible(
-    parallel_dims: ParallelDims, job_config: JobConfig, color: Color | NoColor
+    *, parallel_dims: ParallelDims, pp_schedule: str, color: Color | NoColor
 ) -> None:
     """
     Ensures that the loss is visible on the console for pipeline-parallel training.
@@ -206,7 +209,7 @@ def ensure_pp_loss_visible(
     """
 
     # V Block Schedules return loss on rank 0
-    if job_config.parallelism.pipeline_parallel_schedule == "ZBVZeroBubble":
+    if pp_schedule == "ZBVZeroBubble":
         return
 
     # Calculate the rank where loss is visible (first rank of the last pipeline stage)
@@ -228,8 +231,9 @@ def ensure_pp_loss_visible(
 
 
 def _get_metrics_rank(
+    *,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    pp_schedule: str,
 ) -> int:
     """
     Determines which rank should log metrics.
@@ -245,7 +249,7 @@ def _get_metrics_rank(
         return 0
 
     # V Block Schedules return loss on rank 0
-    if job_config.parallelism.pipeline_parallel_schedule == "ZBVZeroBubble":
+    if pp_schedule == "ZBVZeroBubble":
         return 0
 
     # Calculate first rank of the last pipeline stage
@@ -254,98 +258,51 @@ def _get_metrics_rank(
     return (world_size // pp_size) * (pp_size - 1)
 
 
-def _build_metric_logger(
-    job_config: JobConfig, parallel_dims: ParallelDims, tag: str | None = None
-) -> BaseLogger:
-    """
-    Build an appropriate metric logger based on configuration.
-    """
-    metrics_config = job_config.metrics
-
-    # Log initial config state
-    logger.debug(
-        f"Building logger with config: wandb={metrics_config.enable_wandb}, "
-        f"tensorboard={metrics_config.enable_tensorboard}"
-    )
-
-    # Check if any logging backend is enabled
-    has_logging_enabled = (
-        metrics_config.enable_tensorboard or metrics_config.enable_wandb
-    )
-
-    # Determine if this rank should log
-    should_log = has_logging_enabled
-    if (not metrics_config.save_for_all_ranks) and should_log:
-        metrics_rank = _get_metrics_rank(parallel_dims, job_config)
-        should_log = torch.distributed.get_rank() == metrics_rank
-
-    logger.debug(
-        f"Logging decision: has_logging_enabled={has_logging_enabled}, should_log={should_log}"
-    )
-
-    if not should_log:
-        logger.debug("Returning BaseLogger due to should_log=False")
-        return BaseLogger()
-
-    # Setup logging directory
-    dump_dir = job_config.job.dump_folder
-    base_log_dir = os.path.join(
-        dump_dir, metrics_config.save_tb_folder, datetime.now().strftime("%Y%m%d-%H%M")
-    )
-
-    if job_config.fault_tolerance.enable:
-        base_log_dir = os.path.join(
-            base_log_dir,
-            f"replica_{job_config.fault_tolerance.replica_id}",
-        )
-
-    if metrics_config.save_for_all_ranks:
-        base_log_dir = os.path.join(
-            base_log_dir, f"rank_{torch.distributed.get_rank()}"
-        )
-
-    # Create logger container
-    logger_container = LoggerContainer()
-
-    # Create loggers in priority order
-    if metrics_config.enable_wandb:
-        logger.debug("Attempting to create WandB logger")
-        try:
-            wandb_logger = WandBLogger(base_log_dir, job_config, tag)
-            logger_container.add_logger(wandb_logger)
-        except Exception as e:
-            if "No module named 'wandb'" in str(e):
-                logger.error(
-                    "Failed to create WandB logger: No module named 'wandb'. Please install it using 'pip install wandb'."
-                )
-            else:
-                logger.error(f"Failed to create WandB logger: {e}")
-
-    if metrics_config.enable_tensorboard:
-        logger.debug("Creating TensorBoard logger")
-        tensorboard_logger = TensorBoardLogger(base_log_dir, tag)
-        logger_container.add_logger(tensorboard_logger)
-
-    if logger_container.number_of_loggers == 0:
-        logger.debug("No loggers enabled, returning an empty LoggerContainer")
-    return logger_container
-
-
-class MetricsProcessor:
+class MetricsProcessor(Configurable):
     """Metrics processor to processes the metrics and log metrics.
 
     The current MetricsProcessor log some metrics to STDOUT and some metrics to
     TensorBoard or WandB.
 
     Args:
-        job_config (JobConfig): Job configuration.
+        config (Config): Metrics configuration.
         parallel_dims (ParallelDims): Parallel dimensions.
-        tag (Optional[str]): Tag to use for TensorBoard or WandB. Defaults to None.
+        dump_folder (str): Base folder for log output.
+        pp_schedule (str): Pipeline parallel schedule name.
+        ft_enable (bool): Whether fault tolerance is enabled.
+        ft_replica_id (int): Fault tolerance replica ID.
+        config_dict (dict | None): Full job config dict for WandB logging.
+        tag (str | None): Tag to use for TensorBoard or WandB. Defaults to None.
     """
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        log_freq: int = 10
+        """How often to log metrics to TensorBoard, in iterations"""
+
+        enable_tensorboard: bool = False
+        """Whether to log metrics to TensorBoard"""
+
+        disable_color_printing: bool = False
+        """Whether to disable color printing in logs"""
+
+        save_tb_folder: str = "tb"
+        """Folder to dump TensorBoard states"""
+
+        save_for_all_ranks: bool = False
+        """
+        Whether to save TensorBoard/Wandb metrics only for rank 0 or for all ranks.
+        When this option is False and pipeline_parallel_degree is > 1, the metrics
+        component uses the 0th rank of the last stage pipeline group, which is the
+        only stage that computes loss metrics.
+        """
+
+        enable_wandb: bool = False
+        """Whether to log metrics to Weights & Biases"""
+
+    config: Config
     logger: BaseLogger
     parallel_dims: ParallelDims
-    job_config: JobConfig
     device_memory_monitor: DeviceMemoryMonitor
     color: utils.NoColor | utils.Color
 
@@ -361,20 +318,31 @@ class MetricsProcessor:
 
     def __init__(
         self,
-        job_config: JobConfig,
+        config: Config,
+        *,
         parallel_dims: ParallelDims,
+        dump_folder: str = "./outputs",
+        pp_schedule: str = "1F1B",
+        ft_enable: bool = False,
+        ft_replica_id: int = 0,
+        config_dict: dict[str, Any] | None = None,
         tag: str | None = None,
     ):
-        self.logger = _build_metric_logger(job_config, parallel_dims, tag)
+        self.logger = self._build_metric_logger(
+            config=config,
+            parallel_dims=parallel_dims,
+            dump_folder=dump_folder,
+            pp_schedule=pp_schedule,
+            ft_enable=ft_enable,
+            ft_replica_id=ft_replica_id,
+            config_dict=config_dict,
+            tag=tag,
+        )
         self.parallel_dims = parallel_dims
-        self.job_config = job_config
+        self.config = config
         self.device_memory_monitor = build_device_memory_monitor()
         # used for colorful printing
-        self.color = (
-            utils.NoColor()
-            if job_config.metrics.disable_color_printing
-            else utils.Color()
-        )
+        self.color = utils.NoColor() if config.disable_color_printing else utils.Color()
 
         self.gpu_peak_flops = utils.get_peak_flops(
             self.device_memory_monitor.device_name
@@ -391,7 +359,93 @@ class MetricsProcessor:
         self.model_parts = None
 
     def should_log(self, step: int) -> bool:
-        return step == 1 or step % self.job_config.metrics.log_freq == 0
+        return step == 1 or step % self.config.log_freq == 0
+
+    def _build_metric_logger(
+        self,
+        *,
+        config: Config,
+        parallel_dims: ParallelDims,
+        dump_folder: str,
+        pp_schedule: str,
+        ft_enable: bool = False,
+        ft_replica_id: int = 0,
+        config_dict: dict[str, Any] | None = None,
+        tag: str | None = None,
+    ) -> BaseLogger:
+        """
+        Build an appropriate metric logger based on configuration.
+        """
+        # Log initial config state
+        logger.debug(
+            f"Building logger with config: wandb={config.enable_wandb}, "
+            f"tensorboard={config.enable_tensorboard}"
+        )
+
+        # Check if any logging backend is enabled
+        has_logging_enabled = config.enable_tensorboard or config.enable_wandb
+
+        # Determine if this rank should log
+        should_log = has_logging_enabled
+        if (not config.save_for_all_ranks) and should_log:
+            metrics_rank = _get_metrics_rank(
+                parallel_dims=parallel_dims, pp_schedule=pp_schedule
+            )
+            should_log = torch.distributed.get_rank() == metrics_rank
+
+        logger.debug(
+            f"Logging decision: has_logging_enabled={has_logging_enabled}, should_log={should_log}"
+        )
+
+        if not should_log:
+            logger.debug("Returning BaseLogger due to should_log=False")
+            return BaseLogger()
+
+        # Setup logging directory
+        base_log_dir = os.path.join(
+            dump_folder,
+            config.save_tb_folder,
+            datetime.now().strftime("%Y%m%d-%H%M"),
+        )
+
+        if ft_enable:
+            base_log_dir = os.path.join(
+                base_log_dir,
+                f"replica_{ft_replica_id}",
+            )
+
+        if config.save_for_all_ranks:
+            base_log_dir = os.path.join(
+                base_log_dir, f"rank_{torch.distributed.get_rank()}"
+            )
+
+        # Create logger container
+        logger_container = LoggerContainer()
+
+        # Create loggers in priority order
+        if config.enable_wandb:
+            logger.debug("Attempting to create WandB logger")
+            try:
+                wandb_logger = WandBLogger(
+                    base_log_dir, config_dict=config_dict, tag=tag
+                )
+                logger_container.add_logger(wandb_logger)
+            except Exception as e:
+                if "No module named 'wandb'" in str(e):
+                    logger.error(
+                        "Failed to create WandB logger: No module named 'wandb'. Please install it using 'pip install wandb'."
+                    )
+                else:
+                    logger.error(f"Failed to create WandB logger: {e}")
+
+        if config.enable_tensorboard:
+            logger.debug("Creating TensorBoard logger")
+            tensorboard_logger = TensorBoardLogger(base_log_dir, tag)
+            logger_container.add_logger(tensorboard_logger)
+
+        if logger_container.number_of_loggers == 0:
+            logger.debug("No loggers enabled, returning an empty LoggerContainer")
+        return logger_container
 
     def log(
         self,
@@ -428,7 +482,7 @@ class MetricsProcessor:
         mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
         tflops = self.num_flops_per_token * tps / 1e12
 
-        time_end_to_end = time_delta / self.job_config.metrics.log_freq
+        time_end_to_end = time_delta / self.config.log_freq
         time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
         time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
 
@@ -515,23 +569,3 @@ class MetricsProcessor:
 
     def close(self):
         self.logger.close()
-
-
-def build_metrics_processor(
-    job_config: JobConfig,
-    parallel_dims: ParallelDims,
-    model_args: "BaseModelArgs | None" = None,
-    tag: str | None = None,
-) -> MetricsProcessor:
-    """Create a metrics processor.
-
-    Args:
-        job_config (JobConfig): Job configuration.
-        parallel_dims (ParallelDims): Parallel dimensions.
-        model_args (BaseModelArgs | None): Model-specific arguments. Defaults to None.
-        tag (str | None): Tag to use for TensorBoard or WandB. Defaults to None.
-
-    Returns:
-        MetricsProcessor: A metrics processor.
-    """
-    return MetricsProcessor(job_config, parallel_dims, tag)

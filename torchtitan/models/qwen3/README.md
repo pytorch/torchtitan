@@ -12,7 +12,7 @@
     - MoE models use Token Choice routing, which is using auxiluary-loss-free load balancing algorithm.
 
 
-Other model sizes are added to the args, but toml file configs need to be added and tested.
+Other model sizes are added to the configs, but config_registry entries need to be added and tested.
 
 ## Download Qwen3 tokenizer
 ```python scripts/download_hf_assets.py --repo_id <hf_repo_name> --assets tokenizer```
