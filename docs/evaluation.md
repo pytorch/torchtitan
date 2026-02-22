@@ -10,9 +10,10 @@ Below is an example validation config:
 ```toml
 [validation]
 enable = true
-dataset = "c4_validation"
 freq = 500
 steps = -1 # consumes the entire validation set
+[validation.data]
+name = "c4_validation"
 ```
 
 ## Third-Party Evaluation

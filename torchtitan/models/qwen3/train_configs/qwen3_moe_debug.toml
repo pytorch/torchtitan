@@ -31,7 +31,8 @@ local_batch_size = 4
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
 steps = 10
-dataset = "c4_test"
+[training.data]
+name = "c4"
 
 [parallelism]
 data_parallel_replicate_degree = 1

@@ -182,8 +182,10 @@ def build_text_dataloader(
         job_config: Job configuration containing dataset and DataLoader settings.
         infinite: Whether to loop the dataset infinitely.
     """
-    dataset_name = job_config.training.dataset
-    dataset_path = job_config.training.dataset_path
+    dataset_name = job_config.training.data.name
+    dataset_path = (
+        job_config.training.data.paths[0] if job_config.training.data.paths else None
+    )
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
 
@@ -198,7 +200,7 @@ def build_text_dataloader(
     )
 
     dataloader_kwargs = {
-        **asdict(job_config.training.dataloader),
+        **asdict(job_config.training.data.dataloader),
         "batch_size": batch_size,
     }
 
@@ -226,8 +228,12 @@ def build_text_validation_dataloader(
         job_config: Job configuration containing dataset and DataLoader settings.
         infinite: Whether to loop the dataset infinitely.
     """
-    dataset_name = job_config.validation.dataset
-    dataset_path = job_config.validation.dataset_path
+    dataset_name = job_config.validation.data.name
+    dataset_path = (
+        job_config.validation.data.paths[0]
+        if job_config.validation.data.paths
+        else None
+    )
     batch_size = job_config.validation.local_batch_size
     seq_len = job_config.validation.seq_len
 
@@ -242,7 +248,7 @@ def build_text_validation_dataloader(
     )
 
     dataloader_kwargs = {
-        **asdict(job_config.validation.dataloader),
+        **asdict(job_config.validation.data.dataloader),
         "batch_size": batch_size,
     }
 

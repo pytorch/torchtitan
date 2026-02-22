@@ -391,8 +391,11 @@ def build_mm_dataloader(
     Returns:
         DataLoader with appropriate parallelism handling.
     """
-    dataset_path = job_config.training.dataset_path
-    batch_size = job_config.training.local_batch_size
+    dataset_name = job_config.training.data.name
+    dataset_path = (
+        job_config.training.data.paths[0] if job_config.training.data.paths else None
+    )
+    batch_size: int = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
 
     max_images_per_batch = job_config.data.max_images_per_batch
@@ -405,7 +408,7 @@ def build_mm_dataloader(
     special_tokens = SpecialTokens.from_tokenizer(tokenizer)
 
     dataset = HuggingFaceMultiModalDataset(
-        dataset_name=job_config.training.dataset,
+        dataset_name=dataset_name,
         dataset_path=dataset_path,
         tokenizer=tokenizer,
         batch_size=batch_size,
@@ -431,7 +434,7 @@ def build_mm_dataloader(
     )
 
     dataloader_kwargs = {
-        **asdict(job_config.training.dataloader),
+        **asdict(job_config.training.data.dataloader),
         "batch_size": batch_size,
         "collate_fn": collate_fn,
     }

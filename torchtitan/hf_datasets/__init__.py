@@ -16,3 +16,11 @@ class DatasetConfig:
     path: str
     loader: Callable
     sample_processor: Callable
+
+
+@dataclass
+class MultiDatasetConfig:
+    paths: list[str]
+    weights: list[float]
+    loader: Callable
+    sample_processor: Callable

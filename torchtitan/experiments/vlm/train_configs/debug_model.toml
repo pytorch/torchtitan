@@ -43,8 +43,9 @@ local_batch_size = 32
 seq_len = 4096
 max_norm = 1.0  # grad norm clipping
 steps = 10
-# dataset = "obelics"
-dataset = "cc12m"
+[training.data]
+# name = "obelics"
+name = "cc12m"
 
 [data]
 max_patches_per_image = 1024

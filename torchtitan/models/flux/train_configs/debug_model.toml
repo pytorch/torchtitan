@@ -36,9 +36,10 @@ decay_ratio = 0.0  # no decay, stay stable during training
 local_batch_size = 4
 max_norm = 2.0  # grad norm clipping
 steps = 10
-dataset = "cc12m-test"
 classifier_free_guidance_prob = 0.447
 img_size = 256
+[training.data]
+name = "cc12m-test"
 
 [encoder]
 t5_encoder = "google/t5-v1_1-xxl"
@@ -75,6 +76,8 @@ denoising_steps = 4
 save_img_count = 1
 save_img_folder = "img"
 all_timesteps = false
+[validation.data]
+name = "coco-validation"
 
 [inference]
 save_img_folder = "inference_results"

@@ -60,7 +60,7 @@ class TestFluxDataLoader(unittest.TestCase):
                         f"--job.custom_config_module={path}",
                         "--training.img_size",
                         str(256),
-                        "--training.dataset",
+                        "--training.data.name",
                         dataset_name,
                         "--training.local_batch_size",
                         str(batch_size),
