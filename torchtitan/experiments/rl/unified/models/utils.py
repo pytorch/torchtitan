@@ -153,10 +153,17 @@ def load_model(
         qk_norm=True,
         depth_init=True,
         eos_id=getattr(hf_config, "eos_token_id", 151645),
+        enable_weight_tying=getattr(hf_config, "tie_word_embeddings", False),
     )
 
     # state_dict is in standard TorchTitan format (w1, w2, w3)
     state_dict = load_file(checkpoint_path)
+
+    # If weight tying is enabled but output.weight is missing from the checkpoint
+    # (HF models with tie_word_embeddings=True may not store lm_head.weight),
+    # synthesize it from tok_embeddings.weight so load_state_dict(strict=True) works.
+    if model_args.enable_weight_tying and "output.weight" not in state_dict:
+        state_dict["output.weight"] = state_dict["tok_embeddings.weight"]
 
     if model_mode == ModelMode.UNIFIED:
         from torchtitan.models.qwen3 import Qwen3Model
