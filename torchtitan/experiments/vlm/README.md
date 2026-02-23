@@ -55,3 +55,26 @@ We also need a pretrained vision encoder with support for native resolution and 
 - [ ] Compile for Encoder + Deocoder
 - [ ] Tensor Parallel
 - [ ] Pipeline Parallel
+
+
+## Supported Features Summary
+
+| Feature | Status | Notes |
+|---|---|---|
+| **FSDP** | ✅ | Encoder + Decoder |
+| **Context Parallel** | ✅ | LLM only (Encoder uses FlexAttention) |
+| **Tensor Parallel** | ❌ | Planned |
+| **Pipeline Parallel** | ❌ | Planned |
+| **torch.compile** | ❌ | Planned |
+| **FlexAttention** | 🚧 | Planned for variable seq len per image |
+| **Native Resolution** | ✅ | Variable image sizes in a batch |
+| **Native Aspect Ratio** | ✅ | No square crop required |
+| **Interleaved Data** | ✅ | Variable images + text positions |
+
+## Parity Checks
+
+No parity checks against HF VLM implementations have been published yet. Once weight conversion from HF is complete, forward-pass comparison against HF models (e.g., Qwen2-VL, LLaVA) should be performed.
+
+## Performance
+
+No performance benchmarks have been published yet. This experiment is under active development. Community contributions are welcome — see [`benchmarks/README.md`](/benchmarks/README.md) for submission guidelines.

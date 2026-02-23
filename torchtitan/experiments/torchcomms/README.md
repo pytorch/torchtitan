@@ -39,7 +39,7 @@ Locally tested with:
 
 ### Performance
 
-**Setup**: Similar setting as [docs/converging.md](../../docs/converging.md) based on [torchtitan/models/llama3/train_configs/llama3_8b.toml](../torchtitan/models/llama3/train_configs/llama3_8b.toml), but `training.local_batch_size = 1`
+**Setup**: Similar setting as [docs/converging.md](../../../docs/converging.md) based on [torchtitan/models/llama3/train_configs/llama3_8b.toml](../../models/llama3/train_configs/llama3_8b.toml), but `training.local_batch_size = 1`
 
 | Run Name    | Parallelism        | Distributed Library | Remarks               |
 | ----------- | ------------------ | ------------------- | --------------------- |
@@ -52,6 +52,10 @@ Locally tested with:
 
 ![Loss Curves](./asserts/images/loss_curves.png)
 
+
+### Parity Checks
+
+TorchComms is validated against the c10d.distributed baseline. Loss curves for matching configurations (e.g., DP8 with c10d vs. torchcomms) should converge identically. The loss curve comparison above demonstrates convergence parity.
 
 ### Known Issues
 

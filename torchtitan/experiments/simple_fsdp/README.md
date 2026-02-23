@@ -63,6 +63,14 @@ SimpleFSDP relies on compiler backend to perform optimizations (i.e., bucketing 
       --compile.backend "aot_eager" --compile.graph_passes "transformer_block_bucketing"
       ```
 
+### Parity Checks
+
+SimpleFSDP is validated via integration tests that compare loss curves against standard FSDP (PyTorch DTensor-based). The CI runs 8-GPU integration tests on each push to verify numerical parity.
+
+### Performance
+
+No dedicated performance benchmarks comparing SimpleFSDP vs standard FSDP have been published yet. The compiler-backend optimizations (auto-bucketing, transformer-block-bucketing) are expected to improve communication-computation overlap. Community benchmarks are welcome — see [`benchmarks/README.md`](/benchmarks/README.md) for submission guidelines.
+
 ### Citation
 
 If you find SimpleFSDP useful, please kindly consider citing the following paper:
