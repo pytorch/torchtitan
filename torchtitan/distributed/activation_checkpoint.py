@@ -17,7 +17,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 
-from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
+from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.tools.logging import logger
 
 
