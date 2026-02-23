@@ -34,19 +34,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-# TODO: Replace with ``from torchtitan.config import Configurable``
-# once the config branch lands.
-from torchtitan.experiments.rl.unified.configurable import Configurable
-
 # TODO: Replace with ``from torchtitan.trainer import Trainer``
 # once the config branch lands.  For now we use the existing JobConfig
 # as the trainer config type.
-from torchtitan.experiments.rl.unified.job_config import JobConfig
+from torchtitan.config.job_config import JobConfig
 
-
-# ---------------------------------------------------------------------------
-# Leaf data configs (plain dataclasses, not Configurable — no build() needed)
-# ---------------------------------------------------------------------------
+# TODO: Replace with ``from torchtitan.config import Configurable``
+# once the config branch lands.
+from torchtitan.experiments.rl.unified.configurable import Configurable
 
 
 @dataclass(kw_only=True, slots=True)
@@ -75,11 +70,6 @@ class PolicyOptimizationConfig:
 
     use_stable: bool = False
     """Use stable mean-centering GRPO instead of exponential weighting."""
-
-
-# ---------------------------------------------------------------------------
-# Top-level RL orchestrator
-# ---------------------------------------------------------------------------
 
 
 class RLTrainer(Configurable):
@@ -144,11 +134,6 @@ class RLTrainer(Configurable):
         # That will handle distributed init, model construction,
         # parallelisation, optimizer/LR-scheduler creation, checkpoint
         # loading, etc.
-
-
-# ---------------------------------------------------------------------------
-# Lazy default factory — resolved at runtime to break circular import
-# ---------------------------------------------------------------------------
 
 
 def _default_rl_generator_config():
