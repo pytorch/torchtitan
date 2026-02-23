@@ -313,7 +313,7 @@ class TokenChoiceTopKRouter(nn.Module):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = torch.mm(x, self.w1.transpose(-2, -1), out_dtype=self.gate_dtype)
+        scores = torch.mm(x.type(self.gate_dtype), self.gate.weight.transpose(-2, -1).type(self.gate_dtype))
         if self.gate.bias is not None:
             scores = scores + self.gate.bias.type(self.gate_dtype)
 
