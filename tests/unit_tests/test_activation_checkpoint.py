@@ -8,11 +8,12 @@ import unittest
 
 import torch
 import torch.nn as nn
+
+# o/w putting torch.ops.torch_attn._varlen_attn.default in sac list will hit error
+from torch.nn.attention.varlen import varlen_attn  # noqa
 from torch.utils.flop_counter import FlopCounterMode
-
-from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
+from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.distributed.activation_checkpoint import apply_ac
-
 
 # for selective op activation checkpointing
 _op_sac_save_list = {

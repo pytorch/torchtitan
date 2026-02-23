@@ -12,43 +12,26 @@ TORCH_DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
 }
 
-from .job_config import (
-    ActivationCheckpoint,
-    Checkpoint,
-    Comm,
-    Debug,
-    FaultTolerance,
-    Job,
-    JobConfig,
-    LRScheduler,
-    Metrics,
-    Model,
-    Optimizer,
-    Parallelism,
-    Profiling,
-    Quantize,
-    Training,
-    Validation,
+from .configs import (
+    ActivationCheckpointConfig,
+    CommConfig,
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
 )
+from .configurable import Configurable
 from .manager import ConfigManager
 
 __all__ = [
-    "JobConfig",
     "ConfigManager",
+    "Configurable",
     "TORCH_DTYPE_MAP",
-    "Job",
-    "Model",
-    "Optimizer",
-    "LRScheduler",
-    "Metrics",
-    "Checkpoint",
-    "ActivationCheckpoint",
-    "FaultTolerance",
-    "Quantize",
-    "Parallelism",
-    "Comm",
-    "Profiling",
-    "Training",
-    "Validation",
-    "Debug",
+    # Config dataclasses
+    "ActivationCheckpointConfig",
+    "CompileConfig",
+    "ParallelismConfig",
+    "CommConfig",
+    "TrainingConfig",
+    "DebugConfig",
 ]
