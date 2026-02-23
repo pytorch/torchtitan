@@ -132,5 +132,7 @@ class Trainer(Actor):
             "policy_version": self.policy_version,
             **loss_metrics,
         }
-        logger.debug(f"Process {os.getpid()} Finished training step {self.policy_version}")
+        logger.debug(
+            f"Process {os.getpid()} Finished training step {self.policy_version}"
+        )
         return metrics

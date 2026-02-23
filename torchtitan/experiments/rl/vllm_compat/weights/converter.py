@@ -12,9 +12,8 @@ This script provides bidirectional weight conversion:
 - torchtitan_to_vllm: Load weights from TorchTitan format and convert to vLLM format
 """
 
-from pathlib import Path
-
 import logging
+from pathlib import Path
 
 import torch
 

@@ -483,7 +483,9 @@ class Generator(Actor):
             max_tokens=self.max_new_tokens,
             n=1,
         )
-        outputs = self.vllm_engine.llm.generate(prompts, sampling_params, use_tqdm=False)
+        outputs = self.vllm_engine.llm.generate(
+            prompts, sampling_params, use_tqdm=False
+        )
         return [output.outputs[0].text for output in outputs]
 
     @endpoint

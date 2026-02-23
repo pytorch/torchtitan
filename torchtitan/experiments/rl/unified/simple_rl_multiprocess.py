@@ -26,13 +26,8 @@ from monarch.utils import setup_env_for_distributed
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.trainer import Trainer
 from torchtitan.experiments.rl.unified.models.utils import ModelMode
-from torchtitan.experiments.rl.unified.sum_digits import (
-    SumDigitsSpec,
-    extract_answer,
-)
-from torchtitan.experiments.rl.vllm_compat.simple_rl import (
-    download_and_convert_model,
-)
+from torchtitan.experiments.rl.unified.sum_digits import extract_answer, SumDigitsSpec
+from torchtitan.experiments.rl.vllm_compat.simple_rl import download_and_convert_model
 from vllm.model_executor.layers.batch_invariant import (
     init_batch_invariance,
     vllm_is_batch_invariant,
@@ -42,7 +37,13 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 logger = logging.getLogger(__name__)
 
 
-async def evaluate(generator, system_prompt: str, num_samples: int = 10, seed: int = 99, verbose: bool = True):
+async def evaluate(
+    generator,
+    system_prompt: str,
+    num_samples: int = 10,
+    seed: int = 99,
+    verbose: bool = True,
+):
     """Run evaluation using the Generator's vLLM engine.
 
     Args:
@@ -203,7 +204,9 @@ async def main():
     # Pre-training evaluation
     eval_samples = 20
     logger.info("Evaluating pre-training baseline...")
-    pre_eval = await evaluate(generator, system_prompt, num_samples=eval_samples, verbose=verbose)
+    pre_eval = await evaluate(
+        generator, system_prompt, num_samples=eval_samples, verbose=verbose
+    )
 
     # Training loop
     logger.info("=" * 80)
@@ -235,7 +238,9 @@ async def main():
                 answer = expected_answers[p]
                 extracted = extract_answer(batch.completions[idx])
                 comp = batch.completions[idx].replace("\n", " ")
-                logger.info(f"  [{mark}] {question} (expected={answer}, extracted={extracted})")
+                logger.info(
+                    f"  [{mark}] {question} (expected={answer}, extracted={extracted})"
+                )
                 logger.info(f"       {comp}")
 
         # Check for divergence
@@ -248,7 +253,9 @@ async def main():
     # Post-training evaluation
     logger.info("RL Training complete")
     logger.info("Evaluating post-training performance...")
-    post_eval = await evaluate(generator, system_prompt, num_samples=eval_samples, verbose=verbose)
+    post_eval = await evaluate(
+        generator, system_prompt, num_samples=eval_samples, verbose=verbose
+    )
 
     logger.info("=" * 80)
     logger.info(

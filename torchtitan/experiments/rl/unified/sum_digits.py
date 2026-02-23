@@ -46,7 +46,10 @@ def extract_answer(text: str) -> int | None:
     return int(numbers[-1]) if numbers else None
 
 
-_SYSTEM_PROMPT = """You are a helpful assistant. Solve the problem step by step. When you have your final answer, state it as [ANSWER] <number>. Do not write anything after the answer.
+_SYSTEM_PROMPT = """\
+You are a helpful assistant. Solve the problem step by step.
+When you have your final answer, state it as [ANSWER] <number>.
+Do not write anything after the answer.
 
 Example:
 User: What is the total digit sum of [12, 345, 67]?
@@ -70,7 +73,9 @@ class SumDigitsSpec:
         numbers = [self._rng.randint(10, 99) for _ in range(n)]
         answer = sum(int(d) for num in numbers for d in str(num))
         question = f"What is the total digit sum of {numbers}?"
-        return Task(question=question, correct_answer=answer, metadata={"numbers": numbers})
+        return Task(
+            question=question, correct_answer=answer, metadata={"numbers": numbers}
+        )
 
     def get_system_prompt(self) -> str:
         return _SYSTEM_PROMPT
@@ -101,7 +106,11 @@ def sum_digits_reward_function(
         reward = 1.0 if is_correct else -1.0
         # Format bonus: only if correct, exactly one [ANSWER] tag, and generation stops after it
         answer_tags = re.findall(r"\[ANSWER\]", completion)
-        if is_correct and len(answer_tags) == 1 and re.search(r"\[ANSWER\]\s*-?\d+\s*$", completion):
+        if (
+            is_correct
+            and len(answer_tags) == 1
+            and re.search(r"\[ANSWER\]\s*-?\d+\s*$", completion)
+        ):
             reward += 0.2
         rewards.append(reward)
     return torch.tensor(rewards, dtype=torch.float32)
