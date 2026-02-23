@@ -43,7 +43,7 @@ python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_mod
 
 Run with TP:
 ```bash
-python torchtitan/experiments/rl/unified/infer.py  --model-ckpt-path <path_to_model_checkpoint> --tensor-parallel-size 2
+python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint> --tensor-parallel-size 2
 
 ```
 
