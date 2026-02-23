@@ -26,7 +26,7 @@ import torchtitan.experiments.rl.unified  # noqa: F401 — registers models with
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
 from torchtitan.experiments.rl.unified.actors.generator import Generator
-from torchtitan.experiments.rl.unified.actors.trainer import RLPolicyTrainer
+from torchtitan.experiments.rl.unified.actors.trainer import Trainer
 from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_0_6b
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ async def main():
     # Spawn actors on trainer and generator mesh
     trainer = trainer_mesh.spawn(
         "trainer",
-        RLPolicyTrainer,
+        Trainer,
         config,
     )
 
