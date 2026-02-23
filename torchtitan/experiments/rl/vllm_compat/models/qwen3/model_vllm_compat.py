@@ -18,8 +18,9 @@ from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
     silu_and_mul_with_gradients,
 )
 
-from torchtitan.models.common import trunc_normal_
+from torchtitan.models.common import RoPE, trunc_normal_
 from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 
 # Import from main torchtitan
 from torchtitan.models.qwen3.model import Qwen3Model
@@ -27,48 +28,6 @@ from torchtitan.protocols.model import BaseModel
 
 # Import from local experiment's models
 from ..attention import VLLMCompatibleFlashAttention
-
-
-# RoPE functions (same as original)
-def precompute_rope_cache(
-    dim: int, max_seq_len: int, base: float = 1_000_000.0
-) -> torch.Tensor:
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(max_seq_len, dtype=freqs.dtype, device=freqs.device)
-    idx_theta = torch.outer(t, freqs).float()
-    freqs = torch.cat([idx_theta, idx_theta], dim=-1)
-    rope_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
-    return rope_cache
-
-
-def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def reshape_for_broadcast(rope_cache: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    """Reshape frequency tensor for broadcasting."""
-    ndim = x.ndim
-    assert ndim > 1
-    _, seqlen, _, head_dim = x.shape
-    rope_cache = rope_cache[0:seqlen]
-    assert rope_cache.shape == (seqlen, head_dim * 2)
-    shape = [-1, seqlen, 1, head_dim * 2]
-    return rope_cache.view(*shape)
-
-
-def apply_rotary_emb(
-    xq: torch.Tensor, xk: torch.Tensor, rope_cache: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    head_dim = xq.shape[-1]
-    rope_cache = reshape_for_broadcast(rope_cache, xq)
-    cos = rope_cache[..., :head_dim].to(dtype=xq.dtype, device=xq.device)
-    sin = rope_cache[..., head_dim:].to(dtype=xq.dtype, device=xq.device)
-    xq_out = (xq * cos) + (rotate_half(xq) * sin)
-    xk_out = (xk * cos) + (rotate_half(xk) * sin)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -146,33 +105,30 @@ class Attention(nn.Module):
 
     def __init__(self, model_args: Qwen3Model.Config):
         super().__init__()
-        self.n_heads = model_args.n_heads
+        attn_config = model_args.layer.attention
+        self.n_heads = attn_config.n_heads
         self.n_kv_heads = (
-            model_args.n_heads
-            if model_args.n_kv_heads is None
-            else model_args.n_kv_heads
+            attn_config.n_heads
+            if attn_config.n_kv_heads is None
+            else attn_config.n_kv_heads
         )
         self.n_rep = self.n_heads // self.n_kv_heads
-        self.head_dim = model_args.head_dim
+        self.head_dim = attn_config.head_dim
         self.scaling = self.head_dim**-0.5
 
         # QK norm (Qwen3 specific) - use vLLM's RMSNorm
-        if model_args.qk_norm:
-            self.q_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm_eps)
-            self.k_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm_eps)
+        if attn_config.qk_norm:
+            self.q_norm = VLLMRMSNorm(self.head_dim, eps=attn_config.norm_eps)
+            self.k_norm = VLLMRMSNorm(self.head_dim, eps=attn_config.norm_eps)
         else:
             self.q_norm = None
             self.k_norm = None
 
         # QKV projections
-        self.wq = nn.Linear(
-            model_args.dim, model_args.n_heads * self.head_dim, bias=False
-        )
+        self.wq = nn.Linear(model_args.dim, self.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(model_args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(
-            model_args.n_heads * self.head_dim, model_args.dim, bias=False
-        )
+        self.wo = nn.Linear(self.n_heads * self.head_dim, model_args.dim, bias=False)
 
         # Always use vLLM compatible flash attention
         self.inner_attention = VLLMCompatibleFlashAttention()
@@ -207,7 +163,7 @@ class Attention(nn.Module):
             xk = self.k_norm(xk)
 
         # Apply rotary embedding
-        xq, xk = apply_rotary_emb(xq, xk, rope_cache)
+        xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache)
 
         # Repeat k/v heads if needed
         keys = repeat_kv(xk, self.n_rep)
@@ -238,20 +194,20 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, layer_id: int, model_args: Qwen3Model.Config):
         super().__init__()
-        self.n_heads = model_args.n_heads
+        self.n_heads = model_args.layer.attention.n_heads
         self.dim = model_args.dim
 
         self.attention = Attention(model_args)
 
         # Use vLLM-compatible FFN with merged projections
         self.feed_forward = FeedForwardVLLMCompat(
-            dim=model_args.dim, hidden_dim=model_args.hidden_dim
+            dim=model_args.dim, hidden_dim=model_args.layer.feed_forward.hidden_dim
         )
 
         self.attention_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
         self.ffn_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
 
-        if model_args.depth_init:
+        if model_args.layer.depth_init:
             self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         else:
             self.weight_init_std = 0.02 / (2 * model_args.n_layers) ** 0.5
@@ -290,14 +246,11 @@ class Qwen3VLLMCompatModel(BaseModel):
         self.config = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
-        self.eos_id = model_args.eos_id
-        self.head_dim = model_args.head_dim
+        self.head_dim = model_args.layer.attention.head_dim
 
         self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
 
-        self.register_buffer(
-            "rope_cache", self._precompute_rope_cache(), persistent=False
-        )
+        self.rope = RoPE(model_args.rope)
 
         self.layers = torch.nn.ModuleDict()
         for layer_id in range(model_args.n_layers):
@@ -316,9 +269,8 @@ class Qwen3VLLMCompatModel(BaseModel):
         self,
         buffer_device: torch.device | None = None,
     ):
-        buffer_device = buffer_device or self.rope_cache.device
-        with torch.device(buffer_device):
-            self.rope_cache = self._precompute_rope_cache()
+        buffer_device = buffer_device or self.rope.cache.device
+        self.rope.init_weights(buffer_device=buffer_device)
         if self.tok_embeddings is not None:
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
@@ -338,13 +290,6 @@ class Qwen3VLLMCompatModel(BaseModel):
                 b=cutoff_factor * final_out_std,
             )
 
-    def _precompute_rope_cache(self) -> torch.Tensor:
-        return precompute_rope_cache(
-            self.config.head_dim,
-            self.config.max_seq_len,
-            self.config.rope_theta,
-        )
-
     def get_attention_masks(
         self,
         input_batch: torch.Tensor,
@@ -362,7 +307,7 @@ class Qwen3VLLMCompatModel(BaseModel):
         h = self.tok_embeddings(tokens) if self.tok_embeddings else tokens
 
         for layer in self.layers.values():
-            h = layer(h, self.rope_cache, attention_masks)
+            h = layer(h, self.rope.cache, attention_masks)
 
         h = self.norm(h) if self.norm else h
         output = self.output(h) if self.output else h

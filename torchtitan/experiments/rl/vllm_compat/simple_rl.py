@@ -34,7 +34,8 @@ from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
-from torchtitan.models.qwen3.model import Qwen3Model
+from torchtitan.models.common import FeedForward, GQAttention, RoPE
+from torchtitan.models.qwen3.model import Qwen3Model, Qwen3TransformerBlock
 from transformers import AutoConfig, AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -317,25 +318,40 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
     # Load HuggingFace config
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
-    # Create model args
+    # Create model args using the nested dataclass config structure
+    head_dim = getattr(
+        hf_config,
+        "head_dim",
+        hf_config.hidden_size // hf_config.num_attention_heads,
+    )
+    max_seq_len = getattr(hf_config, "max_position_embeddings", 32768)
+    rope_theta = hf_config.rope_theta
+
     model_args = Qwen3Model.Config(
         dim=hf_config.hidden_size,
         n_layers=hf_config.num_hidden_layers,
-        n_heads=hf_config.num_attention_heads,
-        n_kv_heads=hf_config.num_key_value_heads,
         vocab_size=hf_config.vocab_size,
-        head_dim=getattr(
-            hf_config,
-            "head_dim",
-            hf_config.hidden_size // hf_config.num_attention_heads,
-        ),
-        hidden_dim=hf_config.intermediate_size,
         norm_eps=hf_config.rms_norm_eps,
-        rope_theta=hf_config.rope_theta,
-        max_seq_len=getattr(hf_config, "max_position_embeddings", 32768),
-        qk_norm=True,
-        depth_init=True,
-        eos_id=getattr(hf_config, "eos_token_id", 151645),
+        layer=Qwen3TransformerBlock.Config(
+            norm_eps=hf_config.rms_norm_eps,
+            depth_init=True,
+            feed_forward=FeedForward.Config(hidden_dim=hf_config.intermediate_size),
+            attention=GQAttention.Config(
+                n_heads=hf_config.num_attention_heads,
+                n_kv_heads=hf_config.num_key_value_heads,
+                head_dim=head_dim,
+                qk_norm=True,
+                norm_eps=hf_config.rms_norm_eps,
+                attn_backend="sdpa",
+                rope_backend="cos_sin",
+            ),
+        ),
+        rope=RoPE.Config(
+            dim=head_dim,
+            max_seq_len=max_seq_len,
+            theta=rope_theta,
+            backend="cos_sin",
+        ),
     )
 
     # state_dict is in standard TorchTitan format (w1, w2, w3)
@@ -353,8 +369,6 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
         model.load_state_dict(vllm_compat_state, strict=False)
     else:
         # Use standard TorchTitan model
-        from torchtitan.models.qwen3 import Qwen3Model
-
         model = Qwen3Model(model_args)
         # Load standard TorchTitan format directly
         model.load_state_dict(state_dict, strict=False)

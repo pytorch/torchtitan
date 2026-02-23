@@ -17,7 +17,8 @@ from torchtitan.experiments.rl.vllm_compat.models.attention import (
 from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
-from torchtitan.models.qwen3.model import Qwen3Model
+from torchtitan.models.common import FeedForward, GQAttention, RoPE
+from torchtitan.models.qwen3.model import Qwen3Model, Qwen3TransformerBlock
 from transformers import AutoConfig
 
 logger = logging.getLogger(__name__)
@@ -70,13 +71,14 @@ def replace_with_vllm_attention(model, tp_degree=1):
             raise ValueError(f"Layer {layer_name} must have .attention attribute")
 
         # GQA
+        head_dim = model_args.layer.attention.head_dim
         vllm_attn = VLLMAttention(
             hidden_size=model_args.dim,
             num_heads=model_args.layer.attention.n_heads // tp_degree,
             num_kv_heads=num_kv_heads,
-            head_dim=model_args.head_dim,
+            head_dim=head_dim,
             layer_name=layer_name,
-            scale=model_args.head_dim**-0.5,
+            scale=head_dim**-0.5,
         )
 
         layer.attention.inner_attention = vllm_attn
@@ -131,26 +133,41 @@ def load_model(
     # TODO: do not depend on transformers.AutoConfig, use qwen_args directly
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
-    # Create model args
+    # Create model args using the nested dataclass config structure
+    head_dim = getattr(
+        hf_config,
+        "head_dim",
+        hf_config.hidden_size // hf_config.num_attention_heads,
+    )
+    max_seq_len = getattr(hf_config, "max_position_embeddings", 32768)
+    rope_theta = hf_config.rope_theta
+
     model_args = Qwen3Model.Config(
         dim=hf_config.hidden_size,
         n_layers=hf_config.num_hidden_layers,
-        n_heads=hf_config.num_attention_heads,
-        n_kv_heads=hf_config.num_key_value_heads,
         vocab_size=hf_config.vocab_size,
-        head_dim=getattr(
-            hf_config,
-            "head_dim",
-            hf_config.hidden_size // hf_config.num_attention_heads,
-        ),
-        hidden_dim=hf_config.intermediate_size,
         norm_eps=hf_config.rms_norm_eps,
-        rope_theta=hf_config.rope_theta,
-        max_seq_len=getattr(hf_config, "max_position_embeddings", 32768),
-        qk_norm=True,
-        depth_init=True,
-        eos_id=getattr(hf_config, "eos_token_id", 151645),
         enable_weight_tying=getattr(hf_config, "tie_word_embeddings", False),
+        layer=Qwen3TransformerBlock.Config(
+            norm_eps=hf_config.rms_norm_eps,
+            depth_init=True,
+            feed_forward=FeedForward.Config(hidden_dim=hf_config.intermediate_size),
+            attention=GQAttention.Config(
+                n_heads=hf_config.num_attention_heads,
+                n_kv_heads=hf_config.num_key_value_heads,
+                head_dim=head_dim,
+                qk_norm=True,
+                norm_eps=hf_config.rms_norm_eps,
+                attn_backend="sdpa",
+                rope_backend="cos_sin",
+            ),
+        ),
+        rope=RoPE.Config(
+            dim=head_dim,
+            max_seq_len=max_seq_len,
+            theta=rope_theta,
+            backend="cos_sin",
+        ),
     )
 
     # state_dict is in standard TorchTitan format (w1, w2, w3)
@@ -163,8 +180,6 @@ def load_model(
         state_dict["output.weight"] = state_dict["tok_embeddings.weight"]
 
     if model_mode == ModelMode.UNIFIED:
-        from torchtitan.models.qwen3 import Qwen3Model
-
         model = Qwen3Model(model_args)
         # Set global default dtype to bfloat16. This is needed because vLLM's Attention
         # layer uses torch.get_default_dtype() and it doesn't support float32
@@ -187,8 +202,6 @@ def load_model(
         model.load_state_dict(vllm_compat_state, strict=False)
     else:
         # Use standard TorchTitan model
-        from torchtitan.models.qwen3 import Qwen3Model
-
         model = Qwen3Model(model_args)
         # Load standard TorchTitan format directly
         model.load_state_dict(state_dict, strict=False)
