@@ -83,6 +83,8 @@ def _run_experts_for_loop(
     num_tokens_per_expert_list = num_tokens_per_expert.tolist()
 
     # side-effect code due to the usage of generate_permute_indices
+    # torch._check informs the compiler that the slicing is in-bounds,
+    # and the output shape is exactly total_tokens.
     total_tokens = sum(num_tokens_per_expert_list)
     torch._check(total_tokens >= 0)
     torch._check(total_tokens <= x.shape[0])
