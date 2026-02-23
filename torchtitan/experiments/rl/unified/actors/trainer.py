@@ -98,7 +98,7 @@ class Trainer(Actor):
         Returns:
             Training metrics
         """
-        logger.info(
+        logger.debug(
             f"Process {os.getpid()} Starting training for {self.policy_version} on trajectory:"
         )
         # Compute loss
@@ -132,5 +132,5 @@ class Trainer(Actor):
             "policy_version": self.policy_version,
             **loss_metrics,
         }
-        logger.info(f"Process {os.getpid()} Finished training step {self.policy_version}")
+        logger.debug(f"Process {os.getpid()} Finished training step {self.policy_version}")
         return metrics

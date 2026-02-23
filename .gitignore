@@ -45,3 +45,6 @@ Sessionx.vim
 
 # Vibe coding
 .claude
+
+/models/
+/converted/

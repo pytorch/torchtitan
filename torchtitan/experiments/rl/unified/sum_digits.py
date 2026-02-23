@@ -26,7 +26,7 @@ def extract_answer(text: str) -> int | None:
     2. "the answer is" / "answer:" patterns
     3. Last number in text
     """
-    # 1. [ANSWER] tag
+    # 1. [ANSWER] tag (last match, model may self-correct)
     answer_match = re.findall(r"\[ANSWER\]\s*(-?\d+)", text)
     if answer_match:
         return int(answer_match[-1])
@@ -97,9 +97,11 @@ def sum_digits_reward_function(
         prompt_idx = i // group_size
         expected = int(expected_answers[prompt_idx])
         extracted = extract_answer(completion)
-        reward = 1.0 if extracted == expected else -1.0
-        # Format bonus for using [ANSWER] tag
-        if re.search(r"\[ANSWER\]\s*-?\d+", completion):
+        is_correct = extracted == expected
+        reward = 1.0 if is_correct else -1.0
+        # Format bonus: only if correct, exactly one [ANSWER] tag, and generation stops after it
+        answer_tags = re.findall(r"\[ANSWER\]", completion)
+        if is_correct and len(answer_tags) == 1 and re.search(r"\[ANSWER\]\s*-?\d+\s*$", completion):
             reward += 0.2
         rewards.append(reward)
     return torch.tensor(rewards, dtype=torch.float32)

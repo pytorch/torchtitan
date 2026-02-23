@@ -14,7 +14,11 @@ This script provides bidirectional weight conversion:
 
 from pathlib import Path
 
+import logging
+
 import torch
+
+logger = logging.getLogger(__name__)
 from safetensors.torch import load_file, save_file
 
 
@@ -187,7 +191,7 @@ def torchtitan_to_vllm(titan_state: dict[str, torch.Tensor]) -> dict[str, torch.
             else:
                 print(f"Warning: No mapping found for {titan_key}")
 
-    print(f"Converted to {len(vllm_state)} vLLM weights")
+    logger.debug(f"Converted to {len(vllm_state)} vLLM weights")
     return vllm_state
 
 

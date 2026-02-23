@@ -151,7 +151,7 @@ class VLLMRolloutEngine:
         # to achieve the weight communication.
         # only generator rank 0 saves the weight
         if torch.distributed.get_rank() == 0:
-            logger.info(f"Saving weights to {checkpoint_path}")
+            logger.debug(f"Saving weights to {checkpoint_path}")
             if len(shard_files) == 2 and os.path.exists(index_file):
                 # Load the index to see which weights go in which shard
                 with open(index_file, "r") as f:
@@ -194,7 +194,7 @@ class VLLMRolloutEngine:
 
         # Synchronize all ranks before reloading to ensure rank 0 finished writing
         torch.distributed.barrier()
-        logger.info(
+        logger.debug(
             f"[Rank {torch.distributed.get_rank()}] Synchronized after weight save"
         )
 
@@ -239,16 +239,16 @@ class VLLMRolloutEngine:
 
         # Access model from vLLM engine
         model = self.llm.llm_engine.model_executor.driver_worker.get_model()
-        params = dict(model.named_parameters())
+        vllm_params = dict(model.named_parameters())
 
         for name, new_weight in titan_state.items():
             # TorchTitanVLLMModelWrapper stores the model as self.model,
             # so parameters have a "model." prefix
             param_name = f"model.{name}"
-            if param_name in params:
-                param = params[param_name]
-                new_w = new_weight.to(device=param.device, dtype=param.dtype)
-                param.data.copy_(new_w)
+            if param_name in vllm_params:
+                vllm_param = vllm_params[param_name]
+                new_w = new_weight.to(device=vllm_param.device, dtype=vllm_param.dtype)
+                vllm_param.data.copy_(new_w)
 
     @torch.no_grad()
     def generate(
@@ -285,7 +285,7 @@ class VLLMRolloutEngine:
             prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
         )
 
-        outputs = self.llm.generate(prompt_texts, sampling_params)
+        outputs = self.llm.generate(prompt_texts, sampling_params, use_tqdm=False)
 
         # Extract completions and log probs
         completions = []
@@ -405,7 +405,7 @@ class Generator(Actor):
     @endpoint
     async def generate(self) -> None:
         """Generate trajectories and compute rewards/advantages."""
-        logger.info(
+        logger.debug(
             f"Process {os.getpid()} Starting generation (policy v{self.policy_version})..."
         )
         async with self.cond:
@@ -466,7 +466,7 @@ class Generator(Actor):
             self.state = GeneratorState.READY_TO_UPDATE
             self.cond.notify_all()
 
-            logger.info(
+            logger.debug(
                 f"Process {os.getpid()} Finished generation (policy v{self.policy_version})..."
             )
             return trajectory
@@ -486,7 +486,7 @@ class Generator(Actor):
             max_tokens=self.max_new_tokens,
             n=1,
         )
-        outputs = self.vllm_engine.llm.generate(prompts, sampling_params)
+        outputs = self.vllm_engine.llm.generate(prompts, sampling_params, use_tqdm=False)
         return [output.outputs[0].text for output in outputs]
 
     @endpoint
@@ -503,6 +503,6 @@ class Generator(Actor):
             self.policy_version = version
             self.state = GeneratorState.READY_TO_GENERATE
             self.cond.notify_all()
-            logger.info(
+            logger.debug(
                 f"Process {os.getpid()} Generator updating weights to policy v{version}..."
             )

@@ -42,7 +42,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 logger = logging.getLogger(__name__)
 
 
-async def evaluate(generator, system_prompt: str, num_samples: int = 10, seed: int = 99):
+async def evaluate(generator, system_prompt: str, num_samples: int = 10, seed: int = 99, verbose: bool = True):
     """Run evaluation using the Generator's vLLM engine.
 
     Args:
@@ -71,20 +71,22 @@ async def evaluate(generator, system_prompt: str, num_samples: int = 10, seed: i
         correct += int(is_correct)
         format_ok += int(has_tag)
 
-        mark = "Y" if is_correct else "N"
-        logger.info(f"  [{mark}] Q: {task.question}")
-        logger.info(f"       A: {response_text[:200]}")
-        logger.info(f"       extracted={extracted} expected={task.correct_answer}")
+        if verbose:
+            mark = "+" if is_correct else "-"
+            logger.info(f"  [{mark}] Q: {task.question}")
+            logger.info(f"       A: {response_text[:200]}")
+            logger.info(f"       extracted={extracted} expected={task.correct_answer}")
 
     result = {
         "accuracy": correct / num_samples,
         "correct": correct,
         "total": num_samples,
         "format_rate": format_ok / num_samples,
+        "format_ok": format_ok,
     }
     logger.info(
-        f"Eval: {result['accuracy']:.0%} ({result['correct']}/{result['total']}) "
-        f"format={result['format_rate']:.0%}"
+        f"Eval: Accuracy={result['accuracy']:.0%} ({result['correct']}/{result['total']}) "
+        f"Format={result['format_rate']:.0%} ({result['format_ok']}/{result['total']})"
     )
     return result
 
@@ -98,13 +100,16 @@ async def main():
 
     # Training config
     group_size = 8
-    num_steps = 20
+    num_steps = 12
     learning_rate = 5e-6
     max_new_tokens = 256
 
     # GRPO config
     use_stable_grpo = False
     grpo_beta = 0.1
+
+    # Whether to log samples per step in eval and training
+    verbose = False
 
     # Task config
     num_prompts = 5
@@ -196,12 +201,12 @@ async def main():
     await generator.update.call(0, initial_weights)
 
     # Pre-training evaluation
-    eval_samples = 10
+    eval_samples = 20
     logger.info("Evaluating pre-training baseline...")
-    pre_eval = await evaluate(generator, system_prompt, num_samples=eval_samples)
+    pre_eval = await evaluate(generator, system_prompt, num_samples=eval_samples, verbose=verbose)
 
     # Training loop
-    logger.info("\n" + "=" * 80)
+    logger.info("=" * 80)
     logger.info(f"Starting RL training for {num_steps} steps")
     logger.info("=" * 80)
 
@@ -220,15 +225,18 @@ async def main():
             f"Correct: {correct_count}/{total_count}"
         )
         # Show one sample per prompt
-        for p in range(num_prompts):
-            idx = p * group_size  # first sample for this prompt
-            rew = batch.rewards[idx].item()
-            mark = "+" if rew > 0 else "-"
-            # Extract question from prompt (after system prompt)
-            question = prompt_texts[p].split("\n\n")[-1]
-            answer = expected_answers[p]
-            comp = batch.completions[idx].replace("\n", " ")[:120]
-            logger.info(f"  [{mark}] {question} (expected={answer}) -> {comp}")
+        if verbose:
+            for p in range(num_prompts):
+                idx = p * group_size  # first sample for this prompt
+                rew = batch.rewards[idx].item()
+                mark = "+" if rew > 0 else "-"
+                # Extract question from prompt (after system prompt)
+                question = prompt_texts[p].split("\n\n")[-1]
+                answer = expected_answers[p]
+                extracted = extract_answer(batch.completions[idx])
+                comp = batch.completions[idx].replace("\n", " ")
+                logger.info(f"  [{mark}] {question} (expected={answer}, extracted={extracted})")
+                logger.info(f"       {comp}")
 
         # Check for divergence
         if not torch.isfinite(torch.tensor(metrics["loss"])):
@@ -239,14 +247,16 @@ async def main():
 
     # Post-training evaluation
     logger.info("Evaluating post-training performance...")
-    post_eval = await evaluate(generator, system_prompt, num_samples=eval_samples)
+    post_eval = await evaluate(generator, system_prompt, num_samples=eval_samples, verbose=verbose)
 
-    logger.info("\n" + "=" * 80)
+    logger.info("=" * 80)
     logger.info(
-        f"Pre-training:  {pre_eval['accuracy']:.0%} ({pre_eval['correct']}/{pre_eval['total']})"
+        f"Pre-training:  Accuracy={pre_eval['accuracy']:.0%} ({pre_eval['correct']}/{pre_eval['total']}) "
+        f"Format={pre_eval['format_rate']:.0%} ({pre_eval['format_ok']}/{pre_eval['total']})"
     )
     logger.info(
-        f"Post-training: {post_eval['accuracy']:.0%} ({post_eval['correct']}/{post_eval['total']})"
+        f"Post-training: Accuracy={post_eval['accuracy']:.0%} ({post_eval['correct']}/{post_eval['total']}) "
+        f"Format={post_eval['format_rate']:.0%} ({post_eval['format_ok']}/{post_eval['total']})"
     )
     logger.info("=" * 80)
 

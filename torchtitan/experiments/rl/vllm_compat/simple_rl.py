@@ -17,8 +17,11 @@ This demonstrates:
 7. Optional real dataset support (GSM8K math dataset)
 """
 
+import logging
 import os
 import re
+
+logger = logging.getLogger(__name__)
 
 import torch
 import torch.nn.functional as F
@@ -775,14 +778,14 @@ def compute_policy_gradient_loss_vllm(
             deltas = (vllm_lps_f32 - titan_lps_f32).abs()
             max_delta = deltas.max().item()
             avg_delta = deltas.mean().item()
-            print(
+            logger.debug(
                 f"  ⚠ vLLM-TorchTitan logprobs differ: {num_different}/{len(first_sample_deltas)} tokens"
             )
-            print(f"    Max delta: {max_delta:.6e}, Avg delta: {avg_delta:.6e}")
-            print(
+            logger.debug(f"    Max delta: {max_delta:.6e}, Avg delta: {avg_delta:.6e}")
+            logger.debug(
                 f"    vLLM logprobs:     {[f'{lp:.10f}' for lp in vllm_lps_f32[:5].tolist()]}"
             )
-            print(
+            logger.debug(
                 f"    TorchTitan logprobs: {[f'{lp:.10f}' for lp in titan_lps_f32[:5].tolist()]}"
             )
 
