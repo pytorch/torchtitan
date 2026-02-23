@@ -28,7 +28,7 @@ from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.grader import Grader
-from torchtitan.experiments.rl.unified.actors.trainer import RLPolicyTrainer
+from torchtitan.experiments.rl.unified.actors.trainer import Trainer
 from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_0_6b
 
 logger = logging.getLogger(__name__)
@@ -84,7 +84,7 @@ async def main():
     # across ranks — spawning them concurrently can cause cross-rank deadlocks.
     trainer = trainer_mesh.spawn(
         "trainer",
-        RLPolicyTrainer,
+        Trainer,
         config,
     )
 

@@ -40,7 +40,7 @@ from torchtitan.tools import utils
 logger = logging.getLogger(__name__)
 
 
-class RLPolicyTrainer(Actor):
+class Trainer(Actor):
     """
     Updates policy based on collected trajectories using TorchTitan components.
 
@@ -190,7 +190,7 @@ class RLPolicyTrainer(Actor):
         self.generator: Optional[Any] = None
 
         logger.info(
-            f"RLPolicyTrainer initialized: "
+            f"Trainer initialized: "
             f"group_size={self.group_size}, grpo_beta={self.grpo_beta}, "
             f"use_stable_grpo={self.use_stable_grpo}"
         )
