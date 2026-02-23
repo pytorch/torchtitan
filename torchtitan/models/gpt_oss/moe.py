@@ -7,8 +7,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from collections.abc import Callable
+
+from dataclasses import dataclass
 
 import torch
 from torch import nn
