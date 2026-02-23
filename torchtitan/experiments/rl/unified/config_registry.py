@@ -21,6 +21,7 @@ JobConfig`` with ``from torchtitan.trainer import Trainer``.
 from torchtitan.config.job_config import (
     ActivationCheckpoint,
     Checkpoint,
+    JobConfig,
     LRScheduler,
     Model,
     Optimizer,
@@ -34,7 +35,6 @@ from torchtitan.experiments.rl.unified.configs import (
     RLTrainer,
     VLLMSamplingConfig,
 )
-from torchtitan.experiments.rl.unified.job_config import JobConfig
 
 
 def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
