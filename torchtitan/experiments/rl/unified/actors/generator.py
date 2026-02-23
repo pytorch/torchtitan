@@ -20,7 +20,10 @@ from torchtitan.distributed import utils as dist_utils
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
 
-from torchtitan.experiments.rl.unified.sum_digits import sum_digits_reward_function
+from torchtitan.experiments.rl.sum_digits import (
+    extract_answer,
+    sum_digits_reward_function,
+)
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
     compute_grpo_advantages_stable,
@@ -350,37 +353,34 @@ class Generator(Actor):
 
     Args:
         model_path: Path to HuggingFace model
-        prompt_texts: List of prompt strings
-        expected_answers: List of expected answers
         group_size: Number of samples per prompt
         max_new_tokens: Max tokens to generate
         temperature: Sampling temperature
         grpo_beta: Beta for GRPO advantages
         use_stable_grpo: Whether to use stable GRPO
         tp_size: Tensor Parallel size
+        log_samples: Whether to log per-sample outputs each step
     """
 
     def __init__(
         self,
         model_path: str,
-        prompt_texts: List[str],
-        expected_answers: List[str],
         group_size: int = 8,
         max_new_tokens: int = 20,
         temperature: float = 1.0,
         grpo_beta: float = 0.1,
         use_stable_grpo: bool = False,
         tp_size: int = 1,
+        log_samples: bool = False,
     ):
         self.model_path = model_path
-        self.prompt_texts = prompt_texts
-        self.expected_answers = expected_answers
         self.group_size = group_size
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.grpo_beta = grpo_beta
         self.use_stable_grpo = use_stable_grpo
         self.tp_size = tp_size
+        self.log_samples = log_samples
 
         # Initialize distributed environment for SPMD generator
         world_size = dist_utils.init_distributed(
@@ -400,8 +400,15 @@ class Generator(Actor):
         logger.info("Generator initialized with vLLM engine")
 
     @endpoint
-    async def generate(self) -> None:
-        """Generate trajectories and compute rewards/advantages."""
+    async def generate(
+        self, prompt_texts: List[str], expected_answers: List[str]
+    ) -> None:
+        """Generate trajectories and compute rewards/advantages.
+
+        Args:
+            prompt_texts: List of prompt strings for this step
+            expected_answers: List of expected answer strings (one per prompt)
+        """
         logger.debug(
             f"Process {os.getpid()} Starting generation (policy v{self.policy_version})..."
         )
@@ -419,7 +426,7 @@ class Generator(Actor):
                 vllm_token_log_probs,
                 prompt_token_ids,
             ) = self.vllm_engine.generate(
-                self.prompt_texts,
+                prompt_texts,
                 self.max_new_tokens,
                 self.temperature,
                 n_samples_per_prompt=self.group_size,
@@ -427,7 +434,7 @@ class Generator(Actor):
 
             # Compute rewards
             rewards = self.reward_fn(
-                completions, self.expected_answers, self.group_size
+                completions, expected_answers, self.group_size
             )
 
             # Normalize rewards
@@ -447,6 +454,21 @@ class Generator(Actor):
                 advantages = compute_grpo_advantages(
                     rewards_normalized, self.group_size, beta=self.grpo_beta
                 )
+
+            # Log one sample per prompt
+            if self.log_samples:
+                for p in range(len(prompt_texts)):
+                    idx = p * self.group_size
+                    rew = rewards[idx].item()
+                    mark = "+" if rew > 0 else "-"
+                    question = prompt_texts[p].split("\n\n")[-1]
+                    answer = expected_answers[p]
+                    extracted = extract_answer(completions[idx])
+                    comp = completions[idx].replace("\n", " ")
+                    logger.info(
+                        f"  [{mark}] {question} (expected={answer}, extracted={extracted})"
+                    )
+                    logger.info(f"       {comp}")
 
             # Create trajectory data
             trajectory = TrajectoryData(

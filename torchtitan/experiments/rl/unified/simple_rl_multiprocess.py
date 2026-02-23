@@ -26,7 +26,7 @@ from monarch.utils import setup_env_for_distributed
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.trainer import Trainer
 from torchtitan.experiments.rl.unified.models.utils import ModelMode
-from torchtitan.experiments.rl.unified.sum_digits import extract_answer, SumDigitsSpec
+from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsSpec
 from torchtitan.experiments.rl.vllm_compat.simple_rl import download_and_convert_model
 from vllm.model_executor.layers.batch_invariant import (
     init_batch_invariance,
@@ -42,12 +42,12 @@ async def evaluate(
     system_prompt: str,
     num_samples: int = 10,
     seed: int = 99,
-    verbose: bool = True,
+    log_samples_per_step: bool = True,
 ):
     """Run evaluation using the Generator's vLLM engine.
 
     Args:
-        generator: Generator actor (has generate_text endpoint)
+        generator: Generator actor
         system_prompt: System prompt for the task
         num_samples: Number of eval samples
         seed: RNG seed (different from training seed to avoid overlap)
@@ -72,7 +72,7 @@ async def evaluate(
         correct += int(is_correct)
         format_ok += int(has_tag)
 
-        if verbose:
+        if log_samples_per_step:
             mark = "+" if is_correct else "-"
             logger.info(f"  [{mark}] Q: {task.question}")
             logger.info(f"       A: {response_text[:200]}")
@@ -110,7 +110,7 @@ async def main():
     grpo_beta = 0.1
 
     # Whether to log samples per step in eval and training
-    verbose = False
+    log_samples_per_step = False
 
     # Task config
     num_prompts = 5
@@ -140,18 +140,9 @@ async def main():
         model_name, cache_dir, output_dir
     )
 
-    # Generate prompts from task spec
+    # Task spec
     task_spec = SumDigitsSpec(seed=42)
     system_prompt = task_spec.get_system_prompt()
-
-    prompt_texts = []
-    expected_answers = []
-    for _ in range(num_prompts):
-        task = task_spec.generate_task()
-        prompt_texts.append(system_prompt + "\n\n" + task.question)
-        expected_answers.append(str(task.correct_answer))
-
-    logger.info(f"Generated {len(prompt_texts)} sum_digits prompts")
 
     # Create process meshes
     trainer_mesh = this_host().spawn_procs(per_host={"gpus": 2})
@@ -187,14 +178,13 @@ async def main():
         "generator",
         Generator,
         model_path,
-        prompt_texts,
-        expected_answers,
         group_size,
         max_new_tokens,
         1.0,  # temperature
         grpo_beta,
         use_stable_grpo,
         generator_tp_size,
+        log_samples_per_step,
     )
 
     # Initialize generator with trainer weights
@@ -205,7 +195,7 @@ async def main():
     eval_samples = 20
     logger.info("Evaluating pre-training baseline...")
     pre_eval = await evaluate(
-        generator, system_prompt, num_samples=eval_samples, verbose=verbose
+        generator, system_prompt, num_samples=eval_samples, log_samples_per_step=log_samples_per_step
     )
 
     # Training loop
@@ -214,8 +204,16 @@ async def main():
     logger.info("=" * 80)
 
     for step in range(num_steps):
+        # Generate new prompts for every step
+        prompt_texts = []
+        expected_answers = []
+        for _ in range(num_prompts):
+            task = task_spec.generate_task()
+            prompt_texts.append(system_prompt + "\n\n" + task.question)
+            expected_answers.append(str(task.correct_answer))
+
         # Fully sync RL loop
-        batch = generator.generate.call().get().item(gpus=0)
+        batch = generator.generate.call(prompt_texts, expected_answers).get().item(gpus=0)
         metrics = trainer.step.call(batch).get().item(gpus=0)
         weights = trainer.get_weights.call().get().item(gpus=0)
         await generator.update.call(metrics["policy_version"], weights)
@@ -227,22 +225,6 @@ async def main():
             f"Reward: {metrics['reward_mean']:+.3f} | "
             f"Correct: {correct_count}/{total_count}"
         )
-        # Show one sample per prompt
-        if verbose:
-            for p in range(num_prompts):
-                idx = p * group_size  # first sample for this prompt
-                rew = batch.rewards[idx].item()
-                mark = "+" if rew > 0 else "-"
-                # Extract question from prompt (after system prompt)
-                question = prompt_texts[p].split("\n\n")[-1]
-                answer = expected_answers[p]
-                extracted = extract_answer(batch.completions[idx])
-                comp = batch.completions[idx].replace("\n", " ")
-                logger.info(
-                    f"  [{mark}] {question} (expected={answer}, extracted={extracted})"
-                )
-                logger.info(f"       {comp}")
-
         # Check for divergence
         if not torch.isfinite(torch.tensor(metrics["loss"])):
             logger.info("\n" + "!" * 80)
@@ -254,7 +236,7 @@ async def main():
     logger.info("RL Training complete")
     logger.info("Evaluating post-training performance...")
     post_eval = await evaluate(
-        generator, system_prompt, num_samples=eval_samples, verbose=verbose
+        generator, system_prompt, num_samples=eval_samples, log_samples_per_step=log_samples_per_step
     )
 
     logger.info("=" * 80)
