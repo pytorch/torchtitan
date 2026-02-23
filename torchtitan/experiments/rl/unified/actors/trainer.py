@@ -10,16 +10,11 @@ from dataclasses import replace
 from typing import Any, Optional
 
 import torch
-import torch.distributed.checkpoint as dcp
 import torchtitan.protocols.train_spec as train_spec_module
 from monarch.actor import Actor, endpoint
 
 from torch.distributed._tensor import DTensor
-from torch.distributed.checkpoint.state_dict import (
-    get_model_state_dict,
-    set_model_state_dict,
-    StateDictOptions,
-)
+
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.unified.actors.grader import Episodes
@@ -28,14 +23,11 @@ from torchtitan.experiments.rl.unified.actors.utils import (
     compute_token_log_probs,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.unified.job_config import JobConfig
+from torchtitan.experiments.rl.unified.configs import RLTrainer
 from torchtitan.experiments.rl.unified.models.utils import (
     replace_with_vllm_compatible_flash_attention,
 )
-from torchtitan.experiments.rl.vllm_compat.simple_rl import (
-    compute_grpo_advantages,
-    compute_grpo_advantages_stable,
-)
+
 from torchtitan.tools import utils
 
 logger = logging.getLogger(__name__)
@@ -66,31 +58,42 @@ def _set_nccl_determinism_envs() -> None:
     os.environ["NCCL_SOCKET_NTHREADS"] = "1"
 
 
-class Trainer(Actor):
+class RLPolicyTrainer(Actor):
     """
     Updates policy based on collected trajectories using TorchTitan components.
 
     This trainer uses TorchTitan's train_spec, ParallelDims, and optimizer
     components for model initialization and parallelization.
 
+    Receives the top-level ``RLTrainer.Config`` and reads policy trainer
+    settings (batch_invariant_mode, policy_optimization) directly from it,
+    plus model / optimizer / parallelism settings from the nested
+    ``config.trainer``.
+
     Args:
-        job_config: JobConfig dataclass containing all configuration
+        config: Top-level RLTrainer.Config containing all configuration.
     """
 
     def __init__(
         self,
-        job_config: JobConfig,
+        config: RLTrainer.Config,
     ):
-        self.job_config = job_config
+        self.config = config
+        trainer_cfg = config.trainer
 
-        # GRPO config for advantage computation
-        self.group_size = job_config.policy_optimization.grpo_group_size
-        self.grpo_beta = job_config.policy_optimization.grpo_beta
-        self.use_stable_grpo = job_config.policy_optimization.use_stable_grpo
+        # Extract needed fields from config
+        model_path = trainer_cfg.checkpoint.initial_load_path  # path to HF checkpoint
+        learning_rate = trainer_cfg.optimizer.lr
+        self.ddp_size = trainer_cfg.parallelism.data_parallel_replicate_degree
+        self.tp_size = trainer_cfg.parallelism.tensor_parallel_degree
+
+        # Policy optimization settings from top-level config
+        self.group_size = config.policy_optimization.group_size
+        self.grpo_beta = config.policy_optimization.beta
+        self.use_stable_grpo = config.policy_optimization.use_stable
 
         # Batch invariant mode: set NCCL determinism env vars
-        policy_opt = job_config.policy_optimization
-        if policy_opt.batch_invariant_mode:
+        if config.batch_invariant_mode:
             _set_nccl_determinism_envs()
 
         # Device setup
@@ -104,10 +107,10 @@ class Trainer(Actor):
         if torch.distributed.is_initialized():
             world_size = torch.distributed.get_world_size()
         else:
-            world_size = dist_utils.init_distributed(job_config.comm)
+            world_size = dist_utils.init_distributed(trainer_cfg.comm)
 
         # Build parallel dims
-        parallelism_config = job_config.parallelism
+        parallelism_config = trainer_cfg.parallelism
         self.parallel_dims = ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
@@ -120,8 +123,8 @@ class Trainer(Actor):
         )
 
         # Enable PyTorch determinism when batch invariant mode is on
-        if policy_opt.batch_invariant_mode:
-            debug_config = replace(job_config.debug, deterministic=True)
+        if config.batch_invariant_mode:
+            debug_config = replace(trainer_cfg.debug, deterministic=True)
             dist_utils.set_determinism(
                 self.parallel_dims,
                 self.device,
@@ -130,13 +133,13 @@ class Trainer(Actor):
             )
 
         # Get train spec for the model
-        self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
+        self.train_spec = train_spec_module.get_train_spec(trainer_cfg.model.name)
 
         # Build model using train_spec
-        model_args = self.train_spec.model_args[job_config.model.flavor]
-        model_args.update_from_config(job_config)
+        model_args = self.train_spec.model_args[trainer_cfg.model.flavor]
+        model_args.update_from_config(trainer_cfg)
         self.model_args = model_args
-        self.hf_assets_path = job_config.model.hf_assets_path
+        self.hf_assets_path = trainer_cfg.model.hf_assets_path
 
         # Initialize state dict adapter for HF checkpoint loading
         if self.train_spec.state_dict_adapter is not None:
@@ -148,7 +151,7 @@ class Trainer(Actor):
 
         # Build model with meta init
         with torch.device("meta"):
-            with utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]):
+            with utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_cfg.training.dtype]):
                 model = self.train_spec.model_cls(model_args)
 
         # Replace attention with vLLM compatible attention for RL training
@@ -163,7 +166,7 @@ class Trainer(Actor):
         )
 
         model = parallelize_qwen3(
-            model, self.parallel_dims, job_config, is_trainer=True
+            model, self.parallel_dims, trainer_cfg, is_trainer=True
         )
 
         # Initialize model weights on device
@@ -172,8 +175,8 @@ class Trainer(Actor):
             model.init_weights(buffer_device=None)
 
         # Load initial weights from checkpoint if specified
-        if job_config.checkpoint.initial_load_path:
-            self._load_initial_weights(model, job_config.checkpoint.initial_load_path)
+        if trainer_cfg.checkpoint.initial_load_path:
+            self._load_initial_weights(model, trainer_cfg.checkpoint.initial_load_path)
 
         model.train()
         self.model = model
@@ -182,23 +185,23 @@ class Trainer(Actor):
         # Create reference model for KL divergence (frozen copy of initial policy)
         # Build a separate model instance without DDP since it has no trainable params
         with torch.device("meta"):
-            with utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]):
+            with utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_cfg.training.dtype]):
                 ref_model = self.train_spec.model_cls(model_args)
 
         replace_with_vllm_compatible_flash_attention(ref_model)
 
         # Use parallelize_qwen3 (TP only, no FSDP) for ref_model since it's for inference only
         ref_model = parallelize_qwen3(
-            ref_model, self.parallel_dims, job_config, is_trainer=True
+            ref_model, self.parallel_dims, trainer_cfg, is_trainer=True
         )
 
         ref_model.to_empty(device=device_type)
         with torch.no_grad():
             ref_model.init_weights(buffer_device=None)
         # Load weights from the trained model (use strict=False for parallelized state dict)
-        if job_config.checkpoint.initial_load_path:
+        if trainer_cfg.checkpoint.initial_load_path:
             self._load_initial_weights(
-                ref_model, job_config.checkpoint.initial_load_path
+                ref_model, trainer_cfg.checkpoint.initial_load_path
             )
         for p in ref_model.parameters():
             p.requires_grad = False
@@ -207,79 +210,22 @@ class Trainer(Actor):
 
         # Build optimizer using train_spec
         self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config.optimizer, self.parallel_dims
+            self.model_parts, trainer_cfg.optimizer, self.parallel_dims
         )
 
         # Build LR schedulers using train_spec
         self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
-            self.optimizers, job_config.lr_scheduler, job_config.training.steps
+            self.optimizers, trainer_cfg.lr_scheduler, trainer_cfg.training.steps
         )
 
         self.policy_version = 0
         self.generator: Optional[Any] = None
 
         logger.info(
-            f"Trainer initialized with TorchTitan trainer, "
-            f"model={job_config.model.name}, flavor={job_config.model.flavor}, "
+            f"RLPolicyTrainer initialized: "
             f"group_size={self.group_size}, grpo_beta={self.grpo_beta}, "
             f"use_stable_grpo={self.use_stable_grpo}"
         )
-
-    def _load_initial_weights(self, model: torch.nn.Module, model_path: str) -> None:
-        """Load initial weights from HuggingFace checkpoint using state dict adapter."""
-        logger.info(f"Loading initial weights from {model_path}")
-
-        if self.sd_adapter is None:
-            raise RuntimeError(
-                "Cannot load HF checkpoint: state_dict_adapter is not defined in train_spec"
-            )
-
-        # Get the current model state dict
-        state_dict = get_model_state_dict(model)
-
-        # Convert to HF format, load from checkpoint, then convert back
-        hf_state_dict = self.sd_adapter.to_hf(state_dict)
-        hf_storage_reader = self.sd_adapter.get_hf_storage_reader(model_path)
-
-        dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
-
-        native_state_dict = self.sd_adapter.from_hf(hf_state_dict)
-        set_model_state_dict(
-            model,
-            model_state_dict=native_state_dict,
-            options=StateDictOptions(strict=False),
-        )
-        logger.info("Initial weights loaded successfully")
-
-    def _compute_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
-        """
-        Compute advantages from rewards using GRPO. Normalizes rewards and computes group-relative advantages.
-
-        Args:
-            rewards: Raw rewards tensor [batch_size]
-
-        Returns:
-            Advantages tensor [batch_size]
-        """
-        # Normalize rewards for stability
-        reward_mean = rewards.mean()
-        reward_std = rewards.std()
-        if reward_std > 1e-8:
-            rewards_normalized = (rewards - reward_mean) / reward_std
-        else:
-            rewards_normalized = rewards - reward_mean
-
-        # Compute advantages using GRPO
-        if self.use_stable_grpo:
-            advantages = compute_grpo_advantages_stable(
-                rewards_normalized, self.group_size
-            )
-        else:
-            advantages = compute_grpo_advantages(
-                rewards_normalized, self.group_size, beta=self.grpo_beta
-            )
-
-        return advantages
 
     @endpoint
     async def get_weights(self) -> dict:
@@ -355,13 +301,14 @@ class Trainer(Actor):
         )
 
         # Update weights using torchtitan optimizers
+        trainer_cfg = self.config.trainer
         self.optimizers.zero_grad()
         loss.backward()
 
         # Gradient clipping
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
-            self.job_config.training.max_norm,
+            trainer_cfg.training.max_norm,
             foreach=True,
             pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
         )
