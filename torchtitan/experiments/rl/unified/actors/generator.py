@@ -285,6 +285,7 @@ class VLLMEngine(Configurable):
         sampling_params = SamplingParams(
             temperature=temperature,
             max_tokens=max_new_tokens,
+            n=n_samples_per_prompt,
             seed=42,
             logprobs=1,
             prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
@@ -311,31 +312,26 @@ class VLLMEngine(Configurable):
         for output in all_outputs:
             prompt_token_ids = output.prompt_token_ids
 
-            # Each output now has exactly 1 sample (we submitted multiple requests)
-            assert (
-                len(output.outputs) == 1
-            ), f"Expected 1 output, got {len(output.outputs)}"
-            sample = output.outputs[0]
+            for sample in output.outputs:
+                completions.append(sample.text)
 
-            completions.append(sample.text)
+                # Store prompt tokens for this sample
+                prompt_token_ids_list.append(prompt_token_ids)
 
-            # Store prompt tokens for this sample
-            prompt_token_ids_list.append(prompt_token_ids)
+                # Extract token IDs (generated tokens only)
+                token_ids = sample.token_ids
+                token_ids_list.append(token_ids)
 
-            # Extract token IDs (generated tokens only)
-            token_ids = sample.token_ids
-            token_ids_list.append(token_ids)
+                # Extract per-token log probs
+                per_token_log_probs = [
+                    list(logprob_dict.values())[0].logprob
+                    for logprob_dict in sample.logprobs
+                ]
+                token_log_probs_list.append(per_token_log_probs)
 
-            # Extract per-token log probs
-            per_token_log_probs = [
-                list(logprob_dict.values())[0].logprob
-                for logprob_dict in sample.logprobs
-            ]
-            token_log_probs_list.append(per_token_log_probs)
-
-            # Sum log probs across generated tokens
-            total_log_prob = sum(per_token_log_probs)
-            log_probs_list.append(total_log_prob)
+                # Sum log probs across generated tokens
+                total_log_prob = sum(per_token_log_probs)
+                log_probs_list.append(total_log_prob)
 
         log_probs = torch.tensor(log_probs_list, dtype=torch.float32)
 
