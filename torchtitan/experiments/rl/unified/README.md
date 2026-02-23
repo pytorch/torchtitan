@@ -38,12 +38,12 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torch
 
 4. Run inference:
 ```bash
-python torchtitan/experiments/rl/unified/infer.py
+python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint>
 ```
 
 Run with TP:
 ```bash
-python torchtitan/experiments/rl/unified/infer.py --tensor-parallel-size 2
+python torchtitan/experiments/rl/unified/infer.py  --model-ckpt-path <path_to_model_checkpoint> --tensor-parallel-size 2
 
 ```
 
