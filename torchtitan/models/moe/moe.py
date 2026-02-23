@@ -25,6 +25,8 @@ class MoEArgs:
     score_func: Literal["softmax", "sigmoid"] = "sigmoid"
     route_norm: bool = False
     route_scale: float = 1.0
+    router_gate_dtype: torch.dtype = torch.bfloat16
+    scores_dtype: torch.dtype = torch.float32
     gate_bias: bool = False
     score_before_experts: bool = True
 
@@ -215,6 +217,8 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid"],
         route_norm: bool,
         route_scale: float,
+        scores_dtype: torch.dtype,
+        gate_dtype: torch.dtype,
         gate_bias: bool,
         _debug_force_load_balance: bool = False,
     ):
@@ -227,6 +231,8 @@ class TokenChoiceTopKRouter(nn.Module):
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
+        self.scores_dtype = scores_dtype
+        self.gate_dtype = gate_dtype
         self._debug_force_load_balance = _debug_force_load_balance
 
     def _debug_force_load_balance_routing(
@@ -307,9 +313,9 @@ class TokenChoiceTopKRouter(nn.Module):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = self.gate(x)
-
-        dtype = scores.dtype
+        scores = torch.mm(x, self.w1.transpose(-2, -1), out_dtype=self.gate_dtype)
+        if self.gate.bias is not None:
+            scores = scores + self.gate.bias.type(self.gate_dtype)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.score_func == "sigmoid":
@@ -319,7 +325,7 @@ class TokenChoiceTopKRouter(nn.Module):
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        scores = scores.to(dtype)
+        scores = scores.type(self.scores_dtype)
 
         scores_for_choice = scores if expert_bias is None else scores + expert_bias
         # Apply node-limited routing if configured
@@ -440,9 +446,12 @@ class MoE(nn.Module):
             score_func=moe_args.score_func,
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
+            scores_dtype=moe_args.scores_dtype,
+            gate_dtype=moe_args.router_gate_dtype,
             gate_bias=moe_args.gate_bias,
             _debug_force_load_balance=moe_args._debug_force_load_balance,
         )
+        self.scores_dtype = moe_args.scores_dtype
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
         self.shared_experts = (
             FeedForward(dim=dim, hidden_dim=hidden_dim * moe_args.num_shared_experts)
@@ -518,7 +527,7 @@ class MoE(nn.Module):
 
         if self.score_before_experts:
             routed_input = (
-                routed_input.to(torch.float32)
+                routed_input.type(self.scores_dtype)
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
@@ -544,8 +553,9 @@ class MoE(nn.Module):
             out_experts = (
                 torch.bmm(
                     top_scores.reshape(-1, 1, self.router.top_k),
-                    routed_output_unsorted,
+                    routed_output_unsorted.type(self.scores_dtype),
                 )
+                .type(x.dtype)
                 .squeeze(1)
             )
         else:
