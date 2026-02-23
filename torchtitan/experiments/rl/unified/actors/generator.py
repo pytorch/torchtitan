@@ -32,9 +32,6 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
 
-# Suppress noisy vLLM logs during engine creation/reload
-logging.getLogger("vllm").setLevel(logging.WARNING)
-
 
 @dataclass
 class TrajectoryData:
