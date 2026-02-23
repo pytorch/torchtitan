@@ -433,9 +433,7 @@ class Generator(Actor):
             )
 
             # Compute rewards
-            rewards = self.reward_fn(
-                completions, expected_answers, self.group_size
-            )
+            rewards = self.reward_fn(completions, expected_answers, self.group_size)
 
             # Normalize rewards
             reward_mean = rewards.mean()

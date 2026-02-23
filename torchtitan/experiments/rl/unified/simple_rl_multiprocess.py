@@ -23,10 +23,10 @@ import re
 import torch
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
+from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsSpec
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.trainer import Trainer
 from torchtitan.experiments.rl.unified.models.utils import ModelMode
-from torchtitan.experiments.rl.sum_digits import extract_answer, SumDigitsSpec
 from torchtitan.experiments.rl.vllm_compat.simple_rl import download_and_convert_model
 from vllm.model_executor.layers.batch_invariant import (
     init_batch_invariance,
@@ -195,7 +195,10 @@ async def main():
     eval_samples = 20
     logger.info("Evaluating pre-training baseline...")
     pre_eval = await evaluate(
-        generator, system_prompt, num_samples=eval_samples, log_samples_per_step=log_samples_per_step
+        generator,
+        system_prompt,
+        num_samples=eval_samples,
+        log_samples_per_step=log_samples_per_step,
     )
 
     # Training loop
@@ -213,7 +216,9 @@ async def main():
             expected_answers.append(str(task.correct_answer))
 
         # Fully sync RL loop
-        batch = generator.generate.call(prompt_texts, expected_answers).get().item(gpus=0)
+        batch = (
+            generator.generate.call(prompt_texts, expected_answers).get().item(gpus=0)
+        )
         metrics = trainer.step.call(batch).get().item(gpus=0)
         weights = trainer.get_weights.call().get().item(gpus=0)
         await generator.update.call(metrics["policy_version"], weights)
@@ -236,7 +241,10 @@ async def main():
     logger.info("RL Training complete")
     logger.info("Evaluating post-training performance...")
     post_eval = await evaluate(
-        generator, system_prompt, num_samples=eval_samples, log_samples_per_step=log_samples_per_step
+        generator,
+        system_prompt,
+        num_samples=eval_samples,
+        log_samples_per_step=log_samples_per_step,
     )
 
     logger.info("=" * 80)
