@@ -15,19 +15,21 @@ This demonstrates:
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
 Command to run:
-python3 torchtitan/experiments/rl/unified/simple_grpo.py \
-    --job.config_file torchtitan/experiments/rl/unified/run_configs/qwen3_0.6b.toml
+python3 torchtitan/experiments/rl/unified/simple_grpo.py
 """
+
 import asyncio
 import logging
 
 import torch
+
+import torchtitan.experiments.rl.unified  # noqa: F401 — registers models with vLLM
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
-from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.grader import Grader
-from torchtitan.experiments.rl.unified.actors.trainer import Trainer
+from torchtitan.experiments.rl.unified.actors.trainer import RLPolicyTrainer
+from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_0_6b
 
 logger = logging.getLogger(__name__)
 
@@ -35,18 +37,21 @@ logger = logging.getLogger(__name__)
 async def main():
     """Run the distributed RL training loop using Monarch."""
 
-    # Step 1: Load job config using config manager
-    config_manager = ConfigManager()
-    job_config = config_manager.parse_args()
+    # Step 1: Load config from config_registry
+    # TODO: Once the config branch lands, replace with:
+    #     from torchtitan.config.manager import ConfigManager
+    #     config = ConfigManager().parse_args()
+    config = rl_grpo_qwen3_0_6b()
+    trainer_cfg = config.trainer
 
-    # compute world size for trainer and generator
+    # Compute world size for trainer and generator
     # TODO: refine the world size computation and check
-    trainer_world_size = (
-        job_config.parallelism.data_parallel_replicate_degree
-        * job_config.parallelism.tensor_parallel_degree
-    )
+    trainer_ddp_size = trainer_cfg.parallelism.data_parallel_replicate_degree
+    trainer_tp_size = trainer_cfg.parallelism.tensor_parallel_degree
+    trainer_world_size = trainer_ddp_size * trainer_tp_size
+
     # RL Training config
-    num_steps = job_config.training.steps
+    num_steps = trainer_cfg.training.steps
 
     # Use fake dataset for test. TODO: Implement real RL dataloader.
     logger.info("Using default prompts")
@@ -79,15 +84,15 @@ async def main():
     # across ranks — spawning them concurrently can cause cross-rank deadlocks.
     trainer = trainer_mesh.spawn(
         "trainer",
-        Trainer,
-        job_config,  # Pass full job_config
+        RLPolicyTrainer,
+        config,
     )
 
     # Spawn grader on trainer mesh (no collective ops in init, safe to co-spawn)
     grader = trainer_mesh.spawn(
         "grader",
         Grader,
-        job_config,  # Pass full job_config
+        config,
     )
 
     # Wait for trainer to be fully initialized on all ranks
@@ -102,9 +107,10 @@ async def main():
     generator = trainer_mesh.spawn(
         "generator",
         Generator,
-        job_config,  # Pass full job_config
-        prompt_texts,
-        expected_answers,
+        config.generator,
+        rl_config=config,
+        prompt_texts=prompt_texts,
+        expected_answers=expected_answers,
     )
 
     # Initialize generator with trainer weights.
