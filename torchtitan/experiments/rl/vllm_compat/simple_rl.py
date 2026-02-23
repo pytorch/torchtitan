@@ -770,7 +770,7 @@ def compute_policy_gradient_loss_vllm(
         bitwise_identical = torch.equal(vllm_lps_f32, titan_lps_f32)
 
         if bitwise_identical:
-            print(
+            logger.debug(
                 f"  ✓ vLLM-TorchTitan bitwise determinism verified: {len(first_sample_deltas)} tokens match exactly"
             )
         else:

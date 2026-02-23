@@ -121,7 +121,7 @@ async def main():
 
     init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
     batch_invariant = vllm_is_batch_invariant()
-    mode = ModelMode.VLLM_COMPAT
+    mode = ModelMode.UNIFIED
 
     # Set up batch invariant
     if batch_invariant:
@@ -246,6 +246,7 @@ async def main():
             break
 
     # Post-training evaluation
+    logger.info("RL Training complete")
     logger.info("Evaluating post-training performance...")
     post_eval = await evaluate(generator, system_prompt, num_samples=eval_samples, verbose=verbose)
 
