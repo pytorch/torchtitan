@@ -544,30 +544,40 @@ class Transformer(ModelProtocol):
         tokenizer: BaseTokenizer,
         extra_inputs: dict[str, torch.Tensor] | None = None,
     ) -> AttentionMasksType:
-        mask_mods = [get_causal_mask_mod()]
-        match self.model_args.attn_mask_type:
-            case "causal":
-                B = 1
-            case "block_causal":
-                assert tokenizer.eos_id is not None
-                mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
-                B = input_batch.shape[0]
-            case _:
-                raise ValueError(
-                    f"Unknown attention mask type: {self.model_args.attn_mask_type}"
+        match self.model_args.attn_type:
+            case "flex":
+                mask_mods = [get_causal_mask_mod()]
+                match self.model_args.attn_mask_type:
+                    case "causal":
+                        B = 1
+                    case "block_causal":
+                        assert tokenizer.eos_id is not None
+                        mask_mods.append(
+                            get_document_mask_mod(input_batch, tokenizer.eos_id)
+                        )
+                        B = input_batch.shape[0]
+                    case _:
+                        raise ValueError(
+                            f"Unknown attention mask type: {self.model_args.attn_mask_type}"
+                        )
+                rope_mask_mod = and_masks(
+                    *mask_mods,
+                    get_fixed_block_mask_mod(self.model_args.fixed_attn_block_size),
                 )
-
-        rope_mask_mod = and_masks(
-            *mask_mods,
-            get_fixed_block_mask_mod(self.model_args.fixed_attn_block_size),
-        )
-        nope_mask_mod = and_masks(*mask_mods)
-
-        seqlen = input_batch.shape[1]
-        return {
-            "rope": create_attention_mask(rope_mask_mod, B, None, seqlen, seqlen),
-            "nope": create_attention_mask(nope_mask_mod, B, None, seqlen, seqlen),
-        }
+                nope_mask_mod = and_masks(*mask_mods)
+                seqlen = input_batch.shape[1]
+                return {
+                    "rope": create_attention_mask(
+                        rope_mask_mod, B, None, seqlen, seqlen
+                    ),
+                    "nope": create_attention_mask(
+                        nope_mask_mod, B, None, seqlen, seqlen
+                    ),
+                }
+            case "sdpa":
+                raise TypeError("SDPA attention does not require attention masks")
+            case _:
+                raise ValueError(f"Unknown attention type: {self.model_args.attn_type}")
 
     def forward(
         self,
