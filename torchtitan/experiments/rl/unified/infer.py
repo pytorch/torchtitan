@@ -8,12 +8,11 @@
 """
 Example inference script using TorchTitan models with vLLM LLMEngine.
 
-This script uses JobConfig loaded from a TOML file to configure both
+This script uses the RL unified config_registry to configure both
 the vLLM engine and sampling parameters.
 
-Run: torchrun --nproc_per_node=2 \
-      torchtitan/experiments/rl/unified/infer.py \
-      --job.config_file torchtitan/experiments/rl/unified/run_configs/qwen3_0.6b.toml
+Run: torchrun --nproc_per_node=<world_size> \
+      torchtitan/experiments/rl/unified/infer.py
 """
 import os
 
@@ -22,10 +21,10 @@ import os
 # See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-from torchtitan.config import ConfigManager
-
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
+
+from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_0_6b
 
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.logger import init_logger
@@ -36,32 +35,32 @@ logger = init_logger(__name__)
 
 def generate():
 
-    config_manager = ConfigManager()
-    job_config = config_manager.parse_args()
+    config = rl_grpo_qwen3_0_6b()
+    vllm_config = config.generator.vllm_engine
+    model_path = config.trainer.checkpoint.initial_load_path
 
     logger.info("Initializing vLLM LLMEngine with TorchTitan model")
-    logger.info(f"Model: {job_config.checkpoint.initial_load_path}")
+    logger.info(f"Model: {model_path}")
     logger.info(
-        f"Tensor Parallel Size: {job_config.generation.parallelism.tensor_parallel_degree}"
+        f"Tensor Parallel Size: {vllm_config.parallelism.tensor_parallel_degree}"
     )
 
-    # Create EngineArgs from JobConfig
-    # Map TorchTitan parallelism to vLLM parallelism
-    generation = job_config.generation
-
+    # Create EngineArgs from config
     engine_args = EngineArgs(
         # Model configuration
-        model=job_config.checkpoint.initial_load_path,
+        model=model_path,
         trust_remote_code=True,
-        dtype=generation.dtype,
+        dtype=vllm_config.dtype,
         # Parallelism configuration
-        tensor_parallel_size=generation.parallelism.tensor_parallel_degree,
-        distributed_executor_backend="external_launcher",
+        tensor_parallel_size=vllm_config.parallelism.tensor_parallel_degree,
+        # Use external_launcher only when launched via torchrun (multi-GPU);
+        # for single-GPU, let vLLM pick the default executor.
+        distributed_executor_backend=("external_launcher"),
         # Memory and performance
-        gpu_memory_utilization=generation.gpu_memory_utilization,
-        enforce_eager=generation.enforce_eager,
+        gpu_memory_utilization=vllm_config.gpu_memory_limit,
+        enforce_eager=vllm_config.enforce_eager,
         # Seed
-        seed=job_config.debug.seed,
+        seed=vllm_config.seed,
         # HuggingFace overrides
         hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
     )
@@ -71,8 +70,8 @@ def generate():
 
     logger.info("vLLM LLMEngine initialized successfully")
 
-    # Create sampling parameters from JobConfig
-    sampling = job_config.generation.sampling
+    # Create sampling parameters from config
+    sampling = vllm_config.sampling
     sampling_params = SamplingParams(
         temperature=sampling.temperature,
         top_p=sampling.top_p,
