@@ -49,7 +49,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 data_parallel_replicate_degree=2,
             ),
             checkpoint=CheckpointManager.Config(
-                initial_load_path="/data/users/jianiw/model/qwen3-0.6b",
+                initial_load_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
                 initial_load_model_only=True,
                 initial_load_in_hf=True,
             ),
