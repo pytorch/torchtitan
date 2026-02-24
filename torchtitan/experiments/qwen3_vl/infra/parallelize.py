@@ -19,7 +19,7 @@ import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -44,6 +44,7 @@ from torchtitan.distributed.pipeline_parallel import (
     pipeline_module_split,
 )
 
+from torchtitan.distributed import NoParallel
 from torchtitan.models.llama3.infra.parallelize import apply_ddp
 from torchtitan.models.llama4.infra.parallelize import (
     apply_compile,
@@ -53,6 +54,16 @@ from torchtitan.models.llama4.infra.parallelize import (
 from torchtitan.models.qwen3.infra.parallelize import _op_sac_save_list
 from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
 from torchtitan.tools.logging import logger
+
+
+def _replicate_module_params(module: nn.Module, mesh: DeviceMesh):
+    """Convert a module's direct (non-recursive) parameters to Replicate DTensors."""
+    for name, param in module.named_parameters(recurse=False):
+        replicated = nn.Parameter(
+            distribute_tensor(param.data, mesh, [Replicate()]),
+            requires_grad=param.requires_grad,
+        )
+        setattr(module, name, replicated)
 
 
 def _apply_tp_to_decoder(
@@ -81,6 +92,8 @@ def _apply_tp_to_decoder(
             input_layouts=Replicate(),
             output_layouts=Replicate(),
         )
+    if model.norm is not None:
+        top_level_plan["norm"] = NoParallel()
     if model.output is not None:
         top_level_plan["output"] = ColwiseParallel(
             input_layouts=Replicate(),
@@ -107,9 +120,15 @@ def _apply_tp_to_decoder(
         )
 
     # Apply TP to every transformer block's linear layers.
-    # Norms run redundantly on Replicate data (cheap).
+    # NoParallel on norms sets their params as Replicate DTensors on tp_mesh
+    # (for consistent (fsdp, tp) mesh after FSDP) and inserts I/O hooks that
+    # convert local tensor ↔ DTensor at the norm boundary, keeping the block's
+    # data path in local-tensor space as RowwiseParallel(use_local_output=True)
+    # expects.
     for transformer_block in model.layers.values():
         layer_plan = {
+            "attention_norm": NoParallel(),
+            "ffn_norm": NoParallel(),
             # Wrap attention inputs so rope_cache becomes a Replicate DTensor,
             # needed because wq/wk/wv outputs are DTensors and apply_rotary_emb
             # multiplies them with cos/sin from rope_cache.
@@ -161,8 +180,28 @@ def _apply_tp_to_visual(
     sequence lengths are short enough that redundant norm computation is cheap.
     Memory savings come from sharding the linear layer weights.
     """
-    # TP plan for each vision transformer block
+    # Use NoParallel on patch_embed so its params become Replicate DTensors
+    # on tp_mesh (ensuring a consistent (fsdp, tp) mesh after FSDP), while
+    # its I/O hooks convert plain pixel_values to DTensor on entry and back
+    # to local tensor on exit — avoiding mixed tensor/DTensor errors with
+    # pos_embeds (which are computed as plain tensors).
+    parallelize_module(visual, tp_mesh, {"patch_embed": NoParallel()})
+
+    # pos_embed.weight is accessed directly (not through forward), so we
+    # just need its weight to be a DTensor on tp_mesh for mesh consistency.
+    # The vision encoder's compute_position_embeddings() already calls
+    # .to_local() on it, so the downstream pos_embeds stays a plain tensor.
+    _replicate_module_params(visual.pos_embed, tp_mesh)
+
+    # TP plan for each vision transformer block.
+    # NoParallel on norms sets their params as Replicate DTensors on tp_mesh
+    # (for consistent (fsdp, tp) mesh after FSDP) and inserts I/O hooks that
+    # convert local tensor → DTensor on entry and DTensor → local tensor on
+    # exit. This keeps the block's data path in local-tensor space (as
+    # ColwiseParallel/RowwiseParallel with use_local_output=True expect).
     layer_plan = {
+        "norm1": NoParallel(),
+        "norm2": NoParallel(),
         "attn.qkv": ColwiseParallel(),
         "attn.proj": RowwiseParallel(),
         "mlp.linear_fc1": ColwiseParallel(),
@@ -172,8 +211,9 @@ def _apply_tp_to_visual(
     for transformer_block in visual.layers.values():
         parallelize_module(transformer_block, tp_mesh, layer_plan)
 
-    # TP plan for patch mergers (main + deepstack)
+    # TP plan for patch mergers (main + deepstack).
     merger_plan = {
+        "norm": NoParallel(),
         "linear_fc1": ColwiseParallel(),
         "linear_fc2": RowwiseParallel(),
     }
