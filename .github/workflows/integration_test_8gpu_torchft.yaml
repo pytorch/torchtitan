@@ -6,11 +6,13 @@ on:
     tags:
       - ciflow/8gpu/*
     paths:
-      - 'torchtitan/components/ft.py'
+      - 'torchtitan/experiments/ft/**'
+      - 'torchtitan/components/checkpoint.py'
       - '.github/workflows/integration_test_8gpu_torchft.yaml'
   pull_request:
     paths:
-      - 'torchtitan/components/ft.py'
+      - 'torchtitan/experiments/ft/**'
+      - 'torchtitan/components/checkpoint.py'
       - '.github/workflows/integration_test_8gpu_torchft.yaml'
   schedule:
     # Runs every 6 hours
@@ -71,6 +73,6 @@ jobs:
         RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join_timeout_ms 10000 > /dev/null 2>&1 &
         echo "ft_integration_test"
         # Getting error - Cuda failure 217 'peer access is not supported between these two devices'
-        python -m tests.integration_tests.ft $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+        python -m torchtitan.experiments.ft.tests.integration_tests $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
         # pkill -9 torchft_lighthouse
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
