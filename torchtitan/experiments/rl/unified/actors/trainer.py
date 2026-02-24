@@ -47,7 +47,7 @@ class PolicyTrainer(Actor, Configurable):
     """
     Updates policy based on collected trajectories using TorchTitan components.
 
-    Run model forward on trajectories, computes loss, and run backward.
+    Uses ModelSpec for model construction, parallelization, and weight loading.
 
     Args:
         config: PolicyTrainer.Config for model/optimizer/parallelism settings.
