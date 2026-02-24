@@ -3,32 +3,27 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+#
+# Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
-from torchtitan.components.tokenizer import build_hf_tokenizer
+from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-
-from torchtitan.experiments.simple_fsdp.deepseek_v3.model import (
-    SimpleFSDPDeepSeekV3Model,
-)
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.models.deepseek_v3 import deepseekv3_args
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.models.deepseek_v3 import deepseekv3_configs
+from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
+from torchtitan.protocols.model_spec import ModelSpec
 
 from .parallelize import parallelize_deepseekv3
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_cls=SimpleFSDPDeepSeekV3Model,
-        model_args=deepseekv3_args,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="compiler_toolkit/deepseek_v3",
+        flavor=flavor,
+        model=deepseekv3_configs[flavor],
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
-        build_optimizers_fn=build_optimizers_with_moe_load_balancing,
-        build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        state_dict_adapter=DeepSeekV3StateDictAdapter,
     )

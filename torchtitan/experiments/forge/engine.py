@@ -5,35 +5,72 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-from typing import Generator
+from dataclasses import asdict, dataclass, field
+from typing import Any, Generator
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
-import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import rescale_accumulated_loss
-from torchtitan.config import TORCH_DTYPE_MAP
-
+from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.config.configs import (
+    ActivationCheckpointConfig,
+    CommConfig,
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.protocols import BaseModelArgs
+from torchtitan.protocols import BaseModel
+from torchtitan.protocols.model_converter import ModelConvertersContainer
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
-from .job_config import ForgeJobConfig
-from .train_spec import ForgeTrainSpec, get_train_spec
 
+class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        hf_assets_path: str = "./tests/assets/tokenizer"
+        dump_folder: str = "./outputs"
+        model_spec: ModelSpec = field(default_factory=ModelSpec)
+        optimizer: OptimizersContainer.Config = field(
+            default_factory=OptimizersContainer.Config
+        )
+        lr_scheduler: LRSchedulersContainer.Config = field(
+            default_factory=LRSchedulersContainer.Config
+        )
+        training: TrainingConfig = field(default_factory=TrainingConfig)
+        parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
+        checkpoint: CheckpointManager.Config = field(
+            default_factory=CheckpointManager.Config
+        )
+        activation_checkpoint: ActivationCheckpointConfig = field(
+            default_factory=ActivationCheckpointConfig
+        )
+        compile: CompileConfig = field(default_factory=CompileConfig)
+        model_converters: ModelConvertersContainer.Config = field(
+            default_factory=ModelConvertersContainer.Config
+        )
+        comm: CommConfig = field(default_factory=CommConfig)
+        debug: DebugConfig = field(default_factory=DebugConfig)
 
-class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
+        def to_dict(self) -> dict[str, Any]:
+            return asdict(self)
+
     # core configs
-    job_config: ForgeJobConfig
+    config: Config
     parallel_dims: ParallelDims
-    train_spec: ForgeTrainSpec
+    train_spec: ModelSpec
 
-    # swappable training components in ForgeTrainSpec
+    # swappable training components in ModelSpec
     model_parts: list[torch.nn.Module]
-    loss_fn: train_spec_module.LossFunction
-    optimizers: train_spec_module.OptimizersContainer
-    lr_schedulers: train_spec_module.LRSchedulersContainer
+    loss_fn: LossFunction
+    optimizers: OptimizersContainer
+    lr_schedulers: LRSchedulersContainer
 
     # non-swappable training components
     checkpointer: CheckpointManager
@@ -51,17 +88,17 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
     dp_degree: int
     dp_rank: int
     # for logging
-    model_args: BaseModelArgs
+    model_config: BaseModel.Config
     num_flops_per_token: float
     model_param_count: int
     global_batch_size: int
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
-    def __init__(self, job_config: ForgeJobConfig):
+    def __init__(self, config: Config):
         torch._C._log_api_usage_once("torchtitan.train")
 
-        self.job_config = job_config
+        self.config = config
 
         device_module, device_type = utils.device_module, utils.device_type
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
@@ -70,11 +107,11 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
 
         # init distributed and build meshes
         dist_utils.init_distributed(
-            job_config.comm,
-            enable_cpu_backend=job_config.training.enable_cpu_offload,
+            config.comm,
+            enable_cpu_backend=config.training.enable_cpu_offload,
         )
         world_size = int(os.environ["WORLD_SIZE"])
-        parallelism_config = job_config.parallelism
+        parallelism_config = config.parallelism
         self.parallel_dims = parallel_dims = ParallelDims(
             dp_shard=parallelism_config.data_parallel_shard_degree,
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
@@ -95,7 +132,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
 
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
-            gc_freq=job_config.training.gc_freq, debug=job_config.training.gc_debug
+            gc_freq=config.training.gc_freq, debug=config.training.gc_debug
         )
 
         # Set random seed, and maybe enable deterministic mode
@@ -103,59 +140,59 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
         dist_utils.set_determinism(
             parallel_dims,
             self.device,
-            job_config.debug,
+            config.debug,
             distinct_seed_mesh_dims=["pp"],  # same as `torchtitan/train.py`
         )
-        self.train_spec = get_train_spec(job_config.model.name)
+        self.train_spec = config.model_spec
 
         # build model (using meta init)
-        self.model_args = model_args = self.train_spec.model_args[
-            job_config.model.flavor
-        ]
-        # set the model args from training job configs
-        model_args.update_from_config(job_config)
+        self.model_config = model_config = self.train_spec.model
+        # set the model args from training configs
+        model_config.update_from_config(
+            trainer_config=config,
+        )
 
         with (
             torch.device("meta"),
-            utils.set_default_dtype(TORCH_DTYPE_MAP[job_config.training.dtype]),
+            utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
         ):
-            model = self.train_spec.model_cls(model_args)
+            model = model_config.build()
 
         # calculate model size and flops per token
         (
             self.model_param_count,
             self.num_flops_per_token,
-        ) = model_args.get_nparams_and_flops(model, job_config.training.seq_len)
+        ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
 
         # move sharded model to CPU/GPU and initialize weights via DTensor
-        if job_config.training.enable_cpu_offload:
+        if config.training.enable_cpu_offload:
             init_device = "cpu"
             buffer_device = device_type
         else:
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = self.train_spec.build_loss_fn(job_config)
+        self.loss_fn = self.train_spec.build_loss_fn(config)
 
         # verify batch sizes
-        global_batch_size = job_config.training.global_batch_size
+        global_batch_size = config.training.global_batch_size
         if global_batch_size < 0:
             # This global batch size results in 1 gradient accumulation
             # step.
-            global_batch_size = job_config.training.local_batch_size * dp_degree
+            global_batch_size = config.training.local_batch_size * dp_degree
         assert global_batch_size > 0
         assert (
-            global_batch_size % (job_config.training.local_batch_size * dp_degree) == 0
+            global_batch_size % (config.training.local_batch_size * dp_degree) == 0
         ), (
             f"global batch size must be multiple of local batch size times "
             f"data-parallel degree ({global_batch_size} "
-            f"% ({job_config.training.local_batch_size} * {dp_degree}) != 0)"
+            f"% ({config.training.local_batch_size} * {dp_degree}) != 0)"
         )
         self.global_batch_size = global_batch_size
 
         # calculate gradient accumulation steps
         self.gradient_accumulation_steps = global_batch_size // (
-            job_config.training.local_batch_size * dp_degree
+            config.training.local_batch_size * dp_degree
         )
         assert self.gradient_accumulation_steps > 0
         self.loss_fn = rescale_accumulated_loss(
@@ -166,7 +203,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
                 raise RuntimeError(
-                    f"Pipeline Parallel is enabled but {job_config.model.name} "
+                    f"Pipeline Parallel is enabled but {self.train_spec.name} "
                     f"does not support pipelining"
                 )
 
@@ -178,12 +215,17 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 self.pp_has_last_stage,
             ) = self.train_spec.pipelining_fn(
                 model,
-                parallel_dims,
-                job_config,
-                self.device,
-                model_args,
-                self.train_spec.parallelize_fn,
-                self.loss_fn,
+                parallel_dims=parallel_dims,
+                training=config.training,
+                model_converters=config.model_converters,
+                parallelism=config.parallelism,
+                compile_config=config.compile,
+                ac_config=config.activation_checkpoint,
+                dump_folder=config.dump_folder,
+                device=self.device,
+                model_config=model_config,
+                parallelize_fn=self.train_spec.parallelize_fn,
+                loss_fn=self.loss_fn,
             )
             # when PP is enabled, `model` obj is no longer used after this point,
             # model_parts is used instead
@@ -196,7 +238,16 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
                 m.train()
         else:
             # apply PT-D Tensor Parallel, activation checkpointing, torch.compile, Data Parallel
-            model = self.train_spec.parallelize_fn(model, parallel_dims, job_config)
+            model = self.train_spec.parallelize_fn(
+                model,
+                parallel_dims=parallel_dims,
+                training=config.training,
+                model_converters=config.model_converters,
+                parallelism=config.parallelism,
+                compile_config=config.compile,
+                ac_config=config.activation_checkpoint,
+                dump_folder=config.dump_folder,
+            )
 
             model.to_empty(device=init_device)
             with torch.no_grad():
@@ -206,28 +257,31 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
             self.model_parts = [model]
 
         # build optimizer after applying parallelisms to the model
-        self.optimizers = self.train_spec.build_optimizers_fn(
-            self.model_parts, job_config.optimizer, parallel_dims
+        self.optimizers = config.optimizer.build(
+            model_parts=self.model_parts,
+            parallel_dims=parallel_dims,
         )
-        self.lr_schedulers = self.train_spec.build_lr_schedulers_fn(
-            self.optimizers, job_config.lr_scheduler, job_config.training.steps
+        if self.train_spec.post_optimizer_build_fn is not None:
+            self.train_spec.post_optimizer_build_fn(
+                self.optimizers, self.model_parts, parallel_dims
+            )
+        self.lr_schedulers = config.lr_scheduler.build(
+            optimizers=self.optimizers,
+            training_steps=config.training.steps,
         )
 
-        self.checkpointer = CheckpointManager(
+        self.checkpointer = config.checkpoint.build(
             dataloader=None,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             states={"train_state": self},
-            checkpoint_config=job_config.checkpoint,
             sd_adapter=(
-                self.train_spec.state_dict_adapter(
-                    model_args, job_config.model.hf_assets_path
-                )
+                self.train_spec.state_dict_adapter(model_config, config.hf_assets_path)
                 if self.train_spec.state_dict_adapter
                 else None
             ),
-            base_folder=job_config.job.dump_folder,
+            base_folder=config.dump_folder,
         )
 
         loss_parallel_enabled = (
@@ -236,7 +290,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful):
         self.train_context = dist_utils.get_train_context(loss_parallel_enabled)
         self.maybe_enable_amp = dist_utils.maybe_enable_amp(
             parallel_dims,
-            job_config.training.mixed_precision_param,
+            config.training.mixed_precision_param,
             device_type,
         )
 

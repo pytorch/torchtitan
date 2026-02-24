@@ -6,12 +6,22 @@
 
 import logging
 import os
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import torch
 from monarch.actor import Actor, endpoint
+from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.config import Configurable
+from torchtitan.config.configs import (
+    ActivationCheckpointConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.experiments.rl.unified.actors.generator import TrajectoryData
-from torchtitan.experiments.rl.unified.configs import RLTrainer
+from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
 from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     create_trainer_parallel_dims,
 )
@@ -20,42 +30,65 @@ from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_policy_gradient_loss_vllm,
 )
 from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_to_vllm
+from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
 
 
-class Trainer(Actor):
+class PolicyTrainer(Actor, Configurable):
     """
     Updates policy based on collected trajectories.
 
     Run model forward on trajectories, computes loss, and run backward.
-    Receives the top-level ``RLTrainer.Config`` and reads policy trainer
-    settings (batch_invariant_mode, grpo) directly from it, plus model /
-    optimizer / parallelism settings from the nested ``config.trainer``.
 
-    TODO: Use torchtitan Trainer for model init and parallelisation.
+    TODO: Use torchtitan PolicyTrainer for model init and parallelism.
 
     Args:
-        config: Top-level RLTrainer.Config containing all configuration.
+        config: PolicyTrainer.Config for model/optimizer/parallelism settings.
+        policy_optimization: GRPO hyperparameters.
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        """PolicyTrainer configuration for optimizer, training, and parallelism.
+
+        TODO: Remove this config once the Trainer is replaced by torchtitan Trainer
+        """
+
+        optimizer: OptimizersContainer.Config = field(
+            default_factory=OptimizersContainer.Config
+        )
+        lr_scheduler: LRSchedulersContainer.Config = field(
+            default_factory=LRSchedulersContainer.Config
+        )
+        training: TrainingConfig = field(default_factory=TrainingConfig)
+        parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
+        checkpoint: CheckpointManager.Config = field(
+            default_factory=CheckpointManager.Config
+        )
+        activation_checkpoint: ActivationCheckpointConfig = field(
+            default_factory=ActivationCheckpointConfig
+        )
 
     def __init__(
         self,
-        config: RLTrainer.Config,
+        config: Config,
+        policy_optimization: PolicyOptimizationConfig,
+        model_spec: ModelSpec,
     ):
         self.config = config
-        trainer_cfg = config.trainer
+        self.model_spec = model_spec
 
         # Extract needed fields from config
-        model_path = trainer_cfg.checkpoint.initial_load_path  # path to HF checkpoint
-        learning_rate = trainer_cfg.optimizer.lr
-        self.ddp_size = trainer_cfg.parallelism.data_parallel_replicate_degree
-        self.tp_size = trainer_cfg.parallelism.tensor_parallel_degree
+        model_path = config.checkpoint.initial_load_path  # path to HF checkpoint
+        learning_rate = config.optimizer.lr
+        self.ddp_size = config.parallelism.data_parallel_replicate_degree
+        self.tp_size = config.parallelism.tensor_parallel_degree
 
-        # GRPO settings from top-level config
-        self.group_size = config.policy_optimization.group_size
-        self.grpo_beta = config.policy_optimization.beta
-        self.use_stable_grpo = config.policy_optimization.use_stable
+        # GRPO settings
+        self.group_size = policy_optimization.group_size
+        self.grpo_beta = policy_optimization.beta
+        self.use_stable_grpo = policy_optimization.use_stable_grpo
 
         # Explicitly set cuda device for each trainer, otherwise different processes will use the same CUDA device
         local_rank = int(os.environ["LOCAL_RANK"])
@@ -63,14 +96,14 @@ class Trainer(Actor):
         torch.cuda.set_device(local_rank)
 
         # load trainer model and patch to vllm.Attention()
-        self.model = load_trainer_model(model_path)
+        self.model = load_trainer_model(model_path, model_spec.model)
 
         self.parallel_dims = create_trainer_parallel_dims(self.ddp_size, self.tp_size)
 
         # apply PT-D Parallelism
         # TODO: right now it only works for qwen3 model, need to formalize this to use parallize_fn from train_spec
         if self.ddp_size > 1:
-            from torchtitan.models.llama3.infra.parallelize import apply_ddp
+            from torchtitan.models.llama3.parallelize import apply_ddp
 
             apply_ddp(
                 self.model,
@@ -87,7 +120,7 @@ class Trainer(Actor):
         self.generator: Optional[Any] = None
 
         logger.info(
-            f"Trainer initialized: "
+            f"PolicyTrainer initialized: "
             f"group_size={self.group_size}, grpo_beta={self.grpo_beta}, "
             f"use_stable_grpo={self.use_stable_grpo}"
         )
@@ -111,7 +144,7 @@ class Trainer(Actor):
             Training metrics
         """
         logger.info(
-            f"{os.getpid()=} Trainer starts to train {self.policy_version} on traj:"
+            f"{os.getpid()=} PolicyTrainer starts to train {self.policy_version} on traj:"
         )
         # Compute loss
         loss, loss_metrics = compute_policy_gradient_loss_vllm(
@@ -144,5 +177,5 @@ class Trainer(Actor):
             "policy_version": self.policy_version,
             **loss_metrics,
         }
-        logger.info(f"{os.getpid()=} Trainer finish step {self.policy_version}")
+        logger.info(f"{os.getpid()=} PolicyTrainer finish step {self.policy_version}")
         return metrics
