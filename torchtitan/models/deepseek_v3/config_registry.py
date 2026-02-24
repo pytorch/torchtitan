@@ -12,9 +12,11 @@ from torchtitan.components.quantization.float8 import (
     Float8GroupedMMConverter,
     Float8LinearConverter,
 )
+from torchtitan.components.quantization.mx import MXLinearConverter
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
+    DebugConfig,
     ParallelismConfig,
     TrainingConfig,
 )
@@ -93,6 +95,43 @@ def deepseek_v3_16b() -> Trainer.Config:
             selective_ac_option="op",
         ),
         compile=CompileConfig(enable=True, components=["loss"]),
+    )
+
+
+def deepseek_v3_16b_mx() -> Trainer.Config:
+    return Trainer.Config(
+        hf_assets_path="./assets/hf/deepseek-moe-16b-base",
+        model_spec=model_registry("16B"),
+        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        optimizer=OptimizersContainer.Config(lr=2.2e-4),
+        lr_scheduler=LRSchedulersContainer.Config(
+            decay_ratio=0.8,
+            decay_type="cosine",
+            min_lr_factor=0.1,
+        ),
+        training=TrainingConfig(
+            local_batch_size=2,
+            seq_len=8192,
+            steps=100,
+        ),
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=4,
+            expert_parallel_degree=4,
+            tensor_parallel_degree=2,
+            expert_tensor_parallel_degree=1,
+        ),
+        checkpoint=CheckpointManager.Config(interval=10),
+        activation_checkpoint=ActivationCheckpointConfig(mode="full"),
+        compile=CompileConfig(enable=True, components=["model", "loss"]),
+        debug=DebugConfig(moe_force_load_balance=True),
+        model_converters=ModelConvertersContainer.Config(
+            print_after_conversion=True,
+            converters=[
+                MXLinearConverter.Config(
+                    mxfp8_dim1_cast_kernel_choice="cuda",
+                ),
+            ],
+        ),
     )
 
 

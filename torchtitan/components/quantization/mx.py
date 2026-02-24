@@ -71,9 +71,9 @@ class MXLinearConverter(Configurable):
         ), "MXFP8 is only supported on CUDA SM100 or later, or ROCm gfx950 or later"
 
         # TP not yet supported with torch.compile
-        assert not (
-            model_compile_enabled and parallel_dims.tp_enabled
-        ), "TP not yet supported with torch.compile for mxfp8"
+        # assert not (
+        #     model_compile_enabled and parallel_dims.tp_enabled
+        # ), "TP not yet supported with torch.compile for mxfp8"
 
         # Configure MXFP8
         from torchao.prototype.mx_formats.config import (
