@@ -14,25 +14,69 @@ from monarch.actor import Actor, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import Configurable
+from torchtitan.config import CommConfig, Configurable
 from torchtitan.config.configs import (
     ActivationCheckpointConfig,
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.unified.actors.generator import TrajectoryData
 from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
-from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
-    create_trainer_parallel_dims,
+from torchtitan.experiments.rl.unified.models.attention import (
+    replace_with_vllm_compatible_flash_attention,
 )
-from torchtitan.experiments.rl.unified.models.utils import load_trainer_model
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_policy_gradient_loss_vllm,
 )
-from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_to_vllm
+from torchtitan.experiments.rl.vllm_compat.weights.converter import (
+    torchtitan_to_vllm,
+    vllm_to_torchtitan,
+)
+from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
+
+
+def load_trainer_model(model_path: str, model_config: BaseModel.Config):
+    """
+    Helper function to load TorchTitan model from checkpoint for trainer.
+    TODO: Remove this helper function once we refactor PolicyTrainer using torchtitan components.
+
+    Args:
+        model_path: Path to HuggingFace model (for weights)
+        model_config: Model config from model_spec (e.g., Qwen3Model.Config)
+
+    Returns:
+        model: Loaded TorchTitan model for trainer.
+    """
+    model_args = model_config
+
+    # convert to torchtitan state_dict. TODO: Use torchtitan components
+    titan_state_dict = vllm_to_torchtitan(model_path)
+
+    # If weight tying is enabled but output.weight is missing from the checkpoint
+    # (HF models with tie_word_embeddings=True may not store lm_head.weight),
+    # synthesize it from tok_embeddings.weight so load_state_dict(strict=True) works.
+    if model_args.enable_weight_tying and "output.weight" not in titan_state_dict:
+        titan_state_dict["output.weight"] = titan_state_dict["tok_embeddings.weight"]
+
+    model = model_args.build()
+    # Set global default dtype to bfloat16. This is needed because vLLM's Attention
+    # layer uses torch.get_default_dtype() and it doesn't support float32
+    torch.set_default_dtype(torch.bfloat16)
+    # NOTE: Override attention to vllm compatible attention for backward capability.
+    # Only patch to vllm compatible attention during training.
+    replace_with_vllm_compatible_flash_attention(model)
+
+    # Load standard TorchTitan format directly
+    model.load_state_dict(titan_state_dict, strict=True)
+
+    model.to(torch.bfloat16)
+
+    return model
 
 
 class PolicyTrainer(Actor, Configurable):
@@ -101,7 +145,18 @@ class PolicyTrainer(Actor, Configurable):
         # load trainer model and patch to vllm.Attention()
         self.model = load_trainer_model(model_path, model_spec.model)
 
-        self.parallel_dims = create_trainer_parallel_dims(self.ddp_size, self.tp_size)
+        self.parallel_dims = ParallelDims(
+            dp_replicate=self.ddp_size,
+            dp_shard=1,
+            tp=self.tp_size,
+            cp=1,
+            pp=1,
+            ep=1,
+            etp=1,
+            world_size=dist_utils.init_distributed(
+                CommConfig(),
+            ),
+        )
 
         # apply PT-D Parallelism
         # TODO: right now it only works for qwen3 model, need to formalize this to use parallize_fn from train_spec
