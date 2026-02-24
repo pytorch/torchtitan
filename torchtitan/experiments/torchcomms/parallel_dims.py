@@ -6,7 +6,6 @@
 
 import os
 from dataclasses import dataclass
-from typing import Dict, List
 
 import torch
 import torchcomms
@@ -21,11 +20,11 @@ __all__ = ["TorchCommsParallelDims"]
 
 
 def _calculate_ranks_per_dimension(
-    meshes: List[torch.Tensor],
-    dim_names: List[str],
-    dim_sizes: List[int],
+    meshes: list[torch.Tensor],
+    dim_names: list[str],
+    dim_sizes: list[int],
     cur_rank: int,
-) -> Dict[str, List[int]]:
+) -> dict[str, list[int]]:
     """Util function to calculate global ranks mapping for each mesh dimension.
 
     Args:
@@ -52,8 +51,8 @@ def _calculate_ranks_per_dimension(
 def _create_device_mesh(
     world_size: int,
     mesh_shape: tuple,
-    mesh_dim_names: List[str],
-) -> Dict:
+    mesh_dim_names: list[str],
+) -> dict:
     """Util function to create device mesh with communicators for each dimension.
 
     Args:
@@ -117,11 +116,11 @@ def _create_device_mesh(
 
 
 def _flatten_comms(
-    flatten_ranks_per_dim: Dict[str, List[int]],
+    flatten_ranks_per_dim: dict[str, list[int]],
     comm,
-    flatten_mesh_dim_names: Dict[str, List[str]],
+    flatten_mesh_dim_names: dict[str, list[str]],
     device_mesh: DeviceMesh,
-    comm_per_dim: Dict[str, any],
+    comm_per_dim: dict[str, any],
 ) -> None:
     """Util function to flatten mesh dimensions and create corresponding communicators.
 

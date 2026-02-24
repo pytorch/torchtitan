@@ -4,28 +4,27 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate
 from torch.utils._pytree import register_pytree_node, tree_map
-
-from torchtitan.config import JobConfig
+from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 
 @contextmanager
-def disable_compile(job_config: JobConfig):
+def disable_compile(compile_config: CompileConfig):
     """Context manager to temporarily disable compilation."""
-    original_value = job_config.compile.enable
-    job_config.compile.enable = False
+    original_value = compile_config.enable
+    compile_config.enable = False
     try:
         yield
     finally:
-        job_config.compile.enable = original_value
+        compile_config.enable = original_value
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):

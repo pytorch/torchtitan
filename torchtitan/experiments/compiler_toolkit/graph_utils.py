@@ -6,8 +6,9 @@
 
 import contextlib
 import functools
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any, Optional
 
 import torch
 from torch._dynamo.functional_export import dynamo_graph_capture_for_export
@@ -18,7 +19,7 @@ from torch._functorch.aot_autograd import (
 )
 from torch._guards import tracing, TracingContext
 from torch.distributed.tensor import DTensor
-from torchtitan.config import JobConfig
+from torchtitan.config import CompileConfig, ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.compiler_toolkit.common_utils import (
     create_extra_fsdp_pg,
@@ -110,9 +111,9 @@ def joint_graph_builder(
     model_kwargs: dict,
     fw_compiler: Optional[Callable] = None,
     bw_compiler: Optional[Callable] = None,
-    joint_custom_passes: Optional[List[Callable]] = None,
+    joint_custom_passes: Optional[list[Callable]] = None,
     dump_folder: str | None = None,
-    job_config: Optional["JobConfig"] = None,
+    compile_config: Optional[CompileConfig] = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -140,8 +141,8 @@ def joint_graph_builder(
     )
 
     # Check if inductor_decomposition is configured and create the pass with proper context
-    if job_config is not None:
-        joint_pass_names = getattr(job_config.compile, "joint_passes", [])
+    if compile_config is not None:
+        joint_pass_names = getattr(compile_config, "joint_passes", [])
         if "inductor_decomposition" in joint_pass_names:
             from torchtitan.experiments.compiler_toolkit.passes import (
                 inductor_decomposition_pass,
@@ -262,7 +263,7 @@ def compiler(
     name: str,
     gm: torch.fx.GraphModule,
     example_inputs,
-    passes: List[Callable] = None,
+    passes: list[Callable] = None,
     dump_folder: str | None = None,
     is_forward: bool = True,
 ):
@@ -322,7 +323,7 @@ def compiler(
 
 
 def make_compiler_with_passes(
-    passes: List[Callable] = None,
+    passes: list[Callable] = None,
     dump_folder: str | None = None,
 ):
     """
@@ -394,7 +395,7 @@ def validate_pass_names(pass_names: list[str], joint_pass_names: list[str]) -> N
 
 def get_compiler_passes_from_config(
     model: torch.nn.Module,
-    job_config: JobConfig,
+    compile_config: CompileConfig,
     parallel_dims: ParallelDims,
 ):
     """
@@ -413,8 +414,8 @@ def get_compiler_passes_from_config(
         get_transformer_block_buckets,
     )
 
-    pass_names = getattr(job_config.compile, "passes", [])
-    joint_pass_names = getattr(job_config.compile, "joint_passes", [])
+    pass_names = getattr(compile_config, "passes", [])
+    joint_pass_names = getattr(compile_config, "joint_passes", [])
 
     validate_pass_names(pass_names, joint_pass_names)
     compiler_passes = []
@@ -466,7 +467,8 @@ def get_compiler_passes_from_config(
 
 def get_joint_custom_passes_from_config(
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    compile_config: CompileConfig,
+    parallelism: ParallelismConfig,
 ):
     """
     Extract and validate joint custom passes from job config.
@@ -493,7 +495,7 @@ def get_joint_custom_passes_from_config(
     joint_custom_passes.append(validate_flex_attn_annotation_pass)
 
     # Handle joint passes from config (excluding inductor_decomposition)
-    joint_pass_names = getattr(job_config.compile, "joint_passes", [])
+    joint_pass_names = getattr(compile_config, "joint_passes", [])
     for pass_name in joint_pass_names:
         if pass_name not in AVAILABLE_JOINT_PASSES:
             raise ValueError(
@@ -511,7 +513,7 @@ def get_joint_custom_passes_from_config(
         logger.info(f"Using joint passes from config: {joint_pass_names}")
 
     # Handle FSDP reshard after forward
-    match job_config.parallelism.fsdp_reshard_after_forward:
+    match parallelism.fsdp_reshard_after_forward:
         case "always":
             fsdp_reshard_after_forward = True
         case "never":
@@ -522,7 +524,7 @@ def get_joint_custom_passes_from_config(
             fsdp_reshard_after_forward = not parallel_dims.pp_enabled
         case _:
             raise ValueError(
-                f"Invalid fsdp_reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+                f"Invalid fsdp_reshard_after_forward_policy: {parallelism.fsdp_reshard_after_forward}."
             )
 
     joint_custom_passes.append(
