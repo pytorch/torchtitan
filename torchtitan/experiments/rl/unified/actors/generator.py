@@ -278,6 +278,11 @@ class Generator(Actor, Configurable):
         self.config = config
         self.model_spec = model_spec
 
+        # Register TorchTitan model with vLLM before any engine creation
+        from torchtitan.experiments.rl.unified.plugin import register
+
+        register(model_spec)
+
         # Set vLLM environment variables from config before any vLLM initialization
         if batch_invariant_mode:
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
