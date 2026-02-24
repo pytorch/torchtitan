@@ -36,11 +36,11 @@ def generate():
     vllm_config = config.generator.vllm_engine
     model_path = config.trainer.checkpoint.initial_load_path
 
-    # Load TorchTitan plugin at runtime (like native_sampler does)
+    # Register TorchTitan model with vLLM before engine creation
     from torchtitan.experiments.rl.unified.plugin import register
 
-    register()
-    logger.info("Loaded TorchTitan vLLM plugin")
+    register(config.model_spec)
+    logger.info("Registered TorchTitan model with vLLM")
 
     logger.info("Initializing vLLM LLMEngine with TorchTitan model")
     logger.info(f"Model: {model_path}")
