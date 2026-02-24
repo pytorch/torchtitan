@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -19,6 +19,7 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
+from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.rope import RoPE
@@ -64,6 +65,7 @@ class Decoder(BaseModel):
         n_layers: int
         vocab_size: int
         norm_eps: float = 1e-5
+        tok_embeddings: Embedding.Config = field(default_factory=Embedding.Config)
         # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
         # so that rope cache, a.k.a. freqs_cis, is shared by all layers. However,
         # it causes redundantly passing backend (complex / cos_sin) to both RoPE
@@ -76,7 +78,9 @@ class Decoder(BaseModel):
         super().__init__()
         self.config = config
 
-        self.tok_embeddings = nn.Embedding(config.vocab_size, config.dim)
+        self.tok_embeddings = config.tok_embeddings.build(
+            num_embeddings=config.vocab_size, embedding_dim=config.dim
+        )
 
         self.rope = config.rope.build()
         self.register_buffer("freqs_cis", self.rope.cache, persistent=False)
@@ -105,7 +109,7 @@ class Decoder(BaseModel):
             rope.init_weights(buffer_device=buffer_device)
             self.freqs_cis = rope.cache
         if self.tok_embeddings is not None:
-            nn.init.normal_(self.tok_embeddings.weight)
+            self.tok_embeddings.init_weights()
         for layer in self.layers.values():
             # pyrefly: ignore [not-callable]
             layer.init_weights(buffer_device=buffer_device)
