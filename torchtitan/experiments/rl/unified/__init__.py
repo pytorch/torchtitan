@@ -12,10 +12,8 @@ To manually load the plugin:
     plugin.register()
 """
 
-from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
-    create_parallel_dims_from_vllm_config,
-)
 from torchtitan.experiments.rl.unified.models.vllm_wrapper import (
+    create_torchtitan_config_from_vllm,
     TorchTitanVLLMModelWrapper,
 )
 
@@ -25,6 +23,6 @@ from torchtitan.experiments.rl.unified.plugin import register
 
 __all__ = [
     "TorchTitanVLLMModelWrapper",
-    "create_parallel_dims_from_vllm_config",
+    "create_torchtitan_config_from_vllm",
     "register",  # Export register function for manual use
 ]
