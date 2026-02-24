@@ -11,13 +11,63 @@ This module combines the Qwen3 LLM with the Qwen3-VL Vision Encoder
 to create a multimodal vision-language model with DeepStack support.
 """
 
+from dataclasses import dataclass, field
+
 import torch
 from torch import nn
 
-from torchtitan.models.qwen3.model.model import Qwen3Model
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.models.qwen3.model import Qwen3Model
+from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.models.common.attention import GQAttention
+from torchtitan.tools.logging import logger
 
-from .args import Qwen3VLModelArgs, SpecialTokens
 from .vision_encoder import Qwen3VLVisionEncoder
+
+
+@dataclass
+class SpecialTokens:
+    """Special tokens for Qwen3-VL multimodal processing."""
+
+    img_token: str
+    img_id: int
+    vision_start_token: str
+    vision_start_id: int
+    vision_end_token: str
+    vision_end_id: int
+    pad_token: str
+    pad_id: int
+    ignore_id: int = -100  # PyTorch F.cross_entropy default
+
+    @classmethod
+    def from_tokenizer(cls, tokenizer: HuggingFaceTokenizer):
+        SPECIAL_TOKENS_MAP = {
+            "img": "<|image_pad|>",
+            "vision_start": "<|vision_start|>",
+            "vision_end": "<|vision_end|>",
+            "pad": "<|endoftext|>",
+        }
+        added_tokens = tokenizer.tokenizer.get_added_tokens_decoder()
+        token_to_id = {tok.content: tok_id for tok_id, tok in added_tokens.items()}
+
+        # Try to get tokens from added tokens, fall back to encode if not found
+        special_tokens_dict = {}
+        for prefix, tok in SPECIAL_TOKENS_MAP.items():
+            special_tokens_dict[f"{prefix}_token"] = tok
+            if tok in token_to_id:
+                special_tokens_dict[f"{prefix}_id"] = token_to_id[tok]
+            else:
+                # Fall back to encoding the token
+                encoded = tokenizer.encode(tok)
+                if len(encoded) != 1:
+                    raise ValueError(
+                        f"Special token '{tok}' encodes to {len(encoded)} tokens "
+                        f"but must encode to exactly 1 token. "
+                        f"Please use a tokenizer with Qwen3-VL special tokens "
+                        f"(e.g., Qwen/Qwen3-VL-8B-Instruct)."
+                    )
+                special_tokens_dict[f"{prefix}_id"] = encoded[0]
+        return cls(**special_tokens_dict)
 
 
 class Qwen3VLModel(Qwen3Model):
@@ -36,27 +86,97 @@ class Qwen3VLModel(Qwen3Model):
       position encoding for vision tokens
     """
 
-    def __init__(self, model_args: Qwen3VLModelArgs):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Qwen3Model.Config):
+        # Vision encoder configuration
+        encoder: Qwen3VLVisionEncoder.Config = field(
+            default_factory=Qwen3VLVisionEncoder.Config
+        )
+
+        # MRoPE section sizes for interleaved multi-dimensional RoPE
+        # [temporal, height, width] - controls how position dimensions are interleaved
+        mrope_section: list[int] = field(default_factory=lambda: [24, 20, 20])
+
+        # Vision-language specific token IDs
+        image_token_id: int = 151655
+        video_token_id: int = 151656
+        vision_start_token_id: int = 151652
+        vision_end_token_id: int = 151653
+
+        def update_from_config(
+            self,
+            *,
+            trainer_config,
+            **kwargs,
+        ) -> None:
+            training = trainer_config.training
+            parallelism = trainer_config.parallelism
+            debug = trainer_config.debug
+            seq_len = training.seq_len
+            if seq_len > self.rope.max_seq_len:
+                logger.warning(
+                    f"Sequence length {seq_len} exceeds original maximum {self.rope.max_seq_len}."
+                )
+            # Sync rope max_seq_len
+            import dataclasses as _dc
+
+            self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
+
+            if self.layer.moe is not None:
+                self.layer.moe._debug_force_load_balance = (
+                    debug.moe_force_load_balance
+                )
+
+            if (
+                parallelism.context_parallel_degree > 1
+                and self.layer.attention.attn_backend == "varlen"
+            ):
+                raise NotImplementedError(
+                    f"Context Parallel only supports SDPA and FlexAttention."
+                    f"Got attn_backend='{self.layer.attention.attn_backend}'. "
+                    f"Varlen attention is not supported with CP."
+                )
+
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, int]:
+            assert isinstance(self.layer.attention, GQAttention.Config)
+            assert self.layer.attention.head_dim is not None
+            return get_moe_model_nparams_and_flops(
+                self,
+                model,
+                self.layer.attention.n_heads,
+                2 * self.layer.attention.head_dim,
+                seq_len,
+            )
+
+    def __init__(self, config: Config):
         # Initialize the base Qwen3 model
-        super().__init__(model_args)
-        self.model_args = model_args
+        super().__init__(config)
 
         # Vision encoder
-        self.visual = Qwen3VLVisionEncoder(model_args.encoder)
+        self.visual = Qwen3VLVisionEncoder(config.encoder)
 
         # Store special token IDs for vision
-        self.image_token_id = model_args.image_token_id
-        self.video_token_id = model_args.video_token_id
-        self.vision_start_token_id = model_args.vision_start_token_id
-        self.vision_end_token_id = model_args.vision_end_token_id
+        self.image_token_id = config.image_token_id
+        self.video_token_id = config.video_token_id
+        self.vision_start_token_id = config.vision_start_token_id
+        self.vision_end_token_id = config.vision_end_token_id
 
         # MRoPE section for interleaved multi-dimensional RoPE
-        self.mrope_section = model_args.text_config.mrope_section
+        self.mrope_section = config.mrope_section
 
         # Inject deepstack features from ViT layers deepstack_visual_indicies[i] into LLM decoder layer i
-        self.deepstack_layer_indices = list(range(len(model_args.encoder.deepstack_visual_indicies)))
+        self.deepstack_layer_indices = list(
+            range(len(config.encoder.deepstack_visual_indicies))
+        )
 
-    def init_weights(self, buffer_device: torch.device | None = None):
+    def init_weights(
+        self,
+        *,
+        buffer_device: torch.device | None = None,
+        **kwargs,
+    ):
         """Initialize all weights.
 
         Handles enable_weight_tying gracefully for PP where tok_embeddings
@@ -66,7 +186,7 @@ class Qwen3VLModel(Qwen3Model):
         # then tie manually with a softer check.
         orig_weight_tying = self.enable_weight_tying
         self.enable_weight_tying = False
-        super().init_weights(buffer_device=buffer_device)
+        super().init_weights(buffer_device=buffer_device, **kwargs)
         self.enable_weight_tying = orig_weight_tying
 
         if self.enable_weight_tying:
@@ -92,7 +212,9 @@ class Qwen3VLModel(Qwen3Model):
             deepstack_embeds: List of DeepStack features from intermediate layers
         """
         pixel_values = pixel_values.type(self.visual.patch_embed.proj.weight.dtype)
-        merged_embeds, deepstack_features = self.visual(pixel_values, grid_thw=image_grid_thw)
+        merged_embeds, deepstack_features = self.visual(
+            pixel_values, grid_thw=image_grid_thw
+        )
 
         # Compute valid sequence lengths per image (after merging)
         merge_unit = self.visual.spatial_merge_unit
@@ -157,7 +279,8 @@ class Qwen3VLModel(Qwen3Model):
 
         special_mask_expanded = special_mask.unsqueeze(-1).expand_as(inputs_embeds)
         inputs_embeds = inputs_embeds.masked_scatter(
-            special_mask_expanded, vision_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            special_mask_expanded,
+            vision_embeds.to(inputs_embeds.device, inputs_embeds.dtype),
         )
         return inputs_embeds, True
 
@@ -194,7 +317,9 @@ class Qwen3VLModel(Qwen3Model):
         visual_pos_masks = visual_pos_masks.to(hidden_states.device)
         visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
         hidden_states = hidden_states.clone()
-        hidden_states[visual_pos_masks] = hidden_states[visual_pos_masks] + visual_embeds
+        hidden_states[visual_pos_masks] = (
+            hidden_states[visual_pos_masks] + visual_embeds
+        )
         return hidden_states
 
     def _process_vision(
@@ -224,15 +349,25 @@ class Qwen3VLModel(Qwen3Model):
             visual_pos_masks: (batch, seq_len) bool mask or None
             deepstack_visual_embeds: list of (num_visual_tokens, dim) or None
         """
-        img_token_id = special_tokens.img_id if special_tokens is not None else self.image_token_id
+        img_token_id = (
+            special_tokens.img_id
+            if special_tokens is not None
+            else self.image_token_id
+        )
         vid_token_id = self.video_token_id
 
-        inputs_embeds = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+        inputs_embeds = (
+            self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+        )
 
         # Process image inputs
         image_mask = None
         deepstack_image_embeds = None
-        if self.visual is not None and pixel_values is not None and grid_thw is not None:
+        if (
+            self.visual is not None
+            and pixel_values is not None
+            and grid_thw is not None
+        ):
             image_embeds_list, deepstack_image_embeds = self.get_image_features(
                 pixel_values, grid_thw
             )
@@ -248,7 +383,11 @@ class Qwen3VLModel(Qwen3Model):
         # Process video inputs
         video_mask = None
         deepstack_video_embeds = None
-        if self.visual is not None and pixel_values_videos is not None and grid_thw_videos is not None:
+        if (
+            self.visual is not None
+            and pixel_values_videos is not None
+            and grid_thw_videos is not None
+        ):
             video_embeds_list, deepstack_video_embeds = self.get_video_features(
                 pixel_values_videos, grid_thw_videos
             )
@@ -269,8 +408,12 @@ class Qwen3VLModel(Qwen3Model):
             deepstack_visual_embeds = []
             image_mask_joint = image_mask[visual_pos_masks]
             video_mask_joint = video_mask[visual_pos_masks]
-            for img_embed, vid_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
-                embed_joint = img_embed.new_zeros(visual_pos_masks.sum(), img_embed.shape[-1])
+            for img_embed, vid_embed in zip(
+                deepstack_image_embeds, deepstack_video_embeds
+            ):
+                embed_joint = img_embed.new_zeros(
+                    visual_pos_masks.sum(), img_embed.shape[-1]
+                )
                 embed_joint[image_mask_joint] = img_embed
                 embed_joint[video_mask_joint] = vid_embed
                 deepstack_visual_embeds.append(embed_joint)
@@ -302,9 +445,15 @@ class Qwen3VLModel(Qwen3Model):
             inputs_embeds: (batch, seq_len, dim) with vision tokens scattered in
             pp_deepstack_embeds: (batch, num_ds_layers, seq_len, dim) or None
         """
-        inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._process_vision(
-            tokens, pixel_values, pixel_values_videos,
-            grid_thw, grid_thw_videos, special_tokens,
+        inputs_embeds, visual_pos_masks, deepstack_visual_embeds = (
+            self._process_vision(
+                tokens,
+                pixel_values,
+                pixel_values_videos,
+                grid_thw,
+                grid_thw_videos,
+                special_tokens,
+            )
         )
 
         # Convert sparse DeepStack to dense format for PP microbatch splitting
@@ -358,15 +507,21 @@ class Qwen3VLModel(Qwen3Model):
             inputs_embeds = tokens
         else:
             # Non-PP mode: full vision processing
-            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._process_vision(
-                tokens, pixel_values, pixel_values_videos,
-                grid_thw, grid_thw_videos, special_tokens,
+            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = (
+                self._process_vision(
+                    tokens,
+                    pixel_values,
+                    pixel_values_videos,
+                    grid_thw,
+                    grid_thw_videos,
+                    special_tokens,
+                )
             )
 
         # Apply transformer layers with DeepStack
         hidden_states = inputs_embeds
         for layer_idx, layer in self.layers.items():
-            hidden_states = layer(hidden_states, self.rope_cache, None, positions)
+            hidden_states = layer(hidden_states, self.freqs_cis, None, positions)
 
             # Apply DeepStack: add visual features to early layer hidden states
             layer_idx_int = int(layer_idx)
@@ -376,7 +531,9 @@ class Qwen3VLModel(Qwen3Model):
                     # Dense PP mode: (batch, num_ds, seq_len, dim)
                     # Zeros at non-visual positions act as no-op additions
                     if ds_idx < pp_deepstack_embeds.shape[1]:
-                        hidden_states = hidden_states + pp_deepstack_embeds[:, ds_idx].to(hidden_states.dtype)
+                        hidden_states = hidden_states + pp_deepstack_embeds[
+                            :, ds_idx
+                        ].to(hidden_states.dtype)
                 elif (
                     deepstack_visual_embeds is not None
                     and visual_pos_masks is not None
@@ -390,7 +547,9 @@ class Qwen3VLModel(Qwen3Model):
                         )
 
         # Final normalization and output
-        hidden_states = self.norm(hidden_states) if self.norm is not None else hidden_states
+        hidden_states = (
+            self.norm(hidden_states) if self.norm is not None else hidden_states
+        )
         output = self.output(hidden_states) if self.output is not None else hidden_states
 
         return output
