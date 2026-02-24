@@ -101,15 +101,16 @@ class OverlapAnalyzer:
         raw_overlap = compute_us + comm_us - trace_duration_us
         overlap_pct = max(0.0, min(raw_overlap / comm_us * 100.0, 100.0))
 
-        status = "OPTIMAL" if overlap_pct >= 50.0 else "COMMUNICATION BOUND"
+        # Calculate GPU time spent on unoverlopped communication (unutilized for compute)
+        unoverlapped_comm_pct = 100.0 - overlap_pct
 
         logger.info(
             "[OverlapAnalyzer] Compute-Communication Overlap Report\n"
-            f"  Total Compute Time : {compute_us / 1e3:.2f} ms\n"
-            f"  Total NCCL Time    : {comm_us / 1e3:.2f} ms\n"
-            f"  Total Trace Time   : {trace_duration_us / 1e3:.2f} ms\n"
-            f"  Overlap Efficiency : {overlap_pct:.1f}% (conservative lower bound)\n"
-            f"  Status             : {status}"
+            f"  Total Compute Time               : {compute_us / 1e3:.2f} ms\n"
+            f"  Total NCCL Time                  : {comm_us / 1e3:.2f} ms\n"
+            f"  Total Trace Time                 : {trace_duration_us / 1e3:.2f} ms\n"
+            f"  Overlap Efficiency               : {overlap_pct:.1f} %\n"
+            f"  GPU Unutilized due to NCCL comms : {unoverlapped_comm_pct:.1f} %"
         )
 
 
@@ -165,6 +166,15 @@ class ProfilingConfig:
 
     save_memory_snapshot_folder: str = "memory_snapshot"
     """Memory snapshot files location"""
+
+    experimental_diagnostics: bool = False
+    """
+    Enable experimental diagnostic analysis after each profiler trace.
+
+    When set to true, an OverlapAnalyzer is run after each trace export to
+    report compute-communication overlap efficiency. This is only active when
+    profiling is enabled and the process group is initialized (distributed run).
+    """
 
 
 @contextlib.contextmanager
