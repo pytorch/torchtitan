@@ -19,7 +19,7 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.models.common.embedding import NNEmbedding
+from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.rope import RoPE
@@ -65,7 +65,7 @@ class Decoder(BaseModel):
         n_layers: int
         vocab_size: int
         norm_eps: float = 1e-5
-        tok_embeddings: NNEmbedding.Config = field(default_factory=NNEmbedding.Config)
+        tok_embeddings: Embedding.Config = field(default_factory=Embedding.Config)
         # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
         # so that rope cache, a.k.a. freqs_cis, is shared by all layers. However,
         # it causes redundantly passing backend (complex / cos_sin) to both RoPE

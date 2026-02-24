@@ -26,7 +26,7 @@ class Module(nn.Module, Configurable):
         ``nn.Module`` uses plain ``type`` as its metaclass, not ``ABCMeta``.
         The ``raise NotImplementedError`` provides runtime enforcement so
         that any subclass (including diamond-inheritance cases like
-        ``NNEmbedding(nn.Embedding, Module)``) gets a clear error if it
+        ``Embedding(nn.Embedding, Module)``) gets a clear error if it
         forgets to implement ``init_weights``.
         """
         raise NotImplementedError(

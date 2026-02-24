@@ -11,7 +11,7 @@ import torch.nn as nn
 from torchtitan.protocols.module import Module
 
 
-class NNEmbedding(nn.Embedding, Module):
+class Embedding(nn.Embedding, Module):
     """Configurable nn.Embedding with init_weights support.
 
     Uses diamond inheritance (nn.Embedding + Module) so that:
@@ -38,7 +38,7 @@ class NNEmbedding(nn.Embedding, Module):
             embedding_dim = config.embedding_dim
         except AttributeError:
             raise ValueError(
-                "NNEmbedding.Config requires 'num_embeddings' and "
+                "Embedding.Config requires 'num_embeddings' and "
                 "'embedding_dim' to be set before building. "
                 "These are typically set by the parent model config "
                 "(e.g. Decoder.Config.__post_init__)."

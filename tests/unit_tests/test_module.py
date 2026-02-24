@@ -51,7 +51,7 @@ class TestModuleInitWeights(unittest.TestCase):
 class TestDiamondInheritance(unittest.TestCase):
     """Tests for diamond inheritance: class Foo(nn.SomeModule, Module).
 
-    The diamond pattern is used by NNEmbedding(nn.Embedding, Module) to
+    The diamond pattern is used by Embedding(nn.Embedding, Module) to
     reuse PyTorch's implementation while satisfying the Module protocol.
     These tests ensure the pattern works correctly and catches regressions.
     """
