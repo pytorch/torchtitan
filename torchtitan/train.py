@@ -13,7 +13,7 @@ from torchtitan.tools.logging import init_logger, logger
 from torchtitan.trainer import Trainer
 
 
-def main() -> None:
+def main(custom_trainer_class: type[Trainer] | None = None) -> None:
     """Main entry point for training."""
     init_logger()
 
@@ -38,7 +38,10 @@ def main() -> None:
             return
 
         # pyrefly: ignore [missing-attribute]
-        trainer = config.build()
+        if custom_trainer_class is not None:
+            trainer = custom_trainer_class(config)
+        else:
+            trainer = config.build()
 
         # pyrefly: ignore [missing-attribute]
         if config.checkpoint.create_seed_checkpoint:

@@ -19,7 +19,6 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.components.validate import Validator
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 from torchtitan.tools.profiling import (
@@ -51,14 +50,17 @@ class Trainer(ForgeEngine):
         super().__init__(config)
 
         # build tokenizer
-        self.tokenizer = HuggingFaceTokenizer(config.hf_assets_path)
+        self.tokenizer = (config.tokenizer.build(
+            tokenizer_path=config.hf_assets_path)
+                          if config.tokenizer is not None else None)
 
         # build dataloader
-        self.dataloader = HuggingFaceTextDataLoader(
-            config.dataloader,
+        self.dataloader = config.dataloader.build(
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
+            seq_len=config.training.seq_len,
+            local_batch_size=config.training.local_batch_size,
         )
 
         model_args = self.model_config
@@ -71,8 +73,6 @@ class Trainer(ForgeEngine):
             parallel_dims=self.parallel_dims,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
-            ft_enable=config.fault_tolerance.enable,
-            ft_replica_id=config.fault_tolerance.replica_id,
             config_dict=config.to_dict(),
         )
         color = self.metrics_processor.color
@@ -102,9 +102,14 @@ class Trainer(ForgeEngine):
         self.step = 0
 
         # Build validator if validation is configured
-        if config.validation.enable:
-            self.validator = Validator(
-                validation=config.validation,
+        if config.validator.enable:
+            pp_schedule, pp_has_first_stage, pp_has_last_stage = ((
+                self.pp_schedule,
+                self.pp_has_first_stage,
+                self.pp_has_last_stage,
+            ) if self.parallel_dims.pp_enabled else (None, None, None))
+
+            self.validator = config.validator.build(
                 parallelism=config.parallelism,
                 dp_world_size=self.dp_degree,
                 dp_rank=self.dp_rank,
@@ -114,6 +119,11 @@ class Trainer(ForgeEngine):
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
                 metrics_processor=self.metrics_processor,
+                seq_len=config.training.seq_len,
+                local_batch_size=config.training.local_batch_size,
+                pp_schedule=pp_schedule,
+                pp_has_first_stage=pp_has_first_stage,
+                pp_has_last_stage=pp_has_last_stage,
             )
 
         logger.info(
@@ -147,12 +157,7 @@ class Trainer(ForgeEngine):
                 time.perf_counter() - data_load_start
             )
 
-            # Move tensors to the appropriate device
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(device_type)
-            labels = labels.to(device_type)
-
+            # Tensors stay on CPU; moved to GPU per-microbatch during training
             yield input_dict, labels
 
     def post_dataloading_process(
@@ -358,11 +363,10 @@ class Trainer(ForgeEngine):
                     break
 
                 # Run validation if validator is available
-                if self.config.validation.enable and self.validator.should_validate(
+                if config.validator.enable and self.validator.should_validate(
                     self.step
                 ):
-                    with self.loss_fn.no_rescale():
-                        self.validator.validate(self.model_parts, self.step)
+                    self.validator.validate(self.model_parts, self.step)
 
                 self.checkpointer.save(
                     self.step, last_step=(self.step == config.training.steps)
