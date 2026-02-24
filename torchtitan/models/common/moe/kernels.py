@@ -80,7 +80,7 @@ def fill_indices_wrapper(
 ):
     # preallocate output
     permuted_indices = torch.full(
-        (max_len,), -1, dtype=torch.int32, device=tokens_per_expert_group.device
+        (max_len,), -1, dtype=torch.int64, device=tokens_per_expert_group.device
     )
 
     # write offsets is per local expert...
@@ -118,7 +118,7 @@ def fill_indices_cpu(
     permuted_indices = torch.full(
         (max_len,),
         -1,
-        dtype=torch.int32,
+        dtype=torch.int64,
     )  # device=device)
     # Fill the permuted indices
     # For each local expert
