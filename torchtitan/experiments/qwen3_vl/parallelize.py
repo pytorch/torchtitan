@@ -35,7 +35,14 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.components.quantization.float8 import find_float8_linear_config
+from torchtitan.config import (
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.pipeline_parallel import (
@@ -45,14 +52,15 @@ from torchtitan.distributed.pipeline_parallel import (
 )
 
 from torchtitan.distributed import NoParallel
-from torchtitan.models.llama3.infra.parallelize import apply_ddp
-from torchtitan.models.llama4.infra.parallelize import (
+from torchtitan.models.llama3.parallelize import apply_ddp
+from torchtitan.models.llama4.parallelize import (
     apply_compile,
     apply_fsdp,
     apply_moe_ep_tp,
 )
-from torchtitan.models.qwen3.infra.parallelize import _op_sac_save_list
-from torchtitan.protocols.train_spec import BaseModelArgs, ParallelizeFunction
+from torchtitan.models.qwen3.parallelize import _op_sac_save_list
+from torchtitan.protocols.model import BaseModel
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
@@ -410,11 +418,17 @@ class _VLMPipelineScheduleWrapper:
 
 def pipeline_qwen3_vl(
     model: nn.Module,
+    *,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpointConfig,
+    dump_folder: str,
     device: torch.device,
-    model_args: BaseModelArgs,
-    parallelize_fn: ParallelizeFunction,
+    model_config: BaseModel.Config,
+    parallelize_fn,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     """Pipeline-parallelize Qwen3-VL.
@@ -431,18 +445,15 @@ def pipeline_qwen3_vl(
 
     # Determine number of virtual stages (mirrors pipeline_llm logic)
     schedule_class = get_schedule_class(
-        job_config.parallelism.pipeline_parallel_schedule
+        parallelism.pipeline_parallel_schedule
     )
     is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
-    layers_per_stage = job_config.parallelism.pipeline_parallel_layers_per_stage
+    layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
 
-    if hasattr(model_args, "n_layers"):
-        num_layers = model_args.n_layers
-    else:
-        raise ValueError("Model does not have n_layers attribute.")
+    num_layers = model_config.n_layers
 
-    input_weight = job_config.parallelism.pipeline_parallel_first_stage_less_layers
-    output_weight = job_config.parallelism.pipeline_parallel_last_stage_less_layers
+    input_weight = parallelism.pipeline_parallel_first_stage_less_layers
+    output_weight = parallelism.pipeline_parallel_last_stage_less_layers
 
     if layers_per_stage is not None:
         num_virtual_stages = math.ceil(
@@ -472,7 +483,7 @@ def pipeline_qwen3_vl(
         num_virtual_stages = parallel_dims.pp * stages_per_rank
 
     # Generate standard LLM FQNs, then prepend "visual" to stage 0
-    module_names_per_stage = job_config.parallelism.module_fqns_per_model_part
+    module_names_per_stage = parallelism.module_fqns_per_model_part
     if module_names_per_stage is None:
         module_names_per_stage = generate_llm_fqn_per_model_part(
             num_virtual_stages, num_layers, input_weight, output_weight
@@ -486,18 +497,32 @@ def pipeline_qwen3_vl(
     stages, model_parts = pipeline_module_split(
         model,
         pp_mesh,
-        job_config.parallelism.pipeline_parallel_schedule,
+        parallelism.pipeline_parallel_schedule,
         device,
         module_names_per_stage,
     )
 
     # Apply SPMD parallelism to each model part
     for i, m in enumerate(model_parts):
-        m = parallelize_fn(m, parallel_dims, job_config)
+        m = parallelize_fn(
+            m,
+            parallel_dims=parallel_dims,
+            training=training,
+            model_converters=model_converters,
+            parallelism=parallelism,
+            compile_config=compile_config,
+            ac_config=ac_config,
+            dump_folder=dump_folder,
+        )
         model_parts[i] = m
         stages[i].submod = m
 
-    pp_schedule = build_pipeline_schedule(job_config, stages, loss_fn)
+    pp_schedule = build_pipeline_schedule(
+        parallelism=parallelism,
+        local_batch_size=training.local_batch_size,
+        stages=stages,
+        loss_fn=loss_fn,
+    )
 
     has_first_stage = any(stage.is_first for stage in stages)
     has_last_stage = any(stage.is_last for stage in stages)
@@ -510,8 +535,14 @@ def pipeline_qwen3_vl(
 
 def parallelize_qwen3_vl(
     model: nn.Module,
+    *,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpointConfig,
+    dump_folder: str,
 ):
     """
     Apply tensor parallelism, activation checkpointing, torch.compile, and data
@@ -526,9 +557,9 @@ def parallelize_qwen3_vl(
 
     # Validate sequence length divisibility
     assert (
-        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
-        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
@@ -539,18 +570,19 @@ def parallelize_qwen3_vl(
         )
 
     model_compile_enabled = (
-        job_config.compile.enable and "model" in job_config.compile.components
+        compile_config.enable and "model" in compile_config.components
     )
 
     if parallel_dims.tp_enabled:
         if (
-            job_config.parallelism.enable_async_tensor_parallel
+            parallelism.enable_async_tensor_parallel
             and not model_compile_enabled
         ):
             raise RuntimeError("Async TP requires torch.compile")
 
-        enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
+        float8_config = find_float8_linear_config(model_converters.converters)
+        enable_float8_linear = float8_config is not None
+        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
@@ -572,9 +604,9 @@ def parallelize_qwen3_vl(
         _apply_tp_to_decoder(
             model,
             tp_mesh,
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=enable_float8_tensorwise_tp,
-            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
+            enable_async_tp=parallelism.enable_async_tensor_parallel,
         )
 
     # Apply MoE expert parallelism to decoder layers
@@ -588,22 +620,22 @@ def parallelize_qwen3_vl(
         )
 
     # Apply activation checkpointing
-    if job_config.activation_checkpoint.mode != "none":
+    if ac_config.mode != "none":
         apply_ac(
             model,
-            job_config.activation_checkpoint,
+            ac_config,
             model_compile_enabled=model_compile_enabled,
             op_sac_save_list=_op_sac_save_list,
         )
         if model.visual is not None:
-            apply_ac(model.visual, job_config.activation_checkpoint)
+            apply_ac(model.visual, ac_config)
 
     # Apply torch.compile after AC wrapping and before FSDP
     if model_compile_enabled:
-        apply_compile(model, job_config.compile, parallel_dims.ep_enabled)
-    if job_config.compile.enable:
+        apply_compile(model, compile_config, parallel_dims.ep_enabled)
+    if compile_config.enable:
         if model.visual is not None:
-            _apply_compile_to_visual(model.visual, job_config.compile)
+            _apply_compile_to_visual(model.visual, compile_config)
 
     # Apply FSDP or HSDP
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
@@ -624,21 +656,21 @@ def parallelize_qwen3_vl(
         _apply_fsdp_to_visual(
             model,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         )
 
         # FSDP the decoder with MoE-aware sharding (reuses llama4 apply_fsdp)
         apply_fsdp(
             model,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
             edp_mesh=edp_mesh,
             gradient_divide_factor=parallel_dims.fsdp_gradient_divide_factor,
@@ -652,7 +684,7 @@ def parallelize_qwen3_vl(
         if parallel_dims.cp_enabled:
             logger.info("Applied Context Parallel to the Qwen3-VL model")
 
-        if job_config.training.enable_cpu_offload:
+        if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the Qwen3-VL model")
 
     elif parallel_dims.dp_replicate_enabled:
@@ -662,7 +694,7 @@ def parallelize_qwen3_vl(
         apply_ddp(
             model,
             dp_mesh,
-            enable_compile=job_config.compile.enable,
+            enable_compile=compile_config.enable,
         )
 
     return model
