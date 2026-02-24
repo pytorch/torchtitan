@@ -8,7 +8,7 @@
 Multiprocess RL training loop using Monarch Actors.
 
 This demonstrates:
-1. Distributed actor architecture with Generator (vLLM) and Trainer (TorchTitan) components
+1. Distributed actor architecture with Generator (vLLM) and PolicyTrainer (TorchTitan) components
 2. File based weight synchronization between trainer and generator
 
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
@@ -19,26 +19,73 @@ python3 torchtitan/experiments/rl/unified/simple_grpo.py
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 
 import torch
 
 import torchtitan.experiments.rl.unified  # noqa: F401 — registers models with vLLM
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
+from torchtitan.config import Configurable
 from torchtitan.experiments.rl.unified.actors.generator import Generator
-from torchtitan.experiments.rl.unified.actors.trainer import Trainer
-from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_0_6b
+from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
+from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
+
+
+class RLTrainer(Configurable):
+    """Top-level RL training orchestrator.
+
+    Composes a ``PolicyTrainer`` (for model construction, parallelism,
+    optimizer, checkpoint, etc.) with RL-specific settings and a
+    Generator Monarch actor.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        """Master config for RL training.
+
+        ``trainer`` holds the PolicyTrainer.Config that handles model
+        construction, parallelism, optimizer, LR scheduler, checkpoint, etc.
+        The remaining fields are RL-specific.
+        """
+
+        model_spec: ModelSpec | None = None
+        """Model specification shared by trainer and generator.
+        Set programmatically via config_registry (not from CLI)."""
+
+        trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
+        """PolicyTrainer config. Controls optimizer, training, parallelism,
+        lr_scheduler, checkpoint, activation_checkpoint."""
+
+        num_steps: int = 10
+        """Number of RL training steps."""
+
+        dump_folder: str = "outputs/rl"
+        """Root output folder for RL artifacts (temp weights, logs, etc.)."""
+
+        batch_invariant_mode: bool = True
+        """Enable batch-invariant mode for deterministic NCCL collective
+        operations and bitwise-reproducible forward/backward passes."""
+
+        policy_optimization: PolicyOptimizationConfig = field(
+            default_factory=PolicyOptimizationConfig
+        )
+        """Policy optimization hyperparameters."""
+
+        generator: Generator.Config = field(default_factory=Generator.Config)
+        """Generator actor configuration (vLLM engine, sampling)."""
 
 
 async def main():
     """Run the distributed RL training loop using Monarch."""
 
-    # Step 1: Load config from config_registry
-    # TODO: Once the config branch lands, replace with:
-    #     from torchtitan.config.manager import ConfigManager
-    #     config = ConfigManager().parse_args()
+    # Load config from config_registry
+    from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_0_6b
+
+    # TODO: Make simple_grpo.py take --config as input
     config = rl_grpo_qwen3_0_6b()
     trainer_cfg = config.trainer
 
@@ -48,7 +95,7 @@ async def main():
     trainer_tp_size = trainer_cfg.parallelism.tensor_parallel_degree
 
     # RL Training config
-    num_steps = trainer_cfg.training.steps
+    num_steps = config.num_steps
 
     # Use fake dataset for test. TODO: Implement real RL dataloader.
     logger.info("Using default prompts")
@@ -88,15 +135,21 @@ async def main():
     # Spawn actors on trainer and generator mesh
     trainer = trainer_mesh.spawn(
         "trainer",
-        Trainer,
-        config,
+        PolicyTrainer,
+        config.trainer,
+        config.policy_optimization,
+        config.model_spec,
     )
 
     generator = gen_mesh.spawn(
         "generator",
         Generator,
         config.generator,
-        rl_config=config,
+        model_spec=config.model_spec,
+        model_path=trainer_cfg.checkpoint.initial_load_path,
+        dump_folder=config.dump_folder,
+        batch_invariant_mode=config.batch_invariant_mode,
+        policy_optimization=config.policy_optimization,
         prompt_texts=prompt_texts,
         expected_answers=expected_answers,
     )

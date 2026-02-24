@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
-from torchtitan.config import Debug as DebugConfig
+from torchtitan.config import DebugConfig
 from torchtitan.distributed.utils import set_determinism
 
 
