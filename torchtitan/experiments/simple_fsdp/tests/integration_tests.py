@@ -21,9 +21,8 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                 ],
             ],
             "1D",
@@ -32,11 +31,10 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--compile.backend aot_eager",
-                    "--compile.graph_passes auto_bucketing",
+                    "--compile.graph_passes=auto_bucketing",
                 ],
             ],
             "1D+autobucketing",
@@ -45,11 +43,10 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--compile.backend aot_eager",
-                    "--compile.graph_passes transformer_block_bucketing",
+                    "--compile.graph_passes=transformer_block_bucketing",
                 ],
             ],
             "1D+transformer_block_bucketing",
@@ -58,11 +55,10 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--activation_checkpoint.mode selective",
                     "--activation_checkpoint.selective_ac_option op",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "1D with selective op AC",
@@ -71,10 +67,9 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--activation_checkpoint.mode full",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "1D with full AC",
@@ -83,10 +78,9 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "2D",
@@ -96,11 +90,10 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.enable_async_tensor_parallel",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "2D async TP",
@@ -110,17 +103,15 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                     "--training.steps 20",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "Checkpoint Integration Test - Save Load Full Checkpoint",
@@ -129,23 +120,21 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--training.steps 20",
                     "--checkpoint.enable",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "PP+DP+TP 3D test with save/load resume ckpt",
@@ -155,11 +144,10 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 1",
                     "--parallelism.data_parallel_replicate_degree 4",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ]
             ],
             "DDP",
@@ -169,11 +157,10 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ]
             ],
             "HSDP",
@@ -183,12 +170,11 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ]
             ],
             "HSDP+TP",
@@ -198,11 +184,10 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ]
             ],
             "DDP+TP",
@@ -212,12 +197,11 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.context_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ]
             ],
             "HSDP+CP (with dp_shard)",
@@ -227,12 +211,11 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ]
             ],
             "FSDP+TP+CP",
@@ -242,32 +225,29 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                     "--training.steps 10",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
                 # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
                 # excluded during loading to avoid errors caused by mismatched dp_degree.
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                     "--parallelism.tensor_parallel_degree 2",
                     "--training.steps 20",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
                 # load at [tp:4].
                 [
-                    "--model.name simple_fsdp.llama3",
-                    "--compile.enable",
+                    "--module simple_fsdp.llama3",
+                    "--config simple_fsdp_llama3_debugmodel",
                     "--checkpoint.enable",
                     "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
                     "--parallelism.tensor_parallel_degree 4",
                     "--training.steps 30",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "Optional checkpoint",
@@ -277,10 +257,10 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.deepseek_v3",
+                    "--module simple_fsdp.deepseek_v3",
+                    "--config simple_fsdp_deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.expert_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "FSDP+EP",
@@ -290,12 +270,12 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.deepseek_v3",
+                    "--module simple_fsdp.deepseek_v3",
+                    "--config simple_fsdp_deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 4",
                     "--parallelism.expert_tensor_parallel_degree 1",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "FSDP+TP+EP",
@@ -305,12 +285,12 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.deepseek_v3",
+                    "--module simple_fsdp.deepseek_v3",
+                    "--config simple_fsdp_deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 2",
                     "--parallelism.expert_tensor_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "FSDP+TP+EP+ETP",
@@ -320,10 +300,10 @@ def build_simple_fsdp_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--model.name simple_fsdp.deepseek_v3",
+                    "--module simple_fsdp.deepseek_v3",
+                    "--config simple_fsdp_deepseek_v3_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.context_parallel_degree 2",
-                    "--job.custom_config_module=torchtitan.experiments.simple_fsdp.job_config",
                 ],
             ],
             "FSDP+CP",
@@ -342,11 +322,6 @@ _TEST_SUITES_FUNCTION = {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
-    parser.add_argument(
-        "--config_path",
-        default="./tests/integration_tests/base_config.toml",
-        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
-    )
     parser.add_argument(
         "--test_name",
         default="all",

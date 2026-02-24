@@ -49,12 +49,7 @@ python torchtitan/experiments/rl/unified/infer.py --tensor-parallel-size 2
 
 5. Run simple GRPO rl loop
 ```
-<<<<<<< HEAD
-python3 torchtitan/experiments/rl/unified/simple_grpo.py --checkpoint.initial_load_path=<path_to_model_checkpoint>
-=======
-python3 torchtitan/experiments/rl/unified/simple_grpo.py \
-    --job.config_file torchtitan/experiments/rl/unified/run_configs/qwen3_0.6b.toml
->>>>>>> ed644525 (refactor scorer and trainer generator actor)
+python3 torchtitan/experiments/rl/unified/simple_grpo.py --module rl.unified --config rl_grpo_qwen3_0_6b --trainer.checkpoint.initial-load-path=<path_to_model_checkpoint>
 ```
 We use a unified model definition for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 

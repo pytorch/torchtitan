@@ -7,6 +7,7 @@
 # This file applies the PT-D parallelisms (except pipeline parallelism) and various
 # training techniques (e.g. activation checkpointing and compile) to the Llama model.
 
+import logging
 
 import torch
 import torch.nn as nn
@@ -23,16 +24,30 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import (
+    TORCH_DTYPE_MAP,
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
-from torchtitan.tools.logging import logger
+from torchtitan.protocols.model_converter import ModelConvertersContainer
+
+logger = logging.getLogger(__name__)
 
 
 def parallelize_qwen3(
     model: nn.Module,
+    *,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
-    is_trainer: bool = False,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpointConfig,
+    dump_folder: str,
+    has_position_id: bool = False,
 ):
     """
     Apply tensor parallelism and FSDP to the Qwen3 dense model for training.
@@ -43,10 +58,10 @@ def parallelize_qwen3(
         apply_non_moe_tp(
             model,
             tp_mesh,
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
-            enable_async_tp=job_config.parallelism.enable_async_tensor_parallel,
-            is_position_id=not is_trainer,
+            enable_async_tp=parallelism.enable_async_tensor_parallel,
+            has_position_id=has_position_id,
         )
 
     if parallel_dims.fsdp_enabled:
@@ -58,11 +73,11 @@ def parallelize_qwen3(
         apply_fsdp(
             model,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -79,7 +94,7 @@ def apply_non_moe_tp(
     loss_parallel: bool,
     enable_float8_tensorwise_tp: bool,
     enable_async_tp: bool,
-    is_position_id: bool = False,
+    has_position_id: bool = False,
 ):
     """Apply tensor parallelism to the Qwen3 dense model.
 
@@ -113,7 +128,7 @@ def apply_non_moe_tp(
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
     # pyrefly: ignore [not-callable]
-    if is_position_id:
+    if has_position_id:
         attention_module_plan = PrepareModuleInput(
             input_layouts=(Shard(1), Replicate(), None, Replicate()),
             desired_input_layouts=(Replicate(), Replicate(), None, Replicate()),
@@ -145,7 +160,7 @@ def apply_non_moe_tp(
             ),
             "attention.inner_attention": PrepareModuleInputOutput(
                 input_layouts=(Shard(1), Shard(1), Shard(1)),  # xq, xk, xv
-                desired_input_layouts=(None, None, None),
+                desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
                 use_local_input=True,  # use local tensor for attention calculation
                 output_layouts=(Shard(1)),  # output
                 desired_output_layouts=(Shard(1)),

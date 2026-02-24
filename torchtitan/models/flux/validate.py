@@ -6,6 +6,7 @@
 
 import os
 from contextlib import AbstractContextManager
+from dataclasses import dataclass, field, replace
 
 import torch
 import torch.nn as nn
@@ -16,38 +17,62 @@ from torchtitan.components.loss import LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import ValidationContext, Validator
-from torchtitan.config import JobConfig
+from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.models.flux.flux_datasets import build_flux_validation_dataloader
-from torchtitan.models.flux.inference.sampling import generate_image, save_image
-from torchtitan.models.flux.model.autoencoder import AutoEncoder
-from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
-
-from torchtitan.models.flux.tokenizer import build_flux_tokenizer
-from torchtitan.models.flux.utils import (
-    create_position_encoding_for_latents,
-    pack_latents,
-    preprocess_data,
-)
 from torchtitan.tools.logging import logger
+
+from .flux_datasets import FluxDataLoader
+from .inference.sampling import generate_image, save_image
+from .model.autoencoder import AutoEncoder
+from .model.hf_embedder import FluxEmbedder
+from .tokenizer import build_flux_tokenizer
+from .trainer import FluxTrainer
+from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
 
 
 class FluxValidator(Validator):
     """
-    Simple validator focused on correctness and integration.
+    Flux model validator focused on correctness and integration.
 
     Args:
-        job_config: Job configuration
-        validation_dataloader: The validation dataloader
+        config: FluxValidator.Config configuration
+        parallelism: Parallelism configuration
+        dp_world_size: Data parallel world size
+        dp_rank: Data parallel rank
+        tokenizer: Tokenizer
+        parallel_dims: Parallel dimensions
         loss_fn: Loss function to use for validation
-        model: The model to validate (single model, no parallelism)
+        validation_context: Context manager for validation
+        maybe_enable_amp: Context manager for AMP
+        metrics_processor: Metrics processor
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Validator.Config):
+        dataloader: BaseDataLoader.Config = field(
+            default_factory=lambda: FluxDataLoader.Config(
+                dataset="coco-validation",
+                generate_timesteps=True,
+            )
+        )
+        """DataLoader configuration for Flux validation"""
+
+        all_timesteps: bool = False
+        """Generate all 8 timesteps for each sample instead of round-robin"""
+
+        save_img_count: int = -1
+        """Number of images to save during validation (-1 for unlimited)"""
+
+        save_img_folder: str = "validation_images"
+        """Folder to save validation images"""
 
     validation_dataloader: BaseDataLoader
 
     def __init__(
         self,
-        job_config: JobConfig,
+        config: Config,
+        *,
+        parallelism: ParallelismConfig,
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
@@ -55,32 +80,42 @@ class FluxValidator(Validator):
         loss_fn: LossFunction,
         validation_context: ValidationContext,
         maybe_enable_amp: AbstractContextManager[None],
+        local_batch_size: int,
         metrics_processor: MetricsProcessor | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
+        **kwargs,
     ):
-        self.job_config = job_config
+        self.config = config
+        self.parallelism = parallelism
         self.tokenizer = tokenizer
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
-        # pyrefly: ignore [missing-attribute]
-        self.all_timesteps = self.job_config.validation.all_timesteps
-        self.validation_dataloader = build_flux_validation_dataloader(
-            job_config=job_config,
+        self.all_timesteps = config.all_timesteps
+
+        assert isinstance(config.dataloader, FluxDataLoader.Config)
+        self.t5_tokenizer, self.clip_tokenizer = build_flux_tokenizer(
+            config.dataloader.encoder, config.dataloader.hf_assets_path
+        )
+        dl_config = replace(
+            config.dataloader,
+            infinite=config.steps != -1,
+            generate_timesteps=not config.all_timesteps,
+        )
+        self.validation_dataloader = dl_config.build(
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
-            tokenizer=tokenizer,
-            generate_timestamps=not self.all_timesteps,
-            infinite=self.job_config.validation.steps != -1,
+            t5_tokenizer=self.t5_tokenizer,
+            clip_tokenizer=self.clip_tokenizer,
+            local_batch_size=local_batch_size,
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
         # pyrefly: ignore [bad-assignment]
         self.metrics_processor = metrics_processor
-        self.t5_tokenizer, self.clip_tokenizer = build_flux_tokenizer(self.job_config)
 
-        if self.job_config.validation.steps == -1:
+        if config.steps == -1:
             logger.warning(
                 "Setting validation steps to -1 might cause hangs because of "
                 "unequal sample counts across ranks when dataset is exhausted."
@@ -93,6 +128,7 @@ class FluxValidator(Validator):
         autoencoder: AutoEncoder,
         t5_encoder: FluxEmbedder,
         clip_encoder: FluxEmbedder,
+        trainer_config: FluxTrainer.Config,  # TODO: remove this dependency
     ):
         # pyrefly: ignore [read-only]
         self.device = device
@@ -100,6 +136,9 @@ class FluxValidator(Validator):
         self.autoencoder = autoencoder
         self.t5_encoder = t5_encoder
         self.clip_encoder = clip_encoder
+        # Store job_config for Flux-specific runtime accesses
+        # (generate_image, classifier_free_guidance_prob, etc.)
+        self.trainer_config = trainer_config
 
     @torch.no_grad()
     def validate(
@@ -112,14 +151,8 @@ class FluxValidator(Validator):
         model = model_parts[0]
         model.eval()
 
-        # Disable cfg dropout during validation
-        # pyrefly: ignore [missing-attribute]
-        training_cfg_prob = self.job_config.training.classifier_free_guidance_prob
-        # pyrefly: ignore [missing-attribute]
-        self.job_config.training.classifier_free_guidance_prob = 0.0
-
-        # pyrefly: ignore [missing-attribute]
-        save_img_count = self.job_config.validation.save_img_count
+        assert isinstance(self.config, FluxValidator.Config)
+        save_img_count = self.config.save_img_count
 
         parallel_dims = self.parallel_dims
 
@@ -128,10 +161,7 @@ class FluxValidator(Validator):
         num_steps = 0
 
         for input_dict, labels in self.validation_dataloader:
-            if (
-                self.job_config.validation.steps != -1
-                and num_steps >= self.job_config.validation.steps
-            ):
+            if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 
             prompt = input_dict.pop("prompt")
@@ -144,7 +174,7 @@ class FluxValidator(Validator):
                 image = generate_image(
                     device=self.device,
                     dtype=self._dtype,
-                    job_config=self.job_config,
+                    job_config=self.trainer_config,
                     # pyrefly: ignore [bad-argument-type]
                     model=model,
                     prompt=p,
@@ -158,9 +188,8 @@ class FluxValidator(Validator):
                 save_image(
                     name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
                     output_dir=os.path.join(
-                        self.job_config.job.dump_folder,
-                        # pyrefly: ignore [missing-attribute]
-                        self.job_config.validation.save_img_folder,
+                        self.trainer_config.dump_folder,
+                        self.config.save_img_folder,
                     ),
                     x=image,
                     add_sampling_metadata=True,
@@ -271,38 +300,3 @@ class FluxValidator(Validator):
 
         # Set model back to train mode
         model.train()
-
-        # re-enable cfg dropout for training
-        # pyrefly: ignore [missing-attribute]
-        self.job_config.training.classifier_free_guidance_prob = training_cfg_prob
-
-
-def build_flux_validator(
-    job_config: JobConfig,
-    dp_world_size: int,
-    dp_rank: int,
-    tokenizer: BaseTokenizer,
-    parallel_dims: ParallelDims,
-    loss_fn: LossFunction,
-    validation_context: ValidationContext,
-    maybe_enable_amp: AbstractContextManager[None],
-    metrics_processor: MetricsProcessor | None = None,
-    pp_schedule: _PipelineSchedule | None = None,
-    pp_has_first_stage: bool | None = None,
-    pp_has_last_stage: bool | None = None,
-) -> FluxValidator:
-    """Build a simple validator focused on correctness."""
-    return FluxValidator(
-        job_config=job_config,
-        dp_world_size=dp_world_size,
-        dp_rank=dp_rank,
-        tokenizer=tokenizer,
-        parallel_dims=parallel_dims,
-        loss_fn=loss_fn,
-        validation_context=validation_context,
-        maybe_enable_amp=maybe_enable_amp,
-        metrics_processor=metrics_processor,
-        pp_schedule=pp_schedule,
-        pp_has_first_stage=pp_has_first_stage,
-        pp_has_last_stage=pp_has_last_stage,
-    )

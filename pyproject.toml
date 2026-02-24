@@ -14,16 +14,15 @@ dependencies = [
     "torchdata>=0.8.0",
 
     # Hugging Face integrations
-    "datasets>=2.21.0",
-
-    # Tokenization
-    "tokenizers",
+    "datasets>=3.6.0",
+    "tokenizers>=0.15.0",
+    "safetensors",
 
     # Miscellaneous
-    "tomli>=1.1.0",
     "fsspec",
     "tyro",
     "tensorboard",
+    "wandb",
     "einops",
     "pillow",
 ]
@@ -39,9 +38,8 @@ dev = [
     "pre-commit",
     "pytest",
     "pytest-cov",
-    "wandb",
-    "tomli_w", # test_job_config
     "expecttest", # test_tokenizer
+    "pyrefly==0.45.1",
 ]
 
 [tool.setuptools.dynamic]
