@@ -18,6 +18,7 @@ from .attention import (
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
+from .embedding import NNEmbedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .moe import MoE
 from .rope import (
@@ -40,6 +41,7 @@ __all__ = [
     "get_sliding_window_mask_mod",
     "GQAttention",
     "MoE",
+    "NNEmbedding",
     "RoPE",
     "ScaledDotProductAttentionWrapper",
     "TransformerBlock",
