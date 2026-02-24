@@ -303,14 +303,6 @@ def _apply_fsdp_to_visual(
         reshard_after_forward=reshard_after_forward,
     )
 
-    # Shard projector if present
-    if hasattr(model, "projector") and model.projector is not None:
-        fully_shard(
-            model.projector,
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
-        )
-
 
 def _apply_compile_to_visual(visual: nn.Module, compile_config):
     """Apply torch.compile to vision encoder transformer blocks."""
