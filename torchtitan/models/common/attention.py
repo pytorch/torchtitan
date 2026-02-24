@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, NamedTuple
 
 import torch
@@ -22,6 +22,7 @@ from torch.nn.attention.flex_attention import (
 from torch.nn.attention.varlen import varlen_attn
 from torch.types import Number
 
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import (
     apply_rotary_emb_complex,
     apply_rotary_emb_cos_sin,
@@ -407,7 +408,8 @@ class GQAttention(BaseAttention):
         n_kv_heads: int | None = None
         head_dim: int | None = None
         qk_norm: bool = False
-        norm_eps: float = 1e-5
+        q_norm: RMSNorm.Config = field(default_factory=RMSNorm.Config)
+        k_norm: RMSNorm.Config = field(default_factory=RMSNorm.Config)
         bias: bool = False
         use_rope: bool = True
         attn_backend: str = "sdpa"
@@ -428,15 +430,11 @@ class GQAttention(BaseAttention):
         self.rope_backend = config.rope_backend
 
         # Optional QK normalization (Qwen3-style)
-        self.q_norm: nn.RMSNorm | None = None
-        self.k_norm: nn.RMSNorm | None = None
+        self.q_norm: RMSNorm | None = None
+        self.k_norm: RMSNorm | None = None
         if config.qk_norm:
-            self.q_norm = nn.RMSNorm(
-                self.head_dim, eps=config.norm_eps, elementwise_affine=True
-            )
-            self.k_norm = nn.RMSNorm(
-                self.head_dim, eps=config.norm_eps, elementwise_affine=True
-            )
+            self.q_norm = config.q_norm.build(normalized_shape=self.head_dim)
+            self.k_norm = config.k_norm.build(normalized_shape=self.head_dim)
 
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
@@ -550,6 +548,6 @@ class GQAttention(BaseAttention):
         if self.wo.bias is not None:
             trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
         if self.q_norm is not None:
-            self.q_norm.reset_parameters()
+            self.q_norm.init_weights()
         if self.k_norm is not None:
-            self.k_norm.reset_parameters()
+            self.k_norm.init_weights()

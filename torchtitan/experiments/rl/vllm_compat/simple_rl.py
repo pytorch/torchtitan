@@ -34,6 +34,7 @@ from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3Model
 from transformers import AutoConfig, AutoTokenizer
 
@@ -330,7 +331,7 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
             hf_config.hidden_size // hf_config.num_attention_heads,
         ),
         hidden_dim=hf_config.intermediate_size,
-        norm_eps=hf_config.rms_norm_eps,
+        norm=RMSNorm.Config(eps=hf_config.rms_norm_eps),
         rope_theta=hf_config.rope_theta,
         max_seq_len=getattr(hf_config, "max_position_embeddings", 32768),
         qk_norm=True,

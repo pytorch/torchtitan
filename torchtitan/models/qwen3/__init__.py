@@ -9,6 +9,7 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.models.common import FeedForward, GQAttention, RoPE
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Qwen3Model, Qwen3TransformerBlock
@@ -23,21 +24,29 @@ __all__ = [
 
 # Adding different variants of the model
 
+# Shared config object: safe because RMSNorm.Config is an immutable-style
+# dataclass (slots=True, no mutable fields).  If mutable fields are ever
+# added, each model variant should get its own instance instead.
+norm_config = RMSNorm.Config(eps=1e-6)
+
 qwen3_configs = {
     "debugmodel": Qwen3Model.Config(
         vocab_size=2048,
         dim=256,
         n_layers=8,
+        norm=norm_config,
         enable_weight_tying=True,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=norm_config,
+            ffn_norm=norm_config,
             feed_forward=FeedForward.Config(hidden_dim=3072),
             attention=GQAttention.Config(
                 n_heads=16,
                 n_kv_heads=8,
                 head_dim=128,
                 qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=norm_config,
+                k_norm=norm_config,
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -53,16 +62,19 @@ qwen3_configs = {
         vocab_size=151936,
         dim=1024,
         n_layers=28,
+        norm=norm_config,
         enable_weight_tying=True,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=norm_config,
+            ffn_norm=norm_config,
             feed_forward=FeedForward.Config(hidden_dim=3072),
             attention=GQAttention.Config(
                 n_heads=16,
                 n_kv_heads=8,
                 head_dim=128,
                 qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=norm_config,
+                k_norm=norm_config,
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -78,16 +90,19 @@ qwen3_configs = {
         vocab_size=151936,
         dim=2048,
         n_layers=28,
+        norm=norm_config,
         enable_weight_tying=True,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=norm_config,
+            ffn_norm=norm_config,
             feed_forward=FeedForward.Config(hidden_dim=6144),
             attention=GQAttention.Config(
                 n_heads=16,
                 n_kv_heads=8,
                 head_dim=128,
                 qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=norm_config,
+                k_norm=norm_config,
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -103,16 +118,19 @@ qwen3_configs = {
         vocab_size=151936,
         dim=2560,
         n_layers=36,
+        norm=norm_config,
         enable_weight_tying=True,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=norm_config,
+            ffn_norm=norm_config,
             feed_forward=FeedForward.Config(hidden_dim=9728),
             attention=GQAttention.Config(
                 n_heads=32,
                 n_kv_heads=8,
                 head_dim=128,
                 qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=norm_config,
+                k_norm=norm_config,
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -128,15 +146,18 @@ qwen3_configs = {
         vocab_size=151936,
         dim=4096,
         n_layers=36,
+        norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=norm_config,
+            ffn_norm=norm_config,
             feed_forward=FeedForward.Config(hidden_dim=12288),
             attention=GQAttention.Config(
                 n_heads=32,
                 n_kv_heads=8,
                 head_dim=128,
                 qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=norm_config,
+                k_norm=norm_config,
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -152,15 +173,18 @@ qwen3_configs = {
         vocab_size=151936,
         dim=5120,
         n_layers=40,
+        norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=norm_config,
+            ffn_norm=norm_config,
             feed_forward=FeedForward.Config(hidden_dim=17408),
             attention=GQAttention.Config(
                 n_heads=40,
                 n_kv_heads=8,
                 head_dim=128,
                 qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=norm_config,
+                k_norm=norm_config,
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -176,15 +200,18 @@ qwen3_configs = {
         vocab_size=151936,
         dim=5120,
         n_layers=64,
+        norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=norm_config,
+            ffn_norm=norm_config,
             feed_forward=FeedForward.Config(hidden_dim=25600),
             attention=GQAttention.Config(
                 n_heads=64,
                 n_kv_heads=8,
                 head_dim=128,
                 qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=norm_config,
+                k_norm=norm_config,
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -201,8 +228,10 @@ qwen3_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=8,
+        norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=norm_config,
+            ffn_norm=norm_config,
             moe_enabled=True,
             moe=MoE.Config(
                 hidden_dim=768,
@@ -220,7 +249,8 @@ qwen3_configs = {
                 n_kv_heads=8,
                 head_dim=128,
                 qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=norm_config,
+                k_norm=norm_config,
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -236,8 +266,10 @@ qwen3_configs = {
         vocab_size=151936,
         dim=2048,
         n_layers=48,
+        norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=norm_config,
+            ffn_norm=norm_config,
             moe_enabled=True,
             moe=MoE.Config(
                 hidden_dim=768,
@@ -255,7 +287,8 @@ qwen3_configs = {
                 n_kv_heads=4,
                 head_dim=128,
                 qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=norm_config,
+                k_norm=norm_config,
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),
@@ -271,8 +304,10 @@ qwen3_configs = {
         vocab_size=151936,
         dim=4096,
         n_layers=94,
+        norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
-            norm_eps=1e-6,
+            attention_norm=norm_config,
+            ffn_norm=norm_config,
             moe_enabled=True,
             moe=MoE.Config(
                 hidden_dim=1536,
@@ -290,7 +325,8 @@ qwen3_configs = {
                 n_kv_heads=4,
                 head_dim=128,
                 qk_norm=True,
-                norm_eps=1e-6,
+                q_norm=norm_config,
+                k_norm=norm_config,
                 attn_backend="sdpa",
                 rope_backend="cos_sin",
             ),

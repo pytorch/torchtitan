@@ -158,8 +158,8 @@ class Attention(nn.Module):
 
         # QK norm (Qwen3 specific) - use vLLM's RMSNorm
         if model_args.qk_norm:
-            self.q_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm_eps)
-            self.k_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm_eps)
+            self.q_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm.eps)
+            self.k_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm.eps)
         else:
             self.q_norm = None
             self.k_norm = None
@@ -248,8 +248,8 @@ class TransformerBlock(nn.Module):
             dim=model_args.dim, hidden_dim=model_args.hidden_dim
         )
 
-        self.attention_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
-        self.ffn_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.attention_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm.eps)
+        self.ffn_norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm.eps)
 
         if model_args.depth_init:
             self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -303,7 +303,7 @@ class Qwen3VLLMCompatModel(BaseModel):
         for layer_id in range(model_args.n_layers):
             self.layers[str(layer_id)] = TransformerBlock(layer_id, model_args)
 
-        self.norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.norm = VLLMRMSNorm(model_args.dim, eps=model_args.norm.eps)
         self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
 
         # IMPORTANT: To match vLLM's behavior and Qwen3's config
