@@ -1,4 +1,5 @@
 import warnings
+from dataclasses import asdict
 from typing import Dict, List, Tuple, Union
 
 import numpy as np
@@ -323,9 +324,15 @@ def build_nanoset_dataloader(
         random_seed=job_config.training.dataset_random_seed,
         target_tokens=job_config.training.target_tokens,
     )
+
+    dataloader_kwargs = {
+        **asdict(job_config.training.dataloader),
+        "batch_size": job_config.training.local_batch_size,
+    }
+
     return ParallelAwareDataloader(
         dataset=nanoset,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
-        batch_size=job_config.training.local_batch_size,
+        **dataloader_kwargs,
     )
