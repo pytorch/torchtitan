@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 
 import torch
 
-import torchtitan.experiments.rl.unified  # noqa: F401 — registers models with vLLM
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
 from torchtitan.config import Configurable
