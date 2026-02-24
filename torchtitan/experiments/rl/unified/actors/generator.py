@@ -9,7 +9,6 @@ import logging
 import os
 
 from dataclasses import dataclass
-from typing import List
 
 import torch
 from monarch.actor import Actor, endpoint
@@ -50,10 +49,10 @@ class TrajectoryData:
     """
 
     policy_version: int
-    completions: List[str]
-    vllm_token_ids: List[List[int]]
-    vllm_token_log_probs: List[List[float]]
-    prompt_token_ids: List[List[int]]
+    completions: list[str]
+    vllm_token_ids: list[list[int]]
+    vllm_token_log_probs: list[list[float]]
+    prompt_token_ids: list[list[int]]
     rewards: torch.Tensor
     advantages: torch.Tensor
 
@@ -365,8 +364,8 @@ class Generator(Actor):
     def __init__(
         self,
         model_path: str,
-        prompt_texts: List[str],
-        expected_answers: List[str],
+        prompt_texts: list[str],
+        expected_answers: list[str],
         group_size: int = 8,
         max_new_tokens: int = 20,
         temperature: float = 1.0,
