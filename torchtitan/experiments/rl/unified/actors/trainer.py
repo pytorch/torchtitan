@@ -40,6 +40,11 @@ class PolicyTrainer(Actor, Configurable):
     Updates policy based on collected trajectories.
 
     Run model forward on trajectories, computes loss, and run backward.
+    Receives the top-level ``RLTrainer.Config`` and reads policy trainer
+    settings (batch_invariant_mode, grpo) directly from it, plus model /
+    optimizer / parallelism settings from the nested ``config.trainer``.
+
+    TODO: Use torchtitan Trainer for model init and parallelisation.
 
     TODO: Use torchtitan PolicyTrainer for model init and parallelism.
 
