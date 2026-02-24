@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from fnmatch import fnmatch
-from typing import Optional
 
 from requests.exceptions import HTTPError
 from tqdm import tqdm
@@ -16,8 +15,8 @@ def download_hf_assets(
     local_dir: str,
     asset_types: str | list[str],
     download_all: bool = False,
-    hf_token: Optional[str] = None,
-    additional_patterns: Optional[list] = None,
+    hf_token: str | None = None,
+    additional_patterns: list | None = None,
 ) -> None:
     """
     Download relevant files from HuggingFace Hub repository.

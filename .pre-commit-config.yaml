@@ -35,6 +35,7 @@ repos:
           - pep8-naming == 0.12.1
           - torchfix
           - flake8-pep585
+          - flake8-new-union-types == 0.4.1
         args: ['--config=.flake8']
 
 -   repo: https://github.com/omnilib/ufmt

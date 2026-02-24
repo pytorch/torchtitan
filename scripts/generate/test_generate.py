@@ -10,7 +10,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 import torch
 import torch.distributed.checkpoint as dcp
@@ -78,8 +77,8 @@ def test_generate(
     temperature: float = 1.0,
     max_new_tokens: int = 32,
     batch_size: int = 1,
-    top_k: Optional[int] = None,
-    seed: Optional[int] = None,
+    top_k: int | None = None,
+    seed: int | None = None,
     deterministic: bool = False,
 ):
     init_logger()

@@ -8,7 +8,7 @@ import itertools
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import PIL.Image
@@ -30,7 +30,7 @@ from .configs import Encoder
 def _process_cc12m_image(
     img: PIL.Image.Image,
     output_size: int = 256,
-) -> Optional[torch.Tensor]:
+) -> torch.Tensor | None:
     """Process CC12M image to the desired size."""
 
     width, height = img.size
@@ -158,7 +158,7 @@ DATASETS = {
 
 
 def _validate_dataset(
-    dataset_name: str, dataset_path: Optional[str] = None
+    dataset_name: str, dataset_path: str | None = None
 ) -> tuple[str, Callable, Callable]:
     """Validate dataset name and path."""
     if dataset_name not in DATASETS:
@@ -188,7 +188,7 @@ class FluxDataset(IterableDataset, Stateful):
     def __init__(
         self,
         dataset_name: str,
-        dataset_path: Optional[str],
+        dataset_path: str | None,
         t5_tokenizer: BaseTokenizer,
         clip_tokenizer: BaseTokenizer,
         classifier_free_guidance_prob: float,
@@ -320,7 +320,7 @@ class FluxValidationDataset(FluxDataset):
     def __init__(
         self,
         dataset_name: str,
-        dataset_path: Optional[str],
+        dataset_path: str | None,
         t5_tokenizer: BaseTokenizer,
         clip_tokenizer: BaseTokenizer,
         classifier_free_guidance_prob: float,
