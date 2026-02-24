@@ -7,7 +7,7 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.models.common import FeedForward, GQAttention, RoPE
+from torchtitan.models.common import Embedding, FeedForward, GQAttention, RoPE
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.protocols.model_spec import ModelSpec
@@ -36,6 +36,7 @@ qwen3_configs = {
         n_layers=8,
         norm=norm_config,
         enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=norm_config,
             ffn_norm=norm_config,
@@ -64,6 +65,7 @@ qwen3_configs = {
         n_layers=28,
         norm=norm_config,
         enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=norm_config,
             ffn_norm=norm_config,
@@ -92,6 +94,7 @@ qwen3_configs = {
         n_layers=28,
         norm=norm_config,
         enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=norm_config,
             ffn_norm=norm_config,
@@ -120,6 +123,7 @@ qwen3_configs = {
         n_layers=36,
         norm=norm_config,
         enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             attention_norm=norm_config,
             ffn_norm=norm_config,
@@ -146,6 +150,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=4096,
         n_layers=36,
+        tok_embeddings=Embedding.Config(),
         norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
             attention_norm=norm_config,
@@ -173,6 +178,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=5120,
         n_layers=40,
+        tok_embeddings=Embedding.Config(),
         norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
             attention_norm=norm_config,
@@ -200,6 +206,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=5120,
         n_layers=64,
+        tok_embeddings=Embedding.Config(),
         norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
             attention_norm=norm_config,
@@ -228,6 +235,7 @@ qwen3_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=8,
+        tok_embeddings=Embedding.Config(),
         norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
             attention_norm=norm_config,
@@ -266,6 +274,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=2048,
         n_layers=48,
+        tok_embeddings=Embedding.Config(),
         norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
             attention_norm=norm_config,
@@ -304,6 +313,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=4096,
         n_layers=94,
+        tok_embeddings=Embedding.Config(),
         norm=norm_config,
         layer=Qwen3TransformerBlock.Config(
             attention_norm=norm_config,

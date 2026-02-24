@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from torch import nn
@@ -50,8 +50,8 @@ class TransformerBlock(Module):
         attention: BaseAttention.Config  # required, no default
         feed_forward: FeedForward.Config | None = None
         moe: MoE.Config | None = None
-        attention_norm: RMSNorm.Config = field(default_factory=RMSNorm.Config)
-        ffn_norm: RMSNorm.Config = field(default_factory=RMSNorm.Config)
+        attention_norm: RMSNorm.Config
+        ffn_norm: RMSNorm.Config
 
 
 class Decoder(BaseModel):
@@ -66,8 +66,8 @@ class Decoder(BaseModel):
         dim: int
         n_layers: int
         vocab_size: int
-        tok_embeddings: Embedding.Config = field(default_factory=Embedding.Config)
-        norm: RMSNorm.Config = field(default_factory=RMSNorm.Config)
+        tok_embeddings: Embedding.Config
+        norm: RMSNorm.Config
         # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
         # so that rope cache, a.k.a. freqs_cis, is shared by all layers. However,
         # it causes redundantly passing backend (complex / cos_sin) to both RoPE
