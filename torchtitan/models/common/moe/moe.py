@@ -260,7 +260,7 @@ class TokenChoiceTopKRouter(nn.Module):
         # to avoid loss explosion.
         scores = F.linear(
             x.to(torch.float32),
-            self.gate.weight.transpose(-2, -1).to(torch.float32),
+            self.gate.weight.to(torch.float32),
             self.gate.bias.to(torch.float32) if self.gate.bias is not None else None,
         )
         if self.score_func == "sigmoid":
