@@ -31,7 +31,7 @@ def compute_token_log_probs(
         full_sequence, dtype=torch.long, device=device
     ).unsqueeze(0)
 
-    # Forward pass with explicit positions for TP compatibility
+    # Forward pass — trainer uses is_position_id=False so positions=None is fine
     logits = model(full_tensor, attention_masks=None)
 
     # Convert to float32 for numerical stability

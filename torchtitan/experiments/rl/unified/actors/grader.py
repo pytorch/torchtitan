@@ -10,7 +10,7 @@ from typing import Callable, List, Optional
 
 import torch
 from monarch.actor import Actor, endpoint
-from torchtitan.experiments.rl.unified.job_config import JobConfig
+from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
 from torchtitan.experiments.rl.vllm_compat.simple_rl import trivial_reward_function
 
 logger = logging.getLogger(__name__)
@@ -50,18 +50,17 @@ class Grader(Actor):
     is done by the Trainer.
 
     Args:
-        job_config: JobConfig dataclass containing all configuration
+        policy_optimization: Policy optimization config containing group_size.
         reward_fn: Optional custom reward function. If not provided,
                    uses trivial_reward_function from simple_rl.
     """
 
     def __init__(
         self,
-        job_config: JobConfig,
+        policy_optimization: PolicyOptimizationConfig,
         reward_fn: Optional[Callable] = None,
     ):
-        # Extract needed fields from job_config
-        self.group_size = job_config.policy_optimization.grpo_group_size
+        self.group_size = policy_optimization.group_size
 
         # Set reward function
         self.reward_fn = reward_fn if reward_fn is not None else trivial_reward_function

@@ -4,12 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import asdict
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
 
 import torch
-
 from datasets import Dataset, load_dataset
 from datasets.distributed import split_dataset_by_node
 from torch.distributed.checkpoint.stateful import Stateful
@@ -17,7 +16,6 @@ from torch.utils.data import IterableDataset
 
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import JobConfig
 from torchtitan.hf_datasets import DatasetConfig
 from torchtitan.tools.logging import logger
 
@@ -166,89 +164,53 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         return _state_dict
 
 
-def build_text_dataloader(
-    dp_world_size: int,
-    dp_rank: int,
-    tokenizer: BaseTokenizer,
-    job_config: JobConfig,
-    infinite: bool = True,
-) -> ParallelAwareDataloader:
-    """Build a data loader for HuggingFace datasets.
+class HuggingFaceTextDataLoader(ParallelAwareDataloader):
+    """Configurable text dataloader that wraps HuggingFaceTextDataset.
 
-    Args:
-        dp_world_size: Data parallelism world size.
-        dp_rank: Data parallelism rank.
-        tokenizer: Tokenizer to use for encoding text.
-        job_config: Job configuration containing dataset and DataLoader settings.
-        infinite: Whether to loop the dataset infinitely.
+    This dataloader can be used for both training and validation by
+    configuring the appropriate dataset, seq_len, batch_size, etc.
     """
-    dataset_name = job_config.training.dataset
-    dataset_path = job_config.training.dataset_path
-    batch_size = job_config.training.local_batch_size
-    seq_len = job_config.training.seq_len
 
-    hf_ds = HuggingFaceTextDataset(
-        dataset_name=dataset_name,
-        dataset_path=dataset_path,
-        tokenizer=tokenizer,
-        seq_len=seq_len,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=infinite,
-    )
+    @dataclass(kw_only=True, slots=True)
+    class Config(ParallelAwareDataloader.Config):
+        dataset: str = "c4_test"
+        """Dataset to use"""
 
-    dataloader_kwargs = {
-        **asdict(job_config.training.dataloader),
-        "batch_size": batch_size,
-    }
+        infinite: bool = True
+        """Whether to loop the dataset infinitely"""
 
-    return ParallelAwareDataloader(
-        hf_ds,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        **dataloader_kwargs,
-    )
+    def __init__(
+        self,
+        config: Config,
+        *,
+        dp_world_size: int,
+        dp_rank: int,
+        tokenizer: BaseTokenizer,
+        seq_len: int,
+        local_batch_size: int,
+        **kwargs,
+    ):
+        hf_ds = HuggingFaceTextDataset(
+            dataset_name=config.dataset,
+            dataset_path=config.dataset_path,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=config.infinite,
+        )
 
+        dataloader_kwargs = {
+            "num_workers": config.num_workers,
+            "persistent_workers": config.persistent_workers,
+            "pin_memory": config.pin_memory,
+            "prefetch_factor": config.prefetch_factor,
+            "batch_size": local_batch_size,
+        }
 
-def build_text_validation_dataloader(
-    dp_world_size: int,
-    dp_rank: int,
-    tokenizer: BaseTokenizer,
-    job_config: JobConfig,
-    infinite: bool = False,
-) -> ParallelAwareDataloader:
-    """Build a validation data loader for HuggingFace datasets.
-
-    Args:
-        dp_world_size: Data parallelism world size.
-        dp_rank: Data parallelism rank.
-        tokenizer: Tokenizer to use for encoding text.
-        job_config: Job configuration containing dataset and DataLoader settings.
-        infinite: Whether to loop the dataset infinitely.
-    """
-    dataset_name = job_config.validation.dataset
-    dataset_path = job_config.validation.dataset_path
-    batch_size = job_config.validation.local_batch_size
-    seq_len = job_config.validation.seq_len
-
-    hf_ds = HuggingFaceTextDataset(
-        dataset_name=dataset_name,
-        dataset_path=dataset_path,
-        tokenizer=tokenizer,
-        seq_len=seq_len,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        infinite=infinite,
-    )
-
-    dataloader_kwargs = {
-        **asdict(job_config.validation.dataloader),
-        "batch_size": batch_size,
-    }
-
-    return ParallelAwareDataloader(
-        hf_ds,
-        dp_rank=dp_rank,
-        dp_world_size=dp_world_size,
-        **dataloader_kwargs,
-    )
+        super().__init__(
+            hf_ds,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            **dataloader_kwargs,
+        )

@@ -12,7 +12,6 @@ import time
 from torchtitan.tools.logging import logger
 
 from tests.integration_tests import OverrideDefinitions
-
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
@@ -29,23 +28,28 @@ def _run_cmd(cmd):
     return subprocess.run([cmd], text=True, shell=True)
 
 
-def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
+def run_single_test(
+    test_flavor: OverrideDefinitions,
+    output_dir: str,
+    module: str | None = None,
+    config: str | None = None,
+):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
+        cmd = ""
+        if module is not None:
+            cmd += f"MODULE={module} "
+        if config is not None:
+            cmd += f"CONFIG={config} "
+        cmd = f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
+
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
-
-        if test_name == "fsdp2_memory_estimation":
-            cmd = (
-                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
-                "./scripts/estimate/run_memory_estimation.sh"
-            )
 
         cmd += " " + dump_folder_arg
         if override_arg:
@@ -57,7 +61,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
         # save checkpoint (idx == 0) and load it for generation (idx == 1)
         if test_name == "test_generate" and idx == 1:
             cmd = (
-                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+                f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
                 f"CHECKPOINT_DIR={output_dir}/{test_name}/checkpoint/step-10 "
                 "PROMPT='What is the meaning of life?' "
                 f"./scripts/generate/run_llama_generate.sh --out > {output_dir}/{test_name}/generated_output.json"
@@ -71,14 +75,8 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
             )
 
 
-def run_tests(args, test_list: list[OverrideDefinitions]):
+def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):
     """Run all integration tests to test the core features of TorchTitan"""
-
-    # Check if config file exists
-    assert args.config_path.endswith(".toml"), "Base config path must end with .toml"
-    assert os.path.exists(
-        args.config_path
-    ), f"Base config path {args.config_path} does not exist"
 
     ran_any_test = False
     for test_flavor in test_list:
@@ -103,7 +101,7 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
                 f" because --ngpu arg is {args.ngpu}"
             )
         else:
-            run_single_test(test_flavor, args.config_path, args.output_dir)
+            run_single_test(test_flavor, args.output_dir, module, config)
             ran_any_test = True
 
     if not ran_any_test:
@@ -138,9 +136,16 @@ def main():
         help="Which test suite to run. If not specified, torchtitan composability tests will be run",
     )
     parser.add_argument(
-        "--config_path",
-        default="./tests/integration_tests/base_config.toml",
-        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
+        "--module",
+        default="llama3",
+        help="Model module to use for training (default: llama3). "
+        "This is passed as MODULE env var to run_train.sh.",
+    )
+    parser.add_argument(
+        "--config",
+        default="llama3_debugmodel",
+        help="Config function to use for training (default: llama3_debugmodel). "
+        "This is passed as CONFIG env var to run_train.sh.",
     )
     parser.add_argument(
         "--test_name",

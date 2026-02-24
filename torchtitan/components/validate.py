@@ -6,6 +6,7 @@
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from dataclasses import dataclass, field, replace
 from typing import Any, cast, TypeAlias
 
 import torch
@@ -15,26 +16,35 @@ from torchtitan.components.dataloader import BaseDataLoader
 from torchtitan.components.loss import IGNORE_INDEX, LossFunction
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import JobConfig
+from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.hf_datasets.text_datasets import build_text_validation_dataloader
-from torchtitan.protocols import ModelProtocol
+from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
+from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
 
 ValidationContext: TypeAlias = Callable[[], AbstractContextManager[None]]
 
 
-class BaseValidator:
-    def __init__(self, job_config: JobConfig):
-        self.job_config = job_config
+class BaseValidator(Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        freq: int = 10
+        """Frequency of validation"""
+
+    def __init__(
+        self,
+        config: Config,
+        **kwargs,
+    ):
+        self.config = config
 
     def validate(self, model_parts: list[nn.Module], step: int) -> None:
         raise NotImplementedError("validate method not implemented")
 
     def should_validate(self, step: int) -> bool:
-        return step == 1 or step % self.job_config.validation.freq == 0
+        return step == 1 or step % self.config.freq == 0
 
 
 class Validator(BaseValidator):
@@ -42,17 +52,54 @@ class Validator(BaseValidator):
     Simple validator focused on correctness and integration.
 
     Args:
-        job_config: Job configuration
-        validation_dataloader: The validation dataloader
+        config: Validator.Config configuration
+        parallelism: ParallelismConfig configuration
+        dp_world_size: Data parallel world size
+        dp_rank: Data parallel rank
+        tokenizer: Tokenizer
+        parallel_dims: Parallel dimensions
         loss_fn: Loss function to use for validation
-        model: The model to validate (single model, no parallelism)
+        validation_context: Context manager for validation
+        maybe_enable_amp: Context manager for AMP
+        metrics_processor: Metrics processor
+        pp_schedule: Pipeline schedule (optional)
+        pp_has_first_stage: Whether this rank has the first PP stage (optional)
+        pp_has_last_stage: Whether this rank has the last PP stage (optional)
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseValidator.Config):
+        enable: bool = False
+        """Enable validation to default run validation after each training loop"""
+
+        steps: int = -1
+        """
+        Number of steps to take in the validation set, -1 means consuming
+        all the data in the validation dataset.
+        WARNING: When setting to -1 there could be hangs due to mismatch among ranks
+        """
+
+        dataloader: BaseDataLoader.Config = field(
+            default_factory=lambda: HuggingFaceTextDataLoader.Config(
+                dataset="c4_validation",
+                infinite=False,
+            )
+        )
+        """DataLoader configuration for validation"""
+
+        def __post_init__(self):
+            assert (
+                self.steps > 0 or self.steps == -1
+            ), "validation steps must be positive or -1"
 
     validation_dataloader: BaseDataLoader
 
+    # TODO: improve the constructor signature
     def __init__(
         self,
-        job_config: JobConfig,
+        config: Config,
+        *,
+        parallelism: ParallelismConfig,
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
@@ -61,20 +108,26 @@ class Validator(BaseValidator):
         validation_context: ValidationContext,
         maybe_enable_amp: AbstractContextManager[None],
         metrics_processor: MetricsProcessor,
+        seq_len: int,
+        local_batch_size: int,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
+        **kwargs,
     ):
-        self.job_config = job_config
+        super().__init__(config=config)
+        self.parallelism = parallelism
         self.tokenizer = tokenizer
         self.parallel_dims = parallel_dims
         self.loss_fn = loss_fn
-        self.validation_dataloader = build_text_validation_dataloader(
-            job_config=job_config,
+        # pyrefly: ignore [unexpected-keyword]
+        dl_config = replace(config.dataloader, infinite=config.steps != -1)
+        self.validation_dataloader = dl_config.build(
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
             tokenizer=tokenizer,
-            infinite=self.job_config.validation.steps != -1,
+            seq_len=seq_len,
+            local_batch_size=local_batch_size,
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
@@ -83,7 +136,7 @@ class Validator(BaseValidator):
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
 
-        if self.job_config.validation.steps == -1:
+        if config.steps == -1:
             logger.warning(
                 "Setting validation steps to -1 might cause hangs because of "
                 "unequal sample counts across ranks when dataset is exhausted."
@@ -133,8 +186,9 @@ class Validator(BaseValidator):
         extra_kwargs: dict[str, Any] = {}
 
         try:
+            # pyrefly: ignore [not-callable]
             extra_kwargs["attention_masks"] = cast(
-                ModelProtocol, model_parts[0]
+                BaseModel, model_parts[0]
             ).get_attention_masks(
                 input_batch=inputs,
                 tokenizer=self.tokenizer,
@@ -150,7 +204,7 @@ class Validator(BaseValidator):
                 extra_kwargs,
                 self.parallel_dims.get_mesh("cp"),
                 inputs.device,
-                self.job_config.parallelism.context_parallel_load_balancer,
+                self.parallelism.context_parallel_load_balancer,
             )
 
         return inputs, labels, extra_inputs, extra_kwargs
@@ -172,10 +226,8 @@ class Validator(BaseValidator):
         num_steps = 0
 
         for input_dict, labels in self.validation_dataloader:
-            if (
-                self.job_config.validation.steps != -1
-                and num_steps >= self.job_config.validation.steps
-            ):
+            # pyrefly: ignore [missing-attribute, unsupported-operation]
+            if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 
             self.metrics_processor.ntokens_since_last_log += labels.numel()
@@ -200,18 +252,6 @@ class Validator(BaseValidator):
                 )
             else:
                 global_valid_tokens = local_valid_tokens.float()
-
-            optional_context_parallel_ctx = None
-            if parallel_dims.cp_enabled:
-                cp_mesh = parallel_dims.get_mesh("cp")
-                optional_context_parallel_ctx = dist_utils.create_context_parallel_ctx(
-                    cp_mesh=cp_mesh,
-                    # pyrefly: ignore [bad-argument-type]
-                    cp_buffers=[inputs, labels] + [m.freqs_cis for m in model_parts],
-                    cp_seq_dims=[1, 1] + [0 for _ in model_parts],
-                    cp_no_restore_buffers={inputs, labels},
-                    cp_rotate_method=self.job_config.parallelism.context_parallel_rotate_method,
-                )
 
             if parallel_dims.pp_enabled:
                 assert self.pp_schedule is not None
@@ -272,35 +312,3 @@ class Validator(BaseValidator):
         # Set model back to train mode
         for model in model_parts:
             model.train()
-
-
-def build_validator(
-    job_config: JobConfig,
-    dp_world_size: int,
-    dp_rank: int,
-    tokenizer: BaseTokenizer,
-    parallel_dims: ParallelDims,
-    loss_fn: LossFunction,
-    validation_context: ValidationContext,
-    maybe_enable_amp: AbstractContextManager[None],
-    metrics_processor: MetricsProcessor | None = None,
-    pp_schedule: _PipelineSchedule | None = None,
-    pp_has_first_stage: bool | None = None,
-    pp_has_last_stage: bool | None = None,
-) -> BaseValidator:
-    """Build a simple validator focused on correctness."""
-    assert metrics_processor is not None
-    return Validator(
-        job_config=job_config,
-        dp_world_size=dp_world_size,
-        dp_rank=dp_rank,
-        tokenizer=tokenizer,
-        parallel_dims=parallel_dims,
-        loss_fn=loss_fn,
-        validation_context=validation_context,
-        maybe_enable_amp=maybe_enable_amp,
-        metrics_processor=metrics_processor,
-        pp_schedule=pp_schedule,
-        pp_has_first_stage=pp_has_first_stage,
-        pp_has_last_stage=pp_has_last_stage,
-    )
