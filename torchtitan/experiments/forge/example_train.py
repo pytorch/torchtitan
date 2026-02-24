@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import time
 from collections.abc import Iterable
 from datetime import timedelta
@@ -17,15 +18,15 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.components.validate import Validator
+from torchtitan.config import ConfigManager
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
+from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-from torchtitan.train import main
 from torchtitan.trainer import Trainer as TitanTrainer
 
 from .engine import ForgeEngine
@@ -50,9 +51,11 @@ class Trainer(ForgeEngine):
         super().__init__(config)
 
         # build tokenizer
-        self.tokenizer = (config.tokenizer.build(
-            tokenizer_path=config.hf_assets_path)
-                          if config.tokenizer is not None else None)
+        self.tokenizer = (
+            config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+            if config.tokenizer is not None
+            else None
+        )
 
         # build dataloader
         self.dataloader = config.dataloader.build(
@@ -103,11 +106,15 @@ class Trainer(ForgeEngine):
 
         # Build validator if validation is configured
         if config.validator.enable:
-            pp_schedule, pp_has_first_stage, pp_has_last_stage = ((
-                self.pp_schedule,
-                self.pp_has_first_stage,
-                self.pp_has_last_stage,
-            ) if self.parallel_dims.pp_enabled else (None, None, None))
+            pp_schedule, pp_has_first_stage, pp_has_last_stage = (
+                (
+                    self.pp_schedule,
+                    self.pp_has_first_stage,
+                    self.pp_has_last_stage,
+                )
+                if self.parallel_dims.pp_enabled
+                else (None, None, None)
+            )
 
             self.validator = config.validator.build(
                 parallelism=config.parallelism,
@@ -402,6 +409,60 @@ class Trainer(ForgeEngine):
         if self.metrics_processor:
             self.metrics_processor.close()
         super().close()
+
+
+def main(custom_trainer_class: type[Trainer] | None = None) -> None:
+    """Main entry point for training."""
+    init_logger()
+
+    import torchtitan
+
+    logger.info(
+        "torchtitan version: %s (0.0.0 means __version__ is not defined correctly).",
+        torchtitan.__version__,
+    )
+
+    config_manager = ConfigManager()
+    config = config_manager.parse_args()
+    trainer: Trainer | None = None
+
+    try:
+        # TODO(local_tensor): Remove this special case once LocalTensor supports
+        # init_weights() and foreach_allgather. In local tensor mode, skip
+        # training/checkpointing as the # model is not fully initialized
+        # pyrefly: ignore [missing-attribute]
+        if config.comm.mode == "local_tensor":
+            logger.info("Local tensor mode enabled - skipping training execution")
+            return
+
+        # pyrefly: ignore [missing-attribute]
+        if custom_trainer_class is not None:
+            trainer = custom_trainer_class(config)
+        else:
+            trainer = config.build()
+
+        # pyrefly: ignore [missing-attribute]
+        if config.checkpoint.create_seed_checkpoint:
+            assert (
+                int(os.environ["WORLD_SIZE"]) == 1
+            ), "Must create seed checkpoint using a single device, to disable sharding."
+            assert (
+                # pyrefly: ignore [missing-attribute]
+                config.checkpoint.enable
+            ), "Must enable checkpointing when creating a seed checkpoint."
+            trainer.checkpointer.save(curr_step=0, last_step=True)
+            logger.info("Created seed checkpoint")
+        else:
+            trainer.train()
+    except Exception:
+        if trainer:
+            trainer.close()
+        raise
+    else:
+        trainer.close()
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        logger.info("Process group destroyed")
 
 
 if __name__ == "__main__":
