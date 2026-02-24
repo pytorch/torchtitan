@@ -10,7 +10,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributed.tensor import DTensor, Partial, Replicate
+from torch.distributed.tensor import DTensor, Partial
 
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.utils import trunc_normal_
@@ -254,6 +254,38 @@ class TokenChoiceTopKRouter(nn.Module):
                 - num_tokens_per_expert (torch.Tensor):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
+        # === DEBUG: Check gate weight consistency across ranks ===
+        import torch.distributed as dist
+
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            rank = dist.get_rank()
+            gate_weight = self.gate.weight
+            if isinstance(gate_weight, DTensor):
+                gate_weight_local = gate_weight.to_local()
+            else:
+                gate_weight_local = gate_weight
+            # allgather gate weights from all ranks
+            gathered = [
+                torch.zeros_like(gate_weight_local)
+                for _ in range(dist.get_world_size())
+            ]
+            dist.all_gather(gathered, gate_weight_local.contiguous())
+            # check if all ranks have the same gate weight
+            for other_rank, other_weight in enumerate(gathered):
+                if other_rank != rank:
+                    if not torch.equal(gate_weight_local, other_weight):
+                        max_diff = (gate_weight_local - other_weight).abs().max().item()
+                        print(
+                            f"[DEBUG] GATE WEIGHT DIVERGED! rank {rank} vs rank {other_rank}, "
+                            f"max_diff={max_diff:.6e}, "
+                            f"rank_{rank}_norm={gate_weight_local.norm().item():.6f}, "
+                            f"rank_{other_rank}_norm={other_weight.norm().item():.6f}"
+                        )
+                    else:
+                        print(
+                            f"[DEBUG] Gate weights match: rank {rank} == rank {other_rank}"
+                        )
+        # === END DEBUG ===
         # scores shape (bs*slen, num_experts)
         scores = self.gate(x)
 
@@ -453,6 +485,8 @@ class MoE(Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
+        if isinstance(x, DTensor):
+            x = x.to_local(grad_placements=(Partial(),))
         bs, slen, dim = x.shape
         x = x.view(-1, dim)
 
@@ -521,11 +555,11 @@ class MoE(Module):
             #       is therefore Partial. We use from_local/to_local to trigger
             #       an all-reduce in backward so the router gate gets the correct
             #       full gradient.
-            if isinstance(self.router.gate.weight, DTensor):
-                tp_mesh = self.router.gate.weight.device_mesh
-                top_scores = DTensor.from_local(
-                    top_scores, tp_mesh, (Replicate(),)
-                ).to_local(grad_placements=(Partial(),))
+            # if isinstance(self.router.gate.weight, DTensor):
+            #     tp_mesh = self.router.gate.weight.device_mesh
+            #     top_scores = DTensor.from_local(
+            #         top_scores, tp_mesh, (Replicate(),)
+            #     ).to_local(grad_placements=(Partial(),))
             out_experts = (
                 torch.bmm(
                     top_scores.reshape(-1, 1, self.router.top_k),
