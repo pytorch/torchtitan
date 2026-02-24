@@ -163,8 +163,6 @@ class TokenChoiceTopKRouter(nn.Module):
         score_func: Literal["softmax", "sigmoid"],
         route_norm: bool,
         route_scale: float,
-        scores_dtype: torch.dtype,
-        gate_dtype: torch.dtype,
         gate_bias: bool,
         _debug_force_load_balance: bool = False,
     ):
@@ -177,8 +175,6 @@ class TokenChoiceTopKRouter(nn.Module):
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
-        self.scores_dtype = scores_dtype
-        self.gate_dtype = gate_dtype
         self._debug_force_load_balance = _debug_force_load_balance
 
     def _debug_force_load_balance_routing(
@@ -259,19 +255,17 @@ class TokenChoiceTopKRouter(nn.Module):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = torch.mm(x.type(self.gate_dtype), self.gate.weight.transpose(-2, -1).type(self.gate_dtype))
+        scores = torch.mm(x.to(torch.float32), self.gate.weight.transpose(-2, -1).to(torch.float32))
         if self.gate.bias is not None:
-            scores = scores + self.gate.bias.type(self.gate_dtype)
+            scores = scores + self.gate.bias.to(torch.float32)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
+            scores = torch.sigmoid(scores)
         elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1)
+            scores = F.softmax(scores, dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
-
-        scores = scores.type(self.scores_dtype)
 
         scores_for_choice = scores if expert_bias is None else scores + expert_bias
         # Apply node-limited routing if configured
@@ -499,7 +493,7 @@ class MoE(Module):
 
         if self.score_before_experts:
             routed_input = (
-                routed_input.type(self.scores_dtype)
+                routed_input.to(torch.float32)
                 * top_scores_experts_sorted.reshape(-1, 1)
             ).to(x.dtype)
 
@@ -525,9 +519,9 @@ class MoE(Module):
             out_experts = (
                 torch.bmm(
                     top_scores.reshape(-1, 1, self.router.top_k),
-                    routed_output_unsorted.type(self.scores_dtype),
+                    routed_output_unsorted.float(),
                 )
-                .type(x.dtype)
+                .to(x.dtype)
                 .squeeze(1)
             )
         else:
