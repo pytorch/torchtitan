@@ -14,6 +14,7 @@ TorchTitan models for vLLM.
 import dataclasses
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._tensor import DTensor, Replicate
 from torch.distributed.checkpoint.state_dict import (
@@ -21,21 +22,82 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 
-from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
-    create_parallel_dims_from_vllm_config,
-    create_trainer_config_from_vllm_config,
+from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.experiments.rl.unified.models.attention import (
+    replace_with_vllm_attention,
 )
-
-from torchtitan.experiments.rl.unified.models.utils import replace_with_vllm_attention
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.trainer import Trainer
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
 
 logger = init_logger(__name__)
+
+
+def create_torchtitan_config_from_vllm(
+    vllm_config: VllmConfig,
+) -> tuple[ParallelDims, Trainer.Config]:
+    """
+    Create ParallelDims and Trainer.Config from vLLM configuration.
+
+    Maps vLLM parallelism settings to TorchTitan's ParallelDims and Trainer.Config
+    so that TorchTitan's parallelize functions can be called with the correct kwargs.
+
+    This is needed because vLLM doesn't separate model creation and parallelism
+    application — it requires parallelization inside the model constructor
+    (TorchTitanVLLMModelWrapper.__init__).
+
+    Args:
+        vllm_config: vLLM configuration object
+
+    Returns:
+        Tuple of (ParallelDims, Trainer.Config) mapped from vLLM config
+
+    Note:
+        vLLM doesn't use FSDP sharding (dp_shard=1) or expert parallelism (ep=1, etp=1)
+        in inference. These are set to default values.
+    """
+    world_size = dist.get_world_size()
+    parallel_config = vllm_config.parallel_config
+
+    parallel_dims = ParallelDims(
+        dp_replicate=parallel_config.data_parallel_size,
+        dp_shard=1,
+        cp=parallel_config.decode_context_parallel_size,
+        tp=parallel_config.tensor_parallel_size,
+        pp=parallel_config.pipeline_parallel_size,
+        ep=1,
+        etp=1,
+        world_size=world_size,
+    )
+
+    config = Trainer.Config()
+    config.parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=parallel_config.data_parallel_size,
+        data_parallel_shard_degree=1,
+        context_parallel_degree=parallel_config.decode_context_parallel_size,
+        tensor_parallel_degree=parallel_config.tensor_parallel_size,
+        pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
+        expert_parallel_degree=1,
+        expert_tensor_parallel_degree=1,
+    )
+    config.training = TrainingConfig(
+        local_batch_size=1,
+        steps=1,
+    )
+
+    logger.info(
+        f"Created TorchTitan config from vLLM: "
+        f"DP={parallel_dims.dp_replicate}, TP={parallel_dims.tp}, "
+        f"CP={parallel_dims.cp}, PP={parallel_dims.pp}"
+    )
+
+    return parallel_dims, config
 
 
 class TorchTitanVLLMModelWrapper(nn.Module):
@@ -85,9 +147,8 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Create ParallelDims and Trainer.Config from vLLM config at runtime
         # vLLM config contains the tensor_parallel_size from command-line args
         # and this will be consistent across all worker processes
-        self.parallel_dims = create_parallel_dims_from_vllm_config(vllm_config)
-        self.parallel_config = create_trainer_config_from_vllm_config(
-            vllm_config=vllm_config,
+        self.parallel_dims, self.parallel_config = create_torchtitan_config_from_vllm(
+            vllm_config
         )
 
         # Replace attention with vLLM paged attention
