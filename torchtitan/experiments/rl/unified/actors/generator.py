@@ -13,22 +13,22 @@ from typing import List
 
 import torch
 from monarch.actor import Actor, endpoint
-
-# TODO: Replace with ``from torchtitan.config.configs import ParallelismConfig``
-# once the config branch lands.
-from torchtitan.config.job_config import Parallelism as ParallelismConfig
+from safetensors.torch import save_file
+from torchtitan.config import CommConfig, Configurable
+from torchtitan.config.configs import ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
 
-from torchtitan.experiments.rl.unified.configs import RLTrainer, VLLMSamplingConfig
+from torchtitan.experiments.rl.unified.configs import (
+    PolicyOptimizationConfig,
+    VLLMSamplingConfig,
+)
 
-# TODO: Replace with ``from torchtitan.config import Configurable``
-# once the config branch lands.
-from torchtitan.experiments.rl.unified.configurable import Configurable
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_grpo_advantages,
     compute_grpo_advantages_stable,
     trivial_reward_function,
 )
+from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
 
 from vllm.config import AttentionConfig
@@ -72,8 +72,7 @@ class VLLMEngine(Configurable):
     Subsequent weight updates are done in-place via
     ``load_weights_from_state_dict``.
 
-    Constructed via ``config.build(model_path=..., dump_folder=...)``
-    which calls ``VLLMEngine(config=..., model_path=..., dump_folder=...)``.
+    Constructed via ``VLLMEngine(config, model_path=..., dump_folder=...)``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -102,11 +101,17 @@ class VLLMEngine(Configurable):
         self,
         config: Config,
         *,
+        model_spec: ModelSpec,
         model_path: str,
         dump_folder: str,
     ) -> None:
         self.config = config
         self.base_model_path = model_path
+
+        # Register TorchTitan model with vLLM before creating the engine
+        from torchtitan.experiments.rl.unified.plugin import register as register_vllm_model
+
+        register_vllm_model(model_spec)
 
         cfg = self.config
         engine_args = EngineArgs(
@@ -268,8 +273,14 @@ class Generator(Actor, Configurable):
     via weight sync. Generates completions for given prompts and
     computes rewards/advantages.
 
-    Constructed via ``config.build(rl_config=..., prompt_texts=..., expected_answers=...)``
-    which calls ``Generator(config=..., rl_config=..., prompt_texts=..., expected_answers=...)``.
+    Args:
+        config: Generator-specific configuration.
+        model_path: Path to the HF model checkpoint.
+        dump_folder: Root output folder for RL artifacts.
+        batch_invariant_mode: Enable batch-invariant mode for deterministic ops.
+        policy_optimization: GRPO hyperparameters.
+        prompt_texts: List of prompt strings.
+        expected_answers: List of expected answer strings.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -286,15 +297,19 @@ class Generator(Actor, Configurable):
         self,
         config: Config,
         *,
-        rl_config: RLTrainer.Config,
+        model_spec: ModelSpec,
+        model_path: str,
+        dump_folder: str,
+        batch_invariant_mode: bool,
+        policy_optimization: PolicyOptimizationConfig,
         prompt_texts: list[str],
         expected_answers: list[str],
     ):
         self.config = config
-        self.rl_config = rl_config
+        self.model_spec = model_spec
 
         # Set vLLM environment variables from config before any vLLM initialization
-        if rl_config.batch_invariant_mode:
+        if batch_invariant_mode:
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
             init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 
@@ -304,23 +319,22 @@ class Generator(Actor, Configurable):
         self.expected_answers = expected_answers
 
         # Extract needed fields from configs
-        self.model_path = rl_config.trainer.checkpoint.initial_load_path
+        self.model_path = model_path
         self.max_new_tokens = config.vllm_engine.sampling.max_tokens
         self.temperature = config.vllm_engine.sampling.temperature
-        self.group_size = rl_config.policy_optimization.group_size
-        self.grpo_beta = rl_config.policy_optimization.beta
-        self.use_stable_grpo = rl_config.policy_optimization.use_stable
+        self.group_size = policy_optimization.group_size
+        self.grpo_beta = policy_optimization.beta
+        self.use_stable_grpo = policy_optimization.use_stable_grpo
 
         # Initialize distributed environment for SPMD generator
-        # TODO: Replace with CommConfig once the config branch lands.
-        from torchtitan.config.job_config import Comm
+        world_size = dist_utils.init_distributed(CommConfig())
 
-        world_size = dist_utils.init_distributed(Comm())
-
-        # Build vLLM engine from its config
-        self.vllm_engine = config.vllm_engine.build(
+        # Build vLLM engine
+        self.vllm_engine = VLLMEngine(
+            config.vllm_engine,
+            model_spec=model_spec,
             model_path=self.model_path,
-            dump_folder=rl_config.dump_folder,
+            dump_folder=dump_folder,
         )
 
         # State machine

@@ -21,7 +21,7 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
+from torchtitan.config import CommConfig, DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -127,7 +127,7 @@ def set_determinism(
         # reproducibility, since the autotune results may not be deterministic.
         from torch.nn.attention.flex_attention import flex_attention
 
-        from torchtitan.models.attention import FlexAttentionWrapper
+        from torchtitan.models.common.attention import FlexAttentionWrapper
 
         FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
 

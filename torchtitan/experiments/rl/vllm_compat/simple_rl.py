@@ -34,7 +34,7 @@ from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
-from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
+from torchtitan.models.qwen3.model import Qwen3Model
 from transformers import AutoConfig, AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -318,7 +318,7 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
     # Create model args
-    model_args = Qwen3ModelArgs(
+    model_args = Qwen3Model.Config(
         dim=hf_config.hidden_size,
         n_layers=hf_config.num_hidden_layers,
         n_heads=hf_config.num_attention_heads,
