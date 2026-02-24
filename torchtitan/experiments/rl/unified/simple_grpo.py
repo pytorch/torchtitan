@@ -8,50 +8,115 @@
 Multiprocess RL training loop using Monarch Actors.
 
 This demonstrates:
-1. Distributed actor architecture with Generator (vLLM), Grader, and Trainer (TorchTitan) components
+1. Distributed actor architecture with Generator (vLLM) and PolicyTrainer (TorchTitan) components
 2. File based weight synchronization between trainer and generator
 3. Separate scoring component for reward and advantage computation
 
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
 Command to run:
-python3 torchtitan/experiments/rl/unified/simple_grpo.py
+python3 torchtitan/experiments/rl/unified/simple_grpo.py \
+    --module rl.unified --config rl_grpo_qwen3_0_6b \
+    --trainer.checkpoint.initial-load-path=<path_to_model_checkpoint>
 """
 
 import asyncio
 import logging
+from dataclasses import dataclass, field
 
 import torch
 
-import torchtitan.experiments.rl.unified  # noqa: F401 — registers models with vLLM
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
+from torchtitan.config import Configurable
+from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import Generator
+from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
+from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.experiments.rl.unified.actors.grader import Grader
-from torchtitan.experiments.rl.unified.actors.trainer import Trainer
-from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_0_6b
 
 logger = logging.getLogger(__name__)
+
+
+class RLTrainer(Configurable):
+    """Top-level RL training orchestrator.
+
+    Composes a ``PolicyTrainer`` (for model construction, parallelism,
+    optimizer, checkpoint, etc.) with RL-specific settings and a
+    Generator Monarch actor.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        """Top-level config for RL training.
+
+        ``trainer`` holds the PolicyTrainer.Config that handles model
+        construction, parallelism, optimizer, LR scheduler, checkpoint, etc.
+        The remaining fields are RL-specific.
+        """
+
+        model_spec: ModelSpec | None = None
+        """Model specification shared by trainer and generator.
+        Set programmatically via config_registry (not from CLI)."""
+
+        hf_assets_path: str = "./tests/assets/tokenizer"
+        """Path to HF assets folder (model weights, tokenizer, config files)."""
+
+        trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
+        """PolicyTrainer config. Controls optimizer, training, parallelism,
+        lr_scheduler, checkpoint, activation_checkpoint."""
+
+        num_steps: int = 10
+        """Number of RL training steps."""
+
+        dump_folder: str = "outputs/rl"
+        """Root output folder for RL artifacts (temp weights, logs, etc.)."""
+
+        batch_invariant_mode: bool = True
+        """Enable batch-invariant mode for deterministic NCCL collective
+        operations and bitwise-reproducible forward/backward passes."""
+
+        policy_optimization: PolicyOptimizationConfig = field(
+            default_factory=PolicyOptimizationConfig
+        )
+        """Policy optimization hyperparameters."""
+
+        generator: Generator.Config = field(default_factory=Generator.Config)
+        """Generator actor configuration (vLLM engine, sampling)."""
 
 
 async def main():
     """Run the distributed RL training loop using Monarch."""
 
-    # Step 1: Load config from config_registry
-    # TODO: Once the config branch lands, replace with:
-    #     from torchtitan.config.manager import ConfigManager
-    #     config = ConfigManager().parse_args()
-    config = rl_grpo_qwen3_0_6b()
+    config = ConfigManager().parse_args()
+
+    # Patch model_spec to use the RL-specific parallelize function.
+    # The canonical model_registry returns the standard qwen3 parallelize_fn,
+    # but RL training needs the version with inner_attention hooks
+    # (PrepareModuleInputOutput) to convert DTensors to local tensors for
+    # vLLM's flash attention kernels.
+    from torchtitan.experiments.rl.unified.infra.parallelize import parallelize_qwen3
+
+    config.model_spec.parallelize_fn = parallelize_qwen3
+
     trainer_cfg = config.trainer
 
-    # Compute world size for trainer and generator
-    # TODO: refine the world size computation and check
-    trainer_ddp_size = trainer_cfg.parallelism.data_parallel_replicate_degree
-    trainer_tp_size = trainer_cfg.parallelism.tensor_parallel_degree
-    trainer_world_size = trainer_ddp_size * trainer_tp_size
+    # Validate that trainer and generator have the same parallel plan
+    # since they are collocated on the same mesh
+    assert trainer_cfg.parallelism == config.generator.vllm_engine.parallelism, (
+        f"Trainer and generator must use the same parallel plan.\n"
+        f"  Trainer:   {trainer_cfg.parallelism}\n"
+        f"  Generator: {config.generator.vllm_engine.parallelism}"
+    )
+
+    trainer_world_size = (
+        trainer_cfg.parallelism.data_parallel_replicate_degree
+        * trainer_cfg.parallelism.tensor_parallel_degree
+    )
 
     # RL Training config
-    num_steps = trainer_cfg.training.steps
+    num_steps = config.num_steps
 
     # Use fake dataset for test. TODO: Implement real RL dataloader.
     logger.info("Using default prompts")
@@ -84,15 +149,18 @@ async def main():
     # across ranks — spawning them concurrently can cause cross-rank deadlocks.
     trainer = trainer_mesh.spawn(
         "trainer",
-        Trainer,
-        config,
+        PolicyTrainer,
+        config.trainer,
+        config.policy_optimization,
+        config.model_spec,
+        config.hf_assets_path,
     )
 
     # Spawn grader on trainer mesh (no collective ops in init, safe to co-spawn)
     grader = trainer_mesh.spawn(
         "grader",
         Grader,
-        config,
+        config.policy_optimization,
     )
 
     # Wait for trainer to be fully initialized on all ranks
@@ -108,7 +176,11 @@ async def main():
         "generator",
         Generator,
         config.generator,
-        rl_config=config,
+        model_spec=config.model_spec,
+        model_path=config.hf_assets_path,
+        dump_folder=config.dump_folder,
+        batch_invariant_mode=config.batch_invariant_mode,
+        policy_optimization=config.policy_optimization,
         prompt_texts=prompt_texts,
         expected_answers=expected_answers,
     )
