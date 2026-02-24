@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 from torch import nn
@@ -65,7 +65,7 @@ class Decoder(BaseModel):
         n_layers: int
         vocab_size: int
         norm_eps: float = 1e-5
-        tok_embeddings: Embedding.Config = field(default_factory=Embedding.Config)
+        tok_embeddings: Embedding.Config
         # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
         # so that rope cache, a.k.a. freqs_cis, is shared by all layers. However,
         # it causes redundantly passing backend (complex / cos_sin) to both RoPE
