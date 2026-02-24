@@ -74,17 +74,13 @@ class Decoder(BaseModel):
         rope: RoPE.Config
         layer: TransformerBlock.Config  # required, no default
 
-        def __post_init__(self):
-            # NOTE: If subclasses override __post_init__, they MUST call
-            # super().__post_init__() to ensure tok_embeddings is configured.
-            self.tok_embeddings.num_embeddings = self.vocab_size
-            self.tok_embeddings.embedding_dim = self.dim
-
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
 
-        self.tok_embeddings = config.tok_embeddings.build()
+        self.tok_embeddings = config.tok_embeddings.build(
+            num_embeddings=config.vocab_size, embedding_dim=config.dim
+        )
 
         self.rope = config.rope.build()
         self.register_buffer("freqs_cis", self.rope.cache, persistent=False)

@@ -1,0 +1,56 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import unittest
+
+import torch
+import torch.nn as nn
+
+from torchtitan.models.common.embedding import Embedding
+
+
+class TestEmbedding(unittest.TestCase):
+    """Tests for the Embedding class used in the codebase."""
+
+    def test_config_build(self):
+        """Embedding.Config.build() creates a working embedding."""
+        config = Embedding.Config()
+        emb = config.build(num_embeddings=100, embedding_dim=32)
+        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, nn.Embedding)
+        self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
+
+    def test_config_build_without_fields_raises(self):
+        """Embedding.Config.build() raises when fields are not passed."""
+        config = Embedding.Config()
+        with self.assertRaises(TypeError):
+            config.build()
+
+    def test_init_weights(self):
+        """Embedding.init_weights re-initializes the weight tensor."""
+        config = Embedding.Config()
+        emb = config.build(num_embeddings=50, embedding_dim=16)
+
+        # Set all weights to zero, then call init_weights
+        nn.init.zeros_(emb.weight)
+        self.assertTrue(torch.all(emb.weight == 0))
+        emb.init_weights()
+        # After init_weights, weights should no longer be all zero
+        self.assertFalse(torch.all(emb.weight == 0))
+
+    def test_custom_init_std(self):
+        """Embedding respects custom init_mean and init_std."""
+        config = Embedding.Config(init_mean=0.0, init_std=0.02)
+        emb = config.build(num_embeddings=1000, embedding_dim=64)
+
+        torch.manual_seed(42)
+        emb.init_weights()
+        # Deterministic check: std must be within 2x of the requested init_std
+        self.assertLess(emb.weight.std().item(), config.init_std * 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
