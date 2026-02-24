@@ -255,11 +255,14 @@ class TokenChoiceTopKRouter(nn.Module):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = torch.mm(x.to(torch.float32), self.gate.weight.transpose(-2, -1).to(torch.float32))
-        if self.gate.bias is not None:
-            scores = scores + self.gate.bias.to(torch.float32)
-
-        # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
+        # Gate is computed in float32 to help stability of expert load balancing.
+        # The score computation directly after this also needs to be computed in float32
+        # to avoid loss explosion.
+        scores = F.linear(
+            x.to(torch.float32),
+            self.gate.weight.transpose(-2, -1).to(torch.float32),
+            self.gate.bias.to(torch.float32) if self.gate.bias is not None else None,
+        )
         if self.score_func == "sigmoid":
             scores = torch.sigmoid(scores)
         elif self.score_func == "softmax":
