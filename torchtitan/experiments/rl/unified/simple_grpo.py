@@ -96,7 +96,7 @@ async def main():
     # but RL training needs the version with inner_attention hooks
     # (PrepareModuleInputOutput) to convert DTensors to local tensors for
     # vLLM's flash attention kernels.
-    from torchtitan.experiments.rl.unified.infra.parallelize import parallelize_qwen3
+    from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
 
     config.model_spec.parallelize_fn = parallelize_qwen3
 

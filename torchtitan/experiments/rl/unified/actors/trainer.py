@@ -17,7 +17,7 @@ from torch.distributed._tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     ActivationCheckpointConfig,
     CommConfig,
@@ -25,6 +25,13 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
+from torchtitan.experiments.rl.unified.models.attention import (
+    replace_with_vllm_compatible_flash_attention,
+)
+
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.experiments.rl.unified.actors.grader import Episodes
 from torchtitan.experiments.rl.unified.actors.utils import (
@@ -33,7 +40,7 @@ from torchtitan.experiments.rl.unified.actors.utils import (
     verify_logprob_identity,
 )
 from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
-from torchtitan.experiments.rl.unified.models.utils import (
+from torchtitan.experiments.rl.unified.models.attention import (
     replace_with_vllm_compatible_flash_attention,
 )
 from torchtitan.protocols.model_converter import ModelConvertersContainer
