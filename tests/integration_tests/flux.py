@@ -23,11 +23,13 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
+                    "--module flux",
+                    "--config flux_debugmodel",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.data_parallel_replicate_degree 2",
                     "--parallelism.context_parallel_degree 2",
-                    "--validation.enable",
-                    "--validation.steps 5",
+                    "--validator.enable",
+                    "--validator.steps 5",
                     "--checkpoint.enable",
                 ],
                 [],
@@ -45,25 +47,25 @@ _TEST_SUITES_FUNCTION = {
 }
 
 
-def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir: str):
+def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--job.dump_folder {output_dir}/{test_name}"
+    dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
 
     # Random init encoder for offline testing
-    random_init_encoder_arg = "--training.test_mode"
+    random_init_encoder_arg = "--encoder.test_mode --dataloader.encoder.test_mode"
     clip_encoder_version_arg = (
         "--encoder.clip_encoder tests/assets/flux_test_encoders/clip-vit-large-patch14/"
     )
     t5_encoder_version_arg = (
         "--encoder.t5_encoder tests/assets/flux_test_encoders/t5-v1_1-xxl/"
     )
-    hf_assets_path_arg = "--model.hf_assets_path tests/assets/tokenizer"
+    hf_assets_path_arg = "--hf_assets_path tests/assets/tokenizer"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     for idx, override_arg in enumerate(test_flavor.override_args):
-        cmd = f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./torchtitan/models/flux/run_train.sh"
+        cmd = f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} ./run_train.sh"
         # dump compile trace for debugging purpose
         cmd = f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" ' + cmd
 
@@ -71,7 +73,7 @@ def run_single_test(test_flavor: OverrideDefinitions, full_path: str, output_dir
         if test_name == "hsdp+cp+validation+inference" and idx == 1:
             # For flux generation, test using inference script
             cmd = (
-                f"CONFIG_FILE={full_path} NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
+                f"NGPU={test_flavor.ngpu} LOG_RANK={all_ranks} "
                 f"torchtitan/models/flux/run_infer.sh"
             )
 
@@ -99,12 +101,6 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
     Override the run_tests function in run_tests.py because FLUX model
     uses different train.py in command to run the model"""
 
-    # Check if config file exists
-    assert args.config_path.endswith(".toml"), "Base config path must end with .toml"
-    assert os.path.exists(
-        args.config_path
-    ), f"Base config path {args.config_path} does not exist"
-
     for test_flavor in test_list:
         # Filter by test_name if specified
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
@@ -117,17 +113,12 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
                 f" because --ngpu arg is {args.ngpu}"
             )
         else:
-            run_single_test(test_flavor, args.config_path, args.output_dir)
+            run_single_test(test_flavor, args.output_dir)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
-    parser.add_argument(
-        "--config_path",
-        default="./torchtitan/models/flux/train_configs/debug_model.toml",
-        help="Base config path for integration tests. This is the config that will be used as a base for all tests.",
-    )
     parser.add_argument(
         "--test_name",
         default="all",

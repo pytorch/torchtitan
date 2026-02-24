@@ -10,7 +10,6 @@ from unittest.mock import MagicMock
 import torch
 from torch.optim import Adam
 
-from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import ConfigManager
 
@@ -31,7 +30,7 @@ class TestLRScheduler(unittest.TestCase):
         self.optimizer_container.__iter__.return_value = iter([self.optimizer])
         self.optimizer_container.__len__.return_value = 1
 
-    def create_job_config(
+    def create_trainer_config(
         self,
         training_steps=10,
         warmup_steps=None,
@@ -39,8 +38,12 @@ class TestLRScheduler(unittest.TestCase):
         decay_type=None,
         min_lr_factor=None,
     ):
-        # Create a job config with the specified parameters
+        # Create a trainer config with the specified parameters
         args = [
+            "--module",
+            "llama3",
+            "--config",
+            "llama3_debugmodel",
             "--training.steps",
             str(training_steps),
         ]
@@ -73,7 +76,7 @@ class TestLRScheduler(unittest.TestCase):
     def test_linear_warmup_decay(self):
         """Test the linear warmup followed by linear decay schedule."""
         # Create a job config with 10 steps, 2 warmup steps, and linear decay
-        config = self.create_job_config(
+        config = self.create_trainer_config(
             training_steps=10,
             warmup_steps=2,
             decay_ratio=None,  # Use default decay: start decay immediately
@@ -82,8 +85,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(
-            self.optimizer_container, config.lr_scheduler, config.training.steps
+        lr_scheduler = config.lr_scheduler.build(
+            optimizers=self.optimizer_container,
+            training_steps=config.training.steps,
         )
 
         # Expected adjustment factors for each step
@@ -115,7 +119,7 @@ class TestLRScheduler(unittest.TestCase):
     def test_warmup_stable_decay(self):
         """Test warmup followed by stable phase and then decay."""
         # Create a job config with 10 steps, 2 warmup steps, 3 stable steps, and 5 decay steps
-        config = self.create_job_config(
+        config = self.create_trainer_config(
             training_steps=10,
             warmup_steps=2,
             decay_ratio=0.5,  # 50% of steps for decay
@@ -124,8 +128,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(
-            self.optimizer_container, config.lr_scheduler, config.training.steps
+        lr_scheduler = config.lr_scheduler.build(
+            optimizers=self.optimizer_container,
+            training_steps=config.training.steps,
         )
 
         # Expected adjustment factors for each step
@@ -156,7 +161,7 @@ class TestLRScheduler(unittest.TestCase):
     def test_min_lr(self):
         """Test that the learning rate doesn't go below the minimum."""
         # Create a job config with a minimum learning rate
-        config = self.create_job_config(
+        config = self.create_trainer_config(
             training_steps=10,
             warmup_steps=2,
             decay_ratio=None,
@@ -165,8 +170,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(
-            self.optimizer_container, config.lr_scheduler, config.training.steps
+        lr_scheduler = config.lr_scheduler.build(
+            optimizers=self.optimizer_container,
+            training_steps=config.training.steps,
         )
 
         # Step through all steps
@@ -179,7 +185,7 @@ class TestLRScheduler(unittest.TestCase):
     def test_warmup_exceeds_training(self):
         """Test when warmup steps exceed training steps."""
         # Create a job config where warmup steps > training steps
-        config = self.create_job_config(
+        config = self.create_trainer_config(
             training_steps=5,
             warmup_steps=10,  # More than training steps
             decay_ratio=None,
@@ -188,8 +194,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler - should adjust warmup steps
-        lr_scheduler = build_lr_schedulers(
-            self.optimizer_container, config.lr_scheduler, config.training.steps
+        lr_scheduler = config.lr_scheduler.build(
+            optimizers=self.optimizer_container,
+            training_steps=config.training.steps,
         )
 
         # Expected adjustment factors for each step
@@ -215,7 +222,7 @@ class TestLRScheduler(unittest.TestCase):
     def test_warmup_stable_only(self):
         """Test warmup followed by stable phase only, with no decay phase."""
         # Create a job config with 10 steps, 2 warmup steps, and no decay phase
-        config = self.create_job_config(
+        config = self.create_trainer_config(
             training_steps=10,
             warmup_steps=2,
             decay_ratio=0.0,  # 0% of steps for decay (no decay)
@@ -224,8 +231,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = build_lr_schedulers(
-            self.optimizer_container, config.lr_scheduler, config.training.steps
+        lr_scheduler = config.lr_scheduler.build(
+            optimizers=self.optimizer_container,
+            training_steps=config.training.steps,
         )
 
         # Expected adjustment factors for each step
@@ -257,7 +265,7 @@ class TestLRScheduler(unittest.TestCase):
         """Test when warmup + decay steps exceed training steps."""
         # Create a job config where warmup + decay steps > training steps
         # Expected behavior: warmup steps = 5, decay steps = 5
-        config = self.create_job_config(
+        config = self.create_trainer_config(
             training_steps=10,
             warmup_steps=5,
             decay_ratio=0.8,  # 80% of steps for decay (8 steps)
@@ -266,8 +274,9 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler - should adjust warmup steps
-        lr_scheduler = build_lr_schedulers(
-            self.optimizer_container, config.lr_scheduler, config.training.steps
+        lr_scheduler = config.lr_scheduler.build(
+            optimizers=self.optimizer_container,
+            training_steps=config.training.steps,
         )
 
         # Expected adjustment factors for each step

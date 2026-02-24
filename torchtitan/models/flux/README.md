@@ -17,15 +17,14 @@ python scripts/download_hf_assets.py --repo_id black-forest-labs/FLUX.1-dev --ad
 
 This step will download the autoencoder model from HuggingFace and save it to the `assets/hf/FLUX.1-dev/ae.safetensors` file.
 
-Run the following command to train the model on a single GPU:
+Run the following command to train the debug model on a single GPU:
 ```bash
-./torchtitan/models/flux/run_train.sh
-
+MODULE=flux CONFIG=flux_debugmodel .run_train.sh
 ```
 
-If you want to train with other model args, run the following command:
+If you want to train with other configs, run the following command:
 ```bash
-CONFIG_FILE="./torchtitan/models/flux/train_configs/flux_schnell_model.toml" ./torchtitan/models/flux/run_train.sh
+MODULE=flux CONFIG=flux_schnell ./run_train.sh
 ```
 
 

@@ -12,7 +12,6 @@ import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import ConfigManager
-from torchtitan.protocols.train_spec import get_train_spec
 from torchtitan.tools.logging import logger
 
 from transformers import AutoModelForCausalLM
@@ -62,17 +61,18 @@ def forward_hf(model_name, model_path: Optional[str], input_ids):
 
 
 @torch.no_grad
-def forward_tt(config_path, checkpoint_path, test_set):
+def forward_tt(model_name, config_name, checkpoint_path, test_set):
 
     config_manager = ConfigManager()
-    config = config_manager.parse_args([f"--job.config_file={config_path}"])
+    config = config_manager.parse_args(
+        ["--module", model_name, "--config", config_name]
+    )
 
-    train_spec = get_train_spec(config.model.name)
+    # pyrefly: ignore [missing-attribute]
+    model_config = config.model_spec.model
+    model_config.update_from_config(trainer_config=config)
 
-    model_args = train_spec.model_args[config.model.flavor]
-    model_args.update_from_config(config)
-
-    model = train_spec.model_cls(model_args)
+    model = model_config.build()
 
     # materalize model
     device = torch.device(device_type)
@@ -109,7 +109,8 @@ if __name__ == "__main__":
     hf_model_name = "meta-llama/Meta-Llama-3-8B"
 
     # tt params
-    config_path = "torchtitan/models/llama3/train_configs/llama3_8b.toml"
+    model_name = "llama3"
+    config_name = "llama3_8b"
     checkpoint_path = "outputs/test_checkpoint/step-0-fromhf"  # dcp checkpoint from convert_from_hf.py
     # dcp checkpoint from convert_from_hf.py without using sd_adapter's permute
     checkpoint_path_no_perm = "outputs/test_checkpoint/step-0-fromhfnoperm"
@@ -119,10 +120,14 @@ if __name__ == "__main__":
     test_size = 100
 
     config_manager = ConfigManager()
-    config = config_manager.parse_args([f"--job.config_file={config_path}"])
-    train_spec = get_train_spec(config.model.name)
-    # pyrefly: ignore [not-callable]
-    tokenizer = train_spec.build_tokenizer_fn(config)
+    config = config_manager.parse_args(
+        ["--module", model_name, "--config", config_name]
+    )
+
+    from torchtitan.components.tokenizer import HuggingFaceTokenizer
+
+    # pyrefly: ignore [missing-argument, missing-attribute]
+    tokenizer = HuggingFaceTokenizer(config.hf_assets_path)
 
     # Build test set of randomly generated token ids
     test_set = [
@@ -141,8 +146,10 @@ if __name__ == "__main__":
     baseline_hf_outputs = forward_hf(hf_model_name, None, test_set)
 
     # testing from hf conversion
-    from_hf_outputs = forward_tt(config_path, checkpoint_path, test_set)
-    from_hf_outputs_no_perm = forward_tt(config_path, checkpoint_path_no_perm, test_set)
+    from_hf_outputs = forward_tt(model_name, config_name, checkpoint_path, test_set)
+    from_hf_outputs_no_perm = forward_tt(
+        model_name, config_name, checkpoint_path_no_perm, test_set
+    )
 
     # Define the set of outputs to test loss for
     test_configs = {
