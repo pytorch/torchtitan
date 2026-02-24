@@ -7,7 +7,6 @@
 import os
 
 from torch import nn, Tensor
-
 from transformers import CLIPTextModel, T5EncoderModel
 
 

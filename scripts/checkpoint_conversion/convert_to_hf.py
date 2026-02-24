@@ -5,11 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import importlib
 from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
-import torchtitan.protocols.train_spec as train_spec_module
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpoint import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -25,15 +25,16 @@ def convert_to_hf(
     export_dtype,
 ):
     # load model and model args so that we can get the state dict shape
-    train_spec = train_spec_module.get_train_spec(model_name)
-    model_args = train_spec.model_args[model_flavor]
+    model_module = importlib.import_module(f"torchtitan.models.{model_name}")
+    model_spec = model_module.model_registry(model_flavor)
+    model_config = model_spec.model
 
     with torch.device("cpu"):
-        model = train_spec.model_cls(model_args)
+        model = model_config.build()
     model = ModelWrapper(model)
 
     # pyrefly: ignore[bad-instantiation, not-callable]
-    sd_adapter = train_spec.state_dict_adapter(model_args, hf_assets_path)
+    sd_adapter = model_spec.state_dict_adapter(model_config, hf_assets_path)
     assert (
         sd_adapter is not None
     ), "trying to convert checkpoint from DCP to HF safetensors format, but sd_adapter is not provided."

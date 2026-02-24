@@ -8,7 +8,7 @@ from typing import Callable, TypeAlias
 
 import torch
 
-from torchtitan.config import JobConfig
+from torchtitan.config import CompileConfig
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -27,12 +27,12 @@ def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor
     )
 
 
-def build_cross_entropy_loss(job_config: JobConfig, **kwargs):
+def build_cross_entropy_loss(compile_config: CompileConfig, **kwargs):
     del kwargs  # delete any unused arguments
     loss_fn = cross_entropy_loss
-    if job_config.compile.enable and "loss" in job_config.compile.components:
+    if compile_config.enable and "loss" in compile_config.components:
         logger.info("Compiling the loss function with torch.compile")
-        loss_fn = torch.compile(loss_fn, backend=job_config.compile.backend)
+        loss_fn = torch.compile(loss_fn, backend=compile_config.backend)
     return loss_fn
 
 
@@ -43,10 +43,10 @@ def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     )
 
 
-def build_mse_loss(job_config: JobConfig, **kwargs):
+def build_mse_loss(compile_config: CompileConfig, **kwargs):
     del kwargs  # delete any unused arguments
     loss_fn = mse_loss
-    if job_config.compile.enable and "loss" in job_config.compile.components:
+    if compile_config.enable and "loss" in compile_config.components:
         logger.info("Compiling the loss function with torch.compile")
-        loss_fn = torch.compile(loss_fn, backend=job_config.compile.backend)
+        loss_fn = torch.compile(loss_fn, backend=compile_config.backend)
     return loss_fn

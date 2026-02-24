@@ -5,5 +5,5 @@
 # LICENSE file in the root directory of this source tree.
 
 _supported_models = frozenset(
-    ["deepseek_v3", "flux", "gpt_oss", "llama3", "llama3_ft", "llama4", "qwen3"]
+    ["deepseek_v3", "flux", "gpt_oss", "llama3", "llama4", "qwen3"]
 )
