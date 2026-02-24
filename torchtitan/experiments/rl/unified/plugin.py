@@ -28,8 +28,7 @@ def register(
         model_spec: TorchTitan ModelSpec containing model config and components
         model_name: Name to register in vLLM (must match hf_overrides["architectures"])
     """
-    # NOTE: This is a temporary parallel plan patch for Qwen3 model. Will be replace by parallel plan in core torchtitan.
-    from torchtitan.experiments.rl.unified.infra.parallelize import parallelize_qwen3
+    from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
     from torchtitan.experiments.rl.unified.models.vllm_wrapper import (
         TorchTitanVLLMModelWrapper,
     )
