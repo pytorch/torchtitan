@@ -8,17 +8,16 @@ import os
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
-
-from torchtitan.config import ConfigManager, JobConfig
+from torchtitan.config import ConfigManager
 from torchtitan.models.flux.inference.sampling import generate_image, save_image
 from torchtitan.models.flux.tokenizer import build_flux_tokenizer
-from torchtitan.models.flux.train import FluxTrainer
+from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.tools.logging import init_logger, logger
 
 
 @torch.no_grad()
 @record
-def inference(config: JobConfig):
+def inference(config: FluxTrainer.Config):
     # Reuse trainer to perform forward passes
     trainer = FluxTrainer(config)
 
@@ -39,7 +38,9 @@ def inference(config: JobConfig):
     prompts = original_prompts[global_rank::world_size]
 
     trainer.checkpointer.load(step=config.checkpoint.load_step)
-    t5_tokenizer, clip_tokenizer = build_flux_tokenizer(config)
+    t5_tokenizer, clip_tokenizer = build_flux_tokenizer(
+        config.encoder, config.hf_assets_path
+    )
 
     if global_rank == 0:
         logger.info("Starting inference...")
@@ -50,7 +51,7 @@ def inference(config: JobConfig):
         bs = config.inference.local_batch_size
 
         output_dir = os.path.join(
-            config.job.dump_folder,
+            config.dump_folder,
             # pyrefly: ignore [missing-attribute]
             config.inference.save_img_folder,
         )
@@ -61,7 +62,7 @@ def inference(config: JobConfig):
             images = generate_image(
                 device=trainer.device,
                 dtype=trainer._dtype,
-                job_config=trainer.job_config,
+                job_config=config,
                 # pyrefly: ignore [bad-argument-type]
                 model=trainer.model_parts[0],
                 prompt=prompts[i : i + bs],
@@ -91,4 +92,5 @@ if __name__ == "__main__":
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
+    # pyrefly: ignore [bad-argument-type]
     inference(config)

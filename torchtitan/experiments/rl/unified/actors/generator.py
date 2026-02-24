@@ -14,7 +14,7 @@ from typing import List
 import torch
 from monarch.actor import Actor, endpoint
 from safetensors.torch import save_file
-from torchtitan.config.job_config import Comm
+from torchtitan.config import CommConfig
 from torchtitan.distributed import utils as dist_utils
 
 # Import unified module - this automatically registers TorchTitan models with vLLM
@@ -388,7 +388,7 @@ class Generator(Actor):
 
         # Initialize distributed environment for SPMD generator
         world_size = dist_utils.init_distributed(
-            Comm(),
+            CommConfig(),
         )
         # Initialize vLLM engine
         self.vllm_engine = VLLMRolloutEngine(model_path, tp_size=self.tp_size)

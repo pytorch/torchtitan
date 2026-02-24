@@ -62,7 +62,7 @@ Work on batch invariance:
 
 Work on the RL loop:
 1. Design trainer API and integrate with [train.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/train.py#L475)
-2. Remove hardcoded configs and dependency on Qwen3 Model. Use torchtitan's config/TrainSpec instead, to work with any model.
+2. Remove hardcoded configs and dependency on Qwen3 Model. Use torchtitan's config/ModelSpec instead, to work with any model.
 3. Need to load the gsm8k dataset using TorchTitan dataset.
 4. Need to properly implement weight saving and loading using TorchTitan's checkpoint mechanism, or use TorchStore. Also need to
     replace `vllm_to_torchtitan` and `torchtitan_to_vllm` calls to TorchTitan [state dict adaptor](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/qwen3/model/state_dict_adapter.py).

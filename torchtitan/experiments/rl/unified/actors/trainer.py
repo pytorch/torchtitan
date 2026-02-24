@@ -61,8 +61,8 @@ class Trainer(Actor):
         self.parallel_dims = create_trainer_parallel_dims(self.ddp_size, self.tp_size)
 
         # apply PT-D Parallelism
-        # TODO: right now it only works for qwen3 model, need to formalize this to use parallize_fn from train_spec
-        from torchtitan.models.llama3.infra.parallelize import apply_ddp
+        # TODO: right now it only works for qwen3 model, need to formalize this to use parallelize_fn from ModelSpec
+        from torchtitan.models.llama3.parallelize import apply_ddp
 
         apply_ddp(
             self.model,

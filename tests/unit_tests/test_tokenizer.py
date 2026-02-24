@@ -10,15 +10,12 @@ import tempfile
 import unittest
 
 from requests.exceptions import HTTPError
-
 from scripts.download_hf_assets import download_hf_assets
-
 from tokenizers import Tokenizer
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
-
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
@@ -279,7 +276,7 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
         model_name = test_repo_id.split("/")[-1]
         tokenizer_dir = "tokenizer" if model_name == "FLUX.1-dev" else "."
         tokenizer_path = os.path.join(self.temp_dir, model_name, tokenizer_dir)
-        our_tokenizer = HuggingFaceTokenizer(tokenizer_path)
+        our_tokenizer = HuggingFaceTokenizer(tokenizer_path=tokenizer_path)
 
         # Step 3: Load tokenizer using official Tokenizer library (if available)
         official_tokenizer = None

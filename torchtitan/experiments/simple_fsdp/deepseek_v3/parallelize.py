@@ -8,15 +8,20 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.components.quantization.float8 import find_float8_linear_config
+from torchtitan.config import (
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.deepseek_v3.infra.parallelize import (
-    apply_moe_ep_tp,
-    apply_non_moe_tp,
-)
+from torchtitan.models.deepseek_v3.parallelize import apply_moe_ep_tp, apply_non_moe_tp
+from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 from ..backend import get_compile_backend_with_passes
@@ -51,28 +56,35 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
 # Adapted from llama4/infra/parallelize.py
 def parallelize_deepseekv3(
     model: nn.Module,
+    *,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpointConfig,
+    dump_folder: str,
 ):
     # TODO: TP currently cannot handle uneven seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
     assert (
-        job_config.training.seq_len % parallel_dims.seq_len_divisor == 0
+        training.seq_len % parallel_dims.seq_len_divisor == 0
     ), f"""
-        Sequence length {job_config.training.seq_len} must be divisible by the product of TP degree
+        Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
     if (
-        job_config.parallelism.context_parallel_degree > 1
-        and model.model_args.attn_type != "sdpa"
+        parallelism.context_parallel_degree > 1
+        and model.config.layer.attention.attn_backend != "sdpa"
     ):
         raise NotImplementedError("CP support is only supported for SDPA.")
 
     if parallel_dims.tp_enabled:
-        enable_float8_linear = "float8" in job_config.model.converters
-        float8_is_rowwise = job_config.quantize.linear.float8.recipe_name in (
+        float8_config = find_float8_linear_config(model_converters.converters)
+        enable_float8_linear = float8_config is not None
+        float8_is_rowwise = float8_config is not None and float8_config.recipe_name in (
             "rowwise",
             "rowwise_with_gw_hp",
         )
@@ -87,11 +99,11 @@ def parallelize_deepseekv3(
         apply_non_moe_tp(
             model,
             parallel_dims.get_mesh("tp"),
-            loss_parallel=not job_config.parallelism.disable_loss_parallel,
+            loss_parallel=not parallelism.disable_loss_parallel,
             enable_float8_tensorwise_tp=False,
             cp_enabled=parallel_dims.cp_enabled,
         )
-        maybe_enable_async_tp(job_config, parallel_dims.get_mesh("tp"))
+        maybe_enable_async_tp(parallelism, compile_config, parallel_dims.get_mesh("tp"))
 
     if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
         apply_moe_ep_tp(
@@ -102,12 +114,12 @@ def parallelize_deepseekv3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
         )
 
-    if job_config.activation_checkpoint.mode != "none":
-        apply_ac(model, job_config.activation_checkpoint)
+    if ac_config.mode != "none":
+        apply_ac(model, ac_config)
 
     mp_policy = MixedPrecisionPolicy(
-        param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
     # apply data parallel
@@ -168,11 +180,11 @@ def parallelize_deepseekv3(
             "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
         )
 
-    if job_config.compile.enable:
+    if compile_config.enable:
         torch._inductor.config.reorder_for_peak_memory = False
         torch._dynamo.config.capture_scalar_outputs = True
 
-        match job_config.parallelism.fsdp_reshard_after_forward:
+        match parallelism.fsdp_reshard_after_forward:
             case "always":
                 fsdp_reshard_after_forward = True
             case "never":
@@ -183,11 +195,11 @@ def parallelize_deepseekv3(
                 fsdp_reshard_after_forward = not parallel_dims.pp_enabled
             case _:
                 raise ValueError(
-                    f"Invalid reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+                    f"Invalid reshard_after_forward_policy: {parallelism.fsdp_reshard_after_forward}."
                 )
 
         backend = get_compile_backend_with_passes(
-            job_config.compile,
+            compile_config,
             fsdp_reshard_after_forward,
             get_transformer_block_buckets(model),
         )

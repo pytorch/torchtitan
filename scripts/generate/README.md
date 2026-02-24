@@ -17,7 +17,7 @@ This script is ideal for users who need to:
 #### Run on a single GPU.
 
 ```bash
-NGPU=1 CONFIG_FILE=./torchtitan/models/llama3/train_configs/llama3_8b.toml CHECKPOINT_DIR=./outputs/checkpoint/ \
+NGPU=1 MODULE=llama3 CONFIG=llama3_8b CHECKPOINT_DIR=./outputs/checkpoint/ \
 PROMPT="What is the meaning of life?" \
 ./scripts/generate/run_llama_generate.sh --max_new_tokens=32 --temperature=0.8 --seed=3
 ```
@@ -25,7 +25,7 @@ PROMPT="What is the meaning of life?" \
 #### Run on 4 GPUs and pipe results to a json file.
 
 ```bash
-NGPU=4 CONFIG_FILE=./torchtitan/models/llama3/train_configs/llama3_8b.toml CHECKPOINT_DIR=./outputs/checkpoint/ \
+NGPU=4 MODULE=llama3 CONFIG=llama3_8b CHECKPOINT_DIR=./outputs/checkpoint/ \
 PROMPT="What is the meaning of life?" \
 ./scripts/generate/run_llama_generate.sh --max_new_tokens=32 --temperature=0.8 --seed=3 --out > output.json
 ```
