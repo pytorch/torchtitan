@@ -580,8 +580,6 @@ def _clip_grad_norm_with_ep(
             total_norm **= 1.0 / norm_type
 
     torch.nn.utils.clip_grads_with_norm_(ep_params, max_norm, total_norm, foreach)
-    torch.nn.utils.clip_grads_with_norm_(
-        non_ep_params, max_norm, total_norm, foreach
-    )
+    torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
 
     return total_norm
