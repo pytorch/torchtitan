@@ -9,62 +9,51 @@ Config entry points for the RL/unified experiment.
 
 Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 ``ConfigManager`` via ``--module rl.unified --config <function_name>``.
-
-TODO: Once the config branch lands, replace the ``JobConfig`` sub-dataclass
-imports (``Checkpoint``, ``Optimizer``, ``LRScheduler``, ``Training``,
-``Parallelism``, ``ActivationCheckpoint``) with their config-branch
-counterparts (``CheckpointManager.Config``, ``OptimizersContainer.Config``,
-etc.) and replace ``from torchtitan.experiments.rl.unified.job_config import
-JobConfig`` with ``from torchtitan.trainer import Trainer``.
 """
 
-from torchtitan.config.job_config import (
-    ActivationCheckpoint,
-    Checkpoint,
-    JobConfig,
-    LRScheduler,
-    Model,
-    Optimizer,
-    Parallelism,
-    Training,
+from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.config.configs import (
+    ActivationCheckpointConfig,
+    ParallelismConfig,
+    TrainingConfig,
 )
-
 from torchtitan.experiments.rl.unified.actors.generator import Generator, VLLMEngine
+from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.unified.configs import (
     PolicyOptimizationConfig,
-    RLTrainer,
     VLLMSamplingConfig,
 )
+from torchtitan.experiments.rl.unified.simple_grpo import RLTrainer
+from torchtitan.models.qwen3 import model_registry
 
 
 def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B."""
     return RLTrainer.Config(
-        trainer=JobConfig(
-            model=Model(
-                name="qwen3",
-                flavor="0.6B",
-            ),
-            optimizer=Optimizer(lr=1e-6),
-            lr_scheduler=LRScheduler(
+        model_spec=model_registry("0.6B"),
+        num_steps=10,
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=Training(
+            training=TrainingConfig(
                 local_batch_size=4,
                 seq_len=4096,
-                steps=10,
             ),
-            parallelism=Parallelism(
+            parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=2,
             ),
-            checkpoint=Checkpoint(
+            checkpoint=CheckpointManager.Config(
                 initial_load_path="/data/users/jianiw/model/qwen3-0.6b",
                 initial_load_model_only=True,
                 initial_load_in_hf=True,
             ),
-            activation_checkpoint=ActivationCheckpoint(
+            activation_checkpoint=ActivationCheckpointConfig(
                 mode="selective",
                 selective_ac_option="op",
             ),
@@ -73,7 +62,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         policy_optimization=PolicyOptimizationConfig(
             beta=0.1,
             group_size=8,
-            use_stable=False,
+            use_stable_grpo=False,
         ),
         generator=Generator.Config(
             vllm_engine=VLLMEngine.Config(
@@ -81,7 +70,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 gpu_memory_limit=0.5,
                 enforce_eager=True,
                 seed=42,
-                parallelism=Parallelism(
+                parallelism=ParallelismConfig(
                     tensor_parallel_degree=1,
                 ),
                 sampling=VLLMSamplingConfig(
@@ -98,26 +87,23 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
 def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     """Debug config for quick iteration — small model, few steps."""
     return RLTrainer.Config(
-        trainer=JobConfig(
-            model=Model(
-                name="qwen3",
-                flavor="debugmodel",
-            ),
-            optimizer=Optimizer(lr=8e-4),
-            lr_scheduler=LRScheduler(
+        model_spec=model_registry("debugmodel"),
+        num_steps=5,
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=Training(
+            training=TrainingConfig(
                 local_batch_size=2,
                 seq_len=2048,
-                steps=5,
             ),
-            parallelism=Parallelism(
+            parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
-            checkpoint=Checkpoint(
+            checkpoint=CheckpointManager.Config(
                 interval=5,
             ),
         ),
@@ -125,13 +111,13 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
         policy_optimization=PolicyOptimizationConfig(
             beta=0.1,
             group_size=4,
-            use_stable=False,
+            use_stable_grpo=False,
         ),
         generator=Generator.Config(
             vllm_engine=VLLMEngine.Config(
                 gpu_memory_limit=0.3,
                 enforce_eager=True,
-                parallelism=Parallelism(
+                parallelism=ParallelismConfig(
                     tensor_parallel_degree=1,
                 ),
                 sampling=VLLMSamplingConfig(
