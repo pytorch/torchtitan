@@ -26,13 +26,13 @@ import torch
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
-from .args import Qwen3VLModelArgs
+from .model import Qwen3VLModel
 
 
 class Qwen3VLStateDictAdapter(StateDictAdapter):
-    def __init__(self, model_args: Qwen3VLModelArgs, hf_assets_path: str | None):
-        super().__init__(model_args, hf_assets_path)
-        self.model_args = model_args
+    def __init__(self, model_config: Qwen3VLModel.Config, hf_assets_path: str | None):
+        super().__init__(model_config, hf_assets_path)
+        self.model_config = model_config
 
         self.from_hf_map = {
             # ===== Language Model =====
@@ -136,13 +136,13 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
                 if key not in to_hf_map:
                     continue
                 # pyrefly: ignore [missing-attribute]
-                if key == "output.weight" and self.model_args.enable_weight_tying:
+                if key == "output.weight" and self.model_config.enable_weight_tying:
                     continue
                 new_key = to_hf_map[key]
                 new_value = value
                 # Reshape Linear weight to Conv3d for patch embedding
                 if key == "visual.patch_embed.proj.weight":
-                    encoder = self.model_args.encoder
+                    encoder = self.model_config.encoder
                     new_value = value.reshape(
                         value.shape[0],
                         encoder.in_channels,

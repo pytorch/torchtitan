@@ -14,7 +14,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from torchtitan.tools.logging import logger
 
-from ..model.args import SpecialTokens
+from ..model import SpecialTokens
 
 from .utils.image import image_to_patches
 from .utils.text import pad_input_ids_and_labels_to_target_batch_size, pad_text_batch

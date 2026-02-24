@@ -11,14 +11,14 @@ This module implements the Vision Transformer (ViT) encoder used in Qwen3-VL,
 using FlexAttention with padded batches for efficient processing.
 """
 
+from dataclasses import dataclass, field
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from torchtitan.models.attention import FlexAttentionWrapper
-
-from .args import Qwen3VLVisionEncoderArgs
+from torchtitan.models.common.attention import FlexAttentionWrapper
 
 
 # Compiled block mask creation
@@ -202,10 +202,10 @@ class PatchMerger(nn.Module):
 class VisionAttention(nn.Module):
     """Multi-head attention with FlexAttention for efficient batched processing."""
 
-    def __init__(self, args: Qwen3VLVisionEncoderArgs):
+    def __init__(self, dim: int, n_heads: int):
         super().__init__()
-        self.dim = args.dim
-        self.num_heads = args.n_heads
+        self.dim = dim
+        self.num_heads = n_heads
         self.head_dim = self.dim // self.num_heads
 
         self.qkv = nn.Linear(self.dim, self.dim * 3, bias=True)
@@ -261,10 +261,10 @@ class VisionAttention(nn.Module):
 class VisionMLP(nn.Module):
     """Feed-forward network with GELU activation."""
 
-    def __init__(self, args: Qwen3VLVisionEncoderArgs):
+    def __init__(self, dim: int, ffn_dim: int):
         super().__init__()
-        self.linear_fc1 = nn.Linear(args.dim, args.ffn_dim, bias=True)
-        self.linear_fc2 = nn.Linear(args.ffn_dim, args.dim, bias=True)
+        self.linear_fc1 = nn.Linear(dim, ffn_dim, bias=True)
+        self.linear_fc2 = nn.Linear(ffn_dim, dim, bias=True)
         self.act_fn = nn.GELU()
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -282,12 +282,12 @@ class VisionMLP(nn.Module):
 class VisionTransformerBlock(nn.Module):
     """Single transformer block for vision encoder."""
 
-    def __init__(self, args: Qwen3VLVisionEncoderArgs):
+    def __init__(self, dim: int, ffn_dim: int, n_heads: int, layer_norm_eps: float):
         super().__init__()
-        self.norm1 = nn.LayerNorm(args.dim, eps=args.layer_norm_eps)
-        self.norm2 = nn.LayerNorm(args.dim, eps=args.layer_norm_eps)
-        self.attn = VisionAttention(args)
-        self.mlp = VisionMLP(args)
+        self.norm1 = nn.LayerNorm(dim, eps=layer_norm_eps)
+        self.norm2 = nn.LayerNorm(dim, eps=layer_norm_eps)
+        self.attn = VisionAttention(dim, n_heads)
+        self.mlp = VisionMLP(dim, ffn_dim)
 
     def forward(
         self,
@@ -317,53 +317,93 @@ class Qwen3VLVisionEncoder(nn.Module):
     Uses padded batches (N, L, D) format for efficient processing.
     """
 
-    def __init__(self, args: Qwen3VLVisionEncoderArgs):
+    @dataclass
+    class Config:
+        """Configuration for Qwen3-VL Vision Encoder (ViT)."""
+
+        # Transformer dimensions
+        dim: int = 1280
+        ffn_dim: int = 5120
+        n_layers: int = 32
+        n_heads: int = 16
+
+        # Vision-specific parameters
+        patch_size: int = 14
+        temporal_patch_size: int = 2
+        in_channels: int = 3
+        spatial_merge_size: int = 2
+
+        # Output dimension (maps to LLM hidden size)
+        out_hidden_size: int = 3584
+
+        # Position embeddings
+        num_position_embeddings: int = 4096
+
+        # Normalization and attention
+        layer_norm_eps: float = 1e-6
+
+        # RoPE parameters
+        rope_theta: float = 10000.0
+
+        # DeepStack: layer indices for extracting intermediate visual features
+        deepstack_visual_indicies: list[int] = field(
+            default_factory=lambda: [7, 15, 23]
+        )
+
+    def __init__(self, config: Config):
         super().__init__()
-        self.args = args
-        self.spatial_merge_size = args.spatial_merge_size
-        self.patch_size = args.patch_size
-        self.spatial_merge_unit = args.spatial_merge_size ** 2
+        self.config = config
+        self.spatial_merge_size = config.spatial_merge_size
+        self.patch_size = config.patch_size
+        self.spatial_merge_unit = config.spatial_merge_size ** 2
 
         # Patch embedding
         self.patch_embed = PatchEmbed(
-            patch_size=args.patch_size,
-            temporal_patch_size=args.temporal_patch_size,
-            in_channels=args.in_channels,
-            embed_dim=args.dim,
+            patch_size=config.patch_size,
+            temporal_patch_size=config.temporal_patch_size,
+            in_channels=config.in_channels,
+            embed_dim=config.dim,
         )
 
         # Position embeddings (learnable, with bilinear interpolation)
-        self.num_position_embeddings = args.num_position_embeddings
-        self.pos_embed = nn.Embedding(args.num_position_embeddings, args.dim)
-        self.num_grid_per_side = int(args.num_position_embeddings ** 0.5)
+        self.num_position_embeddings = config.num_position_embeddings
+        self.pos_embed = nn.Embedding(config.num_position_embeddings, config.dim)
+        self.num_grid_per_side = int(config.num_position_embeddings ** 0.5)
 
         # Rotary embeddings for 2D positions
-        head_dim = args.dim // args.n_heads
-        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2, theta=args.rope_theta)
+        head_dim = config.dim // config.n_heads
+        self.rotary_pos_emb = VisionRotaryEmbedding(
+            head_dim // 2, theta=config.rope_theta
+        )
 
         # Transformer layers
         self.layers = nn.ModuleDict(
-            {str(idx): VisionTransformerBlock(args) for idx in range(args.n_layers)}
+            {
+                str(idx): VisionTransformerBlock(
+                    config.dim, config.ffn_dim, config.n_heads, config.layer_norm_eps
+                )
+                for idx in range(config.n_layers)
+            }
         )
 
-        # Main patch merger usd in the last layer
+        # Main patch merger used in the last layer
         self.merger = PatchMerger(
-            hidden_size=args.dim,
-            out_hidden_size=args.out_hidden_size,
-            spatial_merge_size=args.spatial_merge_size,
+            hidden_size=config.dim,
+            out_hidden_size=config.out_hidden_size,
+            spatial_merge_size=config.spatial_merge_size,
         )
 
         # DeepStack mergers for intermediate layers
         # DeepStack mergers use postshuffle norm (norm after spatial reshape)
-        self.deepstack_visual_indicies = args.deepstack_visual_indicies
+        self.deepstack_visual_indicies = config.deepstack_visual_indicies
         self.deepstack_merger_list = nn.ModuleList([
             PatchMerger(
-                hidden_size=args.dim,
-                out_hidden_size=args.out_hidden_size,
-                spatial_merge_size=args.spatial_merge_size,
+                hidden_size=config.dim,
+                out_hidden_size=config.out_hidden_size,
+                spatial_merge_size=config.spatial_merge_size,
                 use_postshuffle_norm=True,
             )
-            for _ in range(len(args.deepstack_visual_indicies))
+            for _ in range(len(config.deepstack_visual_indicies))
         ])
 
     def init_weights(self):
@@ -396,7 +436,7 @@ class Qwen3VLVisionEncoder(nn.Module):
         device = grid_thw.device
         dtype = self.pos_embed.weight.dtype
         merge_size = self.spatial_merge_size
-        head_dim = self.args.dim // self.args.n_heads
+        head_dim = self.config.dim // self.config.n_heads
 
         # Compute max height/width for RoPE freq table
         max_hw = int(grid_thw[:, 1:].max().item())
@@ -410,7 +450,7 @@ class Qwen3VLVisionEncoder(nn.Module):
             pos_embed_weight = pos_embed_weight.to_local()
 
         # Pre-allocate output tensors
-        pos_embeds = torch.zeros(num_images, max_num_patch, self.args.dim, device=device, dtype=dtype)
+        pos_embeds = torch.zeros(num_images, max_num_patch, self.config.dim, device=device, dtype=dtype)
         rope_embeds = torch.zeros(num_images, max_num_patch, head_dim // 2, device=device, dtype=dtype)
 
         # Group images by (h, w) to batch compute position embeddings
