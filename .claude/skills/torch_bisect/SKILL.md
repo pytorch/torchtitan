@@ -28,15 +28,26 @@ After collecting, offer to save answers to the cache file.
 
 ## Phase 2: Setup
 
-1. `cd <pytorch> && git fetch origin` (timeout 300000ms). On failure, ask user to fix.
-2. Check `git bisect log 2>&1` — if a bisect is active, ask user to reset or abort.
-3. Resolve the good commit:
+1. **Check GitHub connectivity**: run `curl -s -o /dev/null --connect-timeout 20 -w "%{http_code}" https://github.com`.
+   If it fails or returns non-200, tell the user GitHub is not reachable and
+   suggest checking internet connectivity or proxy settings. On Meta internal
+   servers, suggest setting `https_proxy=http://fwdproxy:8080`. Do not proceed
+   until connectivity is confirmed.
+2. `cd <pytorch> && git fetch origin` (timeout 300000ms). On failure, ask user
+   to fix (remind about proxy/fwdproxy if it looks like a network error).
+3. Check `git bisect log 2>&1` — if a bisect is active, ask user to reset or abort.
+4. Resolve the good commit:
    - Hash: verify with `git log -1 <hash>`
    - Date: `git log origin/main --before="<DATE>T23:59:59" --format="%H %s" -1`
      — show result and confirm with user.
-4. Bad commit is `origin/main`. Show it to user.
-5. Show `git rev-list --count <good>..origin/main` and estimated steps (~log2).
-6. `git bisect start && git bisect bad origin/main && git bisect good <good>`
+5. Bad commit is `origin/main`. Show it to user.
+6. Show `git rev-list --count <good>..origin/main` and estimated steps (~log2).
+7. Run each bisect command individually so failures can be reported cleanly:
+   - `git bisect start`
+   - `git bisect bad origin/main`
+   - `git bisect good <good>`
+   If any step fails, show the error and run `git bisect reset` before asking
+   the user how to proceed.
 
 ## Phase 3: Bisect Loop
 
