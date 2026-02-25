@@ -135,7 +135,7 @@ def fill_indices_cpu(
                 permuted_indices[write_start:end_idx] = torch.arange(
                     start_index,
                     start_index + (end_idx - write_start),
-                    dtype=torch.int32,
+                    dtype=torch.int64,
                     # device=device,
                 )
             write_start += length
