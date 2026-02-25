@@ -50,8 +50,7 @@ class RoPE(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.config = config
-        # Buffer registered later in init_weights
-        self.register_buffer("cache", self._precompute(), persistent=False)
+        self.cache: torch.Tensor = self._precompute()
 
     def _precompute(self) -> torch.Tensor:
         cfg = self.config
