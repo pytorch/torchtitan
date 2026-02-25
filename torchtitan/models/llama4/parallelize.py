@@ -13,17 +13,10 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import (
-    distribute_module,
-    distribute_tensor,
-    Partial,
-    Replicate,
-    Shard,
-)
+from torch.distributed.tensor import distribute_module, Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
-    ParallelStyle,
     PrepareModuleInput,
     PrepareModuleInputOutput,
     RowwiseParallel,
@@ -523,36 +516,58 @@ def apply_fsdp(
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
 
 
-class PartitionOnly(ParallelStyle):
-    """Partition weights as DTensors without registering any input/output hooks.
+class MoEColwiseParallel(ColwiseParallel):
+    """ColwiseParallel variant for shared experts inside MoE layers.
 
-    This is used for shared experts in MoE, where we want the weights sharded
-    (for memory savings) but handle the input/output distribution manually in
-    the forward pass. This avoids the all-reduce of d_x in backward that
-    ColwiseParallel would introduce.
-
-    Args:
-        placements: The DTensor placements for the weight parameter.
-            e.g. [Shard(0)] for colwise (w1, w3), [Shard(1)] for rowwise (w2).
+    Partitions weights identically to ColwiseParallel (Shard(0)), but skips
+    registering input/output hooks. Instead, FeedForward.forward extracts
+    local weight shards and uses F.linear with plain tensors. This avoids
+    DTensor dispatch wrapping x as DTensor(Replicate), whose backward would
+    all-reduce d_x. d_x stays Partial and gets reduced once at the MoE output
+    boundary.
     """
 
-    def __init__(self, placements: list):
-        super().__init__()
-        self.placements = placements
-
-    def _partition_fn(self, name, module, device_mesh):
-        for p_name, param in module.named_parameters():
-            dist_param = nn.Parameter(
-                distribute_tensor(param, device_mesh, self.placements)
-            )
-            module.register_parameter(p_name, dist_param)
-
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        module._partition_only = True
+        if isinstance(module, nn.Linear):
+            partition_fn = self._partition_linear_fn
+        elif isinstance(module, nn.Embedding):
+            partition_fn = self._partition_embedding_fn
+        else:
+            raise NotImplementedError(
+                "MoEColwiseParallel currently only supports nn.Linear and nn.Embedding!"
+            )
+        module._moe_no_hooks = True
         return distribute_module(
             module,
             device_mesh,
-            self._partition_fn,
+            partition_fn,
+        )
+
+
+class MoERowwiseParallel(RowwiseParallel):
+    """RowwiseParallel variant for shared experts inside MoE layers.
+
+    Partitions weights identically to RowwiseParallel (Shard(1) for weight,
+    Replicate for bias), but skips registering input/output hooks. This avoids
+    both the input hook's backward all-reduce on d_x and the output hook's
+    Partial->Replicate all-reduce. d_x stays Partial and gets reduced once
+    at the MoE output boundary.
+    """
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        if isinstance(module, nn.Linear):
+            partition_fn = self._partition_linear_fn
+        elif isinstance(module, nn.Embedding):
+            partition_fn = self._partition_embedding_fn
+        else:
+            raise NotImplementedError(
+                "MoERowwiseParallel currently only supports nn.Linear and nn.Embedding!"
+            )
+        module._moe_no_hooks = True
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn,
         )
 
 
@@ -580,7 +595,7 @@ def apply_moe_ep_tp(
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(Shard(1),),
                     desired_input_layouts=(Replicate(),),
-                    # Input is a DTensor from SequenceParallel, do not wrap with to_local.
+                    # Keep input as a DTensor from SequenceParallel, do not wrap with to_local.
                     use_local_input=False,
                     output_layouts=(Partial(),),
                     desired_output_layouts=(Shard(1),),
@@ -596,17 +611,15 @@ def apply_moe_ep_tp(
                 moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
-                # Partition weights only (no input/output hooks) to avoid
-                # ColwiseParallel's backward all-reduce on d_x.
-                # FeedForward.forward handles local matmuls with .to_local()
-                # weights, keeping d_x as Partial so it gets reduced once
-                # at the MoE output boundary (PrepareModuleInputOutput).
+                # Use MoE-specific parallel styles that avoid all-reducing d_x
+                # in backward. d_x stays Partial and gets reduced once at the
+                # MoE output boundary (PrepareModuleInputOutput).
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": PartitionOnly([Shard(0)]),
-                        "moe.shared_experts.w2": PartitionOnly([Shard(1)]),
-                        "moe.shared_experts.w3": PartitionOnly([Shard(0)]),
+                        "moe.shared_experts.w1": MoEColwiseParallel(),
+                        "moe.shared_experts.w2": MoERowwiseParallel(),
+                        "moe.shared_experts.w3": MoEColwiseParallel(),
                     }
                 )
             parallelize_module(
