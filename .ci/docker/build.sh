@@ -23,9 +23,9 @@ case "${IMAGE_NAME}" in
     CLANG_VERSION=12
     BASE_IMAGE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu${OS_VERSION}
     ;;
-  torchtitan-rocm-ubuntu-22.04-clang12)
-    OS_VERSION=22.04
-    CLANG_VERSION=12
+  torchtitan-rocm-ubuntu-24.04-clang15)
+    OS_VERSION=24.04
+    CLANG_VERSION=15
     BASE_IMAGE=rocm/dev-ubuntu-${OS_VERSION}:latest
     ;;
   *)

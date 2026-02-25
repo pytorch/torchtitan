@@ -61,14 +61,7 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        if [ "${{ matrix.gpu-arch-type }}" = "rocm" ]; then
-          python -m pip install --force-reinstall --pre \
-            "torch==${{ matrix.torch-version }}" \
-            --index-url ${{ matrix.index-url }}
-        else
-          python -m pip install --force-reinstall --pre \
-            torch --index-url ${{ matrix.index-url }}
-        fi
+        python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
 
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
