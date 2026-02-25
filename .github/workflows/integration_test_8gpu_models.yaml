@@ -76,5 +76,6 @@ jobs:
 
         python -m tests.integration_tests.run_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} --test_suite models $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
         python -m tests.integration_tests.flux $RUNNER_TEMP/artifacts-to-be-uploaded/flux --ngpu 8
+        torchrun --nproc_per_node=8 tests/integration_tests/test_state_dict_keys.py
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/flux/*/inference_results/
