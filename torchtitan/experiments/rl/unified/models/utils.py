@@ -7,13 +7,10 @@
 
 import logging
 
-import torch
 from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
 from torchtitan.experiments.rl.vllm_compat.models.attention import (
     VLLMCompatibleFlashAttention,
 )
-from torchtitan.experiments.rl.vllm_compat.weights.converter import vllm_to_torchtitan
-from torchtitan.protocols.model import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +57,7 @@ def replace_with_vllm_attention(model, tp_degree=1):
 
         layer.attention.inner_attention = vllm_attn
 
-    logger.info(
+    logger.debug(
         f"Successfully replaced TorchTitan attention with VLLMAttention "
         f"({len(model.layers)} layers)"
     )
@@ -85,45 +82,7 @@ def replace_with_vllm_compatible_flash_attention(model):
 
         layer.attention.inner_attention = vllm_attn
 
-    logger.info(
+    logger.debug(
         f"Successfully replaced TorchTitan attention with VLLMCompatibleFlashAttention "
         f"({len(model.layers)} layers)"
     )
-
-
-def load_trainer_model(model_path: str, model_config: BaseModel.Config):
-    """
-    Load TorchTitan model from checkpoint for trainer.
-
-    Args:
-        model_path: Path to HuggingFace model (for weights)
-        model_config: Model config from model_spec (e.g., Qwen3Model.Config)
-
-    Returns:
-        model: Loaded TorchTitan model for trainer.
-    """
-    model_args = model_config
-
-    # convert to torchtitan state_dict. TODO: Use torchtitan components
-    titan_state_dict = vllm_to_torchtitan(model_path)
-
-    # If weight tying is enabled but output.weight is missing from the checkpoint
-    # (HF models with tie_word_embeddings=True may not store lm_head.weight),
-    # synthesize it from tok_embeddings.weight so load_state_dict(strict=True) works.
-    if model_args.enable_weight_tying and "output.weight" not in titan_state_dict:
-        titan_state_dict["output.weight"] = titan_state_dict["tok_embeddings.weight"]
-
-    model = model_args.build()
-    # Set global default dtype to bfloat16. This is needed because vLLM's Attention
-    # layer uses torch.get_default_dtype() and it doesn't support float32
-    torch.set_default_dtype(torch.bfloat16)
-    # NOTE: Override attention to vllm compatible attention for backward capability.
-    # Only patch to vllm compatible attention during training.
-    replace_with_vllm_compatible_flash_attention(model)
-
-    # Load standard TorchTitan format directly
-    model.load_state_dict(titan_state_dict, strict=True)
-
-    model.to(torch.bfloat16)
-
-    return model
