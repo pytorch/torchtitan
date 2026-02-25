@@ -287,17 +287,13 @@ class TokenChoiceTopKRouter(nn.Module):
                         )
         # === END DEBUG ===
         # scores shape (bs*slen, num_experts)
-        scores = F.linear(
-            x.to(torch.float32),
-            self.gate.weight.to(torch.float32),
-            self.gate.bias.to(torch.float32) if self.gate.bias is not None else None,
-        )
+        scores = self.gate(x)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores)
+            scores = torch.sigmoid(scores.to(torch.float32))
         elif self.score_func == "softmax":
-            scores = F.softmax(scores, dim=1)
+            scores = F.softmax(scores.to(torch.float32), dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
@@ -489,6 +485,10 @@ class MoE(Module):
         Returns:
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
+        # Convert DTensor to local tensor for MoE-internal computation.
+        # grad_placements=(Partial(),) ensures x.grad is Partial in backward,
+        # so gradient reduction happens once at the MoE boundary (reduce-scatter)
+        # rather than being duplicated inside the MoE.
         if isinstance(x, DTensor):
             x = x.to_local(grad_placements=(Partial(),))
         bs, slen, dim = x.shape
@@ -552,18 +552,6 @@ class MoE(Module):
             -1, self.router.top_k, dim
         )
         if not self.score_before_experts:
-            # NOTE: When score_before_experts=False, top_scores is multiplied
-            #       with routed_output_unsorted via bmm. routed_output_unsorted
-            #       is Partial across TP ranks (from row-parallel expert weights)
-            #       The backward gradient d_top_scores = bmm(d_out_experts, routed_output_unsorted^T)
-            #       is therefore Partial. We use from_local/to_local to trigger
-            #       an all-reduce in backward so the router gate gets the correct
-            #       full gradient.
-            # if isinstance(self.router.gate.weight, DTensor):
-            #     tp_mesh = self.router.gate.weight.device_mesh
-            #     top_scores = DTensor.from_local(
-            #         top_scores, tp_mesh, (Replicate(),)
-            #     ).to_local(grad_placements=(Partial(),))
             out_experts = (
                 torch.bmm(
                     top_scores.reshape(-1, 1, self.router.top_k),
