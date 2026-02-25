@@ -8,9 +8,11 @@ import contextlib
 import os
 import pickle
 import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module
 
@@ -19,11 +21,35 @@ MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
 
 _COMM_KEYWORDS: tuple[str, ...] = ("nccl",)
 _COMPUTE_KEYWORDS: tuple[str, ...] = (
-    "gemm", "aten", "cublas", "cutlass", "cudnn", "triton", "flash",
+    "gemm",
+    "aten",
+    "cublas",
+    "cutlass",
+    "cudnn",
+    "triton",
+    "flash",
 )
 
 
-class OverlapAnalyzer:
+class ProfileAnalyzer(ABC):
+    """Abstract base class for profiler trace analyzers.
+
+    Implement this interface to create custom analyzers that run automatically
+    after each profiler trace is exported. Register instances via
+    ``Profiler(config, analyzers=[...])``.
+    """
+
+    @abstractmethod
+    def analyze(self, prof: torch.profiler.profile) -> None:
+        """Analyze a completed profiler trace.
+
+        Args:
+            prof: A ``torch.profiler.profile`` object with collected trace data.
+        """
+        ...
+
+
+class OverlapAnalyzer(ProfileAnalyzer):
     """Analyzes compute-communication overlap from a PyTorch profiler trace.
 
     Computes overlap efficiency: the fraction of NCCL communication time that
@@ -35,18 +61,12 @@ class OverlapAnalyzer:
         sums durations across all invocations. When multiple kernels run concurrently
         on different CUDA streams, this may underestimate actual overlap. For precise
         timeline analysis, inspect the exported Chrome trace directly.
-
-    Args:
-        prof: A ``torch.profiler.profile`` object with collected trace data.
     """
 
-    def __init__(self, prof: torch.profiler.profile) -> None:
-        self._prof = prof
-
-    def _get_trace_duration_us(self) -> float:
+    def _get_trace_duration_us(self, prof: torch.profiler.profile) -> float:
         """Compute trace duration from raw event timestamps."""
         try:
-            events = self._prof.events()
+            events = prof.events()
         except (AttributeError, RuntimeError, AssertionError):
             return 0.0
 
@@ -69,9 +89,9 @@ class OverlapAnalyzer:
 
         return max(0.0, max_end - min_start)
 
-    def analyze(self) -> None:
+    def analyze(self, prof: torch.profiler.profile) -> None:
         """Run overlap analysis and log a summary to the console."""
-        key_averages = self._prof.key_averages()
+        key_averages = prof.key_averages()
 
         comm_us: float = 0.0
         compute_us: float = 0.0
@@ -92,7 +112,7 @@ class OverlapAnalyzer:
             )
             return
 
-        trace_duration_us = self._get_trace_duration_us()
+        trace_duration_us = self._get_trace_duration_us(prof)
         if trace_duration_us == 0.0:
             trace_duration_us = compute_us + comm_us
 
@@ -101,7 +121,7 @@ class OverlapAnalyzer:
         raw_overlap = compute_us + comm_us - trace_duration_us
         overlap_pct = max(0.0, min(raw_overlap / comm_us * 100.0, 100.0))
 
-        # Calculate GPU time spent on unoverlopped communication (unutilized for compute)
+        # Calculate GPU time spent on unoverlapped communication (unutilized for compute)
         unoverlapped_comm_pct = 100.0 - overlap_pct
 
         logger.info(
@@ -114,104 +134,141 @@ class OverlapAnalyzer:
         )
 
 
-# TODO: introduce an owner class, namely Profiler
-@dataclass(kw_only=True, slots=True)
-class ProfilingConfig:
-    enable_profiling: bool = False
-    """Whether to enable pytorch profile"""
+class Profiler(Configurable):
+    """Owns profiling and memory snapshot lifecycle for a training run.
 
-    save_traces_folder: str = "profile_traces"
-    """Trace files location"""
+    Instantiate with a ``Profiler.Config`` (and an optional list of
+    ``ProfileAnalyzer`` instances) then use the context-manager methods
+    ``enable_profiling`` and ``enable_memory_snapshot`` in the training loop.
 
-    profile_freq: int = 10
-    """How often to collect profile traces, in iterations"""
+    If ``config.experimental_diagnostics`` is ``True``, an ``OverlapAnalyzer``
+    is automatically added as the first analyzer.  Additional analyzers passed
+    via ``analyzers=`` are appended after it.
 
-    profiler_active: int = 1
-    """
-    The steps profiler is active for.
-
-    This is used to configure torch.profile.schedule.
+    Args:
+        config: A ``Profiler.Config`` instance.
+        analyzers: Optional extra ``ProfileAnalyzer`` instances to run after
+            each trace export.
     """
 
-    profiler_warmup: int = 3
-    """
-    The number of warmup steps before the active step in each profiling cycle.
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        enable_profiling: bool = False
+        """Whether to enable pytorch profiler."""
 
-    This is used to configure torch.profile.schedule.
-    """
+        save_traces_folder: str = "profile_traces"
+        """Trace files location."""
 
-    profiler_repeat: int | None = None
-    """
-    The number of times to repeat the profiling cycle
+        profile_freq: int = 10
+        """How often to collect profile traces, in iterations."""
 
-    This is used to configure torch.profile.schedule.
-    """
+        profiler_repeat: int | None = None
+        """
+        The number of times to repeat the profiling cycle
 
-    profiler_skip_first: int | None = None
-    """
-    The number of initial profiling cycles to skip
+        This is used to configure torch.profiler.schedule.
+        """
 
-    This is used to configure torch.profile.schedule.
-    """
+        profiler_skip_first: int | None = None
+        """
+        The number of initial profiling cycles to skip
 
-    profiler_skip_first_wait: int | None = None
-    """
-    The number of initial profiling cycles to skip the wait time
+        This is used to configure torch.profiler.schedule.
+        """
 
-    This is used to configure torch.profile.schedule.
-    """
+        profiler_skip_first_wait: int | None = None
+        """
+        The number of initial profiling cycles to skip the wait time
 
-    enable_memory_snapshot: bool = False
-    """Whether to dump memory snapshot"""
+        This is used to configure torch.profiler.schedule.
+        """
 
-    save_memory_snapshot_folder: str = "memory_snapshot"
-    """Memory snapshot files location"""
+        profiler_active: int = 1
+        """
+        The steps profiler is active for.
 
-    experimental_diagnostics: bool = False
-    """
-    Enable experimental diagnostic analysis after each profiler trace.
+        This is used to configure torch.profiler.schedule.
+        """
 
-    When set to true, an OverlapAnalyzer is run after each trace export to
-    report compute-communication overlap efficiency. This is only active when
-    profiling is enabled and the process group is initialized (distributed run).
-    """
+        profiler_warmup: int = 3
+        """
+        The number of warmup steps before the active step in each profiling cycle.
 
+        This is used to configure torch.profiler.schedule.
+        """
 
-@contextlib.contextmanager
-def maybe_enable_profiling(
-    profiling_config: ProfilingConfig,
-    *,
-    global_step: int = 0,
-    base_folder: str = "",
-    leaf_folder: str = "",
-):
-    # get user defined profiler settings
-    enable_profiling = profiling_config.enable_profiling
+        enable_memory_snapshot: bool = False
+        """Whether to dump memory snapshot."""
 
-    if enable_profiling:
-        trace_dir = os.path.join(base_folder, profiling_config.save_traces_folder)
+        save_memory_snapshot_folder: str = "memory_snapshot"
+        """Memory snapshot files location."""
+
+        experimental_diagnostics: bool = False
+        """
+        Enable experimental diagnostic analysis after each profiler trace.
+
+        When set to true, an OverlapAnalyzer is run after each trace export to
+        report compute-communication overlap efficiency. This is only active when
+        profiling is enabled and the process group is initialized (distributed run).
+        """
+
+    def __init__(
+        self,
+        config: "Profiler.Config",
+        *,
+        analyzers: list[ProfileAnalyzer] | None = None,
+    ) -> None:
+        self._config = config
+        self._analyzers: list[ProfileAnalyzer] = []
+        if config.experimental_diagnostics:
+            self._analyzers.append(OverlapAnalyzer())
+        if analyzers:
+            self._analyzers.extend(analyzers)
+
+    @contextlib.contextmanager
+    def enable_profiling(
+        self,
+        *,
+        global_step: int = 0,
+        base_folder: str = "",
+        leaf_folder: str = "",
+    ):
+        """Context manager that activates the PyTorch profiler when configured.
+
+        Yields the ``torch.profiler.profile`` handle (or ``None`` when profiling
+        is disabled) so callers can call ``torch_profiler.step()`` each iteration.
+        """
+        cfg = self._config
+
+        if not cfg.enable_profiling:
+            yield None
+            return
+
+        trace_dir = os.path.join(base_folder, cfg.save_traces_folder)
         profile_freq, warmup, active = (
-            profiling_config.profile_freq,
-            profiling_config.profiler_warmup,
-            profiling_config.profiler_active,
+            cfg.profile_freq,
+            cfg.profiler_warmup,
+            cfg.profiler_active,
         )
 
         additional_params = {
             key: val
             for key, val in [
-                ("repeat", profiling_config.profiler_repeat),
-                ("skip_first", profiling_config.profiler_skip_first),
-                ("skip_first_wait", profiling_config.profiler_skip_first_wait),
+                ("repeat", cfg.profiler_repeat),
+                ("skip_first", cfg.profiler_skip_first),
+                ("skip_first_wait", cfg.profiler_skip_first_wait),
             ]
             if val is not None
         }
 
         rank = torch.distributed.get_rank()
         run_diagnostics = (
-            profiling_config.experimental_diagnostics
+            bool(self._analyzers)
             and torch.distributed.is_initialized()
             and rank == 0
         )
+
+        analyzers = self._analyzers
 
         def trace_handler(prof):
             curr_trace_dir_name = "iteration_" + str(prof.step_num)
@@ -229,7 +286,8 @@ def maybe_enable_profiling(
             )
 
             if run_diagnostics:
-                OverlapAnalyzer(prof).analyze()
+                for analyzer in analyzers:
+                    analyzer.analyze(prof)
 
         logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
 
@@ -259,24 +317,27 @@ def maybe_enable_profiling(
         ) as torch_profiler:
             torch_profiler.step_num = global_step
             yield torch_profiler
-    else:
-        torch_profiler = contextlib.nullcontext()
-        yield None
 
+    @contextlib.contextmanager
+    def enable_memory_snapshot(
+        self,
+        *,
+        global_step: int = 0,
+        base_folder: str = "",
+        leaf_folder: str = "",
+    ):
+        """Context manager that activates memory snapshot recording when configured.
 
-@contextlib.contextmanager
-def maybe_enable_memory_snapshot(
-    profiling_config: ProfilingConfig,
-    *,
-    global_step: int = 0,
-    base_folder: str = "",
-    leaf_folder: str = "",
-):
-    enable_snapshot = profiling_config.enable_memory_snapshot
-    if enable_snapshot:
-        snapshot_dir = os.path.join(
-            base_folder, profiling_config.save_memory_snapshot_folder
-        )
+        Yields a ``MemoryProfiler`` handle (or ``None`` when snapshots are
+        disabled) so callers can call ``memory_profiler.step()`` each iteration.
+        """
+        cfg = self._config
+
+        if not cfg.enable_memory_snapshot:
+            yield None
+            return
+
+        snapshot_dir = os.path.join(base_folder, cfg.save_memory_snapshot_folder)
         if not os.path.exists(snapshot_dir):
             os.makedirs(snapshot_dir, exist_ok=True)
         rank = torch.distributed.get_rank()
@@ -319,11 +380,9 @@ def maybe_enable_memory_snapshot(
                 )
 
         logger.info(f"Memory profiler active. Snapshot will be saved at {snapshot_dir}")
-        profiler = MemoryProfiler(global_step, profiling_config.profile_freq)
+        profiler = MemoryProfiler(global_step, cfg.profile_freq)
         try:
             yield profiler
         except torch.OutOfMemoryError:
             profiler.step(exit_ctx=True)
             raise
-    else:
-        yield None
