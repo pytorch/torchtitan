@@ -43,5 +43,9 @@ Sessionx.vim
 # env files
 .env
 
-# Vibe coding
-.claude
+# Claude Code local configuration
+CLAUDE.local.md
+/test_*.py
+/debug_*.py
+CLAUDE_CONTEXT/
+/.claude/settings.local.json
