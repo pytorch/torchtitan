@@ -18,8 +18,6 @@ from torch.distributed.tensor import (
     distribute_module,
     distribute_tensor,
     DTensor,
-    Partial,
-    Replicate,
     Shard,
 )
 from torch.distributed.tensor.parallel import ParallelStyle
@@ -47,17 +45,6 @@ class BaseExpertParallel(ParallelStyle, ABC):
 
 # implementation of Tensor Parallel for the GroupedExperts in MoE
 class TensorParallel(ParallelStyle):
-    def _prepare_input_fn(self, mod, inputs, device_mesh):
-        routed_input, num_tokens_per_expert = inputs
-        # NOTE: Currently in MoE TP, experts multiplication runs in plain Tensors.
-        #       The grad_placements on inputs is set to Partial so that necessary
-        #       reductions are performed during backward.
-        routed_input = DTensor.from_local(
-            routed_input, device_mesh, (Replicate(),)
-        ).to_local(grad_placements=(Partial(),))
-
-        return routed_input, num_tokens_per_expert
-
     def _partition_fn(self, name, module, device_mesh):
         # w1 shape = (experts, out_dim, in_dim)
         module.register_parameter(
@@ -81,8 +68,6 @@ class TensorParallel(ParallelStyle):
             module,
             device_mesh,
             self._partition_fn,
-            # pyrefly: ignore [bad-argument-type]
-            self._prepare_input_fn,
         )
 
 
@@ -195,23 +180,6 @@ class ExpertParallel(BaseExpertParallel):
 # This class is for dp2ep with TP (without TP we can just use ExpertParallel)
 class ExpertTensorParallel(ExpertParallel):
     def _token_dispatch(self, mod, inputs, device_mesh):
-        routed_input, num_tokens_per_expert = inputs
-
-        # NOTE: Currently in MoE TP, experts multiplication runs in plain Tensors.
-        #       The grad_placements on inputs is set to Partial so that necessary
-        #       reductions are performed during backward.
-
-        # NOTE: The mesh used here should be dense_mesh["tp"] as routed_input is
-        #       technically wrapped with the dense_mesh["tp"] but this complicates
-        #       the interface of ExpertTensorParallel and it doesn't matter as etp
-        #       is almost always the same as tp or is 1. To avoid the complexity,
-        #       we use the etp mesh here.
-        routed_input = DTensor.from_local(
-            routed_input, device_mesh["etp"], (Replicate(),)
-        ).to_local(grad_placements=(Partial(),))
-
-        inputs = (routed_input, num_tokens_per_expert)
-
         # token dispatch happens on the EP mesh, whereas device_mesh is [ep, tp] mesh
         return super()._token_dispatch(mod, inputs, device_mesh["ep"])
 
@@ -286,14 +254,6 @@ class ReordererSequenceParallel(ParallelStyle):
 
             return output
 
-        # NOTE: top_scores is Replicate across EP ranks, but the split below
-        #       gives each rank only its local slice. In backward, the gradient
-        #       of the slice is nonzero only for the local tokens (Partial).
-        #       We declare grad_placements=(Partial(),) to trigger an all-reduce
-        #       so the router gate receives the correct full gradient.
-        # top_scores = DTensor.from_local(
-        #     top_scores, device_mesh, (Replicate(),)
-        # ).to_local(grad_placements=(Partial(),))
         top_scores = _split_along_first_dim(top_scores)
         selected_experts_indices = _split_along_first_dim(selected_experts_indices)
 

@@ -287,13 +287,17 @@ class TokenChoiceTopKRouter(nn.Module):
                         )
         # === END DEBUG ===
         # scores shape (bs*slen, num_experts)
-        scores = self.gate(x)
+        scores = F.linear(
+            x.to(torch.float32),
+            self.gate.weight.to(torch.float32),
+            self.gate.bias.to(torch.float32) if self.gate.bias is not None else None,
+        )
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
+            scores = torch.sigmoid(scores)
         elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1)
+            scores = F.softmax(scores, dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 

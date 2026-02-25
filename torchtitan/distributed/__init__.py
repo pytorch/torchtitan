@@ -10,7 +10,13 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DeviceMesh, distribute_module, DTensor, Replicate
+from torch.distributed.tensor import (
+    DeviceMesh,
+    distribute_module,
+    DTensor,
+    Partial,
+    Replicate,
+)
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
@@ -34,12 +40,14 @@ class NoParallel(ParallelStyle):
         input_layout: Placement | None = None,
         output_layout: Placement | None = None,
         use_local_output: bool = True,
+        output_grad_as_partial: bool = False,
     ):
         super().__init__()
         self.input_layout = input_layout or Replicate()
         self.output_layout = output_layout or Replicate()
         self.desired_input_layout = Replicate()
         self.use_local_output = use_local_output
+        self.output_grad_as_partial = output_grad_as_partial
 
     @staticmethod
     def _prepare_input_fn(
@@ -69,6 +77,7 @@ class NoParallel(ParallelStyle):
     def _prepare_output_fn(
         output_layout: Placement,
         use_local_output: bool,
+        output_grad_as_partial: bool,
         mod: nn.Module,
         outputs: DTensor,
         device_mesh: DeviceMesh,
@@ -76,7 +85,11 @@ class NoParallel(ParallelStyle):
         if outputs.placements != (output_layout,):
             outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
         # back to local tensor
-        return outputs.to_local() if use_local_output else outputs
+        if use_local_output:
+            if output_grad_as_partial:
+                return outputs.to_local(grad_placements=(Partial(),))
+            return outputs.to_local()
+        return outputs
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
@@ -96,5 +109,6 @@ class NoParallel(ParallelStyle):
                 self._prepare_output_fn,
                 self.output_layout,
                 self.use_local_output,
+                self.output_grad_as_partial,
             ),
         )

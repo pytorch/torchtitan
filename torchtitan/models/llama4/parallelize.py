@@ -13,10 +13,17 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import Partial, Replicate, Shard
+from torch.distributed.tensor import (
+    distribute_module,
+    distribute_tensor,
+    Partial,
+    Replicate,
+    Shard,
+)
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
+    ParallelStyle,
     PrepareModuleInput,
     PrepareModuleInputOutput,
     RowwiseParallel,
@@ -516,6 +523,39 @@ def apply_fsdp(
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
 
 
+class PartitionOnly(ParallelStyle):
+    """Partition weights as DTensors without registering any input/output hooks.
+
+    This is used for shared experts in MoE, where we want the weights sharded
+    (for memory savings) but handle the input/output distribution manually in
+    the forward pass. This avoids the all-reduce of d_x in backward that
+    ColwiseParallel would introduce.
+
+    Args:
+        placements: The DTensor placements for the weight parameter.
+            e.g. [Shard(0)] for colwise (w1, w3), [Shard(1)] for rowwise (w2).
+    """
+
+    def __init__(self, placements: list):
+        super().__init__()
+        self.placements = placements
+
+    def _partition_fn(self, name, module, device_mesh):
+        for p_name, param in module.named_parameters():
+            dist_param = nn.Parameter(
+                distribute_tensor(param, device_mesh, self.placements)
+            )
+            module.register_parameter(p_name, dist_param)
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        module._partition_only = True
+        return distribute_module(
+            module,
+            device_mesh,
+            self._partition_fn,
+        )
+
+
 def apply_moe_ep_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh | None,
@@ -545,7 +585,7 @@ def apply_moe_ep_tp(
                     desired_output_layouts=(Shard(1),),
                 ),
                 # replicate computation for the router
-                "moe.router.gate": NoParallel(),
+                "moe.router.gate": NoParallel(output_grad_as_partial=True),
             }
             if ep_mesh is not None and etp_mesh is None:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
@@ -555,15 +595,17 @@ def apply_moe_ep_tp(
                 moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
-                # input Replicate, output Partial
+                # Partition weights only (no input/output hooks) to avoid
+                # ColwiseParallel's backward all-reduce on d_x.
+                # FeedForward.forward handles local matmuls with .to_local()
+                # weights, keeping d_x as Partial so it gets reduced once
+                # at the MoE output boundary (PrepareModuleInputOutput).
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": ColwiseParallel(),
-                        "moe.shared_experts.w2": RowwiseParallel(
-                            output_layouts=Partial()
-                        ),
-                        "moe.shared_experts.w3": ColwiseParallel(),
+                        "moe.shared_experts.w1": PartitionOnly([Shard(0)]),
+                        "moe.shared_experts.w2": PartitionOnly([Shard(1)]),
+                        "moe.shared_experts.w3": PartitionOnly([Shard(0)]),
                     }
                 )
             parallelize_module(
