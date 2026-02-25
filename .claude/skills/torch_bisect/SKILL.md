@@ -190,13 +190,36 @@ cd <pytorch_path> && git bisect log
 cd <pytorch_path> && git show --stat <first_bad_commit>
 ```
 
-### Step 3: Reset the bisect
+### Step 3: Extract the PR number and details
+
+PyTorch merge commits typically reference a pull request in the commit message
+with the pattern `(#NNNNN)`. Extract the PR number from the commit subject:
+
+```bash
+cd <pytorch_path> && git log -1 --format="%s" <first_bad_commit>
+```
+
+If a `(#NNNNN)` pattern is found, fetch the PR title, body (first 20 lines),
+and URL using the GitHub CLI:
+
+```bash
+gh pr view <PR_NUMBER> --repo pytorch/pytorch --json title,body,url
+```
+
+If `gh` is not available or fails, construct the URL manually as
+`https://github.com/pytorch/pytorch/pull/<PR_NUMBER>` and note that the title
+and summary could not be fetched.
+
+If no PR number is found in the commit message, skip this step and note that
+no associated PR was identified.
+
+### Step 4: Reset the bisect
 
 ```bash
 cd <pytorch_path> && git bisect reset
 ```
 
-### Step 4: Present the summary
+### Step 5: Present the summary
 
 Format your final report as:
 
@@ -208,12 +231,19 @@ Format your final report as:
 **Author:** <author name>
 **Date:** <commit date>
 
+### Associated Pull Request
+**PR:** #<number> — <PR title>
+**Link:** https://github.com/pytorch/pytorch/pull/<number>
+**Summary:** <first ~20 lines of PR body>
+
 ### Changed files
 <output of git show --stat>
 
 ### Full bisect log
 <output of git bisect log>
 ```
+
+If no PR was found, omit the "Associated Pull Request" section.
 
 Do NOT attempt to diagnose what the commit broke or suggest a fix. Your job is
 solely to identify the commit.
