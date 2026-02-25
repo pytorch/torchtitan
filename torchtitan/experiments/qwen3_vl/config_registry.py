@@ -97,14 +97,12 @@ def qwen3_vl_2b() -> Trainer.Config:
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
             tensor_parallel_degree=1,
-            pipeline_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             enable=False,
             interval=50,
             last_save_model_only=False,
             export_dtype="float16",
-            initial_load_in_hf=True,
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="full",
@@ -127,19 +125,17 @@ def qwen3_vl_8b() -> Trainer.Config:
             steps=100,
         ),
         parallelism=ParallelismConfig(
-            data_parallel_shard_degree=4,
-            tensor_parallel_degree=2,
+            data_parallel_shard_degree=-1,
+            tensor_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
-            enable=True,
+            enable=False,
             interval=50,
             last_save_model_only=False,
             export_dtype="float16",
-            initial_load_in_hf=True,
         ),
         activation_checkpoint=ActivationCheckpointConfig(
-            mode="selective",
-            selective_ac_option="op",
+            mode="full",
         ),
     )
 
@@ -154,24 +150,22 @@ def qwen3_vl_30b_a3b() -> Trainer.Config:
         optimizer=OptimizersContainer.Config(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            local_batch_size=2,
+            local_batch_size=12,
             seq_len=4096,
             steps=100,
         ),
         parallelism=ParallelismConfig(
-            data_parallel_shard_degree=4,
-            expert_parallel_degree=4,
-            pipeline_parallel_degree=2,
+            data_parallel_shard_degree=-1,
+            tensor_parallel_degree=1,
+            expert_parallel_degree=8,
         ),
         checkpoint=CheckpointManager.Config(
-            enable=True,
+            enable=False,
             interval=500,
             last_save_model_only=False,
             export_dtype="float16",
-            initial_load_in_hf=True,
         ),
         activation_checkpoint=ActivationCheckpointConfig(
             mode="full",
-            selective_ac_option="op",
         ),
     )
