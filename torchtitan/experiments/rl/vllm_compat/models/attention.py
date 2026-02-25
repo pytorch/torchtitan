@@ -38,9 +38,14 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         # We need to transpose to (batch, seq_len, num_heads, head_dim)
 
         # Input is (batch, num_heads, seq_len, head_dim) - need to transpose
-        q = q.transpose(1, 2)  # -> (batch, seq_len, num_heads, head_dim)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        # TODO(jianiw): Explicitly convert to bfloat16 because vllm's Flash attention kernel only supports bfloat16.
+        # Need to handle precision change properly.
+        original_dtype = q.dtype
+        q = q.transpose(1, 2).to(
+            torch.bfloat16
+        )  # -> (batch, seq_len, num_heads, head_dim)
+        k = k.transpose(1, 2).to(torch.bfloat16)
+        v = v.transpose(1, 2).to(torch.bfloat16)
 
         # Get dimensions
         batch_size, seq_len, num_heads, head_dim = q.shape
@@ -132,6 +137,7 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 num_kv_heads = k.shape[1]
                 head_dim = q.shape[2]
                 batch_size = total_tokens // seq_len
+                num_groups = num_heads // num_kv_heads
 
                 q_batch = q.reshape(batch_size, seq_len, num_heads, head_dim)
                 k_batch = k.reshape(batch_size, seq_len, num_kv_heads, head_dim)
@@ -173,7 +179,7 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 # Softmax
                 attn_weights = torch.nn.functional.softmax(
                     scores, dim=-1
-                )  # (B, H, N, N)
+                )  # (B, num_heads, N, N)
 
                 # Backward through attention
                 # out = attn_weights @ v
@@ -184,7 +190,6 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
                 grad_attn_weights = torch.matmul(grad_out_t, v_t.transpose(-2, -1))
 
                 # Backward through softmax
-                # d_softmax = attn_weights * (grad_attn_weights - sum(grad_attn_weights * attn_weights))
                 sum_term = (grad_attn_weights * attn_weights).sum(dim=-1, keepdim=True)
                 grad_scores = attn_weights * (grad_attn_weights - sum_term)
 
@@ -250,4 +255,4 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         # Transpose back to TorchTitan format: (batch, num_heads, seq_len, head_dim)
         output = output.transpose(1, 2)
 
-        return output
+        return output.to(original_dtype)

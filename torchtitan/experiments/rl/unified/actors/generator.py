@@ -8,57 +8,28 @@ import logging
 import os
 
 from dataclasses import dataclass, field
-from typing import List
 
 import torch
 from monarch.actor import Actor, endpoint
-from torchtitan.config import CommConfig, Configurable, ParallelismConfig
-from torchtitan.distributed import utils as dist_utils
+from torch.distributed._tensor import DTensor
+from torchtitan.config import Configurable
+from torchtitan.config.configs import ParallelismConfig
 
+from torchtitan.experiments.rl.unified.actors.grader import Episodes
 from torchtitan.experiments.rl.unified.configs import (
     PolicyOptimizationConfig,
     VLLMSamplingConfig,
 )
 
-from torchtitan.experiments.rl.vllm_compat.simple_rl import (
-    compute_grpo_advantages,
-    compute_grpo_advantages_stable,
-    trivial_reward_function,
-)
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
 
 from vllm.config import AttentionConfig
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
-
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class TrajectoryData:
-    """
-    Data from one generation batch.
-
-    Attributes:
-        policy_version: Version of policy that produced this batch
-        completions: List of completion strings
-        vllm_token_ids: List of token ID lists for each completion
-        vllm_token_log_probs: List of per-token log prob lists
-        prompt_token_ids: List of prompt token ID lists
-        rewards: Computed rewards for each completion
-        advantages: Computed advantages for each completion
-    """
-
-    policy_version: int
-    completions: List[str]
-    vllm_token_ids: List[List[int]]
-    vllm_token_log_probs: List[List[float]]
-    prompt_token_ids: List[List[int]]
-    rewards: torch.Tensor
-    advantages: torch.Tensor
 
 
 class Generator(Actor, Configurable):
@@ -137,9 +108,8 @@ class Generator(Actor, Configurable):
         self.max_new_tokens = config.sampling.max_tokens
         self.temperature = config.sampling.temperature
         self.group_size = policy_optimization.group_size
-        self.grpo_beta = policy_optimization.beta
-        self.use_stable_grpo = policy_optimization.use_stable_grpo
-        
+
+
         # Build vLLM engine
         engine_args = EngineArgs(
             model=model_path,
@@ -163,9 +133,6 @@ class Generator(Actor, Configurable):
 
         self.policy_version = 0
 
-        # Reward function. TODO: Move reward calculation out of generator
-        self.reward_fn = trivial_reward_function
-
         logger.info("Generator initialized with vLLM engine")
 
     def _get_model(self):
@@ -174,50 +141,10 @@ class Generator(Actor, Configurable):
         """
         return self._engine.model_executor.driver_worker.get_model()
 
-    def _compute_rewards_and_advantages(
-        self, completions: list[str]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute rewards and GRPO advantages for generated completions.
-        TODO: Move this function out of generator for encapsulation.
-
-        Args:
-            completions: List of completion strings.
-
-        Returns:
-            rewards: Raw rewards tensor.
-            advantages: GRPO advantage tensor.
-        """
-        logger.debug(
-            f"Computing rewards: {len(completions)} completions, "
-            f"{len(self.expected_answers)} expected answers, "
-            f"group_size={self.group_size}"
-        )
-        rewards = self.reward_fn(completions, self.expected_answers, self.group_size)
-
-        # Normalize rewards
-        reward_mean = rewards.mean()
-        reward_std = rewards.std()
-        if reward_std > 1e-8:
-            rewards_normalized = (rewards - reward_mean) / reward_std
-        else:
-            rewards_normalized = rewards - reward_mean
-
-        # Compute advantages using GRPO
-        if self.use_stable_grpo:
-            advantages = compute_grpo_advantages_stable(
-                rewards_normalized, self.group_size
-            )
-        else:
-            advantages = compute_grpo_advantages(
-                rewards_normalized, self.group_size, beta=self.grpo_beta
-            )
-
-        return rewards, advantages
-
     @endpoint
-    async def generate(self) -> TrajectoryData:
-        """Generate trajectories and compute rewards/advantages.
-        Called by the orchestrator (simple_grpo.py).
+    async def generate(self) -> Episodes:
+        """Generate trajectories and return Episodes with zero rewards.
+        Called by the orchestrator (simple_grpo.py). The Grader fills in rewards.
         """
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
@@ -263,24 +190,21 @@ class Generator(Actor, Configurable):
                     ]
                     token_log_probs_list.append(per_token_log_probs)
 
-        # Compute rewards and advantages
-        rewards, advantages = self._compute_rewards_and_advantages(completions)
-
-        # Create trajectory data
-        trajectory = TrajectoryData(
+        # Create episode with zero rewards (Grader will fill them in)
+        episode = Episodes(
             policy_version=self.policy_version,
             completions=completions,
             vllm_token_ids=token_ids_list,
             vllm_token_log_probs=token_log_probs_list,
             prompt_token_ids=prompt_token_ids_list,
-            rewards=rewards,
-            advantages=advantages,
+            expected_answers=self.expected_answers,
+            rewards=torch.zeros(len(completions)),
         )
 
-        logger.debug(
+        logger.info(
             f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
         )
-        return trajectory
+        return episode
 
     @endpoint
     async def update(self, version: int, state_dict: dict) -> None:
@@ -289,13 +213,37 @@ class Generator(Actor, Configurable):
 
         Args:
             version: New policy version number
-            state_dict: Model state dict
+            state_dict: Per-rank state dicts keyed by GPU index,
+                e.g. {0: state_dict_gpu0, 1: state_dict_gpu1}
         """
-        load_weights = self._get_model().load_weights_from_state_dict(state_dict)
+        # Extract this rank's state dict from the per-rank dict
+        rank = int(os.environ.get("LOCAL_RANK", 0))
+        local_state_dict = state_dict[rank]
+
+        # Convert plain local tensors (TP shards from trainer) to DTensors
+        # matching the vLLM model's sharding layout. The trainer exports
+        # weights via to_local() which strips DTensor metadata.
+        model_state_dict = dict(
+            self._get_model().model.state_dict()
+        )
+        for name, tensor in local_state_dict.items():
+            if name in model_state_dict and isinstance(
+                model_state_dict[name], DTensor
+            ):
+                if isinstance(tensor, DTensor):
+                    continue
+                target_dtensor = model_state_dict[name]
+                local_state_dict[name] = DTensor.from_local(
+                    tensor.to(target_dtensor.device_mesh.device_type),
+                    device_mesh=target_dtensor.device_mesh,
+                    placements=target_dtensor.placements,
+                )
+
+        load_weights = self._get_model().load_weights_from_state_dict(local_state_dict)
         self.policy_version = version
         logger.debug(
             f"Updated weights into vLLM engine model. "
-            f"Number of parameters: {len(load_weights)}"
+            f"Number of parameters: {len(load_weights)}. "
             f"{os.getpid()=} Generator updating weights to policy v{version}..."
         )
 

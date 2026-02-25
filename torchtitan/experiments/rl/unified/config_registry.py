@@ -11,7 +11,6 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 ``ConfigManager`` via ``--module rl.unified --config <function_name>``.
 """
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config.configs import (
@@ -33,6 +32,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B."""
     return RLTrainer.Config(
         model_spec=model_registry("0.6B"),
+        hf_assets_path="/data/users/jianiw/model/qwen3-0.6b",
         num_steps=10,
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
@@ -46,13 +46,8 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 seq_len=4096,
             ),
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=1,
-                data_parallel_replicate_degree=2,
-            ),
-            checkpoint=CheckpointManager.Config(
-                initial_load_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-                initial_load_model_only=True,
-                initial_load_in_hf=True,
+                tensor_parallel_degree=2,
+                data_parallel_replicate_degree=1,
             ),
             activation_checkpoint=ActivationCheckpointConfig(
                 mode="selective",
@@ -70,7 +65,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             enforce_eager=True,
             seed=42,
             parallelism=ParallelismConfig(
-                tensor_parallel_degree=1,
+                tensor_parallel_degree=2,
             ),
             sampling=VLLMSamplingConfig(
                 temperature=0.8,

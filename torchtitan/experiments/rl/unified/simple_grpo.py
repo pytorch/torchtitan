@@ -10,11 +10,14 @@ Multiprocess RL training loop using Monarch Actors.
 This demonstrates:
 1. Distributed actor architecture with Generator (vLLM) and PolicyTrainer (TorchTitan) components
 2. File based weight synchronization between trainer and generator
+3. Separate scoring component for reward and advantage computation
 
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
 
 Command to run:
-python3 torchtitan/experiments/rl/unified/simple_grpo.py
+python3 torchtitan/experiments/rl/unified/simple_grpo.py \
+    --module rl.unified --config rl_grpo_qwen3_0_6b \
+    --hf_assets_path=<path_to_model_checkpoint>
 """
 
 import asyncio
@@ -26,10 +29,12 @@ import torch
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
 from torchtitan.config import Configurable
+from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.experiments.rl.unified.actors.grader import Grader
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +49,7 @@ class RLTrainer(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """Master config for RL training.
+        """Top-level config for RL training.
 
         ``trainer`` holds the PolicyTrainer.Config that handles model
         construction, parallelism, optimizer, LR scheduler, checkpoint, etc.
@@ -54,6 +59,9 @@ class RLTrainer(Configurable):
         model_spec: ModelSpec | None = None
         """Model specification shared by trainer and generator.
         Set programmatically via config_registry (not from CLI)."""
+
+        hf_assets_path: str = "./tests/assets/tokenizer"
+        """Path to HF assets folder (model weights, tokenizer, config files)."""
 
         trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
         """PolicyTrainer config. Controls optimizer, training, parallelism,
@@ -81,17 +89,29 @@ class RLTrainer(Configurable):
 async def main():
     """Run the distributed RL training loop using Monarch."""
 
-    # Load config from config_registry
-    from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_0_6b
+    config = ConfigManager().parse_args()
 
-    # TODO: Make simple_grpo.py take --config as input
-    config = rl_grpo_qwen3_0_6b()
-    trainer_cfg = config.trainer
+    # Patch model_spec to use the RL-specific parallelize function.
+    # The canonical model_registry returns the standard qwen3 parallelize_fn,
+    # but RL training needs the version with inner_attention hooks
+    # (PrepareModuleInputOutput) to convert DTensors to local tensors for
+    # vLLM's flash attention kernels.
+    from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
+    config.model_spec.parallelize_fn = parallelize_qwen3
 
-    # Compute world size for trainer and generator
-    # TODO: refine the world size computation and check
-    trainer_ddp_size = trainer_cfg.parallelism.data_parallel_replicate_degree
-    trainer_tp_size = trainer_cfg.parallelism.tensor_parallel_degree
+    if config.batch_invariant_mode:
+        # Validate that trainer and generator have the same parallel plan
+        # since they are collocated on the same mesh
+        assert config.trainer.parallelism == config.generator.parallelism, (
+            f"Trainer and generator must use the same parallel plan.\n"
+            f"  Trainer:   {config.trainer.parallelism}\n"
+            f"  Generator: {config.generator.vllm_engine.parallelism}"
+        )
+
+    trainer_world_size = (
+        config.trainer.parallelism.data_parallel_replicate_degree
+        * config.trainer.parallelism.tensor_parallel_degree
+    )
 
     # RL Training config
     num_steps = config.num_steps
@@ -110,28 +130,21 @@ async def main():
 
     logger.debug(f"Loaded {len(prompt_texts)} prompts")
 
-    # Create process meshes
-    trainer_mesh = this_host().spawn_procs(
-        per_host={"gpus": trainer_ddp_size * trainer_tp_size}
-    )
-    gen_tp_size = config.generator.parallelism.tensor_parallel_degree
-    gen_mesh = this_host().spawn_procs(per_host={"gpus": gen_tp_size})
+    # Create process mesh for trainer (generator is collocated on same mesh)
+    # TODO: Make the world size according to parallel degrees
+    trainer_mesh = this_host().spawn_procs(per_host={"gpus": trainer_world_size})
 
     # Set up distributed env vars so that actors are connected via c10d
     await setup_env_for_distributed(
         trainer_mesh,
         master_addr="localhost",  # TODO: figure out what to set
-        master_port=29500,  # TODO: figure out what to set
-    )
-
-    # Set up distributed env vars so that actors are connected via c10d
-    await setup_env_for_distributed(
-        gen_mesh,
-        master_addr="localhost",  # TODO: figure out what to set
         master_port=29501,  # TODO: figure out what to set
     )
 
-    # Spawn actors on trainer and generator mesh
+    # Spawn trainer first and wait for it to be fully initialized on all ranks
+    # before spawning generator. This is critical because both actors do NCCL
+    # collective operations during init, and Monarch doesn't guarantee init order
+    # across ranks — spawning them concurrently can cause cross-rank deadlocks.
     trainer = trainer_mesh.spawn(
         "trainer",
         PolicyTrainer,
@@ -139,22 +152,38 @@ async def main():
         model_spec=config.model_spec,
         policy_optimization=config.policy_optimization,
         batch_invariant_mode=config.batch_invariant_mode,
+        hf_assets_path=config.hf_assets_path,
     )
 
-    generator = gen_mesh.spawn(
+    # Spawn grader on trainer mesh (no collective ops in init, safe to co-spawn)
+    grader = trainer_mesh.spawn(
+        "grader",
+        Grader,
+        config.policy_optimization,
+    )
+
+    # Wait for trainer to be fully initialized on all ranks
+    # Collect weights from ALL trainer ranks (each holds different TP shards)
+    initial_weight_mesh = trainer.get_weights.call().get()
+    initial_weights = {
+        gpu: initial_weight_mesh.item(gpus=gpu) for gpu in range(trainer_world_size)
+    }
+
+    # Now spawn generator — trainer init is complete and process group is ready
+    # Make trainer and generator collocated
+    generator = trainer_mesh.spawn(
         "generator",
         Generator,
         config.generator,
         model_spec=config.model_spec,
-        model_path=trainer_cfg.checkpoint.initial_load_path,
+        model_path=config.hf_assets_path,
         batch_invariant_mode=config.batch_invariant_mode,
         policy_optimization=config.policy_optimization,
         prompt_texts=prompt_texts,
         expected_answers=expected_answers,
     )
 
-    # Initialize generator with trainer weights
-    initial_weights = trainer.get_weights.call().get().item(gpus=0)
+    # Initialize generator with trainer weights.
     generator.update.call(0, initial_weights).get()
 
     # Training loop
@@ -163,12 +192,16 @@ async def main():
     logger.info("=" * 80)
 
     for step in range(num_steps):
-        # Fully sync RL loop
-        # NOTE: This is only getting Trajectory generated from trainer 0, and trainer 1's data is ignored.
-        # .get() is a monarch synchronize API which makes the loop fully sync
-        batch = generator.generate.call().get().item(gpus=0)
-        metrics = trainer.step.call(batch).get().item(gpus=0)
-        weights = trainer.get_weights.call().get().item(gpus=0)
+        # Fully sync RL loop with separate scoring step
+        # 1. Generator produces episode (without rewards)
+        episode = generator.generate.call().get().item(gpus=0)
+        # 2. Grader computes rewards
+        episode = grader.score.call(episode).get().item(gpus=0)
+        # 3. Trainer computes advantages and updates policy
+        metrics = trainer.step.call(episode).get().item(gpus=0)
+        # 4. Sync weights back to generator (all TP ranks)
+        weight_mesh = trainer.get_weights.call().get()
+        weights = {gpu: weight_mesh.item(gpus=gpu) for gpu in range(trainer_world_size)}
         generator.update.call(metrics["policy_version"], weights).get()
 
         logger.info(
