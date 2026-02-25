@@ -17,7 +17,7 @@ The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts +
 Command to run:
 python3 torchtitan/experiments/rl/unified/simple_grpo.py \
     --module rl.unified --config rl_grpo_qwen3_0_6b \
-    --trainer.checkpoint.initial-load-path=<path_to_model_checkpoint>
+    --hf_assets_path=<path_to_model_checkpoint>
 """
 
 import asyncio
@@ -97,29 +97,27 @@ async def main():
     # (PrepareModuleInputOutput) to convert DTensors to local tensors for
     # vLLM's flash attention kernels.
     from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
-
     config.model_spec.parallelize_fn = parallelize_qwen3
 
-    trainer_cfg = config.trainer
-
-    # Validate that trainer and generator have the same parallel plan
-    # since they are collocated on the same mesh
-    assert trainer_cfg.parallelism == config.generator.vllm_engine.parallelism, (
-        f"Trainer and generator must use the same parallel plan.\n"
-        f"  Trainer:   {trainer_cfg.parallelism}\n"
-        f"  Generator: {config.generator.vllm_engine.parallelism}"
-    )
+    if config.batch_invariant_mode:
+        # Validate that trainer and generator have the same parallel plan
+        # since they are collocated on the same mesh
+        assert config.trainer.parallelism == config.generator.parallelism, (
+            f"Trainer and generator must use the same parallel plan.\n"
+            f"  Trainer:   {config.trainer.parallelism}\n"
+            f"  Generator: {config.generator.vllm_engine.parallelism}"
+        )
 
     trainer_world_size = (
-        trainer_cfg.parallelism.data_parallel_replicate_degree
-        * trainer_cfg.parallelism.tensor_parallel_degree
+        config.trainer.parallelism.data_parallel_replicate_degree
+        * config.trainer.parallelism.tensor_parallel_degree
     )
 
     # RL Training config
     num_steps = config.num_steps
 
     # Use fake dataset for test. TODO: Implement real RL dataloader.
-    logger.info("Using default prompts")
+    logger.debug("Using default prompts")
     prompts_with_answers = [
         ("The capital of France is", "paris"),
         ("What is 7 times 8?", "56"),
@@ -130,7 +128,7 @@ async def main():
     prompt_texts = [p[0] for p in prompts_with_answers]
     expected_answers = [p[1] for p in prompts_with_answers]
 
-    logger.info(f"Loaded {len(prompt_texts)} prompts")
+    logger.debug(f"Loaded {len(prompt_texts)} prompts")
 
     # Create process mesh for trainer (generator is collocated on same mesh)
     # TODO: Make the world size according to parallel degrees
@@ -151,9 +149,10 @@ async def main():
         "trainer",
         PolicyTrainer,
         config.trainer,
-        config.policy_optimization,
-        config.model_spec,
-        config.hf_assets_path,
+        model_spec=config.model_spec,
+        policy_optimization=config.policy_optimization,
+        batch_invariant_mode=config.batch_invariant_mode,
+        hf_assets_path=config.hf_assets_path,
     )
 
     # Spawn grader on trainer mesh (no collective ops in init, safe to co-spawn)
@@ -178,7 +177,6 @@ async def main():
         config.generator,
         model_spec=config.model_spec,
         model_path=config.hf_assets_path,
-        dump_folder=config.dump_folder,
         batch_invariant_mode=config.batch_invariant_mode,
         policy_optimization=config.policy_optimization,
         prompt_texts=prompt_texts,
@@ -210,13 +208,13 @@ async def main():
             f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
             f"Reward: {metrics['reward_mean']:+.3f}"
         )
-        logger.info(f"  Sample: {metrics['sample_completion']}...")
+        logger.debug(f"  Sample: {metrics['sample_completion']}...")
 
         # Check for divergence
         if not torch.isfinite(torch.tensor(metrics["loss"])):
-            logger.info("\n" + "!" * 80)
-            logger.info("ERROR: Loss is NaN/Inf! Training diverged.")
-            logger.info("!" * 80)
+            logger.debug("\n" + "!" * 80)
+            logger.debug("ERROR: Loss is NaN/Inf! Training diverged.")
+            logger.debug("!" * 80)
             break
 
     logger.info("\n" + "=" * 80)
