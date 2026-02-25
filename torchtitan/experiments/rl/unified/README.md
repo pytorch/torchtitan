@@ -44,7 +44,7 @@ torchrun --nproc_per_node=<world_size> \
 
 5. Run simple GRPO rl loop
 ```
-python3 torchtitan/experiments/rl/unified/simple_grpo.py --module rl.unified --config rl_grpo_qwen3_0_6b --trainer.checkpoint.initial-load-path=<path_to_model_checkpoint>
+python3 torchtitan/experiments/rl/unified/simple_grpo.py --module rl.unified --config rl_grpo_qwen3_0_6b --hf_assets_path=<path_to_model_checkpoint>
 ```
 We use a unified model definition for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 

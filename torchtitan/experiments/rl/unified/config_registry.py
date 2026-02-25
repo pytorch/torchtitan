@@ -11,7 +11,6 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 ``ConfigManager`` via ``--module rl.unified --config <function_name>``.
 """
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config.configs import (
@@ -19,7 +18,7 @@ from torchtitan.config.configs import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.experiments.rl.unified.actors.generator import Generator, VLLMEngine
+from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.unified.configs import (
     PolicyOptimizationConfig,
@@ -35,6 +34,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         model_spec=model_registry("0.6B"),
         hf_assets_path="/data/users/jianiw/model/qwen3-0.6b",
         num_steps=10,
+        batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -49,37 +49,28 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
             ),
-            # We put load path in Trainer as trainer will load first, and weights are copied to Generator.
-            checkpoint=CheckpointManager.Config(
-                initial_load_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-                initial_load_model_only=True,
-                initial_load_in_hf=True,
-            ),
             activation_checkpoint=ActivationCheckpointConfig(
                 mode="selective",
                 selective_ac_option="op",
             ),
         ),
-        batch_invariant_mode=True,
         policy_optimization=PolicyOptimizationConfig(
             beta=0.1,
             group_size=8,
             use_stable_grpo=False,
         ),
         generator=Generator.Config(
-            vllm_engine=VLLMEngine.Config(
-                dtype="bfloat16",
-                gpu_memory_limit=0.5,
-                enforce_eager=True,
-                seed=42,
-                parallelism=ParallelismConfig(
-                    tensor_parallel_degree=2,
-                ),
-                sampling=VLLMSamplingConfig(
-                    temperature=0.8,
-                    top_p=0.95,
-                    max_tokens=100,
-                ),
+            dtype="bfloat16",
+            gpu_memory_limit=0.5,
+            enforce_eager=True,
+            seed=42,
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+            ),
+            sampling=VLLMSamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
             ),
             vllm_attention_backend="FLASH_ATTN",
         ),
@@ -91,6 +82,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     return RLTrainer.Config(
         model_spec=model_registry("debugmodel"),
         num_steps=5,
+        batch_invariant_mode=False,
         trainer=PolicyTrainer.Config(
             optimizer=OptimizersContainer.Config(lr=8e-4),
             lr_scheduler=LRSchedulersContainer.Config(
@@ -109,23 +101,20 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 interval=5,
             ),
         ),
-        batch_invariant_mode=False,
         policy_optimization=PolicyOptimizationConfig(
             beta=0.1,
             group_size=4,
             use_stable_grpo=False,
         ),
         generator=Generator.Config(
-            vllm_engine=VLLMEngine.Config(
-                gpu_memory_limit=0.3,
-                enforce_eager=True,
-                parallelism=ParallelismConfig(
-                    tensor_parallel_degree=1,
-                ),
-                sampling=VLLMSamplingConfig(
-                    temperature=1.0,
-                    max_tokens=50,
-                ),
+            gpu_memory_limit=0.3,
+            enforce_eager=True,
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=1,
+            ),
+            sampling=VLLMSamplingConfig(
+                temperature=1.0,
+                max_tokens=50,
             ),
         ),
     )

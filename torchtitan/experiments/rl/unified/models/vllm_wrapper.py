@@ -139,7 +139,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Use TorchTitan model config directly (no HF config mapping)
         self.config = model_config
-        logger.info(f"Creating model with config: {model_config}")
+        logger.debug(f"Creating model with config: {model_config}")
         self.model = model_config.build()
 
         # RoPE config from model for cache extension
@@ -287,8 +287,6 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         h = self.model.norm(h)
         # When parallelism is applied, get full tensor before return to vLLM Engine
-        # The original placement is Shard(1) (shard on sequence dimension, as it will prepare for sequence parallel in `self.norm`).
-        # vLLM's engine expects plain, non-distributed tensors to slice the last token for each request.
         if isinstance(h, DTensor):
             h = h.full_tensor()
 

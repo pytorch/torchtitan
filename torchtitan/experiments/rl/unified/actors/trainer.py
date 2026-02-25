@@ -14,7 +14,6 @@ import torch.distributed.checkpoint as dcp
 from monarch.actor import Actor, endpoint
 from torch.distributed._tensor import DTensor
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
@@ -101,9 +100,6 @@ class PolicyTrainer(Actor, Configurable):
         )
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
-        checkpoint: CheckpointManager.Config = field(
-            default_factory=CheckpointManager.Config
-        )
         activation_checkpoint: ActivationCheckpointConfig = field(
             default_factory=ActivationCheckpointConfig
         )
@@ -116,8 +112,10 @@ class PolicyTrainer(Actor, Configurable):
     def __init__(
         self,
         config: Config,
-        policy_optimization: PolicyOptimizationConfig,
+        *,
         model_spec: ModelSpec,
+        policy_optimization: PolicyOptimizationConfig,
+        batch_invariant_mode: bool,
         hf_assets_path: str = "./tests/assets/tokenizer",
         batch_invariant_mode: bool = True,
     ):
@@ -159,81 +157,22 @@ class PolicyTrainer(Actor, Configurable):
             world_size=world_size,
         )
 
-        # Build model config from model_spec
-        model_config = model_spec.model
-
         # Initialize state dict adapter for HF checkpoint loading
         if model_spec.state_dict_adapter is not None:
             self.sd_adapter = model_spec.state_dict_adapter(
-                model_config, hf_assets_path
+                model_spec.model, hf_assets_path
             )
         else:
             self.sd_adapter = None
 
-        # Build model with meta init
-        with torch.device("meta"):
-            with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
-                model = model_config.build()
-
-        # Replace attention with vLLM compatible attention for RL training
-        # NOTE: We do this now for attention backward compatibility.
-        # Long-term this will be replaced by pytorch attention supporting paged attention / kv cache
-        replace_with_vllm_compatible_flash_attention(model)
-
-        # Apply parallelization using model_spec.parallelize_fn.
-        # The RL entry point (simple_grpo.py) patches this to the RL-specific
-        # parallelize_qwen3 which includes inner_attention hooks for DTensor→local
-        # conversion needed by vLLM's flash attention kernels.
-        model = model_spec.parallelize_fn(
-            model,
-            parallel_dims=self.parallel_dims,
-            training=config.training,
-            model_converters=config.model_converters,
-            parallelism=config.parallelism,
-            compile_config=config.compile,
-            ac_config=config.activation_checkpoint,
-            dump_folder=".",
-        )
-
-        # Initialize model weights on device
-        model.to_empty(device=device_type)
-        with torch.no_grad():
-            model.init_weights(buffer_device=None)
-
-        # Load initial weights from checkpoint if specified
-        if config.checkpoint.initial_load_path:
-            self._load_initial_weights(model, config.checkpoint.initial_load_path)
-
+        # Create training policy model
+        model = self._build_model(model_spec, config, device_type, batch_invariant_mode, hf_assets_path)
         model.train()
         self.model = model
         self.model_parts = [model]
 
         # Create reference model for KL divergence (frozen copy of initial policy)
-        with torch.device("meta"):
-            with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
-                ref_model = model_config.build()
-
-        replace_with_vllm_compatible_flash_attention(ref_model)
-
-        ref_model = model_spec.parallelize_fn(
-            ref_model,
-            parallel_dims=self.parallel_dims,
-            training=config.training,
-            model_converters=config.model_converters,
-            parallelism=config.parallelism,
-            compile_config=config.compile,
-            ac_config=config.activation_checkpoint,
-            dump_folder=".",
-        )
-
-        ref_model.to_empty(device=device_type)
-        with torch.no_grad():
-            ref_model.init_weights(buffer_device=None)
-
-        if config.checkpoint.initial_load_path:
-            self._load_initial_weights(
-                ref_model, config.checkpoint.initial_load_path
-            )
+        ref_model = self._build_model(model_spec, config, device_type, batch_invariant_mode, hf_assets_path)
         for p in ref_model.parameters():
             p.requires_grad = False
         ref_model.eval()
@@ -249,13 +188,13 @@ class PolicyTrainer(Actor, Configurable):
         self.policy_version = 0
         self.generator: Optional[Any] = None
 
-        logger.info(
+        logger.debug(
             f"PolicyTrainer initialized: "
             f"group_size={self.group_size}, grpo_beta={self.grpo_beta}, "
             f"use_stable_grpo={self.use_stable_grpo}"
         )
 
-    def _load_initial_weights(self, model, checkpoint_path: str) -> None:
+    def _load_initial_hf_weights(self, model, checkpoint_path: str) -> None:
         """Load model weights from HF checkpoint using DCP and state_dict_adapter.
 
         Args:
@@ -273,21 +212,6 @@ class PolicyTrainer(Actor, Configurable):
         dcp.load(hf_state_dict, storage_reader=storage_reader)
         torchtitan_state_dict = self.sd_adapter.from_hf(hf_state_dict)
 
-        model_state_dict = dict(model.state_dict())
-
-        # Convert to DTensor if target is DTensor (when the model is parallelized)
-        for name, tensor in torchtitan_state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                if isinstance(tensor, DTensor):
-                    continue
-                target_dtensor = model_state_dict[name]
-                device_mesh = target_dtensor.device_mesh
-                torchtitan_state_dict[name] = DTensor.from_local(
-                    tensor.to(device_mesh.device_type),
-                    device_mesh=device_mesh,
-                    placements=target_dtensor.placements,
-                )
-
         from torch.distributed.checkpoint.state_dict import (
             set_model_state_dict,
             StateDictOptions,
@@ -302,6 +226,57 @@ class PolicyTrainer(Actor, Configurable):
             f"Loaded initial weights from {checkpoint_path} "
             f"({len(torchtitan_state_dict)} parameters)"
         )
+
+    def _build_model(
+        self,
+        model_spec: ModelSpec,
+        config: Config,
+        device_type: str,
+        batch_invariant_mode: bool,
+        hf_assets_path: str,
+    ):
+        """Build, parallelize, and initialize a model from checkpoint.
+        Will be used to build trainer's policy model and reference model.
+
+        Args:
+            model_spec: Model specification for building and parallelizing.
+            config: Trainer config (used for dtype, parallelism, checkpoint path, etc.).
+            device_type: Device type string (e.g. "cuda").
+            batch_invariant_mode: Whether to patch attention for vLLM compatibility.
+            hf_assets_path: Path to HF assets folder for checkpoint loading.
+
+        Returns:
+            Initialized model with weights loaded from checkpoint.
+        """
+        with torch.device("meta"):
+            with utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]):
+                model = model_spec.model.build()
+
+        # Replace attention with vLLM compatible attention for RL training.
+        # NOTE: Long-term this will be replaced by pytorch attention
+        # supporting paged attention / kv cache.
+        if batch_invariant_mode:
+            replace_with_vllm_compatible_flash_attention(model)
+
+        model = model_spec.parallelize_fn(
+            model,
+            parallel_dims=self.parallel_dims,
+            training=config.training,
+            model_converters=config.model_converters,
+            parallelism=config.parallelism,
+            compile_config=config.compile,
+            ac_config=config.activation_checkpoint,
+            dump_folder=".",
+        )
+
+        model.to_empty(device=device_type)
+        with torch.no_grad():
+            model.init_weights(buffer_device=None)
+
+        # Load initial weights from HF
+        self._load_initial_hf_weights(model, hf_assets_path)
+
+        return model
 
     def _compute_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
         """Compute GRPO advantages from rewards.
@@ -366,7 +341,7 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             Training metrics
         """
-        logger.info(
+        logger.debug(
             f"{os.getpid()=} PolicyTrainer starts to train {self.policy_version} on traj:"
         )
 
@@ -437,5 +412,5 @@ class PolicyTrainer(Actor, Configurable):
             "logprob_bitwise_identical": verification_result["bitwise_identical"],
             **loss_metrics,
         }
-        logger.info(f"{os.getpid()=} PolicyTrainer finish step {self.policy_version}")
+        logger.debug(f"{os.getpid()=} PolicyTrainer finish step {self.policy_version}")
         return metrics
