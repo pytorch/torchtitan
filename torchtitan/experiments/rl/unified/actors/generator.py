@@ -18,9 +18,6 @@ from safetensors.torch import save_file
 from torchtitan.config import CommConfig, Configurable, ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
 
-# Import unified module - this automatically registers TorchTitan models with vLLM
-from torchtitan.experiments.rl import unified  # noqa: F401
-
 from torchtitan.experiments.rl.unified.configs import (
     PolicyOptimizationConfig,
     VLLMSamplingConfig,
@@ -124,6 +121,11 @@ class Generator(Actor, Configurable):
     ):
         self.config = config
         self.model_spec = model_spec
+
+        # Register TorchTitan model with vLLM before any engine creation
+        from torchtitan.experiments.rl.unified.plugin import register
+
+        register(model_spec)
 
         # Set vLLM environment variables from config before any vLLM initialization
         if batch_invariant_mode:

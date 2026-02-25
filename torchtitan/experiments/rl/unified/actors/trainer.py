@@ -14,18 +14,17 @@ from monarch.actor import Actor, endpoint
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config import Configurable
+from torchtitan.config import CommConfig, Configurable
 from torchtitan.config.configs import (
     ActivationCheckpointConfig,
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.unified.actors.generator import TrajectoryData
 from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
-from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
-    create_trainer_parallel_dims,
-)
-from torchtitan.experiments.rl.unified.models.utils import (
+from torchtitan.experiments.rl.unified.models.attention import (
     replace_with_vllm_compatible_flash_attention,
 )
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
@@ -122,9 +121,20 @@ class PolicyTrainer(Actor, Configurable):
             # TODO: Refine the dtype journey in trainer / generator
             self.model.to(torch.bfloat16)
 
-        self.parallel_dims = create_trainer_parallel_dims(self.ddp_size, self.tp_size)
+        self.parallel_dims = ParallelDims(
+            dp_replicate=self.ddp_size,
+            dp_shard=1,
+            tp=self.tp_size,
+            cp=1,
+            pp=1,
+            ep=1,
+            etp=1,
+            world_size=dist_utils.init_distributed(
+                CommConfig(),
+            ),
+        )
 
-        # apply PT-D Parallelism
+        # Step3: apply PT-D Parallelism
         # TODO: right now it only works for qwen3 model, need to formalize this to use parallize_fn from model_spec
         if self.ddp_size > 1:
             from torchtitan.models.llama3.parallelize import apply_ddp
