@@ -97,7 +97,7 @@ async def main():
     num_steps = config.num_steps
 
     # Use fake dataset for test. TODO: Implement real RL dataloader.
-    logger.info("Using default prompts")
+    logger.debug("Using default prompts")
     prompts_with_answers = [
         ("The capital of France is", "paris"),
         ("What is 7 times 8?", "56"),
@@ -108,13 +108,13 @@ async def main():
     prompt_texts = [p[0] for p in prompts_with_answers]
     expected_answers = [p[1] for p in prompts_with_answers]
 
-    logger.info(f"Loaded {len(prompt_texts)} prompts")
+    logger.debug(f"Loaded {len(prompt_texts)} prompts")
 
     # Create process meshes
     trainer_mesh = this_host().spawn_procs(
         per_host={"gpus": trainer_ddp_size * trainer_tp_size}
     )
-    gen_tp_size = config.generator.vllm_engine.parallelism.tensor_parallel_degree
+    gen_tp_size = config.generator.parallelism.tensor_parallel_degree
     gen_mesh = this_host().spawn_procs(per_host={"gpus": gen_tp_size})
 
     # Set up distributed env vars so that actors are connected via c10d
@@ -136,8 +136,9 @@ async def main():
         "trainer",
         PolicyTrainer,
         config.trainer,
-        config.policy_optimization,
-        config.model_spec,
+        model_spec=config.model_spec,
+        policy_optimization=config.policy_optimization,
+        batch_invariant_mode=config.batch_invariant_mode,
     )
 
     generator = gen_mesh.spawn(
@@ -175,13 +176,13 @@ async def main():
             f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
             f"Reward: {metrics['reward_mean']:+.3f}"
         )
-        logger.info(f"  Sample: {metrics['sample_completion']}...")
+        logger.debug(f"  Sample: {metrics['sample_completion']}...")
 
         # Check for divergence
         if not torch.isfinite(torch.tensor(metrics["loss"])):
-            logger.info("\n" + "!" * 80)
-            logger.info("ERROR: Loss is NaN/Inf! Training diverged.")
-            logger.info("!" * 80)
+            logger.debug("\n" + "!" * 80)
+            logger.debug("ERROR: Loss is NaN/Inf! Training diverged.")
+            logger.debug("!" * 80)
             break
 
     logger.info("\n" + "=" * 80)
