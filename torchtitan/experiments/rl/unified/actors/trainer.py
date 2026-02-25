@@ -49,6 +49,32 @@ from torchtitan.tools import utils
 logger = logging.getLogger(__name__)
 
 
+
+def _set_nccl_determinism_envs() -> None:
+    """Set environment variables to force deterministic NCCL collective operations.
+
+    This configures NCCL to use a single-channel tree all-reduce with the Simple
+    protocol, ensuring a fixed reduction order and bitwise-reproducible results
+    at the cost of reduced throughput.
+    """
+    # Disable symmetric memory all-reduce (non-deterministic)
+    os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+    # Deterministic cuBLAS
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    # NCCL determinism: fixed tree algorithm, simple protocol,
+    # single channel/thread to ensure identical reduction order
+    os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
+    os.environ["NCCL_COLLNET_ENABLE"] = "0"
+    os.environ["NCCL_NVLS_ENABLE"] = "0"
+    os.environ["NCCL_P2P_NET_DISABLE"] = "1"
+    os.environ["NCCL_MIN_NCHANNELS"] = "1"
+    os.environ["NCCL_MAX_NCHANNELS"] = "1"
+    os.environ["NCCL_PROTO"] = "Simple"
+    os.environ["NCCL_ALGO"] = "allreduce:tree"
+    os.environ["NCCL_NTHREADS"] = "1"
+    os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+
+
 class PolicyTrainer(Actor, Configurable):
     """
     Updates policy based on collected trajectories using TorchTitan components.
@@ -91,6 +117,7 @@ class PolicyTrainer(Actor, Configurable):
         policy_optimization: PolicyOptimizationConfig,
         batch_invariant_mode: bool,
         hf_assets_path: str = "./tests/assets/tokenizer",
+        batch_invariant_mode: bool = True,
     ):
         self.config = config
         self.model_spec = model_spec
@@ -99,6 +126,10 @@ class PolicyTrainer(Actor, Configurable):
         self.group_size = policy_optimization.group_size
         self.grpo_beta = policy_optimization.beta
         self.use_stable_grpo = policy_optimization.use_stable_grpo
+
+        # Batch invariant mode: set NCCL determinism env vars
+        if batch_invariant_mode:
+            _set_nccl_determinism_envs()
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
