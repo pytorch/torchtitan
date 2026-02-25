@@ -6,8 +6,6 @@ ARG OS_VERSION
 
 ENV DEBIAN_FRONTEND noninteractive
 
-USER root
-
 # Install common dependencies
 COPY ./common/install_base.sh install_base.sh
 RUN bash ./install_base.sh && rm install_base.sh
