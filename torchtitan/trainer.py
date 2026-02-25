@@ -46,11 +46,7 @@ from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.profiling import (
-    maybe_enable_memory_snapshot,
-    maybe_enable_profiling,
-    ProfilingConfig,
-)
+from torchtitan.tools.profiling import Profiler
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -74,7 +70,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         dump_folder: str = "./outputs"
         """Folder to dump job outputs"""
 
-        profiling: ProfilingConfig = field(default_factory=ProfilingConfig)
+        profiling: Profiler.Config = field(default_factory=Profiler.Config)
         metrics: MetricsProcessor.Config = field(
             default_factory=MetricsProcessor.Config
         )
@@ -789,14 +785,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.checkpointer.load(step=config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
 
+        profiler = Profiler(config.profiling)
         with (
-            maybe_enable_profiling(
-                config.profiling,
+            profiler.enable_profiling(
                 global_step=self.step,
                 base_folder=config.dump_folder,
             ) as torch_profiler,
-            maybe_enable_memory_snapshot(
-                config.profiling,
+            profiler.enable_memory_snapshot(
                 global_step=self.step,
                 base_folder=config.dump_folder,
             ) as memory_profiler,
