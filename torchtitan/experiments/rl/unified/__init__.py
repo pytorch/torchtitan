@@ -58,7 +58,7 @@ def register_torchtitan_model_from_model_spec(
     # Register with vLLM
     ModelRegistry.register_model(model_name, TorchTitanVLLMModelFromSpec)
 
-    logger.info(
+    logger.debug(
         f"Successfully registered {model_name} with vLLM using ModelSpec "
         f"(flavor={model_spec.flavor})"
     )

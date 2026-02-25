@@ -25,11 +25,16 @@ from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
 from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     create_trainer_parallel_dims,
 )
-from torchtitan.experiments.rl.unified.models.utils import load_trainer_model
+from torchtitan.experiments.rl.unified.models.utils import (
+    replace_with_vllm_compatible_flash_attention,
+)
 from torchtitan.experiments.rl.vllm_compat.simple_rl import (
     compute_policy_gradient_loss_vllm,
 )
-from torchtitan.experiments.rl.vllm_compat.weights.converter import torchtitan_to_vllm
+from torchtitan.experiments.rl.vllm_compat.weights.converter import (
+    torchtitan_to_vllm,
+    vllm_to_torchtitan,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -37,14 +42,12 @@ logger = logging.getLogger(__name__)
 
 class PolicyTrainer(Actor, Configurable):
     """
-    Updates policy based on collected trajectories.
+    Updates policy based on collected Episodes.
 
-    Run model forward on trajectories, computes loss, and run backward.
+    Run model forward on Episodes, computes loss, and run backward.
     Receives the top-level ``RLTrainer.Config`` and reads policy trainer
     settings (batch_invariant_mode, grpo) directly from it, plus model /
     optimizer / parallelism settings from the nested ``config.trainer``.
-
-    TODO: Use torchtitan Trainer for model init and parallelisation.
 
     TODO: Use torchtitan PolicyTrainer for model init and parallelism.
 
@@ -55,10 +58,7 @@ class PolicyTrainer(Actor, Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """PolicyTrainer configuration for optimizer, training, and parallelism.
-
-        TODO: Remove this config once the Trainer is replaced by torchtitan Trainer
-        """
+        """PolicyTrainer configuration for optimizer, training, and parallelism."""
 
         optimizer: OptimizersContainer.Config = field(
             default_factory=OptimizersContainer.Config
@@ -78,8 +78,10 @@ class PolicyTrainer(Actor, Configurable):
     def __init__(
         self,
         config: Config,
-        policy_optimization: PolicyOptimizationConfig,
+        *,
         model_spec: ModelSpec,
+        policy_optimization: PolicyOptimizationConfig,
+        batch_invariant_mode: bool,
     ):
         self.config = config
         self.model_spec = model_spec
@@ -100,13 +102,30 @@ class PolicyTrainer(Actor, Configurable):
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(local_rank)
 
-        # load trainer model and patch to vllm.Attention()
-        self.model = load_trainer_model(model_path, model_spec.model)
+        # Step1: Load trainer model from HF/vLLM checkpoint. TODO: Use torchtitan components
+        model_config = model_spec.model
+        titan_state_dict = vllm_to_torchtitan(model_path)
+
+        # If weight tying is enabled but output.weight is missing from the checkpoint
+        if model_config.enable_weight_tying and "output.weight" not in titan_state_dict:
+            titan_state_dict["output.weight"] = titan_state_dict[
+                "tok_embeddings.weight"
+            ]
+
+        self.model = model_config.build()
+        self.model.load_state_dict(titan_state_dict, strict=True)
+
+        # Step2: Replace attention kernel be to vLLM's attention.
+        if batch_invariant_mode:
+            replace_with_vllm_compatible_flash_attention(self.model)
+            # vLLM's Attention requires bfloat16 inputs.
+            # TODO: Refine the dtype journey in trainer / generator
+            self.model.to(torch.bfloat16)
 
         self.parallel_dims = create_trainer_parallel_dims(self.ddp_size, self.tp_size)
 
         # apply PT-D Parallelism
-        # TODO: right now it only works for qwen3 model, need to formalize this to use parallize_fn from train_spec
+        # TODO: right now it only works for qwen3 model, need to formalize this to use parallize_fn from model_spec
         if self.ddp_size > 1:
             from torchtitan.models.llama3.parallelize import apply_ddp
 
@@ -124,7 +143,7 @@ class PolicyTrainer(Actor, Configurable):
         self.policy_version = 0
         self.generator: Optional[Any] = None
 
-        logger.info(
+        logger.debug(
             f"PolicyTrainer initialized: "
             f"group_size={self.group_size}, grpo_beta={self.grpo_beta}, "
             f"use_stable_grpo={self.use_stable_grpo}"
@@ -148,7 +167,7 @@ class PolicyTrainer(Actor, Configurable):
         Returns:
             Training metrics
         """
-        logger.info(
+        logger.debug(
             f"{os.getpid()=} PolicyTrainer starts to train {self.policy_version} on traj:"
         )
         # Compute loss
@@ -169,8 +188,6 @@ class PolicyTrainer(Actor, Configurable):
 
         self.policy_version += 1
 
-        # TODO: save dcp checkpoint to file here instead of sending weight dicts
-
         # Return metrics
         metrics = {
             "loss": loss.item(),
@@ -182,5 +199,5 @@ class PolicyTrainer(Actor, Configurable):
             "policy_version": self.policy_version,
             **loss_metrics,
         }
-        logger.info(f"{os.getpid()=} PolicyTrainer finish step {self.policy_version}")
+        logger.debug(f"{os.getpid()=} PolicyTrainer finish step {self.policy_version}")
         return metrics

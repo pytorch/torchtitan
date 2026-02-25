@@ -58,7 +58,7 @@ def create_parallel_dims_from_vllm_config(vllm_config: VllmConfig) -> ParallelDi
         world_size=world_size,
     )
 
-    logger.info(
+    logger.debug(
         f"Created ParallelDims from vLLM config: "
         f"DP={parallel_dims.dp_replicate}, TP={parallel_dims.tp}, "
         f"CP={parallel_dims.cp}, PP={parallel_dims.pp}"

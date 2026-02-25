@@ -76,7 +76,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Use TorchTitan model config directly (no HF config mapping)
         self.config = model_config
-        logger.info(f"Creating model with config: {model_config}")
+        logger.debug(f"Creating model with config: {model_config}")
         self.model = model_config.build()
 
         # RoPE config from model for cache extension
@@ -86,7 +86,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # vLLM config contains the tensor_parallel_size from command-line args
         # and this will be consistent across all worker processes
         self.parallel_dims = create_parallel_dims_from_vllm_config(vllm_config)
-        self.parallel_config = create_trainer_config_from_vllm_config(
+        self.trainer_config = create_trainer_config_from_vllm_config(
             vllm_config=vllm_config,
         )
 
@@ -102,7 +102,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # NOTE: We need to apply parallelize within model.__init__ because vllm
         # doesn't separate model creation and parallelism application and instead
         # requires parallelization to be done inside model constructor.
-        cfg = self.parallel_config
+        cfg = self.trainer_config
         self.model = parallelize_fn(
             model=self.model,
             parallel_dims=self.parallel_dims,
@@ -205,9 +205,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Get RoPE cache (handle model-specific attribute names)
         # Use hasattr to avoid ambiguous boolean value error with tensors
-        if hasattr(self.model, "rope_cache"):
-            rope_attr = self.model.rope_cache
-        elif hasattr(self.model, "freqs_cis"):
+        if hasattr(self.model, "freqs_cis"):
             rope_attr = self.model.freqs_cis
         else:
             rope_attr = None
