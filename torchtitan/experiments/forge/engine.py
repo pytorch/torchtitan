@@ -13,7 +13,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpoint import CheckpointManager
-from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
+from torchtitan.components.loss import LossFunction
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -173,7 +173,8 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = self.train_spec.build_loss_fn(config)
+        self.loss_fn = self.train_spec.build_loss_fn(
+            config.compile, parallel_dims=parallel_dims)
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
@@ -196,9 +197,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             config.training.local_batch_size * dp_degree
         )
         assert self.gradient_accumulation_steps > 0
-        self.loss_fn = rescale_accumulated_loss(
-            self.loss_fn, self.gradient_accumulation_steps
-        )
 
         # apply parallelisms and initialization
         if parallel_dims.pp_enabled:
@@ -260,7 +258,6 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # build optimizer after applying parallelisms to the model
         self.optimizers = config.optimizer.build(
             model_parts=self.model_parts,
-            parallel_dims=parallel_dims,
         )
         if self.train_spec.post_optimizer_build_fn is not None:
             self.train_spec.post_optimizer_build_fn(

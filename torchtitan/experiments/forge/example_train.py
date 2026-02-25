@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 import time
 from collections.abc import Iterable
 from datetime import timedelta
@@ -17,16 +18,15 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.components.validate import Validator
+from torchtitan.config import ConfigManager
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
+from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import (
     maybe_enable_memory_snapshot,
     maybe_enable_profiling,
 )
-from torchtitan.train import main
 from torchtitan.trainer import Trainer as TitanTrainer
 
 from .engine import ForgeEngine
@@ -51,14 +51,19 @@ class Trainer(ForgeEngine):
         super().__init__(config)
 
         # build tokenizer
-        self.tokenizer = HuggingFaceTokenizer(config.hf_assets_path)
+        self.tokenizer = (
+            config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+            if config.tokenizer is not None
+            else None
+        )
 
         # build dataloader
-        self.dataloader = HuggingFaceTextDataLoader(
-            config.dataloader,
+        self.dataloader = config.dataloader.build(
             dp_world_size=self.dp_degree,
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
+            seq_len=config.training.seq_len,
+            local_batch_size=config.training.local_batch_size,
         )
 
         model_args = self.model_config
@@ -71,8 +76,6 @@ class Trainer(ForgeEngine):
             parallel_dims=self.parallel_dims,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
-            ft_enable=config.fault_tolerance.enable,
-            ft_replica_id=config.fault_tolerance.replica_id,
             config_dict=config.to_dict(),
         )
         color = self.metrics_processor.color
@@ -102,9 +105,18 @@ class Trainer(ForgeEngine):
         self.step = 0
 
         # Build validator if validation is configured
-        if config.validation.enable:
-            self.validator = Validator(
-                validation=config.validation,
+        if config.validator.enable:
+            pp_schedule, pp_has_first_stage, pp_has_last_stage = (
+                (
+                    self.pp_schedule,
+                    self.pp_has_first_stage,
+                    self.pp_has_last_stage,
+                )
+                if self.parallel_dims.pp_enabled
+                else (None, None, None)
+            )
+
+            self.validator = config.validator.build(
                 parallelism=config.parallelism,
                 dp_world_size=self.dp_degree,
                 dp_rank=self.dp_rank,
@@ -114,6 +126,11 @@ class Trainer(ForgeEngine):
                 validation_context=self.train_context,
                 maybe_enable_amp=self.maybe_enable_amp,
                 metrics_processor=self.metrics_processor,
+                seq_len=config.training.seq_len,
+                local_batch_size=config.training.local_batch_size,
+                pp_schedule=pp_schedule,
+                pp_has_first_stage=pp_has_first_stage,
+                pp_has_last_stage=pp_has_last_stage,
             )
 
         logger.info(
@@ -147,12 +164,7 @@ class Trainer(ForgeEngine):
                 time.perf_counter() - data_load_start
             )
 
-            # Move tensors to the appropriate device
-            for k, v in input_dict.items():
-                if isinstance(v, torch.Tensor):
-                    input_dict[k] = v.to(device_type)
-            labels = labels.to(device_type)
-
+            # Tensors stay on CPU; moved to GPU per-microbatch during training
             yield input_dict, labels
 
     def post_dataloading_process(
@@ -358,11 +370,10 @@ class Trainer(ForgeEngine):
                     break
 
                 # Run validation if validator is available
-                if self.config.validation.enable and self.validator.should_validate(
+                if config.validator.enable and self.validator.should_validate(
                     self.step
                 ):
-                    with self.loss_fn.no_rescale():
-                        self.validator.validate(self.model_parts, self.step)
+                    self.validator.validate(self.model_parts, self.step)
 
                 self.checkpointer.save(
                     self.step, last_step=(self.step == config.training.steps)
@@ -398,6 +409,60 @@ class Trainer(ForgeEngine):
         if self.metrics_processor:
             self.metrics_processor.close()
         super().close()
+
+
+def main(custom_trainer_class: type[Trainer] | None = None) -> None:
+    """Main entry point for training."""
+    init_logger()
+
+    import torchtitan
+
+    logger.info(
+        "torchtitan version: %s (0.0.0 means __version__ is not defined correctly).",
+        torchtitan.__version__,
+    )
+
+    config_manager = ConfigManager()
+    config = config_manager.parse_args()
+    trainer: Trainer | None = None
+
+    try:
+        # TODO(local_tensor): Remove this special case once LocalTensor supports
+        # init_weights() and foreach_allgather. In local tensor mode, skip
+        # training/checkpointing as the # model is not fully initialized
+        # pyrefly: ignore [missing-attribute]
+        if config.comm.mode == "local_tensor":
+            logger.info("Local tensor mode enabled - skipping training execution")
+            return
+
+        # pyrefly: ignore [missing-attribute]
+        if custom_trainer_class is not None:
+            trainer = custom_trainer_class(config)
+        else:
+            trainer = config.build()
+
+        # pyrefly: ignore [missing-attribute]
+        if config.checkpoint.create_seed_checkpoint:
+            assert (
+                int(os.environ["WORLD_SIZE"]) == 1
+            ), "Must create seed checkpoint using a single device, to disable sharding."
+            assert (
+                # pyrefly: ignore [missing-attribute]
+                config.checkpoint.enable
+            ), "Must enable checkpointing when creating a seed checkpoint."
+            trainer.checkpointer.save(curr_step=0, last_step=True)
+            logger.info("Created seed checkpoint")
+        else:
+            trainer.train()
+    except Exception:
+        if trainer:
+            trainer.close()
+        raise
+    else:
+        trainer.close()
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+        logger.info("Process group destroyed")
 
 
 if __name__ == "__main__":
