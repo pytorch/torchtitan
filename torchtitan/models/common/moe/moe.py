@@ -458,12 +458,12 @@ class MoE(Module):
         # so gradient reduction happens once at the MoE boundary (reduce-scatter)
         # rather than being duplicated inside the MoE.
         if isinstance(x, DTensor):
-            assert x.device_mesh.ndim == 1, (
-                f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
-            )
-            assert x.device_mesh.mesh_dim_names == ("tp",), (
-                f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
-            )
+            assert (
+                x.device_mesh.ndim == 1
+            ), f"Expected 1D mesh, got {x.device_mesh.ndim}D mesh"
+            assert x.device_mesh.mesh_dim_names == (
+                "tp",
+            ), f"Expected TP mesh, got mesh_dim_names={x.device_mesh.mesh_dim_names}"
             x = x.to_local(grad_placements=(Partial(),))
         bs, slen, dim = x.shape
         x = x.view(-1, dim)

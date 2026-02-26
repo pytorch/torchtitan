@@ -11,13 +11,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import (
-    DeviceMesh,
-    distribute_module,
-    DTensor,
-    Partial,
-    Replicate,
-)
+from torch.distributed.tensor import DeviceMesh, distribute_module, DTensor, Replicate
 from torch.distributed.tensor.parallel import ParallelStyle
 from torch.distributed.tensor.placement_types import Placement
 
