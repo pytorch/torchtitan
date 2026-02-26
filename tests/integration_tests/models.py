@@ -122,6 +122,21 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             "qwen3_fsdp+tp+ep+etp",
             ngpu=4,
         ),
+        # Integration Test Cases for Qwen3-VL MoE model
+        OverrideDefinitions(
+            [
+                [
+                    "--module qwen3_vl --config qwen3_vl_debugmodel_moe",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 4",
+                    "--compile.enable",
+                ],
+            ],
+            "Qwen3-VL FSDP+TP+EP+compile",
+            "qwen3_vl_fsdp+tp+ep+compile",
+            ngpu=8,
+        ),
         # Integration Test Cases for Llama 4
         OverrideDefinitions(
             [
