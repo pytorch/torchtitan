@@ -123,9 +123,13 @@ class Generator(Actor, Configurable):
         self.model_spec = model_spec
 
         # Register TorchTitan model with vLLM before any engine creation
-        from torchtitan.experiments.rl.unified.plugin import register
+        from torchtitan.experiments.rl.unified.plugin import (
+            register_model_to_vllm_model_registry,
+            VLLM_MODEL_NAME,
+        )
 
-        register(model_spec)
+        register_model_to_vllm_model_registry(model_spec)
+        self._vllm_model_name = VLLM_MODEL_NAME
 
         # Set vLLM environment variables from config before any vLLM initialization
         if batch_invariant_mode:
@@ -245,9 +249,8 @@ class Generator(Actor, Configurable):
                 enforce_eager=cfg.enforce_eager,
                 # Seed
                 seed=cfg.seed,
-                # HuggingFace overrides to use TorchTitan model.
-                # TODO: make this field configurable and align with model registration
-                hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
+                # HuggingFace overrides to use registered TorchTitan model
+                hf_overrides={"architectures": [self._vllm_model_name]},
                 attention_config=AttentionConfig(
                     backend=AttentionBackendEnum.FLASH_ATTN,
                 ),

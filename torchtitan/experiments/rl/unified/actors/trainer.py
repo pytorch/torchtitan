@@ -11,15 +11,10 @@ from typing import Any, Optional
 
 import torch
 from monarch.actor import Actor, endpoint
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable
-from torchtitan.config.configs import (
-    ActivationCheckpointConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.experiments.rl.unified.actors.generator import TrajectoryData
@@ -67,12 +62,8 @@ class PolicyTrainer(Actor, Configurable):
         )
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
-        checkpoint: CheckpointManager.Config = field(
-            default_factory=CheckpointManager.Config
-        )
-        activation_checkpoint: ActivationCheckpointConfig = field(
-            default_factory=ActivationCheckpointConfig
-        )
+        hf_assets_path: str = ""
+        """Path to the HF model checkpoint for initial weight loading."""
 
     def __init__(
         self,
@@ -86,7 +77,7 @@ class PolicyTrainer(Actor, Configurable):
         self.model_spec = model_spec
 
         # Extract needed fields from config
-        model_path = config.checkpoint.initial_load_path  # path to HF checkpoint
+        model_path = config.hf_assets_path
         learning_rate = config.optimizer.lr
         self.ddp_size = config.parallelism.data_parallel_replicate_degree
         self.tp_size = config.parallelism.tensor_parallel_degree
@@ -101,7 +92,7 @@ class PolicyTrainer(Actor, Configurable):
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(local_rank)
 
-        # Step1: Load trainer model from HF/vLLM checkpoint. TODO: Use torchtitan components
+        # Step 1: Load trainer model from HF/vLLM checkpoint. TODO: Use torchtitan components
         model_config = model_spec.model
         titan_state_dict = vllm_to_torchtitan(model_path)
 
@@ -114,7 +105,7 @@ class PolicyTrainer(Actor, Configurable):
         self.model = model_config.build()
         self.model.load_state_dict(titan_state_dict, strict=True)
 
-        # Step2: Replace attention kernel be to vLLM's attention.
+        # Step 2: Replace attention kernel be to vLLM's attention.
         if batch_invariant_mode:
             replace_with_vllm_compatible_flash_attention(self.model)
             # vLLM's Attention requires bfloat16 inputs.
@@ -134,7 +125,7 @@ class PolicyTrainer(Actor, Configurable):
             ),
         )
 
-        # Step3: apply PT-D Parallelism
+        # Step 3: apply PT-D Parallelism
         # TODO: right now it only works for qwen3 model, need to formalize this to use parallize_fn from model_spec
         if self.ddp_size > 1:
             from torchtitan.models.llama3.parallelize import apply_ddp

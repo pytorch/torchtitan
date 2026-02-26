@@ -14,10 +14,13 @@ Usage:
 
 from torchtitan.protocols.model_spec import ModelSpec
 
+# Model-agnostic name used for vLLM model registration.
+# Must match the hf_overrides["architectures"] value passed to EngineArgs.
+VLLM_MODEL_NAME = "TorchTitanForCausalLM"
 
-def register(
+
+def register_model_to_vllm_model_registry(
     model_spec: ModelSpec,
-    model_name: str = "Qwen3TorchTitanForCausalLM",
 ) -> None:
     """
     Register a TorchTitan model with vLLM's ModelRegistry.
@@ -26,9 +29,7 @@ def register(
 
     Args:
         model_spec: TorchTitan ModelSpec containing model config and components
-        model_name: Name to register in vLLM (must match hf_overrides["architectures"])
     """
-    from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
     from torchtitan.experiments.rl.unified.models.vllm_wrapper import (
         TorchTitanVLLMModelWrapper,
     )
@@ -37,28 +38,23 @@ def register(
 
     logger = init_logger(__name__)
 
-    model_config = model_spec.model
-
-    # Create dynamic model class capturing ModelSpec components in the closure
+    # Create dynamic model class capturing ModelSpec in the closure
     class TorchTitanVLLMModelFromSpec(TorchTitanVLLMModelWrapper):
         def __init__(self, *, vllm_config, prefix=""):
             super().__init__(
-                model_config=model_config,
-                state_dict_adapter=model_spec.state_dict_adapter,
-                # NOTE: This should be replaced with qwen3 parallelization plan in torchtitan core
-                parallelize_fn=parallelize_qwen3,
+                model_spec=model_spec,
                 vllm_config=vllm_config,
                 prefix=prefix,
             )
 
     # Set the class name so vLLM can identify it
-    TorchTitanVLLMModelFromSpec.__name__ = model_name
-    TorchTitanVLLMModelFromSpec.__qualname__ = model_name
+    TorchTitanVLLMModelFromSpec.__name__ = VLLM_MODEL_NAME
+    TorchTitanVLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
 
     # Register with vLLM
-    ModelRegistry.register_model(model_name, TorchTitanVLLMModelFromSpec)
+    ModelRegistry.register_model(VLLM_MODEL_NAME, TorchTitanVLLMModelFromSpec)
 
     logger.info(
-        f"Registered {model_name} with vLLM "
+        f"Registered {VLLM_MODEL_NAME} with vLLM "
         f"(model={model_spec.name}, flavor={model_spec.flavor})"
     )
