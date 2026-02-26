@@ -46,59 +46,38 @@ class Nemotron3ModelArgs(BaseModelArgs):
     n_heads: int = 32  # num_attention_heads
     head_dim: int = 128
     n_kv_heads: int = 8  # num_key_value_heads (GQA)
-    sliding_window: int | None = None
     max_seq_len: int = 4096  # max_position_embeddings
     attn_dropout: float = 0.0  # attention_dropout
-    hidden_dropout: float = 0.0
 
     # Activation and biases
     mlp_hidden_act: str = "relu2"
     attn_bias: bool = False  # attention_bias
     mlp_bias: bool = False
-    use_bias: bool = False
 
     # Initialization and normalization
     initializer_range: float = 0.02
     norm_eps: float = 1e-5  # layer_norm_epsilon
     residual_in_fp32: bool = False
 
-    # Cache
-    use_cache: bool = True
-    num_logits_to_keep: int = 1
-
-    # Special tokens
-    pad_id: int = 0
-    bos_id: int = 1
-    eos_id: int = 2
-
     # Weight tying
     enable_weight_tying: bool = False  # tie_word_embeddings
 
     # Mamba2 configuration
-    use_mamba_kernels: bool = True
     ssm_state_size: int = 128  # mamba_state_size
     mamba_num_heads: int = 128
     mamba_n_groups: int = 8
     mamba_head_dim: int = 64
     mamba_d_conv: int = 4
-    mamba_expand: int = 2
     mamba_hidden_act: str = "silu"
-    mamba_dt_min: float = 0.001
-    mamba_dt_max: float = 0.1
     mamba_dt_limit: tuple[float, float] = field(
         default_factory=lambda: (0.0, float("inf"))
     )
-    mamba_dt_init_floor: float = 1e-4
     mamba_conv_bias: bool = True
     mamba_proj_bias: bool = False
     mamba_chunk_size: int = 128
 
-    # Residual scaling
-    rescale_prenorm_residual: bool = True
-
     # MoE (Mixture of Experts) configuration
     n_routed_experts: int = 8
-    n_shared_experts: int = 1
     moe_intermediate_size: int = 7688
     moe_shared_expert_intermediate_size: int = 7688
     num_experts_per_tok: int = 2
@@ -109,7 +88,6 @@ class Nemotron3ModelArgs(BaseModelArgs):
 
     # Attention type for torchtitan
     attn_type: str = "sdpa"
-    attn_mask_type: str = "causal"
 
     # Block initialization strategy
     depth_init: bool = True
