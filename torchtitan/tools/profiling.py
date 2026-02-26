@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import contextlib
 import os
 import pickle
 import time
@@ -48,7 +47,7 @@ class ProfileAnalyzer(ABC):
         ...
 
 
-class OverlapAnalyzer(ProfileAnalyzer):
+class CommsComputeOverlapAnalyzer(ProfileAnalyzer):
     """Analyzes compute-communication overlap from a PyTorch profiler trace.
 
     Computes overlap efficiency: the fraction of NCCL communication time that
@@ -106,7 +105,7 @@ class OverlapAnalyzer(ProfileAnalyzer):
 
         if comm_us == 0.0:
             logger.info(
-                "[OverlapAnalyzer] No NCCL kernels found in trace. "
+                "[CommsComputeOverlapAnalyzer] No NCCL kernels found in trace. "
                 "Skipping overlap report."
             )
             return
@@ -124,7 +123,7 @@ class OverlapAnalyzer(ProfileAnalyzer):
         unoverlapped_comm_pct = 100.0 - overlap_pct
 
         logger.info(
-            "[OverlapAnalyzer] Compute-Communication Overlap Report\n"
+            "[CommsComputeOverlapAnalyzer] Compute-Communication Overlap Report\n"
             f"  Total Compute Time               : {compute_us / 1e3:.2f} ms\n"
             f"  Total NCCL Time                  : {comm_us / 1e3:.2f} ms\n"
             f"  Total Trace Time                 : {trace_duration_us / 1e3:.2f} ms\n"
@@ -133,36 +132,76 @@ class OverlapAnalyzer(ProfileAnalyzer):
         )
 
 
-class _ProfilingSession:
-    """Unified handle returned by :meth:`Profiler.active`.
+class MemoryProfiler:
+    """Records periodic memory snapshots during training.
 
-    Wraps both the ``torch.profiler.profile`` handle and the ``MemoryProfiler``
-    handle (either may be ``None`` when the corresponding feature is disabled)
-    and exposes a single ``step()`` call so the training loop does not need to
-    know about the internal structure of profiling.
+    Started by :meth:`Profiler.build_memory_profiler` when memory snapshots are
+    enabled. Call :meth:`step` once per training iteration to trigger periodic
+    dumps; pass ``exit_ctx=True`` to force a final dump on OOM.
     """
 
-    def __init__(self, torch_profiler, memory_profiler) -> None:
-        self._torch = torch_profiler
-        self._mem = memory_profiler
+    def __init__(
+        self,
+        step_num: int,
+        freq: int,
+        snapshot_dir: str,
+        leaf_folder: str,
+        rank: int,
+    ) -> None:
+        device_module.memory._record_memory_history(
+            max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES
+        )
+        # when resume training, we start from the last step
+        self.step_num = step_num
+        self.freq = freq
+        self._snapshot_dir = snapshot_dir
+        self._leaf_folder = leaf_folder
+        self._rank = rank
 
-    def step(self) -> None:
-        """Advance all active profilers by one training step."""
-        if self._torch is not None:
-            self._torch.step()
-        if self._mem is not None:
-            self._mem.step()
+    def step(self, exit_ctx: bool = False) -> None:
+        self.step_num += 1
+        if not exit_ctx and self.step_num % self.freq != 0:
+            return
+        if not exit_ctx:
+            curr_step = self.step_num
+            dir_name = f"iteration_{curr_step}"
+        else:
+            # dump as iteration_0_exit if OOM at iter 1
+            curr_step = self.step_num - 1
+            dir_name = f"iteration_{curr_step}_exit"
+        curr_snapshot_dir = os.path.join(
+            self._snapshot_dir, dir_name, self._leaf_folder
+        )
+        if not os.path.exists(curr_snapshot_dir):
+            os.makedirs(curr_snapshot_dir, exist_ok=True)
+        logger.info(f"Dumping memory snapshot at step {curr_step}")
+        begin = time.monotonic()
+        output_file = os.path.join(
+            curr_snapshot_dir, f"rank{self._rank}_memory_snapshot.pickle"
+        )
+        with open(output_file, "wb") as output:
+            pickle.dump(device_module.memory._snapshot(), output)
+        logger.info(
+            f"Finished dumping memory snapshot in {time.monotonic() - begin:.2f} seconds"
+        )
 
 
 class Profiler(Configurable):
     """Owns profiling and memory snapshot lifecycle for a training run.
 
-    Instantiate via ``Profiler.Config.build()`` and use the context-manager
-    methods ``maybe_enable_profiling`` and ``maybe_enable_memory_snapshot``
-    in the training loop.
+    Instantiate via ``Profiler.Config.build()`` and use as a context manager in
+    the training loop via :meth:`active`.
 
-    If ``config.enable_overlap_analysis`` is ``True``, an ``OverlapAnalyzer``
-    is automatically added to the internal analyzers list.
+    If ``config.enable_overlap_analysis`` is ``True``, a
+    :class:`CommsComputeOverlapAnalyzer` is automatically added to the internal
+    analyzers list and run after each trace export.
+
+    Example::
+
+        with self.profiler.active(global_step=step, base_folder=folder) as prof:
+            for step in training_loop:
+                ...
+                prof.step()
 
     Args:
         config: A ``Profiler.Config`` instance.
@@ -203,75 +242,89 @@ class Profiler(Configurable):
         """
         Enable compute-communication overlap analysis after each profiler trace.
 
-        When set to true, an OverlapAnalyzer is run after each trace export to
-        report compute-communication overlap efficiency. This is only active when
-        profiling is enabled and the process group is initialized (distributed run).
+        When set to true, a CommsComputeOverlapAnalyzer is run after each trace
+        export to report compute-communication overlap efficiency. This is only
+        active when profiling is enabled and the process group is initialized
+        (distributed run).
         """
 
     def __init__(self, config: "Profiler.Config") -> None:
         self._config = config
         self._analyzers: list[ProfileAnalyzer] = []
         if config.enable_overlap_analysis:
-            self._analyzers.append(OverlapAnalyzer())
+            self._analyzers.append(CommsComputeOverlapAnalyzer())
         # TODO: support list[ProfileAnalyzer.Config] in Profiler.Config for extensible analyzers
+        # runtime args stored by active(); defaults used if active() not called
+        self._global_step: int = 0
+        self._base_folder: str = ""
+        self._leaf_folder: str = ""
+        self.torch_profiler = None
+        self.memory_profiler = None
 
-    @contextlib.contextmanager
     def active(
         self,
         *,
         global_step: int = 0,
         base_folder: str = "",
         leaf_folder: str = "",
-    ):
-        """Unified context manager that activates all profiling for a training run.
-
-        Enters both ``maybe_enable_profiling`` and ``maybe_enable_memory_snapshot``
-        and yields a single :class:`_ProfilingSession` handle whose ``step()``
-        method advances both.  Callers do not need to know how many sub-profilers
-        are active.
+    ) -> "Profiler":
+        """Store runtime args and return self for use as a context manager.
 
         Example::
 
             with self.profiler.active(global_step=step, base_folder=folder) as prof:
-                for step in training_loop:
-                    ...
-                    prof.step()
+                prof.step()
         """
-        with contextlib.ExitStack() as stack:
-            torch_profiler = stack.enter_context(
-                self.maybe_enable_profiling(
-                    global_step=global_step,
-                    base_folder=base_folder,
-                    leaf_folder=leaf_folder,
-                )
-            )
-            memory_profiler = stack.enter_context(
-                self.maybe_enable_memory_snapshot(
-                    global_step=global_step,
-                    base_folder=base_folder,
-                    leaf_folder=leaf_folder,
-                )
-            )
-            yield _ProfilingSession(torch_profiler, memory_profiler)
+        self._global_step = global_step
+        self._base_folder = base_folder
+        self._leaf_folder = leaf_folder
+        return self
 
-    @contextlib.contextmanager
-    def maybe_enable_profiling(
+    def __enter__(self) -> "Profiler":
+        self.torch_profiler = self.build_torch_profiler(
+            global_step=self._global_step,
+            base_folder=self._base_folder,
+            leaf_folder=self._leaf_folder,
+        )
+        self.memory_profiler = self.build_memory_profiler(
+            global_step=self._global_step,
+            base_folder=self._base_folder,
+            leaf_folder=self._leaf_folder,
+        )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        if self.torch_profiler is not None:
+            self.torch_profiler.__exit__(exc_type, exc_val, exc_tb)
+            self.torch_profiler = None
+        if self.memory_profiler is not None:
+            if isinstance(exc_val, torch.OutOfMemoryError):
+                self.memory_profiler.step(exit_ctx=True)
+            self.memory_profiler = None
+        return False
+
+    def step(self) -> None:
+        """Advance all active profilers by one training step."""
+        if self.torch_profiler is not None:
+            self.torch_profiler.step()
+        if self.memory_profiler is not None:
+            self.memory_profiler.step()
+
+    def build_torch_profiler(
         self,
         *,
-        global_step: int = 0,
-        base_folder: str = "",
-        leaf_folder: str = "",
+        global_step: int,
+        base_folder: str,
+        leaf_folder: str,
     ):
-        """Context manager that activates the PyTorch profiler when configured.
+        """Create, start, and return the torch profiler, or ``None`` if disabled.
 
-        Yields the ``torch.profiler.profile`` handle (or ``None`` when profiling
-        is disabled) so callers can call ``torch_profiler.step()`` each iteration.
+        Calls ``torch.profiler.profile.__enter__()`` so the returned handle is
+        already active. :meth:`__exit__` is responsible for stopping it.
         """
         cfg = self._config
-
         if not cfg.enable_profiling:
-            yield None
-            return
+            return None
 
         trace_dir = os.path.join(base_folder, cfg.save_traces_folder)
         profile_freq, warmup, active = (
@@ -286,8 +339,6 @@ class Profiler(Configurable):
             and torch.distributed.is_initialized()
             and rank == 0
         )
-
-        analyzers = self._analyzers
 
         def trace_handler(prof):
             curr_trace_dir_name = "iteration_" + str(prof.step_num)
@@ -305,7 +356,7 @@ class Profiler(Configurable):
             )
 
             if run_diagnostics:
-                for analyzer in analyzers:
+                for analyzer in self._analyzers:
                     analyzer.analyze(prof)
 
         logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
@@ -322,7 +373,8 @@ class Profiler(Configurable):
             gpu_device_profiled = torch.profiler.ProfilerActivity.CUDA
         elif torch.xpu.is_available():
             gpu_device_profiled = torch.profiler.ProfilerActivity.XPU
-        with torch.profiler.profile(
+
+        torch_profiler = torch.profiler.profile(
             # pyrefly: ignore [bad-argument-type]
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
@@ -331,72 +383,30 @@ class Profiler(Configurable):
             schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active),
             on_trace_ready=trace_handler,
             record_shapes=True,
-        ) as torch_profiler:
-            torch_profiler.step_num = global_step
-            yield torch_profiler
+        )
+        torch_profiler.__enter__()
+        torch_profiler.step_num = global_step
+        return torch_profiler
 
-    @contextlib.contextmanager
-    def maybe_enable_memory_snapshot(
+    def build_memory_profiler(
         self,
         *,
-        global_step: int = 0,
-        base_folder: str = "",
-        leaf_folder: str = "",
+        global_step: int,
+        base_folder: str,
+        leaf_folder: str,
     ):
-        """Context manager that activates memory snapshot recording when configured.
+        """Create and return a :class:`MemoryProfiler`, or ``None`` if disabled.
 
-        Yields a ``MemoryProfiler`` handle (or ``None`` when snapshots are
-        disabled) so callers can call ``memory_profiler.step()`` each iteration.
+        :class:`MemoryProfiler.__init__` starts memory history recording immediately.
         """
         cfg = self._config
-
         if not cfg.enable_memory_snapshot:
-            yield None
-            return
+            return None
 
         snapshot_dir = os.path.join(base_folder, cfg.save_memory_snapshot_folder)
         if not os.path.exists(snapshot_dir):
             os.makedirs(snapshot_dir, exist_ok=True)
         rank = torch.distributed.get_rank()
 
-        class MemoryProfiler:
-            def __init__(self, step_num: int, freq: int):
-                device_module.memory._record_memory_history(
-                    max_entries=MEMORY_SNAPSHOT_MAX_ENTRIES
-                )
-                # when resume training, we start from the last step
-                self.step_num = step_num
-                self.freq = freq
-
-            def step(self, exit_ctx: bool = False):
-                self.step_num += 1
-                if not exit_ctx and self.step_num % self.freq != 0:
-                    return
-                if not exit_ctx:
-                    curr_step = self.step_num
-                    dir_name = f"iteration_{curr_step}"
-                else:
-                    # dump as iteration_0_exit if OOM at iter 1
-                    curr_step = self.step_num - 1
-                    dir_name = f"iteration_{curr_step}_exit"
-                curr_snapshot_dir = os.path.join(snapshot_dir, dir_name, leaf_folder)
-                if not os.path.exists(curr_snapshot_dir):
-                    os.makedirs(curr_snapshot_dir, exist_ok=True)
-                logger.info(f"Dumping memory snapshot at step {curr_step}")
-                begin = time.monotonic()
-                output_file = os.path.join(
-                    curr_snapshot_dir, f"rank{rank}_memory_snapshot.pickle"
-                )
-                with open(output_file, "wb") as output:
-                    pickle.dump(device_module.memory._snapshot(), output)
-                logger.info(
-                    f"Finished dumping memory snapshot in {time.monotonic() - begin:.2f} seconds"
-                )
-
         logger.info(f"Memory profiler active. Snapshot will be saved at {snapshot_dir}")
-        profiler = MemoryProfiler(global_step, cfg.profile_freq)
-        try:
-            yield profiler
-        except torch.OutOfMemoryError:
-            profiler.step(exit_ctx=True)
-            raise
+        return MemoryProfiler(global_step, cfg.profile_freq, snapshot_dir, leaf_folder, rank)
