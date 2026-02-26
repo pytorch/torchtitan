@@ -103,3 +103,22 @@ def create_extra_fsdp_pg(parallel_dims: ParallelDims) -> None:
 def get_extra_fsdp_pg_name(original_pg_name: str) -> str | None:
     """Look up the extra PG name for a given original FSDP PG name."""
     return _EXTRA_FSDP_PG_REGISTRY.get(original_pg_name)
+
+
+def maybe_disable_eager_ac(
+    compile_config: CompileConfig,
+    ac_config: "ActivationCheckpointConfig",
+) -> None:
+    """Disable eager AC when apply_sac graph pass is enabled.
+
+    When apply_sac is used as a joint graph pass, eager activation checkpointing
+    must be disabled to avoid double-checkpointing. This must be called before
+    the model parallelization step that applies eager AC.
+    """
+    joint_pass_names = getattr(compile_config, "joint_passes", [])
+    if "apply_sac" in joint_pass_names:
+        if ac_config.mode != "none":
+            logger.info(
+                "apply_sac graph pass is enabled, overriding eager AC mode to none"
+            )
+            ac_config.mode = "none"
