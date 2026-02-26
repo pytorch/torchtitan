@@ -53,6 +53,7 @@ __all__ = [
     "pipeline_module_split",
 ]
 
+
 def layerwise_flops(model, x, backward=True):
     """Return forward and backward FLOPs (float) for each layer of the model."""
     fwd_mflops, bwd_mflops = [], []
@@ -285,7 +286,8 @@ def pipeline_llm(
 
         parts = autopipe_partition(seq_modules, parallel_dims.pp, job_config)
         module_names_per_stage = [
-            flatten_module_names[parts[i] : parts[i + 1]] for i in range(parallel_dims.pp)
+            flatten_module_names[parts[i] : parts[i + 1]]
+            for i in range(parallel_dims.pp)
         ]
         del copied_model, seq_modules
 

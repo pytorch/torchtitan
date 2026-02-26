@@ -11,12 +11,12 @@ from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 from torchtitan.models.moe import MoEArgs
 from torchtitan.protocols.train_spec import TrainSpec
-
-from .infra.parallelize_deepseek_v3 import parallelize_deepseekv3
-from .infra.pipeline_parallel import pipeline_llm
 from .deepseek_v3.args import DeepSeekV3ModelArgs
 from .deepseek_v3.model import DeepSeekV3Model
 from .deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
+
+from .infra.parallelize_deepseek_v3 import parallelize_deepseekv3
+from .infra.pipeline_parallel import pipeline_llm
 
 __all__ = [
     "parallelize_deepseekv3",

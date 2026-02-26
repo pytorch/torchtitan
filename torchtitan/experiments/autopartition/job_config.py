@@ -12,6 +12,7 @@ class AutoPipeConfig:
     auto_partition: bool = True
     """Whether to use autopartition method to split module, default False"""
 
+
 @dataclass
 class JobConfig:
     autopipe_config: AutoPipeConfig = field(default_factory=AutoPipeConfig)
