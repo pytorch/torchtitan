@@ -6,7 +6,6 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
-from typing import Literal
 
 from torchtitan.config.configs import CompileConfig
 from torchtitan.protocols.model_spec import ModelSpec
@@ -14,31 +13,29 @@ from torchtitan.trainer import Trainer
 
 
 @dataclass(kw_only=True, slots=True)
-class SimpleFSDPCompileConfig(CompileConfig):
-    graph_passes: Literal["auto_bucketing", "transformer_block_bucketing"] | None = None
-    """
-    Bucketing and overlapping passes in simplefsdp. Additional passes include:
-        auto_bucketing, transformer_block_bucketing
-    """
+class CompilerToolkitCompileConfig(CompileConfig):
+    joint_passes: list[str] = field(default_factory=list)
+    """Joint graph pass names to apply on the joint forward-backward
+    graph before partitioning."""
+
+    passes: list[str] = field(default_factory=list)
+    """Compiler pass names to apply to the partitioned forward/backward graphs."""
 
 
-@dataclass(kw_only=True, slots=True)
-class SimpleFSDPConfig(Trainer.Config):
-    compile: SimpleFSDPCompileConfig = field(default_factory=SimpleFSDPCompileConfig)
-
-
-def to_simple_fsdp_config(
+def to_compiler_toolkit_config(
     base_config: Trainer.Config,
     model_registry: Callable[[str], ModelSpec],
-) -> SimpleFSDPConfig:
-    """Convert a base Trainer.Config to a SimpleFSDPConfig.
+):
+    """Convert a base Trainer.Config to a CompilerToolkitTrainer.Config.
 
     Copies all fields from the base config and replaces the model_spec with one
-    from the simple_fsdp model_registry. The compile field is removed and left
-    as the SimpleFSDPConfig default; callers should explicitly set it.
+    from the compiler_toolkit model_registry. The compile field is removed and
+    left as the default; callers should explicitly set it.
     """
+    from torchtitan.experiments.compiler_toolkit.trainer import CompilerToolkitTrainer
+
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
     d["model_spec"] = model_registry(base_config.model_spec.flavor)
     d.pop("compile")
 
-    return SimpleFSDPConfig(**d)
+    return CompilerToolkitTrainer.Config(**d)
