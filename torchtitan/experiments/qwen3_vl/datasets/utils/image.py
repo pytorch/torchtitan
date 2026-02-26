@@ -21,11 +21,10 @@ from torchtitan.tools.logging import logger
 
 def process_image(
     image: str | bytes | Image.Image,
-    patch_size: int = 14,
+    patch_size: int = 16,
     merge_size: int = 2,
-    temporal_patch_size: int = 2,
-    max_patch_per_image: int = 256,
-    min_patch_per_image: int = 4,
+    max_pixels: int = 16777216,
+    min_pixels: int = 65536,
 ) -> torch.Tensor | None:
     """Process a single image into normalized tensor format for Qwen3-VL.
 
@@ -34,8 +33,8 @@ def process_image(
         patch_size: Size of each spatial patch
         merge_size: Spatial merge size factor
         temporal_patch_size: Temporal patch size for videos
-        max_patch_per_image: Maximum patches allowed per image
-        min_patch_per_image: Minimum patches per image
+        max_pixels: Maximum number of pixels
+        min_pixels: Minimum number of pixels
 
     Returns:
         Tensor of shape (1, H, W, 3) or None if processing fails
@@ -53,6 +52,11 @@ def process_image(
         if image.mode != "RGB":
             image = image.convert("RGB")
 
+        # Convert pixel area constraints to patch counts
+        factor = patch_size * merge_size
+        max_patch_per_image = max_pixels // (factor * factor)
+        min_patch_per_image = min_pixels // (factor * factor)
+
         # Resize maintaining aspect ratio
         image = _resize_image_by_patch_count(
             image,
@@ -66,9 +70,9 @@ def process_image(
         img_array = np.array(image)
         img_array = img_array / 255.0
 
-        # Qwen3-VL uses OpenCLIP normalization
-        mean = np.array([0.48145466, 0.4578275, 0.40821073])
-        std = np.array([0.26862954, 0.26130258, 0.27577711])
+        # From Qwen3-VL preprocessor_config.json
+        mean = np.array([0.5, 0.5, 0.5])
+        std = np.array([0.5, 0.5, 0.5])
         img_array = (img_array - mean) / std
 
         # Convert to tensor (1, H, W, 3) with dummy temporal dim
