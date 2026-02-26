@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.models.moe import build_moe, MoEArgs
+from torchtitan.models.common.moe.moe_nemotron import NemotronMoE
 from torchtitan.protocols.train_spec import ModelProtocol
 from torchtitan.tools.logging import logger
 
@@ -707,7 +707,7 @@ class Nemotron3Block(nn.Module):
         elif self.block_type == "mlp":
             self.mixer = MLP(model_args, layer_idx=layer_idx)
         elif self.block_type == "moe":
-            moe_args = MoEArgs(
+            moe_config = NemotronMoE.Config(
                 num_experts=model_args.n_routed_experts,
                 num_shared_experts=1,
                 score_func="sigmoid",
@@ -720,16 +720,12 @@ class Nemotron3Block(nn.Module):
                 else None,
                 use_grouped_mm=False,
                 load_balance_coeff=None,
-            )
-            self.mixer = build_moe(
-                args=moe_args,
-                dim=model_args.dim,
                 hidden_dim=model_args.moe_intermediate_size,
-                moe_impl="nemotron",
                 activation=model_args.mlp_hidden_act,
                 bias=model_args.mlp_bias,
                 shared_hidden_dim=model_args.moe_shared_expert_intermediate_size,
             )
+            self.mixer = moe_config.build(dim=model_args.dim)
         else:
             raise ValueError(f"Invalid block type: {self.block_type}")
 

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Literal
 
 import torch
@@ -548,71 +548,3 @@ class MoE(Module):
                 self.expert_bias = torch.zeros(
                     self.experts.num_experts, dtype=torch.float32
                 )
-
-# Backward-compatible alias used by existing model code.
-MoEArgs = MoE.Config
-
-
-def build_moe(
-    args: MoEArgs,
-    dim: int,
-    hidden_dim: int,
-    moe_impl: str = "standard",
-    *,
-    activation: str = "silu",
-    bias: bool = False,
-    shared_hidden_dim: int | None = None,
-) -> nn.Module:
-    """Factory for MoE backends and model-specific variants."""
-    if moe_impl == "nemotron":
-        from .moe_nemotron import NemotronMoE
-
-        resolved_shared_hidden_dim = (
-            hidden_dim * args.num_shared_experts
-            if shared_hidden_dim is None
-            else shared_hidden_dim
-        )
-        nemotron_config = NemotronMoE.Config(
-            num_experts=args.num_experts,
-            num_shared_experts=args.num_shared_experts,
-            score_func=args.score_func,
-            route_norm=args.route_norm,
-            route_scale=args.route_scale,
-            gate_bias=args.gate_bias,
-            score_before_experts=args.score_before_experts,
-            top_k=args.top_k,
-            num_expert_groups=args.num_expert_groups,
-            num_limited_groups=args.num_limited_groups,
-            use_grouped_mm=args.use_grouped_mm,
-            load_balance_coeff=args.load_balance_coeff,
-            _debug_force_load_balance=args._debug_force_load_balance,
-            hidden_dim=hidden_dim,
-            activation=activation,
-            bias=bias,
-            shared_hidden_dim=resolved_shared_hidden_dim,
-        )
-        return NemotronMoE(nemotron_config, dim=dim)
-
-    base_config = MoE.Config(
-        num_experts=args.num_experts,
-        num_shared_experts=args.num_shared_experts,
-        score_func=args.score_func,
-        route_norm=args.route_norm,
-        route_scale=args.route_scale,
-        gate_bias=args.gate_bias,
-        score_before_experts=args.score_before_experts,
-        top_k=args.top_k,
-        num_expert_groups=args.num_expert_groups,
-        num_limited_groups=args.num_limited_groups,
-        use_grouped_mm=args.use_grouped_mm,
-        load_balance_coeff=args.load_balance_coeff,
-        _debug_force_load_balance=args._debug_force_load_balance,
-        hidden_dim=hidden_dim,
-    )
-
-    if moe_impl == "deepep":
-        from .moe_deepep import DeepEPMoE
-
-        return DeepEPMoE(DeepEPMoE.Config(**asdict(base_config)), dim=dim)
-
-    return MoE(base_config, dim=dim)
