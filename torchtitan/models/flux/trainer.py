@@ -4,11 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Iterable
+import time
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 
 import torch
 
+from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.flux.configs import Encoder, Inference, Validation
@@ -100,6 +102,33 @@ class FluxTrainer(Trainer):
                 clip_encoder=self.clip_encoder,
                 trainer_config=config,
             )
+
+    def batch_generator(
+        self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+    ) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        """Override to count transformer tokens (image patches + text tokens)
+        instead of raw pixel count from labels.numel().
+        """
+        assert self.config.model_spec is not None
+        model_config = self.config.model_spec.model
+        tokens_per_sample = model_config.seq_len_img + model_config.seq_len_txt
+
+        data_iterator = iter(data_iterable)
+        while True:
+            data_load_start = time.perf_counter()
+            try:
+                batch = next(data_iterator)
+            except StopIteration as ex:
+                raise DataloaderExhaustedError() from ex
+            input_dict, labels = batch
+            bsz = labels.shape[0]
+            ntokens_batch = bsz * tokens_per_sample
+            self.ntokens_seen += ntokens_batch
+            self.metrics_processor.ntokens_since_last_log += ntokens_batch
+            self.metrics_processor.data_loading_times.append(
+                time.perf_counter() - data_load_start
+            )
+            yield input_dict, labels
 
     def forward_backward_step(
         self,
