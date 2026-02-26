@@ -13,14 +13,16 @@ To register TorchTitan models with vLLM:
 """
 
 from torchtitan.experiments.rl.unified.models.vllm_wrapper import (
-    create_torchtitan_config_from_vllm,
     TorchTitanVLLMModelWrapper,
 )
-from torchtitan.experiments.rl.unified.plugin import register
+
+# Export plugin register function for manual use (no auto-registration)
+from torchtitan.experiments.rl.unified.plugin import (
+    register_model_to_vllm_model_registry,
+)
 
 
 __all__ = [
     "TorchTitanVLLMModelWrapper",
-    "create_torchtitan_config_from_vllm",
-    "register",  # Export register function for manual use
+    "register_model_to_vllm_model_registry",  # Export register function for manual use
 ]
