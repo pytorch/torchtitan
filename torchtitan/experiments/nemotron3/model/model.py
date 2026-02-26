@@ -27,6 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.models.moe import build_moe, MoEArgs
 from torchtitan.protocols.train_spec import ModelProtocol
 from torchtitan.tools.logging import logger
 
@@ -680,188 +681,6 @@ class MLP(nn.Module):
 
 
 # =============================================================================
-# MoE (Mixture of Experts) Layer
-# =============================================================================
-class TopkRouter(nn.Module):
-    """Top-k router for MoE."""
-
-    def __init__(self, model_args: Nemotron3ModelArgs):
-        super().__init__()
-        self.top_k = model_args.num_experts_per_tok
-        self.n_routed_experts = model_args.n_routed_experts
-        self.routed_scaling_factor = model_args.routed_scaling_factor
-        self.n_group = model_args.n_group
-        self.topk_group = model_args.topk_group
-        self.norm_topk_prob = model_args.norm_topk_prob
-        self.hidden_size = model_args.dim
-
-        # Note: Reference model uses float32 for these, but we use the default dtype (bfloat16)
-        self.weight = nn.Parameter(
-            torch.empty((self.n_routed_experts, self.hidden_size))
-        )
-        self.register_buffer(
-            "e_score_correction_bias", torch.zeros(self.n_routed_experts)
-        )
-
-    @torch.no_grad()
-    def get_topk_indices(self, scores: torch.Tensor) -> torch.Tensor:
-        """Get top-k expert indices."""
-        scores_for_choice = scores.view(-1, self.n_routed_experts)
-        scores_for_choice = scores_for_choice + self.e_score_correction_bias.unsqueeze(
-            0
-        )
-
-        # Group-based expert selection
-        group_scores = (
-            scores_for_choice.view(
-                -1, self.n_group, self.n_routed_experts // self.n_group
-            )
-            .topk(2, dim=-1)[0]
-            .sum(dim=-1)
-        )
-        group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
-        group_mask = torch.zeros_like(group_scores)
-        group_mask.scatter_(1, group_idx, 1)
-
-        score_mask = (
-            group_mask.unsqueeze(-1)
-            .expand(-1, self.n_group, self.n_routed_experts // self.n_group)
-            .reshape(-1, self.n_routed_experts)
-        )
-        scores_for_choice = scores_for_choice.masked_fill(~score_mask.bool(), 0.0)
-        topk_indices = torch.topk(
-            scores_for_choice, k=self.top_k, dim=-1, sorted=False
-        )[1]
-        return topk_indices
-
-    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Forward pass of router.
-
-        Returns:
-            topk_indices: Expert indices for each token
-            topk_weights: Expert weights for each token
-        """
-        hidden_states = hidden_states.view(-1, self.hidden_size)
-        router_logits = F.linear(
-            hidden_states.to(torch.float32), self.weight.to(torch.float32)
-        )
-        scores = router_logits.sigmoid()
-        topk_indices = self.get_topk_indices(scores)
-        topk_weights = scores.gather(1, topk_indices)
-
-        if self.norm_topk_prob:
-            denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-20
-            topk_weights = topk_weights / denominator
-
-        topk_weights = topk_weights * self.routed_scaling_factor
-        return topk_indices, topk_weights
-
-    def init_weights(self) -> None:
-        """Initialize router weights."""
-        nn.init.trunc_normal_(self.weight, mean=0.0, std=0.02)
-
-
-class MoE(nn.Module):
-    """Mixture of Experts layer."""
-
-    def __init__(self, model_args: Nemotron3ModelArgs, layer_idx: int):
-        super().__init__()
-        self.layer_idx = layer_idx
-        self.n_routed_experts = model_args.n_routed_experts
-
-        self.experts = nn.ModuleList(
-            [
-                MoEExpert(
-                    model_args, intermediate_size=model_args.moe_intermediate_size
-                )
-                for _ in range(model_args.n_routed_experts)
-            ]
-        )
-        self.gate = TopkRouter(model_args)
-        self.shared_experts = MoEExpert(
-            model_args, intermediate_size=model_args.moe_shared_expert_intermediate_size
-        )
-
-    def moe_forward(
-        self,
-        hidden_states: torch.Tensor,
-        topk_indices: torch.Tensor,
-        topk_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        """Route tokens to experts and combine outputs."""
-        final_hidden_states = torch.zeros_like(hidden_states, dtype=topk_weights.dtype)
-        expert_mask = F.one_hot(topk_indices, num_classes=len(self.experts))
-        expert_mask = expert_mask.permute(2, 0, 1)
-
-        for expert_idx, expert in enumerate(self.experts):
-            mask = expert_mask[expert_idx]
-            token_indices, weight_indices = torch.where(mask)
-
-            if token_indices.numel() > 0:
-                expert_weights = topk_weights[token_indices, weight_indices]
-                expert_input = hidden_states[token_indices]
-                expert_output = expert(expert_input)
-                weighted_output = expert_output * expert_weights.unsqueeze(-1)
-                final_hidden_states.index_add_(0, token_indices, weighted_output)
-            else:
-                # No-op compute for unused experts (for gradient flow)
-                dummy_out = expert(torch.zeros_like(hidden_states[0]).unsqueeze(0))
-                final_hidden_states = final_hidden_states + dummy_out * 0
-
-        return final_hidden_states.type(hidden_states.dtype)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Forward pass of MoE."""
-        residuals = hidden_states
-        orig_shape = hidden_states.shape
-
-        # Route tokens
-        topk_indices, topk_weights = self.gate(hidden_states)
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        hidden_states = self.moe_forward(hidden_states, topk_indices, topk_weights)
-        hidden_states = hidden_states.view(*orig_shape)
-
-        # Add shared experts
-        hidden_states = hidden_states + self.shared_experts(residuals)
-        return hidden_states
-
-    def init_weights(self, init_std: float) -> None:
-        """Initialize MoE weights."""
-        self.gate.init_weights()
-        for expert in self.experts:
-            expert.init_weights(init_std)
-        self.shared_experts.init_weights(init_std)
-
-
-class MoEExpert(nn.Module):
-    """Single MoE expert (simple MLP)."""
-
-    def __init__(self, model_args: Nemotron3ModelArgs, intermediate_size: int):
-        super().__init__()
-        self.hidden_size = model_args.dim
-
-        self.up_proj = nn.Linear(
-            self.hidden_size, intermediate_size, bias=model_args.mlp_bias
-        )
-        self.down_proj = nn.Linear(
-            intermediate_size, self.hidden_size, bias=model_args.mlp_bias
-        )
-        self.act_fn = ACT2FN[model_args.mlp_hidden_act]
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(self.act_fn(self.up_proj(x)))
-
-    def init_weights(self, init_std: float) -> None:
-        nn.init.trunc_normal_(self.up_proj.weight, mean=0.0, std=0.02)
-        if self.up_proj.bias is not None:
-            nn.init.zeros_(self.up_proj.bias)
-        nn.init.trunc_normal_(self.down_proj.weight, mean=0.0, std=init_std)
-        if self.down_proj.bias is not None:
-            nn.init.zeros_(self.down_proj.bias)
-
-
-# =============================================================================
 # Nemotron3 Block (Hybrid Layer)
 # =============================================================================
 class Nemotron3Block(nn.Module):
@@ -888,7 +707,29 @@ class Nemotron3Block(nn.Module):
         elif self.block_type == "mlp":
             self.mixer = MLP(model_args, layer_idx=layer_idx)
         elif self.block_type == "moe":
-            self.mixer = MoE(model_args, layer_idx=layer_idx)
+            moe_args = MoEArgs(
+                num_experts=model_args.n_routed_experts,
+                num_shared_experts=1,
+                score_func="sigmoid",
+                route_norm=model_args.norm_topk_prob,
+                route_scale=model_args.routed_scaling_factor,
+                top_k=model_args.num_experts_per_tok,
+                num_expert_groups=model_args.n_group if model_args.n_group > 1 else None,
+                num_limited_groups=model_args.topk_group
+                if model_args.n_group > 1
+                else None,
+                use_grouped_mm=False,
+                load_balance_coeff=None,
+            )
+            self.mixer = build_moe(
+                args=moe_args,
+                dim=model_args.dim,
+                hidden_dim=model_args.moe_intermediate_size,
+                moe_impl="nemotron",
+                activation=model_args.mlp_hidden_act,
+                bias=model_args.mlp_bias,
+                shared_hidden_dim=model_args.moe_shared_expert_intermediate_size,
+            )
         else:
             raise ValueError(f"Invalid block type: {self.block_type}")
 

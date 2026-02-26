@@ -569,9 +569,38 @@ class MoE(nn.Module):
 
 
 def build_moe(
-    args: MoEArgs, dim: int, hidden_dim: int, moe_impl: str = "standard"
+    args: MoEArgs,
+    dim: int,
+    hidden_dim: int,
+    moe_impl: str = "standard",
+    *,
+    activation: str = "silu",
+    bias: bool = False,
+    shared_hidden_dim: int | None = None,
 ) -> nn.Module:
-    """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP)."""
+    """Factory for MoE backends and model-specific variants."""
+    if moe_impl == "nemotron":
+        from .moe_nemotron import NemotronMoE
+
+        resolved_shared_hidden_dim = (
+            hidden_dim * args.num_shared_experts
+            if shared_hidden_dim is None
+            else shared_hidden_dim
+        )
+        logger.info(
+            "Nemotron MoE: "
+            f"num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, "
+            f"hidden_dim={hidden_dim}, shared_hidden_dim={resolved_shared_hidden_dim}"
+        )
+        return NemotronMoE(
+            moe_args=args,
+            dim=dim,
+            hidden_dim=hidden_dim,
+            shared_hidden_dim=resolved_shared_hidden_dim,
+            activation=activation,
+            bias=bias,
+        )
+
     if moe_impl == "deepep":
         from .moe_deepep import DeepEPMoE
 
