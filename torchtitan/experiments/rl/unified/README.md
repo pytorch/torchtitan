@@ -62,4 +62,4 @@ Work on the RL loop:
     replace `vllm_to_torchtitan` and `torchtitan_to_vllm` calls to TorchTitan [state dict adaptor](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/qwen3/model/state_dict_adapter.py).
 5. Right now we only support trainer run on multiple processes using DDP, and generator using TP, need to onboard more parallelism.
 6. Right now we only support VLLM_COMPAT mode to achieve batch invariance and bitwise determinism, need to support UNIFIED mode.
-7. In the longer term, need to add trajectory queue to achieve async, right now trainer and generator are running synchronously.
+7. In the longer term, need to add episode queue to achieve async, right now trainer and generator are running synchronously.

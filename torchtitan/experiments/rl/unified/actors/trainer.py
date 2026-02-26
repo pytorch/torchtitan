@@ -13,26 +13,12 @@ import torch
 import torch.distributed.checkpoint as dcp
 from monarch.actor import Actor, endpoint
 from torch.distributed._tensor import DTensor
-
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.configs import (
-    ActivationCheckpointConfig,
-    CommConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
-from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
-from torchtitan.experiments.rl.unified.models.attention import (
-    replace_with_vllm_compatible_flash_attention,
-)
-
+from torchtitan.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.rl.unified.actors.grader import Episodes
+from torchtitan.experiments.rl.unified.actors.grader import Episode
 from torchtitan.experiments.rl.unified.actors.utils import (
     compute_policy_gradient_loss,
     compute_token_log_probs,
@@ -42,7 +28,6 @@ from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
 from torchtitan.experiments.rl.unified.models.attention import (
     replace_with_vllm_compatible_flash_attention,
 )
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
@@ -51,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 class PolicyTrainer(Actor, Configurable):
     """
-    Updates policy based on collected trajectories using TorchTitan components.
+    Updates policy based on collected Episode using TorchTitan components.
 
     Uses ModelSpec for model construction, parallelization, and weight loading.
 
@@ -74,14 +59,10 @@ class PolicyTrainer(Actor, Configurable):
         )
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
-        activation_checkpoint: ActivationCheckpointConfig = field(
-            default_factory=ActivationCheckpointConfig
-        )
-        compile: CompileConfig = field(default_factory=CompileConfig)
-        model_converters: ModelConvertersContainer.Config = field(
-            default_factory=ModelConvertersContainer.Config
-        )
         comm: CommConfig = field(default_factory=CommConfig)
+        """Communication configuration for distributed initialization."""
+        hf_assets_path: str = ""
+        """Path to the HF model checkpoint for initial weight loading."""
 
     def __init__(
         self,
@@ -105,13 +86,7 @@ class PolicyTrainer(Actor, Configurable):
         self.device = torch.device(f"{device_type}:{int(os.environ['LOCAL_RANK'])}")
         device_module.set_device(self.device)
 
-        # Initialize distributed
-        # When running under Monarch, setup_env_for_distributed already
-        # initializes the process group, so skip re-initialization.
-        if torch.distributed.is_initialized():
-            world_size = torch.distributed.get_world_size()
-        else:
-            world_size = dist_utils.init_distributed(config.comm)
+        world_size = dist_utils.init_distributed(config.comm)
 
         # Build parallel dims
         parallelism_config = config.parallelism
@@ -230,12 +205,7 @@ class PolicyTrainer(Actor, Configurable):
         model = model_spec.parallelize_fn(
             model,
             parallel_dims=self.parallel_dims,
-            training=config.training,
-            model_converters=config.model_converters,
             parallelism=config.parallelism,
-            compile_config=config.compile,
-            ac_config=config.activation_checkpoint,
-            dump_folder=".",
         )
 
         model.to_empty(device=device_type)
@@ -299,19 +269,19 @@ class PolicyTrainer(Actor, Configurable):
         }
 
     @endpoint
-    async def step(self, episode: Episodes) -> dict:
+    async def step(self, episode: Episode) -> dict:
         """Perform one training step.
 
         Computes advantages from rewards, then updates the policy.
 
         Args:
-            episode: Trajectory data with rewards filled by Grader
+            episode: Episode data with rewards filled by Grader
 
         Returns:
             Training metrics
         """
         logger.debug(
-            f"{os.getpid()=} PolicyTrainer starts to train {self.policy_version} on traj:"
+            f"{os.getpid()=} PolicyTrainer starts to train {self.policy_version} "
         )
 
         # Compute advantages from rewards
@@ -339,7 +309,7 @@ class PolicyTrainer(Actor, Configurable):
             kl_coef=0.1,
         )
 
-        # Verify bitwise identity between vLLM and computed log probs
+        # Verify logprob identity and compute log ratio (train/generator)
         verification_result = verify_logprob_identity(
             episode.vllm_token_log_probs,
             batch_token_log_probs,
@@ -347,7 +317,8 @@ class PolicyTrainer(Actor, Configurable):
         logger.info(
             f"Logprob verification: bitwise_identical={verification_result['bitwise_identical']}, "
             f"max_delta={verification_result['max_delta']:.6e}, "
-            f"avg_delta={verification_result['avg_delta']:.6e}, "
+            f"log_ratio_mean={verification_result['log_ratio_mean']:.6e}, "
+            f"log_ratio_max_abs={verification_result['log_ratio_max_abs']:.6e}, "
             f"tokens_checked={verification_result['total_tokens_checked']}"
         )
 
@@ -379,6 +350,8 @@ class PolicyTrainer(Actor, Configurable):
             "policy_version": self.policy_version,
             "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
             "logprob_bitwise_identical": verification_result["bitwise_identical"],
+            "log_ratio_mean": verification_result["log_ratio_mean"],
+            "log_ratio_max_abs": verification_result["log_ratio_max_abs"],
             **loss_metrics,
         }
         logger.debug(f"{os.getpid()=} PolicyTrainer finish step {self.policy_version}")

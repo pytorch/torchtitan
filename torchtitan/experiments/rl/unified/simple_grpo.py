@@ -9,7 +9,7 @@ Multiprocess RL training loop using Monarch Actors.
 
 This demonstrates:
 1. Distributed actor architecture with Generator (vLLM) and PolicyTrainer (TorchTitan) components
-2. File based weight synchronization between trainer and generator
+2. Weight synchronization between trainer and generator by unwrapping and rewrap DTensor. We have strong assumption that trainer and generator has same parallelism
 3. Separate scoring component for reward and advantage computation
 
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
@@ -194,11 +194,12 @@ async def main():
     for step in range(num_steps):
         # Fully sync RL loop with separate scoring step
         # 1. Generator produces episode (without rewards)
+        # TODO: Create a queue to use all episode from all GPUs
         episode = generator.generate.call().get().item(gpus=0)
         # 2. Grader computes rewards
-        episode = grader.score.call(episode).get().item(gpus=0)
+        scored_episode = grader.score.call(episode).get().item(gpus=0)
         # 3. Trainer computes advantages and updates policy
-        metrics = trainer.step.call(episode).get().item(gpus=0)
+        metrics = trainer.step.call(scored_episode).get().item(gpus=0)
         # 4. Sync weights back to generator (all TP ranks)
         weight_mesh = trainer.get_weights.call().get()
         weights = {gpu: weight_mesh.item(gpus=gpu) for gpu in range(trainer_world_size)}

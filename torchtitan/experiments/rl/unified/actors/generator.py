@@ -11,11 +11,11 @@ from dataclasses import dataclass, field
 
 import torch
 from monarch.actor import Actor, endpoint
-from torch.distributed._tensor import DTensor
+from torch.distributed.tensor import DTensor
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
 
-from torchtitan.experiments.rl.unified.actors.grader import Episodes
+from torchtitan.experiments.rl.unified.actors.grader import Episode
 from torchtitan.experiments.rl.unified.configs import (
     PolicyOptimizationConfig,
     VLLMSamplingConfig,
@@ -53,18 +53,6 @@ class Generator(Actor, Configurable):
     class Config(Configurable.Config):
         """Generator actor configuration."""
 
-        dtype: str = "bfloat16"
-        """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
-
-        gpu_memory_limit: float = 0.5
-        """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
-
-        enforce_eager: bool = True
-        """Disable CUDA graphs in vLLM (use eager execution)."""
-
-        seed: int = 42
-        """Random seed for reproducible generation."""
-
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         """Parallelism configuration for the vLLM engine."""
 
@@ -73,6 +61,18 @@ class Generator(Actor, Configurable):
 
         vllm_attention_backend: str = "FLASH_ATTN"
         """vLLM attention backend to use (e.g., FLASH_ATTN, XFORMERS)."""
+        
+        vllm_model_dtype: str = "bfloat16"
+        """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
+
+        vllm_gpu_memory_limit: float = 0.5
+        """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
+
+        vllm_enforce_eager: bool = True
+        """Disable CUDA graphs in vLLM (use eager execution)."""
+
+        vllm_seed: int | None = None
+        """Random seed for vLLM engine and sampling. None for non-deterministic."""
 
     def __init__(
         self,
@@ -89,9 +89,12 @@ class Generator(Actor, Configurable):
         self.model_spec = model_spec
 
         # Register TorchTitan model with vLLM before any engine creation
-        from torchtitan.experiments.rl.unified.plugin import register
+        from torchtitan.experiments.rl.unified.plugin import (
+            register_model_to_vllm_model_registry,
+            VLLM_MODEL_NAME,
+        )
 
-        register(model_spec)
+        register_model_to_vllm_model_registry(model_spec)
 
         # Set vLLM environment variables from config before any vLLM initialization
         if batch_invariant_mode:
@@ -109,23 +112,23 @@ class Generator(Actor, Configurable):
         self.temperature = config.sampling.temperature
         self.group_size = policy_optimization.group_size
 
-
         # Build vLLM engine
-        engine_args = EngineArgs(
+        engine_kwargs = dict(
             model=model_path,
             trust_remote_code=True,
-            dtype=config.dtype,
+            dtype=config.vllm_model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
             distributed_executor_backend="external_launcher",
-            gpu_memory_utilization=config.gpu_memory_limit,
-            enforce_eager=config.enforce_eager,
-            seed=config.seed,
-            # TODO: make this field configurable and align with model registration
-            hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
+            gpu_memory_utilization=config.vllm_gpu_memory_limit,
+            enforce_eager=config.vllm_enforce_eager,
+            hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum.FLASH_ATTN,
             ),
         )
+        if config.vllm_seed is not None:
+            engine_kwargs["seed"] = config.vllm_seed
+        engine_args = EngineArgs(**engine_kwargs)
 
         logger.info("Initializing LLMEngine from EngineArgs...")
         self._engine = LLMEngine.from_engine_args(engine_args)
@@ -142,8 +145,8 @@ class Generator(Actor, Configurable):
         return self._engine.model_executor.driver_worker.get_model()
 
     @endpoint
-    async def generate(self) -> Episodes:
-        """Generate trajectories and return Episodes with zero rewards.
+    async def generate(self) -> Episode:
+        """Generate episodes and return Episode with zero rewards.
         Called by the orchestrator (simple_grpo.py). The Grader fills in rewards.
         """
         logger.debug(
@@ -156,7 +159,7 @@ class Generator(Actor, Configurable):
                 temperature=self.temperature,
                 max_tokens=self.max_new_tokens,
                 n=self.group_size,
-                seed=self.config.seed,
+                seed=self.config.vllm_seed,
                 logprobs=1,
                 prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
                 output_kind=RequestOutputKind.FINAL_ONLY,  # Only return completed outputs
@@ -191,7 +194,7 @@ class Generator(Actor, Configurable):
                     token_log_probs_list.append(per_token_log_probs)
 
         # Create episode with zero rewards (Grader will fill them in)
-        episode = Episodes(
+        episode = Episode(
             policy_version=self.policy_version,
             completions=completions,
             vllm_token_ids=token_ids_list,

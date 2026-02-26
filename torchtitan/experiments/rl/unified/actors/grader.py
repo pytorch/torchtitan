@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class Episodes:
+class Episode:
     """
     Data from one generation batch.
 
@@ -43,9 +43,9 @@ class Episodes:
 
 class Grader(Actor):
     """
-    Evaluates completions and assigns rewards to trajectory data.
+    Evaluates completions and assigns rewards to episode data.
 
-    The Grader receives trajectory data from the Generator
+    The Grader receives episode data from the Generator
     and computes rewards using a reward function. Advantage computation
     is done by the Trainer.
 
@@ -68,39 +68,39 @@ class Grader(Actor):
         logger.info(f"Grader initialized with group_size={self.group_size}")
 
     @endpoint
-    async def score(self, trajectory: Episodes) -> Episodes:
+    async def score(self, episode: Episode) -> Episode:
         """
-        Score a trajectory by computing rewards.
+        Score an episode by computing rewards.
 
         Args:
-            trajectory: Trajectory data (with or without rewards)
+            episode: Episode data (with or without rewards)
 
         Returns:
-            Episodes with computed rewards
+            Episode with computed rewards
         """
         logger.info(
-            f"Grader scoring trajectory (policy v{trajectory.policy_version})..."
+            f"Grader scoring episode (policy v{episode.policy_version})..."
         )
 
         # Compute rewards using reward function
         rewards = self.reward_fn(
-            trajectory.completions,
-            trajectory.expected_answers,
+            episode.completions,
+            episode.expected_answers,
             self.group_size,
         )
 
         reward_mean = rewards.mean()
         reward_std = rewards.std()
 
-        # Update trajectory with rewards
-        trajectory.rewards = rewards
+        # Update episode with rewards
+        episode.rewards = rewards
 
         logger.info(
             f"Grader finished scoring: "
             f"reward_mean={reward_mean.item():.4f}, reward_std={reward_std.item():.4f}"
         )
 
-        return trajectory
+        return episode
 
     @endpoint
     async def set_reward_fn(self, reward_fn: Callable) -> None:

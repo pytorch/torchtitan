@@ -34,12 +34,15 @@ def generate():
 
     config = rl_grpo_qwen3_0_6b()
     gen_config = config.generator
-    model_path = config.trainer.checkpoint.initial_load_path
+    model_path = config.trainer.hf_assets_path
 
     # Register TorchTitan model with vLLM before engine creation
-    from torchtitan.experiments.rl.unified.plugin import register
+    from torchtitan.experiments.rl.unified.plugin import (
+        register_model_to_vllm_model_registry,
+        VLLM_MODEL_NAME,
+    )
 
-    register(config.model_spec)
+    register_model_to_vllm_model_registry(config.model_spec)
     logger.info("Registered TorchTitan model with vLLM")
 
     logger.debug("Initializing vLLM LLMEngine with TorchTitan model")
@@ -53,19 +56,19 @@ def generate():
         # Model configuration
         model=model_path,
         trust_remote_code=True,
-        dtype=gen_config.dtype,
+        dtype=gen_config.vllm_model_dtype,
         # Parallelism configuration
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         # Use external_launcher only when launched via torchrun (multi-GPU);
         # for single-GPU, let vLLM pick the default executor.
         distributed_executor_backend=("external_launcher"),
         # Memory and performance
-        gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.enforce_eager,
+        gpu_memory_utilization=gen_config.vllm_gpu_memory_limit,
+        enforce_eager=gen_config.vllm_enforce_eager,
         # Seed
-        seed=gen_config.seed,
+        seed=gen_config.vllm_seed,
         # HuggingFace overrides
-        hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
+        hf_overrides={"architectures": [VLLM_MODEL_NAME]},
     )
 
     logger.debug("Initializing LLMEngine from EngineArgs...")

@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# This file applies the PT-D parallelisms (except pipeline parallelism) and various
-# training techniques (e.g. activation checkpointing and compile) to the Llama model.
+# RL-specific parallelize function for vLLM-compatible TP plan.
+# Applies tensor parallelism with DTensor-aware attention hooks
+# (PrepareModuleInputOutput) so vLLM's flash attention kernels receive
+# local tensors, and optionally FSDP for the trainer.
 
 import logging
 
@@ -24,15 +26,8 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config import (
-    TORCH_DTYPE_MAP,
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 logger = logging.getLogger(__name__)
 
@@ -41,16 +36,19 @@ def parallelize_qwen3(
     model: nn.Module,
     *,
     parallel_dims: ParallelDims,
-    training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
-    dump_folder: str,
     has_position_id: bool = False,
 ):
     """
-    Apply tensor parallelism and FSDP to the Qwen3 dense model for training.
+    Apply tensor parallelism to the Qwen3 dense model for RL training/inference.
+
+    NOTE: The function signature is intentionally simpler than core torchtitan's
+    parallelize_qwen3 — it only accepts the configs needed for TP.
+
+    Args:
+        has_position_id: Whether position IDs are passed as an explicit argument
+            to the attention module. True for vLLM inference (generator),
+            False for training (trainer).
     """
 
     if parallel_dims.tp_enabled:
@@ -63,27 +61,6 @@ def parallelize_qwen3(
             enable_async_tp=parallelism.enable_async_tensor_parallel,
             has_position_id=has_position_id,
         )
-
-    if parallel_dims.fsdp_enabled:
-        # dp_mesh is the mesh for FSDP/HSDP
-        names = (
-            ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
-        )
-        dp_mesh = parallel_dims.get_mesh(names)
-        apply_fsdp(
-            model,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-        )
-
-        if parallel_dims.dp_replicate_enabled:
-            logger.info("Applied HSDP to the model")
-        else:
-            logger.info("Applied FSDP to the model")
 
     return model
 
@@ -127,7 +104,6 @@ def apply_non_moe_tp(
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
     #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
-    # pyrefly: ignore [not-callable]
     if has_position_id:
         attention_module_plan = PrepareModuleInput(
             input_layouts=(Shard(1), Replicate(), None, Replicate()),
@@ -139,6 +115,7 @@ def apply_non_moe_tp(
             desired_input_layouts=(Replicate(), Replicate(), None, None),
         )
 
+    # pyrefly: ignore [not-callable]
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(
@@ -158,6 +135,7 @@ def apply_non_moe_tp(
                 sequence_dim=2,
                 use_local_output=False,
             ),
+            # Apply on vllm.Attention() module to use local tensor
             "attention.inner_attention": PrepareModuleInputOutput(
                 input_layouts=(Shard(1), Shard(1), Shard(1)),  # xq, xk, xv
                 desired_input_layouts=(Shard(1), Shard(1), Shard(1)),
@@ -217,18 +195,16 @@ def apply_fsdp(
     Apply data parallelism (via FSDP2) to the Qwen3 model.
 
     Args:
-        model (nn.Module): The model to apply data parallelism to.
-        dp_mesh (DeviceMesh): The device mesh to use for data parallelism.
-        param_dtype (torch.dtype): The data type to use for model parameters.
-        reduce_dtype (torch.dtype): The data type to use for reduction operations.
-        pp_enabled (bool): Whether pipeline parallelism is enabled.
-        cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str, optional): The policy to use for resharding after forward pass. Defaults to "default".
-            Other options: "never", "always".
-            - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
-            - "always" will enable `reshard_after_forward` for all forward passes.
-            - "never" will disable `reshard_after_forward` for all forward passes.
-
+        model: The model to apply data parallelism to.
+        dp_mesh: The device mesh to use for data parallelism.
+        param_dtype: The data type to use for model parameters.
+        reduce_dtype: The data type to use for reduction operations.
+        pp_enabled: Whether pipeline parallelism is enabled.
+        cpu_offload: Whether to offload model parameters to CPU.
+        reshard_after_forward_policy: The policy to use for resharding after forward pass.
+            "default" applies default resharding behavior.
+            "always" enables reshard_after_forward for all forward passes.
+            "never" disables reshard_after_forward for all forward passes.
     """
     mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
     fsdp_config = {"mesh": dp_mesh, "mp_policy": mp_policy}

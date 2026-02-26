@@ -152,14 +152,15 @@ def verify_logprob_identity(
     batch_token_log_probs: list[torch.Tensor],
 ) -> dict:
     """
-    Check if vLLM log probs and computed log probs are bit-wise identical.
+    Check if vLLM log probs and computed log probs are bit-wise identical,
+    and compute the log ratio (train/generator) between them.
 
     Args:
-        vllm_token_log_probs: Per-token log probs from vLLM (reference)
-        batch_token_log_probs: Per-token log probs computed by the model
+        vllm_token_log_probs: Per-token log probs from vLLM (generator)
+        batch_token_log_probs: Per-token log probs computed by the trainer model
 
     Returns:
-        Verification result dict with identity status and delta info
+        Verification result dict with identity status, delta info, and log ratio stats
     """
     result = {
         "bitwise_identical": True,
@@ -168,9 +169,12 @@ def verify_logprob_identity(
         "num_tokens_different": 0,
         "max_delta": 0.0,
         "avg_delta": 0.0,
+        "log_ratio_mean": 0.0,
+        "log_ratio_max_abs": 0.0,
     }
 
     all_deltas = []
+    all_log_ratios = []
 
     for vllm_lps, titan_lps in zip(vllm_token_log_probs, batch_token_log_probs):
         # Convert vLLM log probs to tensor
@@ -191,10 +195,20 @@ def verify_logprob_identity(
             deltas = (vllm_tensor - titan_tensor).abs()
             all_deltas.append(deltas)
 
+        # Log ratio: log(pi_train / pi_generator) = logprob_train - logprob_generator
+        # Should be 0 when weights are identical (ratio = 1)
+        all_log_ratios.append(titan_tensor - vllm_tensor)
+
     # Compute aggregate delta stats
     if all_deltas:
         combined_deltas = torch.cat(all_deltas)
         result["max_delta"] = combined_deltas.max().item()
         result["avg_delta"] = combined_deltas.mean().item()
+
+    # Compute log ratio stats
+    if all_log_ratios:
+        combined_log_ratios = torch.cat(all_log_ratios)
+        result["log_ratio_mean"] = combined_log_ratios.mean().item()
+        result["log_ratio_max_abs"] = combined_log_ratios.abs().max().item()
 
     return result
