@@ -236,7 +236,7 @@ class CompiledModule(torch.nn.Module):
     def load_state_dict(self, *args, **kwargs) -> Any:
         return self.inner.load_state_dict(*args, **kwargs)
 
-    def name_parameters(self, *args, **kwargs) -> Any:
+    def named_parameters(self, *args, **kwargs) -> Any:
         return self.inner.named_parameters(*args, **kwargs)
 
     def parameters(self, *args, **kwargs) -> Any:

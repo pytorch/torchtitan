@@ -7,18 +7,8 @@
 import gc
 from dataclasses import dataclass, field
 
-from torchtitan.config.configs import CompileConfig
+from torchtitan.experiments.compiler_toolkit.configs import CompilerToolkitCompileConfig
 from torchtitan.trainer import Trainer
-
-
-@dataclass(kw_only=True, slots=True)
-class CompilerToolkitCompileConfig(CompileConfig):
-    joint_passes: list[str] = field(default_factory=list)
-    """Joint graph pass names to apply on the joint forward-backward
-    graph before partitioning."""
-
-    passes: list[str] = field(default_factory=list)
-    """Compiler pass names to apply to the partitioned forward/backward graphs."""
 
 
 class CompilerToolkitTrainer(Trainer):
