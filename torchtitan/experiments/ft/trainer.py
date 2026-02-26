@@ -349,8 +349,6 @@ class FaultTolerantTrainer(Trainer):
                 pp_has_last_stage=pp_has_last_stage,
             )
 
-        # TODO: refactor into a Profiler container (similar to LoggerContainer in metrics.py)
-        # that holds both torch_profiler and memory_profiler, exposing a single .step() call.
         self.profiler = config.profiler.build()
 
         logger.info(
@@ -511,16 +509,11 @@ class FaultTolerantTrainer(Trainer):
             else f"replica_{self.ft_manager.replica_id}"
         )
         with (
-            self.profiler.maybe_enable_profiling(
+            self.profiler.active(
                 global_step=self.step,
                 base_folder=config.dump_folder,
                 leaf_folder=leaf_folder,
-            ) as torch_profiler,
-            self.profiler.maybe_enable_memory_snapshot(
-                global_step=self.step,
-                base_folder=config.dump_folder,
-                leaf_folder=leaf_folder,
-            ) as memory_profiler,
+            ) as prof_session,
             # FT addition: maybe_semi_sync_training context manager
             maybe_semi_sync_training(
                 config.fault_tolerance,
@@ -560,10 +553,7 @@ class FaultTolerantTrainer(Trainer):
                     self.validator.validate(self.model_parts, self.step)
 
                 # signal the profiler that the next profiling step has started
-                if torch_profiler:
-                    torch_profiler.step()
-                if memory_profiler:
-                    memory_profiler.step()
+                prof_session.step()
 
                 # reduce timeout after first train step for faster signal
                 # (assuming lazy init and compilation are finished)

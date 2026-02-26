@@ -164,6 +164,23 @@ class TestProfilerDisabledPaths(unittest.TestCase):
         with profiler.maybe_enable_memory_snapshot() as handle:
             self.assertIsNone(handle)
 
+    def test_active_disabled_yields_session_with_noop_step(self):
+        """active() with everything disabled yields a _ProfilingSession whose step() is a no-op."""
+        from torchtitan.tools.profiling import _ProfilingSession
+
+        profiler = Profiler(Profiler.Config())
+        with profiler.active(global_step=0, base_folder="/tmp") as session:
+            self.assertIsInstance(session, _ProfilingSession)
+            # step() must not raise when both handles are None
+            session.step()
+            session.step()
+
+    def test_active_default_args(self):
+        """active() works with all default keyword args."""
+        profiler = Profiler(Profiler.Config())
+        with profiler.active() as session:
+            session.step()
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestProfilerEnabledPathsGPU(unittest.TestCase):
