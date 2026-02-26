@@ -15,7 +15,8 @@ Pass Types:
 - Compiler passes: Applied to the partitioned forward/backward graphs
 """
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import torch
 from torch._functorch.aot_autograd import JointWithDescriptors

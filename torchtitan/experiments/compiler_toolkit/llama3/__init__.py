@@ -7,7 +7,9 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 
-from torchtitan.models.llama3 import llama3_configs
+from torchtitan.experiments.simple_fsdp.llama3 import (
+    _simple_fsdp_configs as simple_fsdp_llama3_configs,
+)
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -18,7 +20,7 @@ def model_registry(flavor: str) -> ModelSpec:
     return ModelSpec(
         name="compiler_toolkit/llama3",
         flavor=flavor,
-        model=llama3_configs[flavor],
+        model=simple_fsdp_llama3_configs[flavor],
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,

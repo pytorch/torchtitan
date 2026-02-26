@@ -8,9 +8,10 @@ import dataclasses
 import json
 import os
 import time
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from typing import Annotated, Any, cast, Iterable, Iterator
+from typing import Annotated, Any, cast
 
 import torch
 import torch.distributed.checkpoint.stateful

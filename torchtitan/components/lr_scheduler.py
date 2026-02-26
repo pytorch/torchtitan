@@ -7,8 +7,9 @@
 import copy
 import functools
 import math
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Literal
+from typing import Any, Literal
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim.lr_scheduler import LambdaLR, LRScheduler

@@ -4,13 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Optional
-
 import torch
 
 
 def multinomial_sample_one(
-    probs: torch.Tensor, rng: Optional[torch.Generator] = None
+    probs: torch.Tensor, rng: torch.Generator | None = None
 ) -> torch.Tensor:
     q = torch.empty_like(probs).exponential_(1, generator=rng)
     return torch.argmax(probs / q, dim=-1, keepdim=True).to(dtype=torch.long)
@@ -19,7 +17,7 @@ def multinomial_sample_one(
 def logits_to_probs(
     logits: torch.Tensor,
     temperature: float = 1.0,
-    top_k: Optional[int] = None,
+    top_k: int | None = None,
 ) -> torch.Tensor:
     logits = logits / max(temperature, 1e-5)
 
@@ -37,8 +35,8 @@ def generate_next_token(
     x: torch.Tensor,
     *,
     temperature: float = 1.0,
-    top_k: Optional[int] = None,
-    rng: Optional[torch.Generator] = None,
+    top_k: int | None = None,
+    rng: torch.Generator | None = None,
 ) -> torch.Tensor:
     logits = model(x)  # (B, T, vocab_size)
     probs = logits_to_probs(logits[:, -1, :], temperature, top_k)
@@ -53,8 +51,8 @@ def generate(
     *,
     max_new_tokens: int,
     temperature: float = 1.0,
-    top_k: Optional[int] = None,
-    seed: Optional[int] = None,
+    top_k: int | None = None,
+    seed: int | None = None,
 ) -> torch.Tensor:
     # ensure batch dimension (T,) --> (B, T)
     if input_ids.ndim == 1:
