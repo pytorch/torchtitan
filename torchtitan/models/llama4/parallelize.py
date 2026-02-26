@@ -46,7 +46,10 @@ from torchtitan.distributed.expert_parallel import (
     ReordererSequenceParallel,
     TensorParallel,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.distributed.tensor_parallel import (
+    ColwiseParallelWithGradPlacement,
+    maybe_enable_async_tp,
+)
 from torchtitan.models.common.moe import moe as moe_module
 from torchtitan.models.llama3.parallelize import (
     apply_ddp,
@@ -558,21 +561,23 @@ def apply_moe_ep_tp(
                 moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
-                # Use grad_placements to keep d_x as Partial in backward
-                # (avoids the all-reduce that from_local(Replicate) would
-                # otherwise trigger). The reduction happens once at the MoE
-                # output boundary (PrepareModuleInputOutput).
+                # Use ColwiseParallelWithGradPlacement to keep d_x as Partial in
+                # backward (avoids the all-reduce that from_local(Replicate)
+                # would otherwise trigger). For w2, output_layouts=Partial()
+                # skips the Partial→Replicate all-reduce in forward. The
+                # reduction happens once at the MoE output boundary
+                # (PrepareModuleInputOutput).
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": ColwiseParallel(
-                            grad_placements=(Partial(),),
+                        "moe.shared_experts.w1": ColwiseParallelWithGradPlacement(
+                            local_input_grad_placements=(Partial(),)
                         ),
                         "moe.shared_experts.w2": RowwiseParallel(
                             output_layouts=Partial(),
                         ),
-                        "moe.shared_experts.w3": ColwiseParallel(
-                            grad_placements=(Partial(),),
+                        "moe.shared_experts.w3": ColwiseParallelWithGradPlacement(
+                            local_input_grad_placements=(Partial(),)
                         ),
                     }
                 )
