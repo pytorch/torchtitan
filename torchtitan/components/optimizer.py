@@ -5,8 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import functools
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Generic, Iterator, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 import torch
 import torch.distributed.tensor
