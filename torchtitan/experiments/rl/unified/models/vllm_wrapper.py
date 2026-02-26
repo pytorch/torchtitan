@@ -130,6 +130,8 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Use TorchTitan model config directly (no HF config mapping)
         self.config = model_spec.model
         logger.debug(f"Creating model with config: {self.config}")
+
+        # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()
 
         # RoPE config from model for cache extension
@@ -142,14 +144,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             vllm_config
         )
 
-        # Replace attention with vLLM paged attention
-        tp_size = self.parallel_dims.tp
-        if tp_size > 1:
-            assert (
-                self.config.layer.attention.n_heads % tp_size == 0
-            ), "Only support when n_heads can be divided by tp_size"
-
-        replace_with_vllm_attention(self.model, tp_degree=tp_size)
+        # Replace attention with vLLM compatible flash attention
+        # TODO: Use config system to replace with vllm Attention
+        replace_with_vllm_attention(self.model, tp_degree=self.parallel_dims.tp)
 
         # NOTE: We need to apply parallelize within model.__init__ because vllm
         # doesn't separate model creation and parallelism application and instead
@@ -262,7 +259,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         else:
             max_position = 0
 
-        rope_cache = self._extend_rope_cache_if_needed(self.model.freqs_cis, max_position)
+        rope_cache = self._extend_rope_cache_if_needed(
+            self.model.freqs_cis, max_position
+        )
         positions = positions.unsqueeze(0)
 
         # Pass through transformer layers
@@ -365,8 +364,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
     def load_weights(self, weights_iter):
         """
         vLLM required API.
-        Load weights from HF checkpoint using the provided state dict adapter.
-        vLLM engine would call this function to load model weights.
+
+        This is a no-op method since model weights are already loaded during initialization.
+        Returns the names of all parameters that have been loaded so vLLM's safety check passes.
 
         Args:
             weights_iter: Iterator of (name, tensor) pairs from HF checkpoint
@@ -375,9 +375,6 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             Set of loaded parameter names
         """
 
-        # Since our model weights are already loaded during initialization,
-        # we need to return the names of all parameters that have been loaded
-        # so vLLM's safety check passes.
         loaded_param_names = set()
         for name, _ in self.model.named_parameters():
             loaded_param_names.add("model." + name)

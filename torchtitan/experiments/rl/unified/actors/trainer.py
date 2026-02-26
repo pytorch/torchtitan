@@ -24,7 +24,7 @@ from torchtitan.experiments.rl.unified.actors.utils import (
     compute_token_log_probs,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
+from torchtitan.experiments.rl.unified.configs import GRPOConfig
 from torchtitan.experiments.rl.unified.models.attention import (
     replace_with_vllm_compatible_flash_attention,
 )
@@ -42,7 +42,7 @@ class PolicyTrainer(Actor, Configurable):
 
     Args:
         config: PolicyTrainer.Config for model/optimizer/parallelism settings.
-        policy_optimization: GRPO hyperparameters.
+        grpo_config: GRPO hyperparameters.
         model_spec: Model specification (model config, parallelize_fn, state_dict_adapter).
         hf_assets_path: Path to HF assets folder for checkpoint loading.
     """
@@ -69,7 +69,7 @@ class PolicyTrainer(Actor, Configurable):
         config: Config,
         *,
         model_spec: ModelSpec,
-        policy_optimization: PolicyOptimizationConfig,
+        grpo_config: GRPOConfig,
         batch_invariant_mode: bool,
         hf_assets_path: str = "./tests/assets/tokenizer",
     ):
@@ -77,9 +77,9 @@ class PolicyTrainer(Actor, Configurable):
         self.model_spec = model_spec
 
         # GRPO settings
-        self.group_size = policy_optimization.group_size
-        self.grpo_beta = policy_optimization.beta
-        self.use_stable_grpo = policy_optimization.use_stable_grpo
+        self.group_size = grpo_config.group_size
+        self.grpo_beta = grpo_config.beta
+        self.use_stable_grpo = grpo_config.use_stable_grpo
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -110,13 +110,17 @@ class PolicyTrainer(Actor, Configurable):
             self.sd_adapter = None
 
         # Create training policy model
-        model = self._build_model(model_spec, config, device_type, batch_invariant_mode, hf_assets_path)
+        model = self._build_model(
+            model_spec, config, device_type, batch_invariant_mode, hf_assets_path
+        )
         model.train()
         self.model = model
         self.model_parts = [model]
 
         # Create reference model for KL divergence (frozen copy of initial policy)
-        ref_model = self._build_model(model_spec, config, device_type, batch_invariant_mode, hf_assets_path)
+        ref_model = self._build_model(
+            model_spec, config, device_type, batch_invariant_mode, hf_assets_path
+        )
         for p in ref_model.parameters():
             p.requires_grad = False
         ref_model.eval()
@@ -200,7 +204,9 @@ class PolicyTrainer(Actor, Configurable):
         # NOTE: Long-term this will be replaced by pytorch attention
         # supporting paged attention / kv cache.
         if batch_invariant_mode:
-            replace_with_vllm_compatible_flash_attention(model)
+            replace_with_vllm_compatible_flash_attention(
+                model, tp_size=self.parallel_dims.tp
+            )
 
         model = model_spec.parallelize_fn(
             model,
@@ -240,9 +246,7 @@ class PolicyTrainer(Actor, Configurable):
             rewards_normalized = rewards - reward_mean
 
         if self.use_stable_grpo:
-            return compute_grpo_advantages_stable(
-                rewards_normalized, self.group_size
-            )
+            return compute_grpo_advantages_stable(rewards_normalized, self.group_size)
         else:
             return compute_grpo_advantages(
                 rewards_normalized, self.group_size, beta=self.grpo_beta

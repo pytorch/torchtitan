@@ -15,21 +15,7 @@ from dataclasses import dataclass
 
 
 @dataclass(kw_only=True, slots=True)
-class VLLMSamplingConfig:
-    """Sampling parameters passed to vLLM's SamplingParams."""
-
-    temperature: float = 0.8
-    """Sampling temperature. 0.0 = greedy, higher = more random."""
-
-    top_p: float = 0.95
-    """Nucleus sampling threshold."""
-
-    max_tokens: int = 100
-    """Maximum number of tokens to generate per completion."""
-
-
-@dataclass(kw_only=True, slots=True)
-class PolicyOptimizationConfig:
+class GRPOConfig:
     """Hyperparameters for Group Relative Policy Optimization."""
 
     beta: float = 0.1

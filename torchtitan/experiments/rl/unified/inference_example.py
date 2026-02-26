@@ -56,17 +56,17 @@ def generate():
         # Model configuration
         model=model_path,
         trust_remote_code=True,
-        dtype=gen_config.vllm_model_dtype,
+        dtype=gen_config.model_dtype,
         # Parallelism configuration
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         # Use external_launcher only when launched via torchrun (multi-GPU);
         # for single-GPU, let vLLM pick the default executor.
         distributed_executor_backend=("external_launcher"),
         # Memory and performance
-        gpu_memory_utilization=gen_config.vllm_gpu_memory_limit,
-        enforce_eager=gen_config.vllm_enforce_eager,
+        gpu_memory_utilization=gen_config.gpu_memory_limit,
+        enforce_eager=gen_config.enforce_eager,
         # Seed
-        seed=gen_config.vllm_seed,
+        seed=gen_config.seed,
         # HuggingFace overrides
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
     )

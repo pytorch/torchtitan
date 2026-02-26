@@ -16,11 +16,12 @@ from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
 
 from torchtitan.experiments.rl.unified.actors.grader import Episode
-from torchtitan.experiments.rl.unified.configs import (
-    PolicyOptimizationConfig,
-    VLLMSamplingConfig,
-)
+from torchtitan.experiments.rl.unified.configs import GRPOConfig
 
+from torchtitan.experiments.rl.unified.plugin import (
+    register_model_to_vllm_model_registry,
+    VLLM_MODEL_NAME,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
 
@@ -32,7 +33,21 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 logger = logging.getLogger(__name__)
 
 
-class Generator(Actor, Configurable):
+@dataclass(kw_only=True, slots=True)
+class VLLMSamplingConfig:
+    """Sampling parameters passed to vLLM's SamplingParams."""
+
+    temperature: float = 0.8
+    """Sampling temperature. 0.0 = greedy, higher = more random."""
+
+    top_p: float = 0.95
+    """Nucleus sampling threshold."""
+
+    max_tokens: int = 100
+    """Maximum number of tokens to generate per completion."""
+
+
+class VLLMGenerator(Actor, Configurable):
     """
     Generates rollouts using vLLM engine.
 
@@ -44,7 +59,7 @@ class Generator(Actor, Configurable):
         config: Generator-specific configuration.
         model_path: Path to the HF model checkpoint.
         batch_invariant_mode: Enable batch-invariant mode for deterministic ops.
-        policy_optimization: GRPO hyperparameters.
+        grpo_config: GRPO hyperparameters.
         prompt_texts: List of prompt strings.
         expected_answers: List of expected answer strings.
     """
@@ -59,19 +74,19 @@ class Generator(Actor, Configurable):
         sampling: VLLMSamplingConfig = field(default_factory=VLLMSamplingConfig)
         """Default sampling parameters for generation."""
 
-        vllm_attention_backend: str = "FLASH_ATTN"
+        attention_backend: str = "FLASH_ATTN"
         """vLLM attention backend to use (e.g., FLASH_ATTN, XFORMERS)."""
-        
-        vllm_model_dtype: str = "bfloat16"
+
+        model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
 
-        vllm_gpu_memory_limit: float = 0.5
+        gpu_memory_limit: float = 0.5
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
-        vllm_enforce_eager: bool = True
+        enforce_eager: bool = True
         """Disable CUDA graphs in vLLM (use eager execution)."""
 
-        vllm_seed: int | None = None
+        seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
 
     def __init__(
@@ -81,7 +96,7 @@ class Generator(Actor, Configurable):
         model_spec: ModelSpec,
         model_path: str,
         batch_invariant_mode: bool,
-        policy_optimization: PolicyOptimizationConfig,
+        grpo_config: GRPOConfig,
         prompt_texts: list[str],
         expected_answers: list[str],
     ):
@@ -89,11 +104,6 @@ class Generator(Actor, Configurable):
         self.model_spec = model_spec
 
         # Register TorchTitan model with vLLM before any engine creation
-        from torchtitan.experiments.rl.unified.plugin import (
-            register_model_to_vllm_model_registry,
-            VLLM_MODEL_NAME,
-        )
-
         register_model_to_vllm_model_registry(model_spec)
 
         # Set vLLM environment variables from config before any vLLM initialization
@@ -101,7 +111,7 @@ class Generator(Actor, Configurable):
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
             init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 
-        os.environ["VLLM_ATTENTION_BACKEND"] = config.vllm_attention_backend
+        os.environ["VLLM_ATTENTION_BACKEND"] = config.attention_backend
 
         self.prompt_texts = prompt_texts
         self.expected_answers = expected_answers
@@ -110,24 +120,24 @@ class Generator(Actor, Configurable):
         self.model_path = model_path
         self.max_new_tokens = config.sampling.max_tokens
         self.temperature = config.sampling.temperature
-        self.group_size = policy_optimization.group_size
+        self.group_size = grpo_config.group_size
 
         # Build vLLM engine
         engine_kwargs = dict(
             model=model_path,
             trust_remote_code=True,
-            dtype=config.vllm_model_dtype,
+            dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
             distributed_executor_backend="external_launcher",
-            gpu_memory_utilization=config.vllm_gpu_memory_limit,
-            enforce_eager=config.vllm_enforce_eager,
+            gpu_memory_utilization=config.gpu_memory_limit,
+            enforce_eager=config.enforce_eager,
             hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum.FLASH_ATTN,
             ),
         )
-        if config.vllm_seed is not None:
-            engine_kwargs["seed"] = config.vllm_seed
+        if config.seed is not None:
+            engine_kwargs["seed"] = config.seed
         engine_args = EngineArgs(**engine_kwargs)
 
         logger.info("Initializing LLMEngine from EngineArgs...")
@@ -159,7 +169,7 @@ class Generator(Actor, Configurable):
                 temperature=self.temperature,
                 max_tokens=self.max_new_tokens,
                 n=self.group_size,
-                seed=self.config.vllm_seed,
+                seed=self.config.seed,
                 logprobs=1,
                 prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
                 output_kind=RequestOutputKind.FINAL_ONLY,  # Only return completed outputs
@@ -226,13 +236,9 @@ class Generator(Actor, Configurable):
         # Convert plain local tensors (TP shards from trainer) to DTensors
         # matching the vLLM model's sharding layout. The trainer exports
         # weights via to_local() which strips DTensor metadata.
-        model_state_dict = dict(
-            self._get_model().model.state_dict()
-        )
+        model_state_dict = dict(self._get_model().model.state_dict())
         for name, tensor in local_state_dict.items():
-            if name in model_state_dict and isinstance(
-                model_state_dict[name], DTensor
-            ):
+            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
                 if isinstance(tensor, DTensor):
                     continue
                 target_dtensor = model_state_dict[name]

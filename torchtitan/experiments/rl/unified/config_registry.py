@@ -14,12 +14,12 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
-from torchtitan.experiments.rl.unified.actors.generator import Generator
-from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.unified.configs import (
-    PolicyOptimizationConfig,
+from torchtitan.experiments.rl.unified.actors.generator import (
+    VLLMGenerator,
     VLLMSamplingConfig,
 )
+from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.unified.configs import GRPOConfig
 from torchtitan.experiments.rl.unified.simple_grpo import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
@@ -47,15 +47,15 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             ),
             hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         ),
-        policy_optimization=PolicyOptimizationConfig(
+        grpo_config=GRPOConfig(
             beta=0.1,
             group_size=8,
             use_stable_grpo=False,
         ),
-        generator=Generator.Config(
-            vllm_model_dtype="bfloat16",
-            vllm_gpu_memory_limit=0.5,
-            vllm_enforce_eager=True,
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            gpu_memory_limit=0.5,
+            enforce_eager=True,
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
@@ -64,7 +64,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=100,
             ),
-            vllm_attention_backend="FLASH_ATTN",
+            attention_backend="FLASH_ATTN",
         ),
     )
 
@@ -90,14 +90,14 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 data_parallel_replicate_degree=1,
             ),
         ),
-        policy_optimization=PolicyOptimizationConfig(
+        grpo_config=GRPOConfig(
             beta=0.1,
             group_size=4,
             use_stable_grpo=False,
         ),
-        generator=Generator.Config(
-            vllm_gpu_memory_limit=0.3,
-            vllm_enforce_eager=True,
+        generator=VLLMGenerator.Config(
+            gpu_memory_limit=0.3,
+            enforce_eager=True,
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
             ),

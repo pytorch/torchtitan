@@ -10,7 +10,7 @@ from typing import Callable, List, Optional
 
 import torch
 from monarch.actor import Actor, endpoint
-from torchtitan.experiments.rl.unified.configs import PolicyOptimizationConfig
+from torchtitan.experiments.rl.unified.configs import GRPOConfig
 from torchtitan.experiments.rl.vllm_compat.simple_rl import trivial_reward_function
 
 logger = logging.getLogger(__name__)
@@ -50,17 +50,17 @@ class Grader(Actor):
     is done by the Trainer.
 
     Args:
-        policy_optimization: Policy optimization config containing group_size.
+        grpo_config: GRPO config containing group_size.
         reward_fn: Optional custom reward function. If not provided,
                    uses trivial_reward_function from simple_rl.
     """
 
     def __init__(
         self,
-        policy_optimization: PolicyOptimizationConfig,
+        grpo_config: GRPOConfig,
         reward_fn: Optional[Callable] = None,
     ):
-        self.group_size = policy_optimization.group_size
+        self.group_size = grpo_config.group_size
 
         # Set reward function
         self.reward_fn = reward_fn if reward_fn is not None else trivial_reward_function
@@ -78,9 +78,7 @@ class Grader(Actor):
         Returns:
             Episode with computed rewards
         """
-        logger.info(
-            f"Grader scoring episode (policy v{episode.policy_version})..."
-        )
+        logger.info(f"Grader scoring episode (policy v{episode.policy_version})...")
 
         # Compute rewards using reward function
         rewards = self.reward_fn(

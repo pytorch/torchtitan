@@ -9,6 +9,7 @@ import math
 from collections.abc import Callable
 
 import torch
+from torch.distributed._tensor import DTensor
 from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
 
@@ -33,6 +34,16 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         scale: float | None = None,
         enable_gqa: bool = False,
     ) -> torch.Tensor:
+        # Unwrap DTensor inputs to local tensors for attention computation
+        device_mesh = None
+        placements = None
+        if isinstance(q, DTensor):
+            device_mesh = q.device_mesh
+            placements = q.placements
+            q = q.to_local()
+            k = k.to_local()
+            v = v.to_local()
+
         # Flash Attention varlen expects: (batch, seqlen, nheads, headdim)
         # The input from TorchTitan is always (batch, num_heads, seq_len, head_dim)
         # We need to transpose to (batch, seq_len, num_heads, head_dim)
@@ -255,4 +266,12 @@ class VLLMCompatibleFlashAttention(torch.nn.Module):
         # Transpose back to TorchTitan format: (batch, num_heads, seq_len, head_dim)
         output = output.transpose(1, 2)
 
-        return output.to(original_dtype)
+        output = output.to(original_dtype)
+
+        # Wrap output back as DTensor if inputs were DTensors
+        if device_mesh is not None:
+            output = DTensor.from_local(
+                output, device_mesh=device_mesh, placements=placements
+            )
+
+        return output
