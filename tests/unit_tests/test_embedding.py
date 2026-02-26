@@ -51,6 +51,20 @@ class TestEmbedding(unittest.TestCase):
         # Deterministic check: std must be within 2x of the requested init_std
         self.assertLess(emb.weight.std().item(), config.init_std * 2)
 
+    def test_config_pre_specified_build(self):
+        """Embedding.Config with both fields pre-specified builds with no kwargs."""
+        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        emb = config.build()
+        self.assertIsInstance(emb, Embedding)
+        self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
+
+    def test_config_partial_pre_specified(self):
+        """Embedding.Config with one field pre-specified, other via build()."""
+        config = Embedding.Config(num_embeddings=100)
+        emb = config.build(embedding_dim=32)
+        self.assertIsInstance(emb, Embedding)
+        self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
+
 
 if __name__ == "__main__":
     unittest.main()

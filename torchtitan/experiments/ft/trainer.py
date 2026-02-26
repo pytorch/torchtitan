@@ -8,9 +8,10 @@ import dataclasses
 import json
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import cast, Iterator
+from typing import cast
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record

@@ -9,8 +9,9 @@
 import inspect
 import pickle
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any
 
 import torch
 

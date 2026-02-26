@@ -11,8 +11,9 @@ including images and text. Images are interleaved with text at native aspect rat
 It supports both streaming and non-streaming datasets from HuggingFace.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from datasets import Dataset, load_dataset
