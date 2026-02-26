@@ -18,7 +18,6 @@ from torchtitan.models.flux.model.layers import (
     timestep_embedding,
 )
 from torchtitan.protocols import BaseModel
-from torchtitan.tools.logging import logger
 
 
 class FluxModel(BaseModel):
@@ -85,18 +84,63 @@ class FluxModel(BaseModel):
             )
         )
 
+        # Derived sequence lengths, set by update_from_config from trainer
+        # config. Used for FLOPs estimation in get_nparams_and_flops.
+        seq_len_img: int = field(init=False, repr=False, default=0)
+        seq_len_txt: int = field(init=False, repr=False, default=0)
+
         def update_from_config(self, *, trainer_config, **kwargs) -> None:
-            pass
+            # Compute image token count: autoencoder downscales the image,
+            # then pack_latents tiles the latent into 2×2 patches.
+            # pyrefly: ignore [missing-attribute]
+            img_size = trainer_config.dataloader.img_size
+            ae_downscale = 2 ** (len(self.autoencoder_params.ch_mult) - 1)
+            LATENT_PATCH_SIZE = 2  # from pack_latents in utils.py
+            latent_side = img_size // ae_downscale // LATENT_PATCH_SIZE
+            self.seq_len_img = latent_side * latent_side
+
+            # pyrefly: ignore [missing-attribute]
+            self.seq_len_txt = trainer_config.encoder.max_t5_encoding_len
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
-            # TODO(jianiw): Add the number of flops for the autoencoder
             nparams = sum(p.numel() for p in model.parameters())
-            logger.warning(
-                "FLUX model haven't implement get_nparams_and_flops() function"
+
+            assert self.seq_len_img > 0 and self.seq_len_txt > 0, (
+                "update_from_config must be called before get_nparams_and_flops"
             )
-            return nparams, 1
+            total_seq_len = self.seq_len_img + self.seq_len_txt
+
+            # Base: 6 FLOPs per parameter per token (fwd + bwd for linear
+            # layers). This assumes every token passes through every parameter.
+            num_flops_per_token = 6 * nparams
+
+            # Correction for DoubleStreamBlocks: img and txt tokens pass
+            # through separate but symmetric linear layers, so 6*nparams
+            # double-counts one side's parameters. Subtract one side per block.
+            #
+            # Per-side weight params (bias/norm terms are negligible):
+            #   img_attn.qkv:  h * 3h           = 3h²
+            #   img_attn.proj: h * h             =  h²
+            #   img_mlp:       2 * h * h*r       = 2rh²
+            #   img_mod.lin:   h * 6h (double)   = 6h²
+            #   Total: h² * (10 + 2r)
+            db_h = self.double_block_config.hidden_size
+            db_r = self.double_block_config.mlp_ratio
+            nparams_db_one_side = int(db_h * db_h * (10 + 2 * db_r))
+            num_flops_per_token -= 6 * nparams_db_one_side * self.depth
+
+            # Add non-parameterized self-attention FLOPs (QK^T and attn*V).
+            # Per PaLM convention: 6 * hidden_size * seq_len per token per
+            # layer (covers 2 matmuls × fwd+bwd × multiply-add).
+            sb_h = self.single_block_config.hidden_size
+            num_flops_per_token += (
+                6 * sb_h * total_seq_len * self.depth_single_blocks
+                + 6 * db_h * total_seq_len * self.depth
+            )
+
+            return nparams, num_flops_per_token
 
     def __init__(self, config: Config):
         super().__init__()
