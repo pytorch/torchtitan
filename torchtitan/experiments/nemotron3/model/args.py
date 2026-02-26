@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from torch import nn
 
 from torchtitan.config import JobConfig
-from torchtitan.models.utils import get_dense_model_nparams_and_flops
 from torchtitan.protocols.model import BaseModelArgs
 from torchtitan.tools.logging import logger
 
@@ -142,11 +141,60 @@ class Nemotron3ModelArgs(BaseModelArgs):
 
     def get_nparams_and_flops(
         self, model: nn.Module, seq_len: int
-    ) -> tuple[int, float]:
-        # TODO(aghilann): this number should accurately consider the {Mambda, Attention, MoE layers}
-        return get_dense_model_nparams_and_flops(
-            self,
-            model,
-            2 * self.head_dim,
-            seq_len,
+    ) -> tuple[int, int]:
+        """
+        Estimate parameters and FLOPs/token for Nemotron's hybrid stack.
+
+        This follows the same active-parameter accounting pattern used for MoE
+        models, while only applying the attention quadratic term to attention
+        layers in the hybrid pattern.
+        """
+        nparams_embedding = 0
+        nparams_moe_router = 0
+        nparams_shared_experts = 0
+        nparams_experts = 0
+        nparams_dense = 0
+
+        for name, p in model.named_parameters():
+            if "tok_embeddings" in name:
+                nparams_embedding += p.numel()
+                nparams_dense += p.numel()
+            elif ".mixer.shared_experts." in name:
+                nparams_shared_experts += p.numel()
+            elif ".mixer.router." in name:
+                nparams_moe_router += p.numel()
+            elif ".mixer.experts." in name:
+                nparams_experts += p.numel()
+            else:
+                nparams_dense += p.numel()
+
+        nparams_sparse = nparams_moe_router + nparams_shared_experts + nparams_experts
+        nparams = nparams_dense + nparams_sparse
+
+        if self.n_routed_experts > 0:
+            nparams_sparse_active = (
+                nparams_moe_router
+                + nparams_shared_experts
+                + nparams_experts * self.num_experts_per_tok // self.n_routed_experts
+            )
+        else:
+            nparams_sparse_active = nparams_moe_router + nparams_shared_experts
+        active_nparams = nparams_dense + nparams_sparse_active
+
+        attention_layers = self.layers_block_type.count("attention")
+        head_dims = 2 * self.head_dim
+        num_flops_per_token = (
+            6 * (active_nparams - nparams_embedding)
+            + 6 * attention_layers * self.n_heads * head_dims * seq_len
         )
+
+        logger.info(
+            f"Nemotron hybrid parameter count: dense {nparams_dense:,}, "
+            f"sparse {nparams_sparse:,}, active {active_nparams:,}, "
+            f"attention_layers {attention_layers}"
+        )
+
+        if self.enable_weight_tying:
+            nparams = nparams - nparams_embedding
+
+        return nparams, num_flops_per_token
