@@ -292,7 +292,9 @@ def apply_moe_ep_tp(
                     desired_output_layouts=(Shard(1),),
                 ),
                 # replicate computation for the router
-                "moe.router.gate": NoParallel(),
+                "moe.router.gate": NoParallel(
+                    local_output_grad_placements=(Replicate(),),
+                ),
             }
             if ep_mesh is not None and not etp_enabled:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that

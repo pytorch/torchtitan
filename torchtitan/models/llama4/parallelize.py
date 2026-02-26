@@ -13,7 +13,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-from torch.distributed.tensor import distribute_module, Partial, Replicate, Shard
+from torch.distributed.tensor import Partial, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -34,6 +34,10 @@ from torchtitan.config import (
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
+from torchtitan.distributed.tensor_parallel import (
+    ColwisePartitionOnly,
+    RowwisePartitionOnly,
+)
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
     get_dual_pipe_v_flag,
@@ -516,61 +520,6 @@ def apply_fsdp(
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
 
 
-class MoEColwiseParallel(ColwiseParallel):
-    """ColwiseParallel variant for shared experts inside MoE layers.
-
-    Partitions weights identically to ColwiseParallel (Shard(0)), but skips
-    registering input/output hooks. Instead, FeedForward.forward extracts
-    local weight shards and uses F.linear with plain tensors. This avoids
-    DTensor dispatch wrapping x as DTensor(Replicate), whose backward would
-    all-reduce d_x. d_x stays Partial and gets reduced once at the MoE output
-    boundary.
-    """
-
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        if isinstance(module, nn.Linear):
-            partition_fn = self._partition_linear_fn
-        elif isinstance(module, nn.Embedding):
-            partition_fn = self._partition_embedding_fn
-        else:
-            raise NotImplementedError(
-                "MoEColwiseParallel currently only supports nn.Linear and nn.Embedding!"
-            )
-        module._moe_no_hooks = True
-        return distribute_module(
-            module,
-            device_mesh,
-            partition_fn,
-        )
-
-
-class MoERowwiseParallel(RowwiseParallel):
-    """RowwiseParallel variant for shared experts inside MoE layers.
-
-    Partitions weights identically to RowwiseParallel (Shard(1) for weight,
-    Replicate for bias), but skips registering input/output hooks. This avoids
-    both the input hook's backward all-reduce on d_x and the output hook's
-    Partial->Replicate all-reduce. d_x stays Partial and gets reduced once
-    at the MoE output boundary.
-    """
-
-    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        if isinstance(module, nn.Linear):
-            partition_fn = self._partition_linear_fn
-        elif isinstance(module, nn.Embedding):
-            partition_fn = self._partition_embedding_fn
-        else:
-            raise NotImplementedError(
-                "MoERowwiseParallel currently only supports nn.Linear and nn.Embedding!"
-            )
-        module._moe_no_hooks = True
-        return distribute_module(
-            module,
-            device_mesh,
-            partition_fn,
-        )
-
-
 def apply_moe_ep_tp(
     model: nn.Module,
     tp_mesh: DeviceMesh | None,
@@ -601,7 +550,9 @@ def apply_moe_ep_tp(
                     desired_output_layouts=(Shard(1),),
                 ),
                 # replicate computation for the router
-                "moe.router.gate": NoParallel(output_grad_as_partial=True),
+                "moe.router.gate": NoParallel(
+                    local_output_grad_placements=(Partial(),),
+                ),
             }
             if ep_mesh is not None and etp_mesh is None:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
@@ -617,9 +568,9 @@ def apply_moe_ep_tp(
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": MoEColwiseParallel(),
-                        "moe.shared_experts.w2": MoERowwiseParallel(),
-                        "moe.shared_experts.w3": MoEColwiseParallel(),
+                        "moe.shared_experts.w1": ColwisePartitionOnly(),
+                        "moe.shared_experts.w2": RowwisePartitionOnly(),
+                        "moe.shared_experts.w3": ColwisePartitionOnly(),
                     }
                 )
             parallelize_module(

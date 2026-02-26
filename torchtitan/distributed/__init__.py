@@ -39,15 +39,16 @@ class NoParallel(ParallelStyle):
         *,
         input_layout: Placement | None = None,
         output_layout: Placement | None = None,
-        use_local_output: bool = True,
-        output_grad_as_partial: bool = False,
+        local_output_grad_placements: tuple[Placement, ...] | None = None,
     ):
         super().__init__()
         self.input_layout = input_layout or Replicate()
         self.output_layout = output_layout or Replicate()
         self.desired_input_layout = Replicate()
-        self.use_local_output = use_local_output
-        self.output_grad_as_partial = output_grad_as_partial
+        # If None, output stays as DTensor.
+        # If provided, output is cast to local tensor via
+        # to_local(grad_placements=local_output_grad_placements).
+        self.local_output_grad_placements = local_output_grad_placements
 
     @staticmethod
     def _prepare_input_fn(
@@ -76,20 +77,17 @@ class NoParallel(ParallelStyle):
     @staticmethod
     def _prepare_output_fn(
         output_layout: Placement,
-        use_local_output: bool,
-        output_grad_as_partial: bool,
+        local_output_grad_placements: tuple[Placement, ...] | None,
         mod: nn.Module,
         outputs: DTensor,
         device_mesh: DeviceMesh,
     ) -> torch.Tensor | DTensor:
         if outputs.placements != (output_layout,):
             outputs = outputs.redistribute(placements=(output_layout,), async_op=True)
-        # back to local tensor
-        if use_local_output:
-            if output_grad_as_partial:
-                return outputs.to_local(grad_placements=(Partial(),))
-            return outputs.to_local()
-        return outputs
+        if local_output_grad_placements is not None:
+            return outputs.to_local(grad_placements=local_output_grad_placements)
+        else:
+            return outputs
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
@@ -108,7 +106,6 @@ class NoParallel(ParallelStyle):
                 # pyrefly: ignore [bad-argument-type]
                 self._prepare_output_fn,
                 self.output_layout,
-                self.use_local_output,
-                self.output_grad_as_partial,
+                self.local_output_grad_placements,
             ),
         )

@@ -287,9 +287,9 @@ def apply_non_moe_tp(
             # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
             # so that the intermedidate results k is generated as a DTensor and its gradient is
             # correctly handled by the autograd engine.
-            "attention.wkv_a": NoParallel(use_local_output=False),
+            "attention.wkv_a": NoParallel(),
             "attention.wkv_b": colwise_parallel(use_local_output=False),
-            "attention.kv_norm": NoParallel(use_local_output=False),
+            "attention.kv_norm": NoParallel(),
             # NOTE: use_local_output=True so that the inputs to FlexAttention are plain Tensors
             "attention.inner_attention": attention_kernel_plan,
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
@@ -308,9 +308,9 @@ def apply_non_moe_tp(
         else:
             layer_plan.update(
                 {
-                    "attention.wq_a": NoParallel(use_local_output=False),
+                    "attention.wq_a": NoParallel(),
                     "attention.wq_b": colwise_parallel(use_local_output=False),
-                    "attention.q_norm": NoParallel(use_local_output=False),
+                    "attention.q_norm": NoParallel(),
                 }
             )
 
