@@ -131,6 +131,20 @@ class GroupedExperts(nn.Module):
         trunc_normal_(self.w3, mean=0.0, std=init_std)
 
 
+class LinearFloat32(nn.Linear):
+    """Linear layer with torch.float32 compute type. Wrapper
+    class is used to maintain any hooks that are applied
+    to router.gate by other pieces of code.
+    """
+
+    def forward(self, x):
+        return F.linear(
+            x.to(torch.float32),
+            self.weight.to(torch.float32),
+            self.bias.to(torch.float32) if self.bias is not None else None,
+        )
+
+
 class TokenChoiceTopKRouter(nn.Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
         routed to top K experts based on the router scores.
@@ -167,7 +181,8 @@ class TokenChoiceTopKRouter(nn.Module):
         _debug_force_load_balance: bool = False,
     ):
         super().__init__()
-        self.gate = nn.Linear(dim, num_experts, bias=gate_bias)
+        # NOTE: gate is computed in f32 for stability of expert load balancing
+        self.gate = LinearFloat32(dim, num_experts, bias=gate_bias)
         self.num_experts = num_experts
         self.num_expert_groups = num_expert_groups
         self.num_limited_groups = num_limited_groups
@@ -255,18 +270,13 @@ class TokenChoiceTopKRouter(nn.Module):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        # Gate is computed in float32 to help stability of expert load balancing.
-        # The score computation directly after this also needs to be computed in float32
-        # to avoid loss explosion.
-        scores = F.linear(
-            x.to(torch.float32),
-            self.gate.weight.to(torch.float32),
-            self.gate.bias.to(torch.float32) if self.gate.bias is not None else None,
-        )
+        scores = self.gate(x)
+
+        # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores)
+            scores = torch.sigmoid(scores.to(torch.float32))
         elif self.score_func == "softmax":
-            scores = F.softmax(scores, dim=1)
+            scores = F.softmax(scores.to(torch.float32), dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 
