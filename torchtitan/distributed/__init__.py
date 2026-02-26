@@ -34,7 +34,7 @@ class NoParallel(ParallelStyle):
         *,
         input_layout: Placement | None = None,
         output_layout: Placement | None = None,
-        local_output_grad_placements: tuple[Placement, ...] | None = None,
+        local_output_grad_placements: Sequence[Placement] | None = None,
     ):
         super().__init__()
         self.input_layout = input_layout or Replicate()

@@ -28,8 +28,8 @@ class ColwiseParallelWithGradPlacement(ColwiseParallel):
     back to Replicate.  This subclass overrides ``_prepare_input_fn`` to pass
     ``local_input_grad_placements`` to ``DTensor.from_local``, giving users
     explicit control over the gradient placement during backward.  When not
-    specified, defaults to ``(Partial(),)`` so that d_x stays Partial and is
-    not all-reduced.
+    specified, defaults to ``None`` and the gradient placement follows the
+    default guarantees of ``DTensor.from_local``.
     """
 
     def __init__(
@@ -45,11 +45,7 @@ class ColwiseParallelWithGradPlacement(ColwiseParallel):
             output_layouts=output_layouts,
             use_local_output=use_local_output,
         )
-        self.local_input_grad_placements = (
-            local_input_grad_placements
-            if local_input_grad_placements is not None
-            else (Partial(),)
-        )
+        self.local_input_grad_placements = local_input_grad_placements
 
     @staticmethod
     def _prepare_input_fn(
