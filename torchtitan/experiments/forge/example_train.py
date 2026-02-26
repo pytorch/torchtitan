@@ -112,8 +112,6 @@ class Trainer(ForgeEngine):
                 metrics_processor=self.metrics_processor,
             )
 
-        # TODO: refactor into a Profiler container (similar to LoggerContainer in metrics.py)
-        # that holds both torch_profiler and memory_profiler, exposing a single .step() call.
         self.profiler = config.profiler.build()
 
         logger.info(
@@ -335,16 +333,10 @@ class Trainer(ForgeEngine):
         self.checkpointer.load(step=config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}.")
 
-        with (
-            self.profiler.maybe_enable_profiling(
-                global_step=self.step,
-                base_folder=config.dump_folder,
-            ) as torch_profiler,
-            self.profiler.maybe_enable_memory_snapshot(
-                global_step=self.step,
-                base_folder=config.dump_folder,
-            ) as memory_profiler,
-        ):
+        with self.profiler.active(
+            global_step=self.step,
+            base_folder=config.dump_folder,
+        ) as prof_session:
             data_iterator = self.batch_generator(self.dataloader)
             while self.step < config.training.steps:
                 self.step += 1
@@ -367,10 +359,7 @@ class Trainer(ForgeEngine):
                 )
 
                 # signal the profiler that the next profiling step has started
-                if torch_profiler:
-                    torch_profiler.step()
-                if memory_profiler:
-                    memory_profiler.step()
+                prof_session.step()
 
                 # reduce timeout after first train step for faster signal
                 # (assuming lazy init and compilation are finished)

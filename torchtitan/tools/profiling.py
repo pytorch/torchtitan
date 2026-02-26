@@ -133,6 +133,27 @@ class OverlapAnalyzer(ProfileAnalyzer):
         )
 
 
+class _ProfilingSession:
+    """Unified handle returned by :meth:`Profiler.active`.
+
+    Wraps both the ``torch.profiler.profile`` handle and the ``MemoryProfiler``
+    handle (either may be ``None`` when the corresponding feature is disabled)
+    and exposes a single ``step()`` call so the training loop does not need to
+    know about the internal structure of profiling.
+    """
+
+    def __init__(self, torch_profiler, memory_profiler) -> None:
+        self._torch = torch_profiler
+        self._mem = memory_profiler
+
+    def step(self) -> None:
+        """Advance all active profilers by one training step."""
+        if self._torch is not None:
+            self._torch.step()
+        if self._mem is not None:
+            self._mem.step()
+
+
 class Profiler(Configurable):
     """Owns profiling and memory snapshot lifecycle for a training run.
 
@@ -193,6 +214,45 @@ class Profiler(Configurable):
         if config.enable_overlap_analysis:
             self._analyzers.append(OverlapAnalyzer())
         # TODO: support list[ProfileAnalyzer.Config] in Profiler.Config for extensible analyzers
+
+    @contextlib.contextmanager
+    def active(
+        self,
+        *,
+        global_step: int = 0,
+        base_folder: str = "",
+        leaf_folder: str = "",
+    ):
+        """Unified context manager that activates all profiling for a training run.
+
+        Enters both ``maybe_enable_profiling`` and ``maybe_enable_memory_snapshot``
+        and yields a single :class:`_ProfilingSession` handle whose ``step()``
+        method advances both.  Callers do not need to know how many sub-profilers
+        are active.
+
+        Example::
+
+            with self.profiler.active(global_step=step, base_folder=folder) as prof:
+                for step in training_loop:
+                    ...
+                    prof.step()
+        """
+        with contextlib.ExitStack() as stack:
+            torch_profiler = stack.enter_context(
+                self.maybe_enable_profiling(
+                    global_step=global_step,
+                    base_folder=base_folder,
+                    leaf_folder=leaf_folder,
+                )
+            )
+            memory_profiler = stack.enter_context(
+                self.maybe_enable_memory_snapshot(
+                    global_step=global_step,
+                    base_folder=base_folder,
+                    leaf_folder=leaf_folder,
+                )
+            )
+            yield _ProfilingSession(torch_profiler, memory_profiler)
 
     @contextlib.contextmanager
     def maybe_enable_profiling(
