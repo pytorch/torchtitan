@@ -111,7 +111,7 @@ def llama3_debugmodel_float8_emulate() -> Trainer.Config:
 def llama3_8b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-8B",
-        profiling=Profiler.Config(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
         ),
@@ -143,7 +143,7 @@ def llama3_8b() -> Trainer.Config:
 def llama3_70b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-70B",
-        profiling=Profiler.Config(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
         ),
@@ -175,7 +175,7 @@ def llama3_70b() -> Trainer.Config:
 def llama3_405b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-405B",
-        profiling=Profiler.Config(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=100,
         ),

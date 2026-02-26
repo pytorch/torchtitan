@@ -35,8 +35,7 @@ class ProfileAnalyzer(ABC):
     """Abstract base class for profiler trace analyzers.
 
     Implement this interface to create custom analyzers that run automatically
-    after each profiler trace is exported. Register instances via
-    ``Profiler(config, analyzers=[...])``.
+    after each profiler trace is exported.
     """
 
     @abstractmethod
@@ -137,18 +136,15 @@ class OverlapAnalyzer(ProfileAnalyzer):
 class Profiler(Configurable):
     """Owns profiling and memory snapshot lifecycle for a training run.
 
-    Instantiate with a ``Profiler.Config`` (and an optional list of
-    ``ProfileAnalyzer`` instances) then use the context-manager methods
-    ``enable_profiling`` and ``enable_memory_snapshot`` in the training loop.
+    Instantiate via ``Profiler.Config.build()`` and use the context-manager
+    methods ``maybe_enable_profiling`` and ``maybe_enable_memory_snapshot``
+    in the training loop.
 
-    If ``config.experimental_diagnostics`` is ``True``, an ``OverlapAnalyzer``
-    is automatically added as the first analyzer.  Additional analyzers passed
-    via ``analyzers=`` are appended after it.
+    If ``config.enable_overlap_analysis`` is ``True``, an ``OverlapAnalyzer``
+    is automatically added to the internal analyzers list.
 
     Args:
         config: A ``Profiler.Config`` instance.
-        analyzers: Optional extra ``ProfileAnalyzer`` instances to run after
-            each trace export.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -182,30 +178,24 @@ class Profiler(Configurable):
         save_memory_snapshot_folder: str = "memory_snapshot"
         """Memory snapshot files location."""
 
-        experimental_diagnostics: bool = False
+        enable_overlap_analysis: bool = False
         """
-        Enable experimental diagnostic analysis after each profiler trace.
+        Enable compute-communication overlap analysis after each profiler trace.
 
         When set to true, an OverlapAnalyzer is run after each trace export to
         report compute-communication overlap efficiency. This is only active when
         profiling is enabled and the process group is initialized (distributed run).
         """
 
-    def __init__(
-        self,
-        config: "Profiler.Config",
-        *,
-        analyzers: list[ProfileAnalyzer] | None = None,
-    ) -> None:
+    def __init__(self, config: "Profiler.Config") -> None:
         self._config = config
         self._analyzers: list[ProfileAnalyzer] = []
-        if config.experimental_diagnostics:
+        if config.enable_overlap_analysis:
             self._analyzers.append(OverlapAnalyzer())
-        if analyzers:
-            self._analyzers.extend(analyzers)
+        # TODO: support list[ProfileAnalyzer.Config] in Profiler.Config for extensible analyzers
 
     @contextlib.contextmanager
-    def enable_profiling(
+    def maybe_enable_profiling(
         self,
         *,
         global_step: int = 0,
@@ -286,7 +276,7 @@ class Profiler(Configurable):
             yield torch_profiler
 
     @contextlib.contextmanager
-    def enable_memory_snapshot(
+    def maybe_enable_memory_snapshot(
         self,
         *,
         global_step: int = 0,

@@ -22,10 +22,6 @@ from torchtitan.distributed.context_parallel import prepare_context_parallel_inp
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.profiling import (
-    maybe_enable_memory_snapshot,
-    maybe_enable_profiling,
-)
 from torchtitan.train import main
 from torchtitan.trainer import Trainer as TitanTrainer
 
@@ -115,6 +111,10 @@ class Trainer(ForgeEngine):
                 maybe_enable_amp=self.maybe_enable_amp,
                 metrics_processor=self.metrics_processor,
             )
+
+        # TODO: refactor into a Profiler container (similar to LoggerContainer in metrics.py)
+        # that holds both torch_profiler and memory_profiler, exposing a single .step() call.
+        self.profiler = config.profiler.build()
 
         logger.info(
             "Trainer is initialized with "
@@ -336,13 +336,11 @@ class Trainer(ForgeEngine):
         logger.info(f"Training starts at step {self.step + 1}.")
 
         with (
-            maybe_enable_profiling(
-                config.profiling,
+            self.profiler.maybe_enable_profiling(
                 global_step=self.step,
                 base_folder=config.dump_folder,
             ) as torch_profiler,
-            maybe_enable_memory_snapshot(
-                config.profiling,
+            self.profiler.maybe_enable_memory_snapshot(
                 global_step=self.step,
                 base_folder=config.dump_folder,
             ) as memory_profiler,
