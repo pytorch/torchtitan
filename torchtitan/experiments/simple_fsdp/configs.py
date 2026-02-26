@@ -19,6 +19,15 @@ class SimpleFSDPCompileConfig(CompileConfig):
         auto_bucketing, transformer_block_bucketing
     """
 
+    use_cudagraph: bool = False
+    """
+    Enable CUDA Graphs via compiler_toolkit.cudagraph.CUDAGraphWrapper.
+    Captures compiled fw/bw graphs into CUDA graphs (warmup -> record -> replay)
+    with a shared memory pool, reducing kernel launch overhead.
+    Supported with backend='inductor' and 'aot_eager'.
+    Requires NCCL_GRAPH_REGISTER=0 env var when NCCL collectives are present.
+    """
+
 
 @dataclass(kw_only=True, slots=True)
 class SimpleFSDPConfig(Trainer.Config):

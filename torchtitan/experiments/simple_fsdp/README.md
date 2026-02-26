@@ -39,6 +39,7 @@ Some of the features require the updates from PyTorch, with which we are working
 |Context Parallelism| ✅ |
 |Pipeline Parallelism| ✅ |
 |Distributed Checkpointing| ✅ |
+|CUDA Graphs| ✅ |
 |Float8 Training| 🚧 |
 |Expert Parallelism | ✅ |
 |Expert Parallelism + Activation Checkpointing| 🚧 |
@@ -62,6 +63,12 @@ SimpleFSDP relies on compiler backend to perform optimizations (i.e., bucketing 
       ```bash
       --compile.backend "aot_eager" --compile.graph_passes "transformer_block_bucketing"
       ```
+
+4. CUDA Graphs: wrap compiled fw/bw graphs with `CUDAGraphWrapper` from `compiler_toolkit` for reduced kernel launch overhead. Compatible with both `auto_bucketing` and `transformer_block_bucketing` passes, and both `aot_eager` and `inductor` backends.
+      ```bash
+      NCCL_GRAPH_REGISTER=0 torchrun ... --compile.use_cudagraph --compile.graph_passes "transformer_block_bucketing"
+      ```
+    **Note:** `NCCL_GRAPH_REGISTER=0` env var is required when NCCL collectives are captured inside CUDA graphs.
 
 ### Citation
 
