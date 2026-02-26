@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import ClassVar, NamedTuple
 
 import torch
@@ -408,8 +408,8 @@ class GQAttention(BaseAttention):
         n_kv_heads: int | None = None
         head_dim: int | None = None
         qk_norm: bool = False
-        q_norm: RMSNorm.Config = field(default_factory=RMSNorm.Config)
-        k_norm: RMSNorm.Config = field(default_factory=RMSNorm.Config)
+        q_norm: RMSNorm.Config | None = None
+        k_norm: RMSNorm.Config | None = None
         bias: bool = False
         use_rope: bool = True
         attn_backend: str = "sdpa"
@@ -433,6 +433,7 @@ class GQAttention(BaseAttention):
         self.q_norm: RMSNorm | None = None
         self.k_norm: RMSNorm | None = None
         if config.qk_norm:
+            assert config.q_norm is not None and config.k_norm is not None
             self.q_norm = config.q_norm.build(normalized_shape=self.head_dim)
             self.k_norm = config.k_norm.build(normalized_shape=self.head_dim)
 

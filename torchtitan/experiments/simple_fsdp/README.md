@@ -17,13 +17,13 @@ This folder includes an experimental frontend implementation for [SimpleFSDP: Si
 #### Training Llama3 models
 
 ```bash
-MODEL=simple_fsdp.llama3 CONFIG=simple_fsdp_llama3_8b ./run_train.sh --compile.enable
+MODULE=simple_fsdp.llama3 CONFIG=simple_fsdp_llama3_8b ./run_train.sh --compile.enable
 ```
 
 #### Training DeepSeek_v3 models
 
 ```bash
-MODEL=simple_fsdp.deepseek_v3 CONFIG=simple_fsdp_deepseek_v3_debugmodel ./run_train.sh --compile.enable --activation_checkpoint.mode "none"
+MODULE=simple_fsdp.deepseek_v3 CONFIG=simple_fsdp_deepseek_v3_debugmodel ./run_train.sh --compile.enable --activation_checkpoint.mode "none"
 ```
 
 ### Composability Support

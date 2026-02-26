@@ -4,10 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import contextlib
 import functools
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any
 
 import torch
 from torch._dynamo.functional_export import dynamo_graph_capture_for_export
@@ -108,11 +111,11 @@ def joint_graph_builder(
     model: torch.nn.Module,
     model_args: tuple,
     model_kwargs: dict,
-    fw_compiler: Optional[Callable] = None,
-    bw_compiler: Optional[Callable] = None,
-    joint_custom_passes: Optional[List[Callable]] = None,
+    fw_compiler: Callable | None = None,
+    bw_compiler: Callable | None = None,
+    joint_custom_passes: list[Callable] | None = None,
     dump_folder: str | None = None,
-    compile_config: Optional[CompileConfig] = None,
+    compile_config: CompileConfig | None = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -233,7 +236,7 @@ class CompiledModule(torch.nn.Module):
     def load_state_dict(self, *args, **kwargs) -> Any:
         return self.inner.load_state_dict(*args, **kwargs)
 
-    def name_parameters(self, *args, **kwargs) -> Any:
+    def named_parameters(self, *args, **kwargs) -> Any:
         return self.inner.named_parameters(*args, **kwargs)
 
     def parameters(self, *args, **kwargs) -> Any:
@@ -262,7 +265,7 @@ def compiler(
     name: str,
     gm: torch.fx.GraphModule,
     example_inputs,
-    passes: List[Callable] = None,
+    passes: list[Callable] = None,
     dump_folder: str | None = None,
     is_forward: bool = True,
 ):
@@ -322,7 +325,7 @@ def compiler(
 
 
 def make_compiler_with_passes(
-    passes: List[Callable] = None,
+    passes: list[Callable] = None,
     dump_folder: str | None = None,
 ):
     """

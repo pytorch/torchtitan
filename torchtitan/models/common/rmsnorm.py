@@ -17,25 +17,36 @@ class RMSNorm(nn.RMSNorm, Module):
     Uses diamond inheritance (nn.RMSNorm + Module) so that:
     - The module hierarchy stays flat (no extra wrapper layer).
     - All nn.RMSNorm logic (forward, state_dict, etc.) is reused as-is.
-    - The Module protocol (``init_weights``) is satisfied and ``build()``
-      is inherited from ``Configurable.Config``.
+    - The Module protocol is satisfied and ``build()`` is inherited from
+      ``Configurable.Config``.
 
-    ``normalized_shape`` is passed as a kwarg to ``build()`` (and forwarded
-    to ``__init__``) because it is derived from the parent model config
-    (e.g. ``dim``, ``head_dim``, ``lora_rank``).
+    ``normalized_shape`` lives in ``Config`` (defaulting to ``None``).
+    It is typically supplied via ``build()`` kwargs from the parent model
+    and passed into a cloned config.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        # ``normalized_shape`` are usually passed by the parent modules
+        # through build(). So the default values are None to fit
+        # ``Configurable.Config`` convention.
+        normalized_shape: int | None = None
         eps: float = 1e-5
         elementwise_affine: bool = True
 
-    def __init__(self, config: Config, *, normalized_shape: int):
+    def __init__(self, config: Config):
+        if config.normalized_shape is None:
+            raise TypeError(
+                "RMSNorm requires normalized_shape. "
+                "Either set it in Config or pass it to build()."
+            )
         super().__init__(
-            normalized_shape,
+            config.normalized_shape,
             eps=config.eps,
             elementwise_affine=config.elementwise_affine,
         )
+        self.config = config
 
     def init_weights(self, **kwargs) -> None:
-        self.reset_parameters()
+        if self.weight is not None:
+            self.reset_parameters()

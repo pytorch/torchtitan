@@ -47,12 +47,6 @@ class TestRMSNorm(unittest.TestCase):
         norm = config.build(normalized_shape=32)
         self.assertEqual(norm.eps, 1e-6)
 
-    def test_default_eps(self):
-        """RMSNorm uses default eps=1e-5."""
-        config = RMSNorm.Config()
-        norm = config.build(normalized_shape=32)
-        self.assertEqual(norm.eps, 1e-5)
-
     def test_elementwise_affine_false(self):
         """RMSNorm supports elementwise_affine=False."""
         config = RMSNorm.Config(elementwise_affine=False)

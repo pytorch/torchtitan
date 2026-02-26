@@ -8,8 +8,6 @@
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
 
-from typing import List
-
 import torch
 from transformers import CLIPTokenizer, T5Tokenizer
 
@@ -30,8 +28,8 @@ class FluxTestTokenizer(BaseTokenizer):
         self.pad_id = 0
 
     def _pad_and_chunk_tokens(
-        self, tokens: List[int], max_length: int, pad_token: int
-    ) -> List[int]:
+        self, tokens: list[int], max_length: int, pad_token: int
+    ) -> list[int]:
         # Pad the token sequence to max_length
         if len(tokens) < max_length:
             # If tokens are shorter than max_length, pad with pad_id or eos_id if pad_id is not defined
@@ -75,7 +73,7 @@ class FluxTestTokenizer(BaseTokenizer):
             return torch.tensor(tokens)
 
     # pyrefly: ignore [bad-override]
-    def decode(self, t: List[int]) -> str:
+    def decode(self, t: list[int]) -> str:
         """
         Decode function. This function will not be called.
         """
@@ -127,7 +125,7 @@ class FluxTokenizer(BaseTokenizer):
             return_length=False,
             return_overflowing_tokens=False,
             padding="max_length",
-            return_tensors="pt",  # return pytorch tensors, default return List[int]
+            return_tensors="pt",  # return pytorch tensors, default return list[int]
         )["input_ids"]
         return tokens
 

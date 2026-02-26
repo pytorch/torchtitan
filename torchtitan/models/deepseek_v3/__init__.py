@@ -43,6 +43,8 @@ deepseekv3_configs = {
                 score_before_experts=False,
             ),
             attention=Attention.Config(
+                q_norm=RMSNorm.Config(),
+                kv_norm=RMSNorm.Config(),
                 n_heads=16,
                 q_lora_rank=0,
                 kv_lora_rank=512,
@@ -85,6 +87,8 @@ deepseekv3_configs = {
                 score_before_experts=False,
             ),
             attention=Attention.Config(
+                q_norm=RMSNorm.Config(),
+                kv_norm=RMSNorm.Config(),
                 n_heads=16,
                 q_lora_rank=0,
                 kv_lora_rank=512,
@@ -129,6 +133,8 @@ deepseekv3_configs = {
                 score_before_experts=False,
             ),
             attention=Attention.Config(
+                q_norm=RMSNorm.Config(),
+                kv_norm=RMSNorm.Config(),
                 n_heads=16,
                 q_lora_rank=0,
                 kv_lora_rank=512,
@@ -176,6 +182,8 @@ deepseekv3_configs = {
                 score_before_experts=False,
             ),
             attention=Attention.Config(
+                q_norm=RMSNorm.Config(),
+                kv_norm=RMSNorm.Config(),
                 n_heads=128,
                 q_lora_rank=1536,
                 kv_lora_rank=512,
@@ -222,6 +230,8 @@ deepseekv3_configs = {
                 score_before_experts=False,
             ),
             attention=Attention.Config(
+                q_norm=RMSNorm.Config(),
+                kv_norm=RMSNorm.Config(),
                 n_heads=128,
                 q_lora_rank=1536,
                 kv_lora_rank=512,

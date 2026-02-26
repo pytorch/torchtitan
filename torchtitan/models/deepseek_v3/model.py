@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import cast
 
 import torch
@@ -40,11 +40,11 @@ class Attention(BaseAttention):
         n_heads: int
         q_lora_rank: int = 0
         kv_lora_rank: int = 512
+        q_norm: RMSNorm.Config
+        kv_norm: RMSNorm.Config
         qk_nope_head_dim: int = 128
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
-        q_norm: RMSNorm.Config = field(default_factory=RMSNorm.Config)
-        kv_norm: RMSNorm.Config = field(default_factory=RMSNorm.Config)
         attn_backend: str = "sdpa"
         attn_mask_type: str = "causal"
         mscale: float = 1.0
