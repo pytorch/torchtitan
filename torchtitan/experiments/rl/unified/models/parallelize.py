@@ -21,29 +21,19 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config import (
-    ActivationCheckpointConfig,
-    CompileConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.protocols.model_converter import ModelConvertersContainer
 
 
 def parallelize_qwen3(
     model: nn.Module,
     *,
     parallel_dims: ParallelDims,
-    training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
-    dump_folder: str,
 ):
     """
-    Temporary helper to apply tensor parallelism to the Qwen3 dense model so vLLM can run the torchtitan model.
+    Apply tensor parallelism to the Qwen3 dense model so vLLM can run the torchtitan model.
+    NOTE: The function signature is different from what we have in core torchtitan
     """
 
     if parallel_dims.tp_enabled:
