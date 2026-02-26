@@ -21,7 +21,7 @@ from . import model_registry
 def llama3_ft_debugmodel() -> FaultTolerantTrainer.Config:
     return FaultTolerantTrainer.Config(
         hf_assets_path="./tests/assets/tokenizer",
-        profiling=Profiler.Config(
+        profiler=Profiler.Config(
             enable_profiling=True,
             profile_freq=10,
             profiler_active=10,

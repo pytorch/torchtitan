@@ -103,7 +103,7 @@ class TestProfilerConfig(unittest.TestCase):
         self.assertEqual(cfg.profiler_warmup, 3)
         self.assertFalse(cfg.enable_memory_snapshot)
         self.assertEqual(cfg.save_memory_snapshot_folder, "memory_snapshot")
-        self.assertFalse(cfg.experimental_diagnostics)
+        self.assertFalse(cfg.enable_overlap_analysis)
 
     def test_custom_field_values(self):
         cfg = Profiler.Config(
@@ -122,71 +122,46 @@ class TestProfilerConfig(unittest.TestCase):
         self.assertIsInstance(profiler, Profiler)
 
 
-
 class TestProfilerInit(unittest.TestCase):
     def test_no_analyzers_by_default(self):
         """Profiler with default config has an empty analyzers list."""
         profiler = Profiler(Profiler.Config())
         self.assertEqual(profiler._analyzers, [])
 
-    def test_experimental_diagnostics_adds_overlap_analyzer(self):
-        """experimental_diagnostics=True adds OverlapAnalyzer automatically."""
-        profiler = Profiler(Profiler.Config(experimental_diagnostics=True))
+    def test_enable_overlap_analysis_adds_overlap_analyzer(self):
+        """enable_overlap_analysis=True adds OverlapAnalyzer automatically."""
+        profiler = Profiler(Profiler.Config(enable_overlap_analysis=True))
         self.assertEqual(len(profiler._analyzers), 1)
         self.assertIsInstance(profiler._analyzers[0], OverlapAnalyzer)
-
-    def test_custom_analyzers_are_appended(self):
-        """Custom analyzers passed via analyzers= are stored."""
-        class MyAnalyzer(ProfileAnalyzer):
-            def analyze(self, prof):
-                pass
-
-        my = MyAnalyzer()
-        profiler = Profiler(Profiler.Config(), analyzers=[my])
-        self.assertEqual(profiler._analyzers, [my])
-
-    def test_diagnostics_and_custom_analyzers_combined(self):
-        """experimental_diagnostics adds OverlapAnalyzer first; custom ones follow."""
-        class MyAnalyzer(ProfileAnalyzer):
-            def analyze(self, prof):
-                pass
-
-        my = MyAnalyzer()
-        profiler = Profiler(
-            Profiler.Config(experimental_diagnostics=True), analyzers=[my]
-        )
-        self.assertEqual(len(profiler._analyzers), 2)
-        self.assertIsInstance(profiler._analyzers[0], OverlapAnalyzer)
-        self.assertIs(profiler._analyzers[1], my)
 
 
 class TestProfilerDisabledPaths(unittest.TestCase):
     """Tests for the no-op paths that require no GPU."""
 
-    def test_enable_profiling_disabled_yields_none(self):
+    def test_maybe_enable_profiling_disabled_yields_none(self):
         profiler = Profiler(Profiler.Config(enable_profiling=False))
-        with profiler.enable_profiling(
+        with profiler.maybe_enable_profiling(
             global_step=0, base_folder="/tmp", leaf_folder=""
         ) as handle:
             self.assertIsNone(handle)
 
-    def test_enable_memory_snapshot_disabled_yields_none(self):
+    def test_maybe_enable_memory_snapshot_disabled_yields_none(self):
         profiler = Profiler(Profiler.Config(enable_memory_snapshot=False))
-        with profiler.enable_memory_snapshot(
+        with profiler.maybe_enable_memory_snapshot(
             global_step=0, base_folder="/tmp", leaf_folder=""
         ) as handle:
             self.assertIsNone(handle)
 
-    def test_enable_profiling_disabled_default_args(self):
-        """enable_profiling works with all default keyword args."""
+    def test_maybe_enable_profiling_disabled_default_args(self):
+        """maybe_enable_profiling works with all default keyword args."""
         profiler = Profiler(Profiler.Config())
-        with profiler.enable_profiling() as handle:
+        with profiler.maybe_enable_profiling() as handle:
             self.assertIsNone(handle)
 
-    def test_enable_memory_snapshot_disabled_default_args(self):
-        """enable_memory_snapshot works with all default keyword args."""
+    def test_maybe_enable_memory_snapshot_disabled_default_args(self):
+        """maybe_enable_memory_snapshot works with all default keyword args."""
         profiler = Profiler(Profiler.Config())
-        with profiler.enable_memory_snapshot() as handle:
+        with profiler.maybe_enable_memory_snapshot() as handle:
             self.assertIsNone(handle)
 
 
@@ -194,7 +169,7 @@ class TestProfilerDisabledPaths(unittest.TestCase):
 class TestProfilerEnabledPathsGPU(unittest.TestCase):
     """GPU-dependent tests — skipped automatically when no GPU is present."""
 
-    def test_enable_profiling_yields_profiler_handle(self):
+    def test_maybe_enable_profiling_yields_profiler_handle(self):
         import tempfile
 
         profiler = Profiler(
@@ -206,7 +181,7 @@ class TestProfilerEnabledPathsGPU(unittest.TestCase):
             )
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            with profiler.enable_profiling(
+            with profiler.maybe_enable_profiling(
                 global_step=0, base_folder=tmpdir
             ) as handle:
                 self.assertIsNotNone(handle)

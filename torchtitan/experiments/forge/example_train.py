@@ -23,10 +23,6 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
-from torchtitan.tools.profiling import (
-    maybe_enable_memory_snapshot,
-    maybe_enable_profiling,
-)
 from torchtitan.trainer import Trainer as TitanTrainer
 
 from .engine import ForgeEngine
@@ -131,6 +127,10 @@ class Trainer(ForgeEngine):
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
             )
+
+        # TODO: refactor into a Profiler container (similar to LoggerContainer in metrics.py)
+        # that holds both torch_profiler and memory_profiler, exposing a single .step() call.
+        self.profiler = config.profiler.build()
 
         logger.info(
             "Trainer is initialized with "
@@ -346,13 +346,11 @@ class Trainer(ForgeEngine):
         logger.info(f"Training starts at step {self.step + 1}.")
 
         with (
-            maybe_enable_profiling(
-                config.profiling,
+            self.profiler.maybe_enable_profiling(
                 global_step=self.step,
                 base_folder=config.dump_folder,
             ) as torch_profiler,
-            maybe_enable_memory_snapshot(
-                config.profiling,
+            self.profiler.maybe_enable_memory_snapshot(
                 global_step=self.step,
                 base_folder=config.dump_folder,
             ) as memory_profiler,

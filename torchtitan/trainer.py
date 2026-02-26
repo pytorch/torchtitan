@@ -72,7 +72,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         dump_folder: str = "./outputs"
         """Folder to dump job outputs"""
 
-        profiling: Profiler.Config = field(default_factory=Profiler.Config)
+        profiler: Profiler.Config = field(default_factory=Profiler.Config)
         metrics: MetricsProcessor.Config = field(
             default_factory=MetricsProcessor.Config
         )
@@ -518,6 +518,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 pp_has_last_stage=pp_has_last_stage,
             )
 
+        # TODO: refactor into a Profiler container (similar to LoggerContainer in metrics.py)
+        # that holds both torch_profiler and memory_profiler, exposing a single .step() call.
+        self.profiler = config.profiler.build()
+
         logger.info(
             "Trainer is initialized with "
             f"local batch size {config.training.local_batch_size}, "
@@ -842,13 +846,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.checkpointer.load(step=config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
 
-        profiler = Profiler(config.profiling)
         with (
-            profiler.enable_profiling(
+            self.profiler.maybe_enable_profiling(
                 global_step=self.step,
                 base_folder=config.dump_folder,
             ) as torch_profiler,
-            profiler.enable_memory_snapshot(
+            self.profiler.maybe_enable_memory_snapshot(
                 global_step=self.step,
                 base_folder=config.dump_folder,
             ) as memory_profiler,

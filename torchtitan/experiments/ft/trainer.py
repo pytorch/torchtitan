@@ -25,10 +25,6 @@ from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.profiling import (
-    maybe_enable_memory_snapshot,
-    maybe_enable_profiling,
-)
 from torchtitan.trainer import Trainer
 
 
@@ -353,6 +349,10 @@ class FaultTolerantTrainer(Trainer):
                 pp_has_last_stage=pp_has_last_stage,
             )
 
+        # TODO: refactor into a Profiler container (similar to LoggerContainer in metrics.py)
+        # that holds both torch_profiler and memory_profiler, exposing a single .step() call.
+        self.profiler = config.profiler.build()
+
         logger.info(
             "Trainer is initialized with "
             f"local batch size {config.training.local_batch_size}, "
@@ -511,14 +511,12 @@ class FaultTolerantTrainer(Trainer):
             else f"replica_{self.ft_manager.replica_id}"
         )
         with (
-            maybe_enable_profiling(
-                config.profiling,
+            self.profiler.maybe_enable_profiling(
                 global_step=self.step,
                 base_folder=config.dump_folder,
                 leaf_folder=leaf_folder,
             ) as torch_profiler,
-            maybe_enable_memory_snapshot(
-                config.profiling,
+            self.profiler.maybe_enable_memory_snapshot(
                 global_step=self.step,
                 base_folder=config.dump_folder,
                 leaf_folder=leaf_folder,
