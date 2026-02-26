@@ -9,11 +9,16 @@
 import inspect
 import pickle
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
+
+import torch
 
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.utils.data import IterableDataset
 from torchdata.stateful_dataloader import StatefulDataLoader
+from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 
 
@@ -30,19 +35,23 @@ class DataloaderExhaustedError(Exception):
     pass
 
 
-class BaseDataLoader(Stateful, ABC):
+class BaseDataLoader(Stateful, ABC, Configurable):
     """Base class for all dataloaders.
 
     This is used to enforce that all dataloaders have the methods defined in ``Stateful``,
     ``state_dict()`` and ``load_state_dict()``.
     """
 
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        dataset: str = ""
+        dataset_path: str | None = None
+
     @abstractmethod
-    def __iter__(self):
+    def __iter__(self) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         ...
 
 
-# pyrefly: ignore [inconsistent-inheritance]
 class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
     """Dataloader that is aware of distributed data parallelism.
 
@@ -58,6 +67,23 @@ class ParallelAwareDataloader(StatefulDataLoader, BaseDataLoader):
             batch_size, collate_fn, num_workers, persistent_workers, prefetch_factor,
             pin_memory).
     """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseDataLoader.Config):
+        num_workers: int = 0
+        """Number of worker processes for data loading."""
+
+        persistent_workers: bool = False
+        """Keep workers alive between epochs. Only valid when num_workers > 0."""
+
+        pin_memory: bool = False
+        """Copy tensors to CUDA pinned memory before returning them."""
+
+        prefetch_factor: int | None = None
+        """
+        Number of batches loaded in advance by each worker. Only valid when num_workers > 0.
+        Default is 2 when num_workers > 0, otherwise None.
+        """
 
     dp_rank: int
     dp_world_size: int

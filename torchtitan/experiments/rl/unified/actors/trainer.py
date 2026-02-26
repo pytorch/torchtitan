@@ -6,12 +6,12 @@
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from monarch.actor import Actor, endpoint
 from torchtitan.experiments.rl.unified.actors.generator import TrajectoryData
-from torchtitan.experiments.rl.unified.models.parallelism_utils import (
+from torchtitan.experiments.rl.unified.infra.parallelism_utils import (
     create_trainer_parallel_dims,
 )
 from torchtitan.experiments.rl.unified.models.utils import load_model, ModelMode
@@ -61,8 +61,8 @@ class Trainer(Actor):
         self.parallel_dims = create_trainer_parallel_dims(self.ddp_size, self.tp_size)
 
         # apply PT-D Parallelism
-        # TODO: right now it only works for qwen3 model, need to formalize this to use parallize_fn from train_spec
-        from torchtitan.models.llama3.infra.parallelize import apply_ddp
+        # TODO: right now it only works for qwen3 model, need to formalize this to use parallelize_fn from ModelSpec
+        from torchtitan.models.llama3.parallelize import apply_ddp
 
         apply_ddp(
             self.model,
@@ -76,7 +76,7 @@ class Trainer(Actor):
         # Optimizer
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
         self.policy_version = 0
-        self.generator: Optional[Any] = None
+        self.generator: Any | None = None
 
         logger.info("Trainer initialized with TorchTitan model")
 

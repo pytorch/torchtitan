@@ -17,7 +17,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 
-from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
+from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.tools.logging import logger
 
 
@@ -210,6 +210,19 @@ def apply_ac(
     Returns:
         None
     """
+    # Disable dynamo LRU cache to workaround an interaction between SAC, PP, and Flex:
+    #
+    # When forward runs with a second PP microbatch, it triggers recompilation with dynamic
+    # shapes enabled. Now there are two valid compiled graphs. By default, dynamo selects
+    # the latest one (the dynamic shapes version), so the runtime wrapper expects an extra
+    # symint output. When SAC caches the inductor HOP output from the static graph for
+    # batch_idx=0, it would miss that symint and cause an assertion failure. The workaround
+    # here is to disable the LRU cache, and select graphs in insertion order instead.
+    #
+    # Also see: https://github.com/pytorch/pytorch/issues/166926
+    # pyrefly: ignore [missing-attribute]
+    torch._C._dynamo.eval_frame._set_lru_cache(False)
+
     if ac_config.mode == "memory_budget":
         assert model_compile_enabled, "Memory budget mode requires model to be compiled"
         if ac_config.visualize_memory_budget_pareto:
@@ -222,8 +235,8 @@ def apply_ac(
         torch._functorch.config.activation_memory_budget = ac_config.memory_budget
         logger.info(f"Selected {ac_config.memory_budget} budget option")
     else:
-        # pyrefly: ignore [missing-attribute]
-        for layer_id, transformer_block in model.layers.named_children():
+        layers = model.get_submodule("layers")
+        for layer_id, transformer_block in layers.named_children():
             transformer_block = _apply_ac_to_transformer_block(
                 transformer_block,
                 ac_config,
@@ -231,7 +244,6 @@ def apply_ac(
                 model_compile_enabled=model_compile_enabled,
                 op_sac_save_list=op_sac_save_list,
             )
-            # pyrefly: ignore [missing-attribute]
-            model.layers.register_module(layer_id, transformer_block)
+            layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")

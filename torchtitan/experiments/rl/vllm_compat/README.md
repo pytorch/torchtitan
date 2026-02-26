@@ -51,8 +51,12 @@ Note: Currently supports single-device training only.
 ### Prerequisites
 
 ```bash
-# Install vLLM with deterministic support
-pip install vllm
+# Install vLLM with deterministic support (from source)
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+python use_existing_torch.py
+uv pip install -r requirements/build.txt
+uv pip install --no-build-isolation -e .
 
 # Install TorchTitan (from the repository root)
 pip install -e .
@@ -67,7 +71,8 @@ Initialize vLLM's batch-invariant mode before training:
 
 ```python
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
-init_batch_invariance()
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 ```
 
 ## Usage
@@ -75,27 +80,29 @@ init_batch_invariance()
 ### Quick Start
 
 ```python
-import torch
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+import torch
 from torchtitan.experiments.rl.vllm_compat import (
     enable_batch_invariant_backward_mode,
     Qwen3VLLMCompatModel,
 )
 
 # 1. Enable deterministic mode
-init_batch_invariance()
+init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 enable_batch_invariant_backward_mode()
 
 # 2. Load model
-from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
-model_args = Qwen3ModelArgs(
+from torchtitan.models.qwen3.model.model import Qwen3Model
+model_args = Qwen3Model.Config(
     dim=2048,
     n_layers=24,
     n_heads=16,
     n_kv_heads=2,
     vocab_size=151936,
 )
-model = Qwen3VLLMCompatModel(model_args)
+model = Qwen3VLLMCompatModel(model_args).to('cuda').to(torch.bfloat16)
 
 # 3. Forward pass (deterministic)
 input_ids = torch.randint(0, 151936, (2, 128), device='cuda')
@@ -104,6 +111,9 @@ logits = model(input_ids)
 # 4. Backward pass
 loss = logits.sum()
 loss.backward()
+
+print("Done running simple model")
+
 ```
 
 ### Full RL Training

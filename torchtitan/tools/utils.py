@@ -8,8 +8,9 @@ import contextlib
 import gc
 import subprocess
 import time
+from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Generator, Optional
+from types import ModuleType
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
@@ -24,7 +25,15 @@ def has_cuda_capability(major: int, minor: int) -> bool:
     )
 
 
-def get_device_info() -> tuple[str, torch.device]:
+def has_rocm_capability(major: int, minor: int) -> bool:
+    is_rocm = torch.cuda.is_available() and torch.version.hip is not None
+    return is_rocm and torch.cuda.get_device_capability() >= (
+        major,
+        minor,
+    )
+
+
+def get_device_info() -> tuple[str, ModuleType]:
     device_type = _get_available_device_type() or "cuda"
     device_module = _get_device_module(device_type)  # default device_module:torch.cuda
     return device_type, device_module
@@ -64,7 +73,8 @@ class GarbageCollection:
         logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
 
 
-# hardcoded BF16 type peak flops for NVIDIA A100, H100, H200, B200 GPU and AMD MI250, MI300X, MI325X, MI355X and Intel PVC
+# hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU,
+# AMD MI250, MI300X, MI325X, MI355X, Intel PVC, and AWS Trainium/Inferentia
 def get_peak_flops(device_name: str) -> float:
     try:
         # Run the lspci command and capture the output
@@ -94,6 +104,15 @@ def get_peak_flops(device_name: str) -> float:
     elif "H200" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/h200/
         return 989e12
+    elif "H20" in device_name:
+        # NVIDIA H20 is a region-specific GPU variant.
+        # Since first-hand specifications do not seem to be readily available on
+        # NVIDIA's official global website, we refer to technical reports from
+        # Tom's Hardware. The peak BF16/FP16 Tensor performance is reported as
+        # 148 TFLOPS.
+        # Ref: https://www.tomshardware.com/news/
+        # nvidias-latest-regulation-compliant-gpu-for-china-has-been-delayed-to-early-next-year
+        return 148e12
     elif "B200" in device_name:
         # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
         return 2.25e15
@@ -120,6 +139,24 @@ def get_peak_flops(device_name: str) -> float:
     elif "l40s" in device_name:
         # data from: "https://resources.nvidia.com/en-us-l40s/l40s-datasheet-28413"
         return 362e12
+    elif "neuron" in device_name:
+        # AWS Trainium/Inferentia: query chip type via torch.neuron
+        # TensorEngine BF16 TFLOPS per NeuronCore × default Logical NeuronCore (LNC) count per device
+        neuron_device_name = device_module.get_device_properties().name
+        if neuron_device_name in ("trn1", "trn1n", "inf2"):
+            # NeuronCore-v2 TensorEngine: 90 BF16 TFLOPS/core, LNC=1
+            # https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/neuron-core-v2.html
+            return 90e12 * 1
+        elif neuron_device_name in ("trn2", "trn2n", "trn2u", "trn3", "trn3u"):
+            # NeuronCore-v3/NeuronCore-v4 TensorEngine: 79 BF16 TFLOPS/core, LNC=2
+            # https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/neuron-core-v3.html
+            # https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/neuron-core-v4.html
+            return 79e12 * 2
+        else:
+            logger.warning(
+                f"Unknown neuron device: {neuron_device_name}, fallback to trn2/trn3"
+            )
+            return 79e12 * 2
 
     else:  # for other GPU types, assume A100
         logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
@@ -164,7 +201,7 @@ assert set(NoColor.__dataclass_fields__.keys()) == set(
 def check_if_feature_in_pytorch(
     feature_name: str,
     pull_request: str,
-    min_nightly_version: Optional[str] = None,
+    min_nightly_version: str | None = None,
 ) -> None:
     if "git" in torch.__version__:  # pytorch is built from source
         # notify users to check if the pull request is included in their pytorch

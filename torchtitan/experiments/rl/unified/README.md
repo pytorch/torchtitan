@@ -14,58 +14,41 @@ The integration consists of two main components:
 ## Quick Start
 ### Prerequisites
 
-1. Install PyTorch nightly for torchtitan:
-```
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
-```
-
-
-2. Install vLLM from source [vllm-use-an-existing-pytorch-installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#use-an-existing-pytorch-installation):
+1. Install Monarch:
 ```bash
-# install PyTorch first, either from PyPI or from source
-git clone https://github.com/vllm-project/vllm.git
-cd vllm
-python use_existing_torch.py
-uv pip install -r requirements/build.txt
-uv pip install --no-build-isolation -e .
+uv pip install torchmonarch
 ```
 
 
-NOTE: If `flash_attn_varlen_func` hits error "torch.AcceleratorError: CUDA error: the provided PTX was compiled with an unsupported toolchain" during forward path, this is due to GPU driver version is not compatible with vLLM/PyTorch compiled version. Use the following command to recompile vLLM.
-
+2. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
 ```
-# Set CUDA version environment variable
-export CUDA_HOME=/usr/local/cuda-12.4
-export PATH=/usr/local/cuda-12.4/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
-
-# Clean previous build
-rm -rf build dist *.egg-info
-uv pip uninstall -y vllm
-
-# Rebuild vLLM from source with CUDA 12.4
-uv pip install -e .
-
+# Install vllm with nightly torch
+uv pip install torch vllm xformers  --pre \
+--extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
+--index-strategy unsafe-best-match
 ```
 
-3. Download Qwen/Qwen3-0.6B checkpoint from HuggingFace and put into `torchtitan/experiments/rl/example_checkpoint` folder.
-```
+**NOTE:** The pre-built vLLM wheels are only compatible with CUDA 12.8, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu128, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
+
+
+3. Download `Qwen/Qwen3-0.6B` checkpoint from HuggingFace to `torchtitan/experiments/rl/example_checkpoint` folder.
+```bash
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torchtitan/experiments/rl/example_checkpoint --all --hf_token=...
 ```
 
 4. Run inference:
-```
-python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint>
+```bash
+python torchtitan/experiments/rl/unified/infer.py
 ```
 
-Run with TP: (work in progress)
-```
-python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint> --tensor-parallel-size 2
+Run with TP:
+```bash
+python torchtitan/experiments/rl/unified/infer.py --tensor-parallel-size 2
 
 ```
 
 5. Run simple rl loop
-```
+```bash
 VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
 ```
 Right now we only support VLLM_COMPAT mode, which could achieve trainer and generator bitwise identical. We are working on support UNIFIED mode,
@@ -79,7 +62,7 @@ Work on batch invariance:
 
 Work on the RL loop:
 1. Design trainer API and integrate with [train.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/train.py#L475)
-2. Remove hardcoded configs and dependency on Qwen3 Model. Use torchtitan's config/TrainSpec instead, to work with any model.
+2. Remove hardcoded configs and dependency on Qwen3 Model. Use torchtitan's config/ModelSpec instead, to work with any model.
 3. Need to load the gsm8k dataset using TorchTitan dataset.
 4. Need to properly implement weight saving and loading using TorchTitan's checkpoint mechanism, or use TorchStore. Also need to
     replace `vllm_to_torchtitan` and `torchtitan_to_vllm` calls to TorchTitan [state dict adaptor](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/qwen3/model/state_dict_adapter.py).

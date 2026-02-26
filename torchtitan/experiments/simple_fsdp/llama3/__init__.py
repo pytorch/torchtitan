@@ -4,28 +4,38 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers
-from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.models.llama3 import llama3_args
-from torchtitan.protocols.train_spec import TrainSpec
+from dataclasses import fields
 
-from .model import SimpleFSDPTransformer
+from torchtitan.components.loss import build_cross_entropy_loss
+from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.models.llama3 import llama3_configs
+from torchtitan.protocols.model_spec import ModelSpec
+
+from .model import SimpleFSDPLlama3Model
 from .parallelize import parallelize_llama
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_cls=SimpleFSDPTransformer,
-        model_args=llama3_args,
+def _to_simple_fsdp_configs(base_configs):
+    """Convert Llama3Model.Config instances to SimpleFSDPLlama3Model.Config."""
+    return {
+        k: SimpleFSDPLlama3Model.Config(
+            **{f.name: getattr(v, f.name) for f in fields(v)}
+        )
+        for k, v in base_configs.items()
+    }
+
+
+_simple_fsdp_configs = _to_simple_fsdp_configs(llama3_configs)
+
+
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="simple_fsdp/llama3",
+        flavor=flavor,
+        model=_simple_fsdp_configs[flavor],
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
-        build_optimizers_fn=build_optimizers,
-        build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        post_optimizer_build_fn=None,
+        state_dict_adapter=None,
     )

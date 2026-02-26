@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.models.moe import build_moe, MoEArgs
+from torchtitan.models.common.moe.moe import build_moe, MoEArgs
 from torchtitan.protocols.train_spec import ModelProtocol
 from torchtitan.tools.logging import logger
 

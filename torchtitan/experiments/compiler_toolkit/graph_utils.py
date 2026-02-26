@@ -4,10 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import contextlib
 import functools
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, List, Optional
+from typing import Any
 
 import torch
 from torch._dynamo.functional_export import dynamo_graph_capture_for_export
@@ -18,9 +21,13 @@ from torch._functorch.aot_autograd import (
 )
 from torch._guards import tracing, TracingContext
 from torch.distributed.tensor import DTensor
-from torchtitan.config import JobConfig
+from torchtitan.config import CompileConfig, ParallelismConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.compiler_toolkit.common_utils import end_with_pass
+from torchtitan.experiments.compiler_toolkit.common_utils import (
+    create_extra_fsdp_pg,
+    end_with_pass,
+    get_extra_fsdp_pg_name,
+)
 from torchtitan.tools.logging import logger
 
 
@@ -39,6 +46,15 @@ def _dump_gm(dump_folder: str | None, gm: torch.fx.GraphModule, name: str) -> No
 def export_joint(
     model, args, kwargs=None, dump_folder: str | None = None
 ) -> tuple[JointWithDescriptors, TracingContext]:
+    """
+    Export joint forward-backward graph with AOT Autograd.
+
+    Args:
+        model: The model to export
+        args: Tuple of input arguments
+        kwargs: Dict of keyword arguments for the model
+        dump_folder: Optional folder to dump the graph to
+    """
     if kwargs is None:
         kwargs = {}
     assert isinstance(args, tuple)
@@ -68,6 +84,14 @@ def export_joint(
 
 
 def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
+    """
+    Export joint forward-backward graph with AOT Autograd.
+
+    Args:
+        model: The model to export
+        args: Tuple of input arguments
+        kwargs: Dict of keyword arguments for the model
+    """
     if kwargs is None:
         kwargs = {}
     assert isinstance(args, tuple)
@@ -79,6 +103,7 @@ def aot_export_joint_with_descriptors_alone(model, args, kwargs=None):
             args,
             kwargs,
         )
+
         return joint_with_descriptors
 
 
@@ -86,10 +111,11 @@ def joint_graph_builder(
     model: torch.nn.Module,
     model_args: tuple,
     model_kwargs: dict,
-    fw_compiler: Optional[Callable] = None,
-    bw_compiler: Optional[Callable] = None,
-    joint_custom_passes: Optional[List[Callable]] = None,
+    fw_compiler: Callable | None = None,
+    bw_compiler: Callable | None = None,
+    joint_custom_passes: list[Callable] | None = None,
     dump_folder: str | None = None,
+    compile_config: CompileConfig | None = None,
 ):
     """
     Build a joint forward-backward graph for the model with optional custom compilers.
@@ -102,16 +128,41 @@ def joint_graph_builder(
         bw_compiler: Optional custom backward compiler function
         joint_custom_passes: list of custom passes to run on the joint graph
         dump_folder: Optional folder to dump the graph to
+        job_config: Job configuration
     """
     assert isinstance(model_args, tuple)
     for idx, arg in enumerate(model_args):
         assert isinstance(arg, DTensor), f"Argument {idx} is of type {type(arg)}"
 
     # get joint graph
-    (
-        joint_with_descriptors,
-        tracing_context,
-    ) = export_joint(model, model_args, model_kwargs, dump_folder=dump_folder)
+    (joint_with_descriptors, tracing_context,) = export_joint(
+        model,
+        model_args,
+        model_kwargs,
+        dump_folder=dump_folder,
+    )
+
+    # Check if inductor_decomposition is configured and create the pass with proper context
+    if compile_config is not None:
+        joint_pass_names = getattr(compile_config, "joint_passes", [])
+        if "inductor_decomposition" in joint_pass_names:
+            from torchtitan.experiments.compiler_toolkit.passes import (
+                inductor_decomposition_pass,
+            )
+
+            # Create the decomposition pass with context
+            decomp_pass = functools.partial(
+                inductor_decomposition_pass,
+                model=model,
+                joint_with_descriptors=joint_with_descriptors,
+                forward_inputs=model_args,
+                tracing_context=tracing_context,
+            )
+
+            # Prepend to joint_custom_passes
+            if joint_custom_passes is None:
+                joint_custom_passes = []
+            joint_custom_passes = [decomp_pass] + joint_custom_passes
 
     # run custom passes on joint-graph before partitioner
     if joint_custom_passes is not None:
@@ -185,7 +236,7 @@ class CompiledModule(torch.nn.Module):
     def load_state_dict(self, *args, **kwargs) -> Any:
         return self.inner.load_state_dict(*args, **kwargs)
 
-    def name_parameters(self, *args, **kwargs) -> Any:
+    def named_parameters(self, *args, **kwargs) -> Any:
         return self.inner.named_parameters(*args, **kwargs)
 
     def parameters(self, *args, **kwargs) -> Any:
@@ -214,7 +265,7 @@ def compiler(
     name: str,
     gm: torch.fx.GraphModule,
     example_inputs,
-    passes: List[Callable] = None,
+    passes: list[Callable] = None,
     dump_folder: str | None = None,
     is_forward: bool = True,
 ):
@@ -259,28 +310,36 @@ def compiler(
         logger.info(f"Applying pass: {pass_name}")
         gm = pass_fn(gm, example_inputs)
 
-    logger.debug(f"{name} after compiler:")
-    logger.debug(
-        gm.print_readable(print_output=False, include_stride=True, include_device=True)
-    )
-    _dump_gm(dump_folder, gm, f"{name}_after_compiler")
+    # Only try to print/dump if gm is still a GraphModule
+    # (compile_fx_inner returns a CompiledFxGraph which doesn't have print_readable)
+    if hasattr(gm, "print_readable"):
+        logger.debug(f"{name} after compiler:")
+        logger.debug(
+            gm.print_readable(
+                print_output=False, include_stride=True, include_device=True
+            )
+        )
+        _dump_gm(dump_folder, gm, f"{name}_after_compiler")
+
     return gm
 
 
 def make_compiler_with_passes(
-    passes: List[Callable] = None, dump_folder: str | None = None
+    passes: list[Callable] = None,
+    dump_folder: str | None = None,
 ):
     """
     Create forward and backward compilers with specified passes.
 
     Args:
         passes: List of compiler pass functions to apply. If None, uses DEFAULT_COMPILER_PASSES.
+        dump_folder: Optional folder to dump graphs
 
     Returns:
         Tuple of (fw_compiler, bw_compiler) functions
     """
 
-    def fw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
+    def fw_compiler(gm: torch.fx.GraphModule, example_inputs):
         return compiler(
             "fwd_gm",
             gm,
@@ -290,7 +349,7 @@ def make_compiler_with_passes(
             is_forward=True,
         )
 
-    def bw_compiler(gm: torch.fx.GraphModule, example_inputs) -> None:
+    def bw_compiler(gm: torch.fx.GraphModule, example_inputs):
         return compiler(
             "bwd_gm",
             gm,
@@ -303,7 +362,17 @@ def make_compiler_with_passes(
     return fw_compiler, bw_compiler
 
 
-def validate_pass_names(pass_names: list[str]) -> None:
+def validate_pass_names(pass_names: list[str], joint_pass_names: list[str]) -> None:
+    """
+    Validate compiler and joint pass names and their dependencies.
+
+    Args:
+        pass_names: List of compiler pass names
+        joint_pass_names: List of joint custom pass names
+
+    Raises:
+        ValueError: If pass configuration is invalid
+    """
     if "cudagraph" in pass_names:
         assert (
             pass_names[-1] == "cudagraph"
@@ -317,13 +386,27 @@ def validate_pass_names(pass_names: list[str]) -> None:
             "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
         )
 
+    # Validate that full_inductor_compilation requires inductor_decomposition
+    if "full_inductor_compilation" in pass_names:
+        if "inductor_decomposition" not in joint_pass_names:
+            raise ValueError(
+                "full_inductor_compilation pass requires inductor_decomposition to be "
+                "specified in joint_passes. Please add --compile.joint_passes inductor_decomposition"
+            )
 
-def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfig):
+
+def get_compiler_passes_from_config(
+    model: torch.nn.Module,
+    compile_config: CompileConfig,
+    parallel_dims: ParallelDims,
+):
     """
     Extract and validate compiler passes from job config.
 
     Args:
-        job_config: Job configuration containing compile.passes
+        model: The model being compiled
+        job_config: Job configuration containing compile.passes and compile.joint_passes
+        parallel_dims: Parallelism dimensions (required for separate_ag_pg pass)
 
     Returns:
         List of compiler pass functions
@@ -333,9 +416,18 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
         get_transformer_block_buckets,
     )
 
-    pass_names = getattr(job_config.compile, "passes", [])
-    validate_pass_names(pass_names)
+    pass_names = getattr(compile_config, "passes", [])
+    joint_pass_names = getattr(compile_config, "joint_passes", [])
+
+    validate_pass_names(pass_names, joint_pass_names)
     compiler_passes = []
+
+    # Warn if full Inductor compilation is enabled
+    if "full_inductor_compilation" in pass_names:
+        logger.warning(
+            "Full Inductor compilation is enabled. Note that Inductor may change numerics "
+            "and does not guarantee bitwise equivalent results compared to eager mode."
+        )
 
     for pass_name in pass_names:
         if pass_name not in AVAILABLE_COMPILER_PASSES:
@@ -344,6 +436,22 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
                 f"Available compiler passes: {list(AVAILABLE_COMPILER_PASSES.keys())}"
             )
         if pass_name == "transformer_block_bucketing":
+            from torchtitan.experiments.compiler_toolkit.passes import (
+                reassign_to_pg_pass,
+            )
+
+            create_extra_fsdp_pg(parallel_dims)
+            fsdp_mesh = parallel_dims.get_mesh("fsdp")
+            fsdp_pg = fsdp_mesh.get_group()
+            fsdp_pg_name = fsdp_pg.group_name
+            extra_pg_name = get_extra_fsdp_pg_name(fsdp_pg_name)
+            compiler_passes.append(
+                functools.partial(
+                    reassign_to_pg_pass,
+                    source_pg_name=fsdp_pg_name,
+                    target_pg_name=extra_pg_name,
+                )
+            )
             compiler_passes.append(
                 functools.partial(
                     AVAILABLE_COMPILER_PASSES[pass_name],
@@ -360,18 +468,27 @@ def get_compiler_passes_from_config(model: torch.nn.Module, job_config: JobConfi
 
 
 def get_joint_custom_passes_from_config(
-    parallel_dims: ParallelDims, job_config: JobConfig
+    parallel_dims: ParallelDims,
+    compile_config: CompileConfig,
+    parallelism: ParallelismConfig,
 ):
     """
     Extract and validate joint custom passes from job config.
 
+    Note: The inductor_decomposition pass is handled separately in joint_graph_builder
+    because it requires context (model, joint_with_descriptors, etc.) that's only
+    available at graph capture time.
+
     Args:
+        parallel_dims: Parallelism dimensions
         job_config: Job configuration containing parallelism.fsdp_reshard_after_forward
+                    and compile.joint_passes
 
     Returns:
         List of joint custom pass functions
     """
     from torchtitan.experiments.compiler_toolkit.passes import (
+        AVAILABLE_JOINT_PASSES,
         fsdp_reshard_after_fwd_pass,
         validate_flex_attn_annotation_pass,
     )
@@ -379,7 +496,26 @@ def get_joint_custom_passes_from_config(
     joint_custom_passes = []
     joint_custom_passes.append(validate_flex_attn_annotation_pass)
 
-    match job_config.parallelism.fsdp_reshard_after_forward:
+    # Handle joint passes from config (excluding inductor_decomposition)
+    joint_pass_names = getattr(compile_config, "joint_passes", [])
+    for pass_name in joint_pass_names:
+        if pass_name not in AVAILABLE_JOINT_PASSES:
+            raise ValueError(
+                f"Unknown joint pass: {pass_name}. "
+                f"Available joint passes: {list(AVAILABLE_JOINT_PASSES.keys())}"
+            )
+
+        # Skip inductor_decomposition - it's handled in joint_graph_builder
+        if pass_name == "inductor_decomposition":
+            continue
+
+        joint_custom_passes.append(AVAILABLE_JOINT_PASSES[pass_name])
+
+    if joint_pass_names:
+        logger.info(f"Using joint passes from config: {joint_pass_names}")
+
+    # Handle FSDP reshard after forward
+    match parallelism.fsdp_reshard_after_forward:
         case "always":
             fsdp_reshard_after_forward = True
         case "never":
@@ -390,7 +526,7 @@ def get_joint_custom_passes_from_config(
             fsdp_reshard_after_forward = not parallel_dims.pp_enabled
         case _:
             raise ValueError(
-                f"Invalid fsdp_reshard_after_forward_policy: {job_config.parallelism.fsdp_reshard_after_forward}."
+                f"Invalid fsdp_reshard_after_forward_policy: {parallelism.fsdp_reshard_after_forward}."
             )
 
     joint_custom_passes.append(

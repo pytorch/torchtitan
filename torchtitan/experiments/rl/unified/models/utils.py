@@ -10,16 +10,14 @@ from enum import Enum
 
 import torch
 from safetensors.torch import load_file
-
 from torchtitan.experiments.rl.unified.models.attention import VLLMAttention
 from torchtitan.experiments.rl.vllm_compat.models.attention import (
     VLLMCompatibleFlashAttention,
 )
-
 from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
-from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
+from torchtitan.models.qwen3.model import Qwen3Model
 from transformers import AutoConfig
 
 logger = logging.getLogger(__name__)
@@ -53,16 +51,29 @@ def replace_with_vllm_attention(model, tp_degree=1):
             f"Model {type(model).__name__} must have .layers attribute"
         )
 
-    model_args = model.model_args
+    model_args = model.config
+
+    # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/qwen3.py#L80
+    # Calculate num_kv_heads based on TP size
+    total_num_kv_heads = model_args.layer.attention.n_kv_heads
+    if total_num_kv_heads >= tp_degree:
+        # Number of KV heads is greater than TP size, so we partition
+        # the KV heads across multiple tensor parallel GPUs.
+        assert total_num_kv_heads % tp_degree == 0
+        num_kv_heads = total_num_kv_heads // tp_degree
+    else:
+        # TODO: Handle this branch correctly
+        raise ValueError("num_kv_heads are smaller than tp_degree")
+
     for layer_name, layer in model.layers.items():
         if not hasattr(layer, "attention"):
             raise ValueError(f"Layer {layer_name} must have .attention attribute")
 
+        # GQA
         vllm_attn = VLLMAttention(
             hidden_size=model_args.dim,
-            num_heads=model_args.n_heads // tp_degree,
-            num_kv_heads=model_args.n_heads
-            // tp_degree,  # Use n_heads (already replicated)
+            num_heads=model_args.layer.attention.n_heads // tp_degree,
+            num_kv_heads=num_kv_heads,
             head_dim=model_args.head_dim,
             layer_name=layer_name,
             scale=model_args.head_dim**-0.5,
@@ -87,7 +98,6 @@ def replace_with_vllm_compatible_flash_attention(model):
             f"Model {type(model).__name__} must have .layers attribute"
         )
 
-    model_args = model.model_args
     for layer_name, layer in model.layers.items():
         if not hasattr(layer, "attention"):
             raise ValueError(f"Layer {layer_name} must have .attention attribute")
@@ -122,7 +132,7 @@ def load_model(
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
     # Create model args
-    model_args = Qwen3ModelArgs(
+    model_args = Qwen3Model.Config(
         dim=hf_config.hidden_size,
         n_layers=hf_config.num_hidden_layers,
         n_heads=hf_config.num_attention_heads,
@@ -140,10 +150,17 @@ def load_model(
         qk_norm=True,
         depth_init=True,
         eos_id=getattr(hf_config, "eos_token_id", 151645),
+        enable_weight_tying=getattr(hf_config, "tie_word_embeddings", False),
     )
 
     # state_dict is in standard TorchTitan format (w1, w2, w3)
     state_dict = load_file(checkpoint_path)
+
+    # If weight tying is enabled but output.weight is missing from the checkpoint
+    # (HF models with tie_word_embeddings=True may not store lm_head.weight),
+    # synthesize it from tok_embeddings.weight so load_state_dict(strict=True) works.
+    if model_args.enable_weight_tying and "output.weight" not in state_dict:
+        state_dict["output.weight"] = state_dict["tok_embeddings.weight"]
 
     if model_mode == ModelMode.UNIFIED:
         from torchtitan.models.qwen3 import Qwen3Model

@@ -5,11 +5,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
+# Must set spawn method before any CUDA operations or vLLM imports
+# CUDA cannot be re-initialized in forked subprocesses
+# See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 import argparse
 
 # Import unified module - this automatically registers TorchTitan models with vLLM
 from torchtitan.experiments.rl import unified  # noqa: F401
-
 from vllm import LLM, SamplingParams
 from vllm.logger import init_logger
 
@@ -25,7 +31,7 @@ def parse_args():
     parser.add_argument(
         "--model-ckpt-path",
         type=str,
-        default="torchtitan/experiments/rl/example_checkpoint",
+        default="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B/",
         help="Path to TorchTitan checkpoint directory",
     )
     parser.add_argument(
@@ -64,7 +70,7 @@ def infer():
 
     # Initialize vLLM with custom TorchTitan model
     # The LLM initialization will internally:
-    # 1. Load TrainSpec for Qwen3 (from models/__init__.py register())
+    # 1. Load ModelSpec for Qwen3 (from models/__init__.py register())
     # 2. Create TorchTitanVLLMModel instance
     # 3. Create JobConfig and ParallelDims from vLLM config
     # 4. Apply parallelization using parallelize_qwen3

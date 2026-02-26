@@ -34,13 +34,15 @@ from torchtitan.experiments.rl.vllm_compat.weights_vllm_compat import (
     torchtitan_to_vllm_compat,
 )
 
-from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
+from torchtitan.models.qwen3.model import Qwen3Model
 from transformers import AutoConfig, AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-init_batch_invariance()
+
+init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
 
 
 class VLLMRolloutEngine:
@@ -170,6 +172,7 @@ class VLLMRolloutEngine:
                 gpu_memory_utilization=0.3,  # Reduced from 0.5
                 seed=42,  # Fixed seed for determinism
                 enforce_eager=True,
+                attention_config={"backend": AttentionBackendEnum.FLASH_ATTN},
             )
             print("✓ Created new vLLM engine")
         else:
@@ -315,7 +318,7 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
     hf_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
 
     # Create model args
-    model_args = Qwen3ModelArgs(
+    model_args = Qwen3Model.Config(
         dim=hf_config.hidden_size,
         n_layers=hf_config.num_hidden_layers,
         n_heads=hf_config.num_attention_heads,
@@ -340,7 +343,7 @@ def load_model(checkpoint_path: str, model_path: str, use_vllm_compat: bool = Tr
 
     if use_vllm_compat:
         # Create and load model (using vLLM-compat for bitwise determinism)
-        from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.models.qwen3 import (
+        from torchtitan.experiments.rl.vllm_compat.models.qwen3 import (
             Qwen3VLLMCompatModel,
         )
 
@@ -1051,7 +1054,7 @@ def main():
         print("✓ Batch invariance detected - using vLLM-compatible model")
         # Add backward pass support to vLLM's batch_invariant mode
         print("  Adding gradient support to vLLM's batch_invariant mode...")
-        from torchtitan.experiments.deterministic_vllm_rl.vllm_compat.batch_invariant_backward import (
+        from torchtitan.experiments.rl.vllm_compat import (
             enable_batch_invariant_backward_mode,
         )
 
