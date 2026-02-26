@@ -11,14 +11,9 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 ``ConfigManager`` via ``--module rl.unified --config <function_name>``.
 """
 
-from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.config.configs import (
-    ActivationCheckpointConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan.experiments.rl.unified.actors.generator import Generator
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.unified.configs import (
@@ -49,15 +44,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(
-                initial_load_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
-                initial_load_model_only=True,
-                initial_load_in_hf=True,
-            ),
-            activation_checkpoint=ActivationCheckpointConfig(
-                mode="selective",
-                selective_ac_option="op",
-            ),
+            hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         ),
         policy_optimization=PolicyOptimizationConfig(
             beta=0.1,
@@ -101,9 +88,6 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
-            ),
-            checkpoint=CheckpointManager.Config(
-                interval=5,
             ),
         ),
         policy_optimization=PolicyOptimizationConfig(

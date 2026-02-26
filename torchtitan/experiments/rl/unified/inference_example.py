@@ -34,12 +34,15 @@ def generate():
 
     config = rl_grpo_qwen3_0_6b()
     gen_config = config.generator
-    model_path = config.trainer.checkpoint.initial_load_path
+    model_path = config.trainer.hf_assets_path
 
     # Register TorchTitan model with vLLM before engine creation
-    from torchtitan.experiments.rl.unified.plugin import register
+    from torchtitan.experiments.rl.unified.plugin import (
+        register_model_to_vllm_model_registry,
+        VLLM_MODEL_NAME,
+    )
 
-    register(config.model_spec)
+    register_model_to_vllm_model_registry(config.model_spec)
     logger.info("Registered TorchTitan model with vLLM")
 
     logger.debug("Initializing vLLM LLMEngine with TorchTitan model")
@@ -65,7 +68,7 @@ def generate():
         # Seed
         seed=gen_config.seed,
         # HuggingFace overrides
-        hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
+        hf_overrides={"architectures": [VLLM_MODEL_NAME]},
     )
 
     logger.debug("Initializing LLMEngine from EngineArgs...")
