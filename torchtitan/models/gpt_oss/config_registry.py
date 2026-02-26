@@ -58,6 +58,7 @@ def gpt_oss_debugmodel() -> Trainer.Config:
         ),
     )
 
+
 def gpt_oss_20b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/gpt-oss-20b",
@@ -82,6 +83,7 @@ def gpt_oss_20b() -> Trainer.Config:
         checkpoint=CheckpointManager.Config(interval=500),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
     )
+
 
 def gpt_oss_120b() -> Trainer.Config:
     return Trainer.Config(
