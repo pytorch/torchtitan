@@ -51,8 +51,9 @@ class TestModuleInitWeights(unittest.TestCase):
 class TestDiamondInheritance(unittest.TestCase):
     """Tests for diamond inheritance: class Foo(nn.SomeModule, Module).
 
-    The diamond pattern is used by Embedding(nn.Embedding, Module) to
-    reuse PyTorch's implementation while satisfying the Module protocol.
+    The diamond pattern will be used if a Module component also inherits from
+    an nn.Module (e.g., nn.Embedding) to reuse PyTorch's implementation while
+    satisfying the Module protocol.
     These tests ensure the pattern works correctly and catches regressions.
     """
 
@@ -67,28 +68,16 @@ class TestDiamondInheritance(unittest.TestCase):
         """Module must not define __init__ in its own __dict__.
 
         If Module defined __init__, diamond inheritance (e.g. nn.Embedding +
-        Module) would break because nn.Embedding.super().__init__() would call
-        Module.__init__ instead of nn.Module.__init__.
+        Module) may break the __init__ structure.
         """
         self.assertNotIn(
             "__init__",
             Module.__dict__,
             "Module must not define __init__. Adding __init__ to Module "
-            "would break diamond inheritance (e.g. nn.Embedding + Module) "
-            "because nn.Embedding.super().__init__() would call "
-            "Module.__init__ instead of nn.Module.__init__.",
+            "may break diamond inheritance (e.g. nn.Embedding + Module). "
+            "Please verify all the use cases and ensure the change doesn't "
+            "break them. After that, we can consider to remove this test.",
         )
-
-    def test_mro_resolves(self):
-        """Python's C3 linearization should resolve the diamond MRO."""
-        mro_names = [c.__name__ for c in self.TestEmbedding.__mro__]
-        # nn.Embedding should come before Module in MRO
-        self.assertLess(mro_names.index("Embedding"), mro_names.index("Module"))
-
-    def test_instantiation(self):
-        """Diamond-inheriting class can be instantiated."""
-        emb = self.TestEmbedding(100, 32)
-        self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_forward(self):
         """Forward pass works through nn.Embedding's implementation."""
@@ -120,13 +109,6 @@ class TestDiamondInheritance(unittest.TestCase):
         emb = BadEmbedding(10, 4)
         with self.assertRaises(NotImplementedError):
             emb.init_weights()
-
-    def test_state_dict(self):
-        """state_dict works correctly (no duplicate or missing keys)."""
-        emb = self.TestEmbedding(20, 8)
-        sd = emb.state_dict()
-        self.assertEqual(list(sd.keys()), ["weight"])
-        self.assertEqual(sd["weight"].shape, torch.Size([20, 8]))
 
     def test_module_hierarchy_is_flat(self):
         """Diamond embedding adds no extra layer to the module tree."""

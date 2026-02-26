@@ -17,23 +17,34 @@ class Embedding(nn.Embedding, Module):
     Uses diamond inheritance (nn.Embedding + Module) so that:
     - The module hierarchy stays flat (no extra wrapper layer).
     - All nn.Embedding logic (forward, state_dict, etc.) is reused as-is.
-    - The Module protocol (``init_weights``) is satisfied and ``build()``
-      is inherited from ``Configurable.Config``.
+    - The Module protocol is satisfied and ``build()`` is inherited from
+      ``Configurable.Config``.
 
-    ``num_embeddings`` and ``embedding_dim`` are passed as kwargs to
-    ``build()`` (and forwarded to ``__init__``) because they are derived
-    from the parent model config (``vocab_size`` and ``dim``).
+    ``num_embeddings`` and ``embedding_dim`` live in ``Config`` (defaulting
+    to ``None``).  They are typically supplied via ``build()`` kwargs from
+    the parent model and passed into a cloned config.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        # ``num_embeddings`` and ``embedding_dim`` are usually passed by the
+        # parent modules through build(). So the default values are None to
+        # fit Configurable.Config convention.
+        num_embeddings: int | None = None
+        embedding_dim: int | None = None
         init_mean: float = 0.0
         init_std: float = 1.0
 
-    def __init__(self, config: Config, *, num_embeddings: int, embedding_dim: int):
-        super().__init__(num_embeddings, embedding_dim)
-        self._init_mean = config.init_mean
-        self._init_std = config.init_std
+    def __init__(self, config: Config):
+        if config.num_embeddings is None or config.embedding_dim is None:
+            raise TypeError(
+                "Embedding requires num_embeddings and embedding_dim. "
+                "Either set them in Config or pass them to build()."
+            )
+        super().__init__(config.num_embeddings, config.embedding_dim)
+        self.config = config
 
     def init_weights(self, **kwargs) -> None:
-        nn.init.normal_(self.weight, mean=self._init_mean, std=self._init_std)
+        nn.init.normal_(
+            self.weight, mean=self.config.init_mean, std=self.config.init_std
+        )
