@@ -51,16 +51,6 @@ class FeedForward(Module):
         self.w3 = nn.Linear(dim, config.hidden_dim, bias=config.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if getattr(self.w1, "_partition_only", False):
-            # When weights are partitioned as DTensors (via PartitionOnly),
-            # use local weight shards directly. This avoids wrapping input as
-            # DTensor(Replicate) which would cause an all-reduce of d_x in
-            # backward. The output is Partial across TP ranks (from row-parallel
-            # w2), and will be reduced at the MoE output boundary.
-            w1 = self.w1.weight.to_local()
-            w2 = self.w2.weight.to_local()
-            w3 = self.w3.weight.to_local()
-            return F.linear(F.silu(F.linear(x, w1)) * F.linear(x, w3), w2)
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def init_weights(self, init_std: float = 0.02, **kwargs):

@@ -287,13 +287,14 @@ def apply_moe_ep_tp(
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(Shard(1),),
                     desired_input_layouts=(Replicate(),),
-                    use_local_input=True,
+                    # Keep input as a DTensor from SequenceParallel, do not wrap with to_local.
+                    use_local_input=False,
                     output_layouts=(Partial(),),
                     desired_output_layouts=(Shard(1),),
                 ),
                 # replicate computation for the router
                 "moe.router.gate": NoParallel(
-                    local_output_grad_placements=(Replicate(),),
+                    local_output_grad_placements=(Partial(),),
                 ),
             }
             if ep_mesh is not None and not etp_enabled:

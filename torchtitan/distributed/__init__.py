@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
+from collections.abc import Sequence
 from functools import partial
 from typing import Any
 
@@ -77,7 +78,7 @@ class NoParallel(ParallelStyle):
     @staticmethod
     def _prepare_output_fn(
         output_layout: Placement,
-        local_output_grad_placements: tuple[Placement, ...] | None,
+        local_output_grad_placements: Sequence[Placement] | None,
         mod: nn.Module,
         outputs: DTensor,
         device_mesh: DeviceMesh,

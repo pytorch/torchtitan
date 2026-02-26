@@ -284,9 +284,9 @@ def apply_non_moe_tp(
                     positions_sharding,
                 ),
             ),
-            # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
-            # so that the intermedidate results k is generated as a DTensor and its gradient is
-            # correctly handled by the autograd engine.
+            # NOTE: NoParallel() without local_output_grad_placements keeps the output as a
+            # DTensor so that the intermediate results k is generated as a DTensor and its
+            # gradient is correctly handled by the autograd engine.
             "attention.wkv_a": NoParallel(),
             "attention.wkv_b": colwise_parallel(use_local_output=False),
             "attention.kv_norm": NoParallel(),

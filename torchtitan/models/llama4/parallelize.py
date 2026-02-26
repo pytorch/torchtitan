@@ -34,10 +34,6 @@ from torchtitan.config import (
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
-from torchtitan.distributed.tensor_parallel import (
-    ColwisePartitionOnly,
-    RowwisePartitionOnly,
-)
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
     get_dual_pipe_v_flag,
@@ -562,15 +558,22 @@ def apply_moe_ep_tp(
                 moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
-                # Use MoE-specific parallel styles that avoid all-reducing d_x
-                # in backward. d_x stays Partial and gets reduced once at the
-                # MoE output boundary (PrepareModuleInputOutput).
+                # Use grad_placements to keep d_x as Partial in backward
+                # (avoids the all-reduce that from_local(Replicate) would
+                # otherwise trigger). The reduction happens once at the MoE
+                # output boundary (PrepareModuleInputOutput).
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": ColwisePartitionOnly(),
-                        "moe.shared_experts.w2": RowwisePartitionOnly(),
-                        "moe.shared_experts.w3": ColwisePartitionOnly(),
+                        "moe.shared_experts.w1": ColwiseParallel(
+                            grad_placements=(Partial(),),
+                        ),
+                        "moe.shared_experts.w2": RowwiseParallel(
+                            output_layouts=Partial(),
+                        ),
+                        "moe.shared_experts.w3": ColwiseParallel(
+                            grad_placements=(Partial(),),
+                        ),
                     }
                 )
             parallelize_module(
