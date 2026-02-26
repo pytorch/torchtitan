@@ -85,8 +85,7 @@ def _process_mm_sample(
                     img,
                     patch_size=patch_size,
                     merge_size=spatial_merge_size,
-                    temporal_patch_size=temporal_patch_size,
-                    max_patch_per_image=max_patch_per_image,
+                    max_pixels=max_patch_per_image * (patch_size * spatial_merge_size) ** 2,
                 )
                 if processed_img is not None:
                     # Each (patch_size x temporal_patch_size) x (patch_size x temporal_patch_size)
