@@ -328,7 +328,7 @@ class Qwen3VLVisionEncoder(nn.Module):
         n_heads: int = 16
 
         # Vision-specific parameters
-        patch_size: int = 14
+        patch_size: int = 16
         temporal_patch_size: int = 2
         in_channels: int = 3
         spatial_merge_size: int = 2
@@ -578,7 +578,8 @@ class Qwen3VLVisionEncoder(nn.Module):
         # Create attention mask for block-diagonal attention
         mask_mod = get_vision_block_mask_mod(num_patch, max_num_patch)
         attention_mask = _compiled_create_block_mask(
-            mask_mod, num_images, None, max_num_patch, max_num_patch
+            mask_mod, num_images, None, max_num_patch, max_num_patch,
+            device=hidden_states.device,
         )
 
         # Apply transformer layers with DeepStack extraction

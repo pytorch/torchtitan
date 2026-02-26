@@ -40,7 +40,7 @@ def process_image(
 
     Note:
         - Resizes image while maintaining aspect ratio
-        - Normalizes using CLIP mean/std values
+        - Normalizes using pre-process configs of Qwen3-VL
         - Returns None if any processing step fails
     """
     try:
