@@ -10,7 +10,8 @@ from unittest.mock import MagicMock
 import torch
 
 from torchtitan.tools.profiling import (
-    OverlapAnalyzer,
+    CommsComputeOverlapAnalyzer,
+    MemoryProfiler,
     ProfileAnalyzer,
     Profiler,
 )
@@ -40,7 +41,7 @@ class TestProfileAnalyzerABC(unittest.TestCase):
         self.assertIsInstance(analyzer, ProfileAnalyzer)
 
 
-class TestOverlapAnalyzer(unittest.TestCase):
+class TestCommsComputeOverlapAnalyzer(unittest.TestCase):
     def _make_mock_prof(self, key_averages=None, events=None):
         prof = MagicMock(spec=torch.profiler.profile)
         prof.key_averages.return_value = key_averages or []
@@ -54,14 +55,14 @@ class TestOverlapAnalyzer(unittest.TestCase):
         evt.self_device_time_total = 1000.0
         prof = self._make_mock_prof(key_averages=[evt])
 
-        analyzer = OverlapAnalyzer()
+        analyzer = CommsComputeOverlapAnalyzer()
         # Should not raise; logs a "Skipping" message.
         analyzer.analyze(prof)
 
     def test_analyze_empty_key_averages(self):
         """Empty key_averages → no NCCL time → early return without error."""
         prof = self._make_mock_prof(key_averages=[])
-        analyzer = OverlapAnalyzer()
+        analyzer = CommsComputeOverlapAnalyzer()
         analyzer.analyze(prof)
 
     def test_analyze_nccl_and_compute_kernels(self):
@@ -75,21 +76,21 @@ class TestOverlapAnalyzer(unittest.TestCase):
         compute_evt.self_device_time_total = 8000.0
 
         prof = self._make_mock_prof(key_averages=[nccl_evt, compute_evt])
-        analyzer = OverlapAnalyzer()
+        analyzer = CommsComputeOverlapAnalyzer()
         # Should not raise; logs the overlap report.
         analyzer.analyze(prof)
 
     def test_get_trace_duration_empty_events(self):
         """_get_trace_duration_us() returns 0.0 for empty events."""
         prof = self._make_mock_prof(events=[])
-        analyzer = OverlapAnalyzer()
+        analyzer = CommsComputeOverlapAnalyzer()
         self.assertEqual(analyzer._get_trace_duration_us(prof), 0.0)
 
     def test_get_trace_duration_events_exception(self):
         """_get_trace_duration_us() returns 0.0 when events() raises."""
         prof = MagicMock(spec=torch.profiler.profile)
         prof.events.side_effect = RuntimeError("no trace")
-        analyzer = OverlapAnalyzer()
+        analyzer = CommsComputeOverlapAnalyzer()
         self.assertEqual(analyzer._get_trace_duration_us(prof), 0.0)
 
 
@@ -128,65 +129,92 @@ class TestProfilerInit(unittest.TestCase):
         profiler = Profiler(Profiler.Config())
         self.assertEqual(profiler._analyzers, [])
 
-    def test_enable_overlap_analysis_adds_overlap_analyzer(self):
-        """enable_overlap_analysis=True adds OverlapAnalyzer automatically."""
+    def test_enable_overlap_analysis_adds_comms_compute_overlap_analyzer(self):
+        """enable_overlap_analysis=True adds CommsComputeOverlapAnalyzer automatically."""
         profiler = Profiler(Profiler.Config(enable_overlap_analysis=True))
         self.assertEqual(len(profiler._analyzers), 1)
-        self.assertIsInstance(profiler._analyzers[0], OverlapAnalyzer)
+        self.assertIsInstance(profiler._analyzers[0], CommsComputeOverlapAnalyzer)
+
+    def test_default_runtime_attrs(self):
+        """Profiler initializes runtime attrs to safe defaults."""
+        profiler = Profiler(Profiler.Config())
+        self.assertEqual(profiler._global_step, 0)
+        self.assertEqual(profiler._base_folder, "")
+        self.assertEqual(profiler._leaf_folder, "")
+        self.assertIsNone(profiler.torch_profiler)
+        self.assertIsNone(profiler.memory_profiler)
 
 
 class TestProfilerDisabledPaths(unittest.TestCase):
-    """Tests for the no-op paths that require no GPU."""
+    """Tests for the no-op / disabled paths that require no GPU."""
 
-    def test_maybe_enable_profiling_disabled_yields_none(self):
+    def test_build_torch_profiler_disabled_returns_none(self):
+        """build_torch_profiler returns None when profiling is disabled."""
         profiler = Profiler(Profiler.Config(enable_profiling=False))
-        with profiler.maybe_enable_profiling(
+        result = profiler.build_torch_profiler(
             global_step=0, base_folder="/tmp", leaf_folder=""
-        ) as handle:
-            self.assertIsNone(handle)
+        )
+        self.assertIsNone(result)
 
-    def test_maybe_enable_memory_snapshot_disabled_yields_none(self):
+    def test_build_memory_profiler_disabled_returns_none(self):
+        """build_memory_profiler returns None when memory snapshot is disabled."""
         profiler = Profiler(Profiler.Config(enable_memory_snapshot=False))
-        with profiler.maybe_enable_memory_snapshot(
+        result = profiler.build_memory_profiler(
             global_step=0, base_folder="/tmp", leaf_folder=""
-        ) as handle:
-            self.assertIsNone(handle)
+        )
+        self.assertIsNone(result)
 
-    def test_maybe_enable_profiling_disabled_default_args(self):
-        """maybe_enable_profiling works with all default keyword args."""
+    def test_active_returns_profiler_itself(self):
+        """active() returns the Profiler instance (self)."""
         profiler = Profiler(Profiler.Config())
-        with profiler.maybe_enable_profiling() as handle:
-            self.assertIsNone(handle)
+        result = profiler.active(global_step=5, base_folder="/tmp", leaf_folder="rank0")
+        self.assertIs(result, profiler)
 
-    def test_maybe_enable_memory_snapshot_disabled_default_args(self):
-        """maybe_enable_memory_snapshot works with all default keyword args."""
+    def test_active_stores_runtime_args(self):
+        """active() stores global_step, base_folder, leaf_folder on the instance."""
         profiler = Profiler(Profiler.Config())
-        with profiler.maybe_enable_memory_snapshot() as handle:
-            self.assertIsNone(handle)
+        profiler.active(global_step=42, base_folder="/data", leaf_folder="sub")
+        self.assertEqual(profiler._global_step, 42)
+        self.assertEqual(profiler._base_folder, "/data")
+        self.assertEqual(profiler._leaf_folder, "sub")
 
-    def test_active_disabled_yields_session_with_noop_step(self):
-        """active() with everything disabled yields a _ProfilingSession whose step() is a no-op."""
-        from torchtitan.tools.profiling import _ProfilingSession
-
+    def test_active_as_context_manager_step_is_noop(self):
+        """With everything disabled, active() as context manager and step() don't raise."""
         profiler = Profiler(Profiler.Config())
-        with profiler.active(global_step=0, base_folder="/tmp") as session:
-            self.assertIsInstance(session, _ProfilingSession)
-            # step() must not raise when both handles are None
-            session.step()
-            session.step()
+        with profiler.active(global_step=0, base_folder="/tmp") as prof:
+            self.assertIs(prof, profiler)
+            self.assertIsNone(prof.torch_profiler)
+            self.assertIsNone(prof.memory_profiler)
+            prof.step()
+            prof.step()
 
     def test_active_default_args(self):
         """active() works with all default keyword args."""
         profiler = Profiler(Profiler.Config())
-        with profiler.active() as session:
-            session.step()
+        with profiler.active() as prof:
+            prof.step()
+
+    def test_step_noop_when_both_profilers_none(self):
+        """step() is a no-op when torch_profiler and memory_profiler are both None."""
+        profiler = Profiler(Profiler.Config())
+        # should not raise even without entering the context manager
+        profiler.step()
+        profiler.step()
+
+    def test_exit_resets_profiler_attrs(self):
+        """After __exit__, torch_profiler and memory_profiler are reset to None."""
+        profiler = Profiler(Profiler.Config())
+        with profiler.active():
+            pass
+        self.assertIsNone(profiler.torch_profiler)
+        self.assertIsNone(profiler.memory_profiler)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestProfilerEnabledPathsGPU(unittest.TestCase):
     """GPU-dependent tests — skipped automatically when no GPU is present."""
 
-    def test_maybe_enable_profiling_yields_profiler_handle(self):
+    def test_build_torch_profiler_returns_active_handle(self):
         import tempfile
 
         profiler = Profiler(
@@ -198,10 +226,8 @@ class TestProfilerEnabledPathsGPU(unittest.TestCase):
             )
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            with profiler.maybe_enable_profiling(
-                global_step=0, base_folder=tmpdir
-            ) as handle:
-                self.assertIsNotNone(handle)
+            with profiler.active(global_step=0, base_folder=tmpdir):
+                self.assertIsNotNone(profiler.torch_profiler)
 
 
 if __name__ == "__main__":
