@@ -235,26 +235,22 @@ class RMSNorm(nn.Module):
         nn.init.ones_(self.weight)
 
 
-class MambaRMSNormGated(nn.Module):
+class MambaRMSNormGated(nn.RMSNorm):
     """Gated RMS Normalization for Mamba2 layers."""
 
     def __init__(self, hidden_size: int, eps: float = 1e-5):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
+        super().__init__(hidden_size, eps=eps)
 
     def forward(
         self, hidden_states: torch.Tensor, gate: torch.Tensor | None = None
     ) -> torch.Tensor:
         input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        hidden_states = super().forward(hidden_states.to(torch.float32))
 
         if gate is not None:
             hidden_states = hidden_states * F.silu(gate.to(torch.float32))
 
-        return (self.weight.to(torch.float32) * hidden_states).to(input_dtype)
+        return hidden_states.to(input_dtype)
 
     def reset_parameters(self) -> None:
         nn.init.ones_(self.weight)

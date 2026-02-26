@@ -84,17 +84,16 @@ initial_load_in_hf = true        # Load from HuggingFace format
 
 ## Roadmap
 
-Currently using **FSDP** (Fully Sharded Data Parallel) to get training up and running. The following parallelism strategies are planned for future support:
+Currently using **FSDP** (Fully Sharded Data Parallel) to get training up and running. The next priorities are Expert Parallelism (EP), then Context Parallelism (CP), followed by MFU optimizations.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | FSDP | ✅ Supported | Currently used for distributed training |
-| Tensor Parallelism | 🚧 To be added | Likely needed for larger model variants |
+| Expert Parallelism | 🚧 Next | Priority for scaling larger MoE models |
 | Context Parallelism | 🚧 To be added | Needed for very long sequence lengths |
-| Expert Parallelism | 🚧 To be added | Essential for scaling MoE layers |
 | MFU Optimizations | 🚧 To be added | Kernel fusion, better memory layout, etc. |
 
-These advanced parallelism strategies will become necessary once NVIDIA releases larger models in the Nemotron series.
+These additions are expected to become increasingly important as larger Nemotron variants are released.
 
 ## Implementation Notes
 

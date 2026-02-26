@@ -26,15 +26,15 @@ __all__ = [
 
 
 # NemotronH model flavors
-# Pattern key: M=Mamba2, *=Attention, -=MLP, E=MoE
+# Pattern key: M=Mamba2, *=Attention, E=MoE
 nemotron3_args = {
     # Debug model for testing
     "debugmodel": Nemotron3ModelArgs(
         vocab_size=131072,
         dim=1024,
         hidden_dim=4096,
-        n_layers=16,
-        hybrid_override_pattern="M*M*M*M*M*M*M*M*",
+        n_layers=3,
+        hybrid_override_pattern="M*E",
         n_heads=16,
         head_dim=64,
         n_kv_heads=8,
@@ -57,29 +57,21 @@ nemotron3_args = {
         mlp_hidden_act="relu2",
         attn_bias=False,
         mlp_bias=False,
-        use_bias=False,
         initializer_range=0.02,
         norm_eps=1e-5,
         residual_in_fp32=False,
         # Mamba2 config
-        use_mamba_kernels=True,
         ssm_state_size=128,
         mamba_num_heads=64,
         mamba_n_groups=8,
         mamba_head_dim=64,
         mamba_d_conv=4,
-        mamba_expand=2,
         mamba_hidden_act="silu",
-        mamba_dt_min=0.001,
-        mamba_dt_max=0.1,
-        mamba_dt_init_floor=1e-4,
         mamba_conv_bias=True,
         mamba_proj_bias=False,
         mamba_chunk_size=128,
-        rescale_prenorm_residual=True,
         # MoE config
         n_routed_experts=128,
-        n_shared_experts=1,
         moe_intermediate_size=1856,
         moe_shared_expert_intermediate_size=3712,
         num_experts_per_tok=6,
