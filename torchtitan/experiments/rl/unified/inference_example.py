@@ -56,7 +56,7 @@ def generate():
         # Model configuration
         model=model_path,
         trust_remote_code=True,
-        dtype=gen_config.dtype,
+        dtype=gen_config.model_dtype,
         # Parallelism configuration
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         # Use external_launcher only when launched via torchrun (multi-GPU);

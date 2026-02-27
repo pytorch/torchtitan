@@ -8,15 +8,15 @@
 vLLM plugin for TorchTitan models.
 
 Usage:
-    from torchtitan.experiments.rl.unified.plugin import register
-    register(model_spec)
+    from torchtitan.experiments.rl.unified.plugin import register_model_to_vllm_model_registry
+    register_model_to_vllm_model_registry(model_spec)
 """
 
 from torchtitan.protocols.model_spec import ModelSpec
 
 # Model-agnostic name used for vLLM model registration.
 # Must match the hf_overrides["architectures"] value passed to EngineArgs.
-VLLM_MODEL_NAME = "TorchTitanForCausalLM"
+VLLM_MODEL_NAME = "TorchTitanCausalLM"
 
 
 def register_model_to_vllm_model_registry(
