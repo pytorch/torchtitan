@@ -10,8 +10,9 @@ This module provides dataset classes for handling multimodal data
 including images, videos, and text for Qwen3-VL model training.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import torch
 from datasets import Dataset, load_dataset
@@ -37,8 +38,11 @@ def _process_mm_sample(
     tokenizer: BaseTokenizer,
     patch_size: int,
     temporal_patch_size: int,
-    max_patch_per_image: int,
     spatial_merge_size: int,
+    min_pixels: int,
+    max_pixels: int,
+    image_mean: tuple[float, ...],
+    image_std: tuple[float, ...],
     special_tokens: SpecialTokens,
 ) -> dict[str, Any] | None:
     """Common processing logic for multimodal samples.
@@ -48,7 +52,6 @@ def _process_mm_sample(
         images: List of image bytes with None for text positions
         tokenizer: Tokenizer for text processing
         patch_size: Size of image patches
-        max_patch_per_image: Maximum patches per image
         spatial_merge_size: merge 2D image patches to reduce LLM's sequence length.
             - if 1 (default): no merge, effectively NoOp
             - if 2: 2x2=4 image patches will be reduced to 1 LLM visual token
@@ -85,7 +88,10 @@ def _process_mm_sample(
                     img,
                     patch_size=patch_size,
                     merge_size=spatial_merge_size,
-                    max_pixels=max_patch_per_image * (patch_size * spatial_merge_size) ** 2,
+                    min_pixels=min_pixels,
+                    max_pixels=max_pixels,
+                    image_mean=image_mean,
+                    image_std=image_std,
                 )
                 if processed_img is not None:
                     # Each (patch_size x temporal_patch_size) x (patch_size x temporal_patch_size)
@@ -142,8 +148,12 @@ def _process_obelics_sample(
     patch_size: int,
     temporal_patch_size: int,
     spatial_merge_size: int,
-    max_patch_per_image: int,
+    min_pixels: int,
+    max_pixels: int,
+    image_mean: tuple[float, ...],
+    image_std: tuple[float, ...],
     special_tokens: SpecialTokens,
+    **kwargs,
 ) -> dict[str, Any] | None:
     """Process a sample from the OBELICS dataset (interleaved text and images)."""
     return _process_mm_sample(
@@ -153,7 +163,10 @@ def _process_obelics_sample(
         patch_size=patch_size,
         temporal_patch_size=temporal_patch_size,
         spatial_merge_size=spatial_merge_size,
-        max_patch_per_image=max_patch_per_image,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+        image_mean=image_mean,
+        image_std=image_std,
         special_tokens=special_tokens,
     )
 
@@ -164,8 +177,12 @@ def _process_cc12_wd_sample(
     patch_size: int,
     temporal_patch_size: int,
     spatial_merge_size: int,
-    max_patch_per_image: int,
+    min_pixels: int,
+    max_pixels: int,
+    image_mean: tuple[float, ...],
+    image_std: tuple[float, ...],
     special_tokens: SpecialTokens,
+    **kwargs,
 ) -> dict[str, Any] | None:
     """Process a sample from the CC12-WD dataset (text-image pairs)."""
     text = sample.get("txt", "")
@@ -181,7 +198,10 @@ def _process_cc12_wd_sample(
         patch_size=patch_size,
         temporal_patch_size=temporal_patch_size,
         spatial_merge_size=spatial_merge_size,
-        max_patch_per_image=max_patch_per_image,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+        image_mean=image_mean,
+        image_std=image_std,
         special_tokens=special_tokens,
     )
 
@@ -236,8 +256,11 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         patch_size: int,
         temporal_patch_size: int,
         spatial_merge_size: int,
-        max_patches_per_image: int,
         max_images_per_batch: int,
+        min_pixels: int,
+        max_pixels: int,
+        image_mean: tuple[float, ...],
+        image_std: tuple[float, ...],
         packing_buffer_size: int,
         special_tokens: SpecialTokens,
         dp_rank: int = 0,
@@ -258,8 +281,11 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         self.patch_size = patch_size
         self.temporal_patch_size = temporal_patch_size
         self.spatial_merge_size = spatial_merge_size
-        self.max_patches_per_image = max_patches_per_image
         self.max_images_per_batch = max_images_per_batch
+        self.min_pixels = min_pixels
+        self.max_pixels = max_pixels
+        self.image_mean = image_mean
+        self.image_std = image_std
         self.special_tokens = special_tokens
         self.enable_packing = packing_buffer_size > 0
         if self.enable_packing:
@@ -284,7 +310,10 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
                         patch_size=self.patch_size,
                         temporal_patch_size=self.temporal_patch_size,
                         spatial_merge_size=self.spatial_merge_size,
-                        max_patch_per_image=self.max_patches_per_image,
+                        min_pixels=self.min_pixels,
+                        max_pixels=self.max_pixels,
+                        image_mean=self.image_mean,
+                        image_std=self.image_std,
                         special_tokens=self.special_tokens,
                     )
                     if processed is None:
@@ -388,11 +417,7 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
 
 
 class MMDataLoader(ParallelAwareDataloader):
-    """Configurable multimodal dataloader for Qwen3-VL.
-
-    This dataloader wraps HuggingFaceMultiModalDataset with the
-    Configurable pattern used by the new config system.
-    """
+    """Configurable multimodal dataloader for Qwen3-VL."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(ParallelAwareDataloader.Config):
@@ -402,23 +427,37 @@ class MMDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Whether to loop the dataset infinitely"""
 
+        # Batching configs
         max_images_per_batch: int = 10
         """Vision encoder batch size (N)"""
 
         max_patches_per_image: int = 256
         """Vision encoder sequence length (L)"""
 
-        patch_size: int = 16
-        """Patch size of the vision encoder."""
-
-        temporal_patch_size: int = 2
-        """Temporal patch size for video processing."""
-
-        spatial_merge_size: int = 2
-        """Spatially merge visual tokens after encoder. Default 2 means 2x2=4 patches merged."""
-
         packing_buffer_size: int = 0
         """Set to a value >0 to enable sample packing."""
+
+        # Preprocessing configs
+        patch_size: int
+        """Patch size of the vision encoder."""
+
+        temporal_patch_size: int
+        """Temporal patch size for video processing."""
+
+        spatial_merge_size: int
+        """Spatially merge visual tokens after encoder. e.g. 2 means 2x2=4 patches merged."""
+
+        min_pixels: int = 65536
+        """Minimum number of pixels for image resizing."""
+
+        max_pixels: int = 16777216
+        """Maximum number of pixels for image resizing."""
+
+        image_mean: tuple[float, ...] = (0.5, 0.5, 0.5)
+        """Per-channel mean for image normalization."""
+
+        image_std: tuple[float, ...] = (0.5, 0.5, 0.5)
+        """Per-channel std for image normalization."""
 
     def __init__(
         self,
@@ -442,8 +481,11 @@ class MMDataLoader(ParallelAwareDataloader):
             patch_size=config.patch_size,
             temporal_patch_size=config.temporal_patch_size,
             spatial_merge_size=config.spatial_merge_size,
-            max_patches_per_image=config.max_patches_per_image,
             max_images_per_batch=config.max_images_per_batch,
+            min_pixels=config.min_pixels,
+            max_pixels=config.max_pixels,
+            image_mean=config.image_mean,
+            image_std=config.image_std,
             packing_buffer_size=config.packing_buffer_size,
             special_tokens=special_tokens,
             dp_rank=dp_rank,

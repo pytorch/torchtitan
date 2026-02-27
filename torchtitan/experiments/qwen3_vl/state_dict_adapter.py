@@ -183,14 +183,20 @@ class Qwen3VLStateDictAdapter(StateDictAdapter):
 
                 # Handle fused gate_up_proj: split and transpose
                 # HF gate_up_proj: [E, dim, 2*hidden_dim] -> split -> transpose each to [E, hidden_dim, dim]
-                if abstract_key == "model.language_model.layers.{}.mlp.experts.gate_up_proj":
+                if (
+                    abstract_key
+                    == "model.language_model.layers.{}.mlp.experts.gate_up_proj"
+                ):
                     w1_hf, w3_hf = value.chunk(2, dim=-1)  # each [E, dim, hidden_dim]
                     state_dict[f"layers.{idx}.moe.experts.w1"] = w1_hf.transpose(-2, -1)
                     state_dict[f"layers.{idx}.moe.experts.w3"] = w3_hf.transpose(-2, -1)
                     continue
 
                 # Handle down_proj transpose: HF [E, hidden, dim] -> TT w2 [E, dim, hidden]
-                if abstract_key == "model.language_model.layers.{}.mlp.experts.down_proj":
+                if (
+                    abstract_key
+                    == "model.language_model.layers.{}.mlp.experts.down_proj"
+                ):
                     state_dict[f"layers.{idx}.moe.experts.w2"] = value.transpose(-2, -1)
                     continue
 

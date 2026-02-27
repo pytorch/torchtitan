@@ -19,6 +19,12 @@ import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+
+from torch.distributed.pipelining.schedules import (
+    _PipelineSchedule,
+    get_schedule_class,
+    PipelineScheduleSingle,
+)
 from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -26,12 +32,6 @@ from torch.distributed.tensor.parallel import (
     PrepareModuleInput,
     RowwiseParallel,
     SequenceParallel,
-)
-
-from torch.distributed.pipelining.schedules import (
-    _PipelineSchedule,
-    get_schedule_class,
-    PipelineScheduleSingle,
 )
 
 from torchtitan.components.loss import LossFunction
@@ -43,15 +43,14 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import ParallelDims
+
+from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.pipeline_parallel import (
     build_pipeline_schedule,
     generate_llm_fqn_per_model_part,
     pipeline_module_split,
 )
-
-from torchtitan.distributed import NoParallel
 from torchtitan.models.llama3.parallelize import apply_ddp
 from torchtitan.models.llama4.parallelize import (
     apply_compile,
@@ -374,7 +373,11 @@ class _VLMPipelineScheduleWrapper:
 
         # Run vision preprocessing on the full batch
         model = self._model_parts[0]
-        inputs_embeds, pp_deepstack_embeds = model.prepare_vision_inputs(
+        (
+            inputs_embeds,
+            pp_deepstack_embeds,
+            mrope_freqs_cis,
+        ) = model.prepare_vision_inputs(
             tokens,
             pixel_values,
             pixel_values_videos,
@@ -396,6 +399,9 @@ class _VLMPipelineScheduleWrapper:
             pp_deepstack_embeds = pp_deepstack_embeds.detach().requires_grad_()
             ds_originals.append((ds_original, pp_deepstack_embeds))
             kwargs["pp_deepstack_embeds"] = pp_deepstack_embeds
+
+        if mrope_freqs_cis is not None:
+            kwargs["mrope_freqs_cis"] = mrope_freqs_cis
 
         result = self._schedule.step(inputs_embeds, *args[1:], **kwargs)
 
@@ -444,9 +450,7 @@ def pipeline_qwen3_vl(
     pp_mesh = parallel_dims.get_mesh("pp")
 
     # Determine number of virtual stages (mirrors pipeline_llm logic)
-    schedule_class = get_schedule_class(
-        parallelism.pipeline_parallel_schedule
-    )
+    schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
     is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
     layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
 
@@ -551,9 +555,9 @@ def parallelize_qwen3_vl(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert isinstance(model.visual, nn.Module) or model.visual is None, (
-        "model.visual must be an nn.Module or None (when PP splits the model)"
-    )
+    assert (
+        isinstance(model.visual, nn.Module) or model.visual is None
+    ), "model.visual must be an nn.Module or None (when PP splits the model)"
 
     # Validate sequence length divisibility
     assert (
@@ -565,19 +569,14 @@ def parallelize_qwen3_vl(
 
     # Check attention type compatibility
     if parallel_dims.cp_enabled:
-        raise NotImplementedError(
-            "Context Parallel is not yet supported for Qwen3-VL."
-        )
+        raise NotImplementedError("Context Parallel is not yet supported for Qwen3-VL.")
 
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
 
     if parallel_dims.tp_enabled:
-        if (
-            parallelism.enable_async_tensor_parallel
-            and not model_compile_enabled
-        ):
+        if parallelism.enable_async_tensor_parallel and not model_compile_enabled:
             raise RuntimeError("Async TP requires torch.compile")
 
         float8_config = find_float8_linear_config(model_converters.converters)

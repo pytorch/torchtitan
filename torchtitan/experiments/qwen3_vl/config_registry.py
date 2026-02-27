@@ -24,11 +24,18 @@ _HF_MODELS = os.path.expanduser("~/hf_models/Qwen")
 
 
 def qwen3_vl_debugmodel() -> Trainer.Config:
+    spec = model_registry("debugmodel")
+    encoder = spec.model.encoder
     return Trainer.Config(
         hf_assets_path=f"{_HF_MODELS}/Qwen3-VL-2B-Instruct",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel"),
-        dataloader=MMDataLoader.Config(dataset="cc12m-test", patch_size=14),
+        model_spec=spec,
+        dataloader=MMDataLoader.Config(
+            dataset="cc12m-test",
+            patch_size=encoder.patch_size,
+            temporal_patch_size=encoder.temporal_patch_size,
+            spatial_merge_size=encoder.spatial_merge_size,
+        ),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
@@ -53,11 +60,18 @@ def qwen3_vl_debugmodel() -> Trainer.Config:
 
 
 def qwen3_vl_debugmodel_moe() -> Trainer.Config:
+    spec = model_registry("debugmodel_moe")
+    encoder = spec.model.encoder
     return Trainer.Config(
         hf_assets_path=f"{_HF_MODELS}/Qwen3-VL-2B-Instruct",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("debugmodel_moe"),
-        dataloader=MMDataLoader.Config(dataset="cc12m-test", patch_size=14),
+        model_spec=spec,
+        dataloader=MMDataLoader.Config(
+            dataset="cc12m-test",
+            patch_size=encoder.patch_size,
+            temporal_patch_size=encoder.temporal_patch_size,
+            spatial_merge_size=encoder.spatial_merge_size,
+        ),
         optimizer=OptimizersContainer.Config(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
@@ -81,11 +95,16 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
 
 
 def qwen3_vl_2b() -> Trainer.Config:
+    spec = model_registry("2B")
+    encoder = spec.model.encoder
     return Trainer.Config(
         hf_assets_path=f"{_HF_MODELS}/Qwen3-VL-2B-Instruct",
-        model_spec=model_registry("2B"),
+        model_spec=spec,
         dataloader=MMDataLoader.Config(
             dataset="cc12m",
+            patch_size=encoder.patch_size,
+            temporal_patch_size=encoder.temporal_patch_size,
+            spatial_merge_size=encoder.spatial_merge_size,
         ),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -111,11 +130,16 @@ def qwen3_vl_2b() -> Trainer.Config:
 
 
 def qwen3_vl_8b() -> Trainer.Config:
+    spec = model_registry("8B")
+    encoder = spec.model.encoder
     return Trainer.Config(
         hf_assets_path=f"{_HF_MODELS}/Qwen3-VL-8B-Instruct",
-        model_spec=model_registry("8B"),
+        model_spec=spec,
         dataloader=MMDataLoader.Config(
             dataset="cc12m",
+            patch_size=encoder.patch_size,
+            temporal_patch_size=encoder.temporal_patch_size,
+            spatial_merge_size=encoder.spatial_merge_size,
         ),
         optimizer=OptimizersContainer.Config(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
@@ -141,11 +165,16 @@ def qwen3_vl_8b() -> Trainer.Config:
 
 
 def qwen3_vl_30b_a3b() -> Trainer.Config:
+    spec = model_registry("30B-A3B")
+    encoder = spec.model.encoder
     return Trainer.Config(
         hf_assets_path=f"{_HF_MODELS}/Qwen3-VL-30B-A3B-Instruct",
-        model_spec=model_registry("30B-A3B"),
+        model_spec=spec,
         dataloader=MMDataLoader.Config(
             dataset="cc12m",
+            patch_size=encoder.patch_size,
+            temporal_patch_size=encoder.temporal_patch_size,
+            spatial_merge_size=encoder.spatial_merge_size,
         ),
         optimizer=OptimizersContainer.Config(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),

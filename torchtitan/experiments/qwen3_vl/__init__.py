@@ -22,8 +22,8 @@ from torchtitan.models.common.moe import MoE
 from torchtitan.models.qwen3.model import Qwen3TransformerBlock
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .parallelize import parallelize_qwen3_vl, pipeline_qwen3_vl
 from .model import Qwen3VLModel
+from .parallelize import parallelize_qwen3_vl, pipeline_qwen3_vl
 from .state_dict_adapter import Qwen3VLStateDictAdapter
 from .vision_encoder import Qwen3VLVisionEncoder
 
