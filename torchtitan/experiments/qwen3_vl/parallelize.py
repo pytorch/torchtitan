@@ -11,20 +11,12 @@ This module applies PT-D parallelisms and various training techniques
 (activation checkpointing, compile, FSDP) to the Qwen3-VL model.
 """
 
-import math
-
 import torch
 import torch._inductor.config
 import torch.nn as nn
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
-
-from torch.distributed.pipelining.schedules import (
-    _PipelineSchedule,
-    get_schedule_class,
-    PipelineScheduleSingle,
-)
 from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
@@ -34,7 +26,6 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.components.loss import LossFunction
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -46,11 +37,6 @@ from torchtitan.config import (
 
 from torchtitan.distributed import NoParallel, ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.pipeline_parallel import (
-    build_pipeline_schedule,
-    generate_llm_fqn_per_model_part,
-    pipeline_module_split,
-)
 from torchtitan.models.llama3.parallelize import apply_ddp
 from torchtitan.models.llama4.parallelize import (
     apply_compile,
@@ -58,7 +44,6 @@ from torchtitan.models.llama4.parallelize import (
     apply_moe_ep_tp,
 )
 from torchtitan.models.qwen3.parallelize import _op_sac_save_list
-from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
@@ -92,23 +77,19 @@ def _apply_tp_to_decoder(
     vision scatter and DeepStack layer.
     """
     # Parallelize embedding, norm, and output — no SequenceParallel
-    # Build plan conditionally for PP stages where tok_embeddings/output may be None
-    top_level_plan = {}
-    if model.tok_embeddings is not None:
-        top_level_plan["tok_embeddings"] = RowwiseParallel(
+    top_level_plan = {
+        "tok_embeddings": RowwiseParallel(
             input_layouts=Replicate(),
             output_layouts=Replicate(),
-        )
-    if model.norm is not None:
-        top_level_plan["norm"] = NoParallel()
-    if model.output is not None:
-        top_level_plan["output"] = ColwiseParallel(
+        ),
+        "norm": NoParallel(),
+        "output": ColwiseParallel(
             input_layouts=Replicate(),
             output_layouts=Shard(-1) if loss_parallel else Replicate(),
             use_local_output=not loss_parallel,
-        )
-    if top_level_plan:
-        parallelize_module(model, tp_mesh, top_level_plan)
+        ),
+    }
+    parallelize_module(model, tp_mesh, top_level_plan)
 
     if enable_float8_tensorwise_tp:
         from torchao.float8.float8_tensor_parallel import (
@@ -237,7 +218,6 @@ def _apply_fsdp_to_visual(
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
-    pp_enabled: bool,
     reshard_after_forward_policy: str = "default",
 ):
     """
@@ -255,7 +235,7 @@ def _apply_fsdp_to_visual(
         case "never":
             reshard_after_forward = False
         case "default":
-            reshard_after_forward = not pp_enabled
+            reshard_after_forward = True
         case _:
             raise ValueError(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
@@ -300,10 +280,7 @@ def _apply_fsdp_to_visual(
     # Shard pos_embed and any other remaining visual parameters by wrapping
     # the visual module itself. Sub-modules (patch_embed, layers, merger,
     # deepstack_merger_list) are already individually wrapped above.
-    # This top-level wrap captures pos_embed.weight and rotary_pos_emb
-    # so they are unsharded when visual.forward() is called — needed in PP
-    # mode where prepare_vision_inputs() calls visual() outside
-    # model.forward().
+    # This top-level wrap captures pos_embed.weight and rotary_pos_emb.
     fully_shard(
         model.visual,
         **fsdp_config,
@@ -321,220 +298,6 @@ def _apply_compile_to_visual(visual: nn.Module, compile_config):
         )
         visual.layers.register_module(layer_id, transformer_block)
     logger.info("Compiling each visual TransformerBlock with torch.compile")
-
-
-class _VLMPipelineScheduleWrapper:
-    """Wraps a PP schedule to preprocess vision data on stage 0 before microbatching.
-
-    Vision data (pixel_values, grid_thw) has dim 0 = num_images, not batch_size,
-    so it cannot be split into microbatches. This wrapper intercepts step() on
-    the first-stage rank, runs vision preprocessing on the full batch to produce
-    batch-aligned inputs_embeds and dense pp_deepstack_embeds, then passes those
-    to the real PP schedule for normal microbatch splitting.
-    """
-
-    def __init__(self, pp_schedule, model_parts, has_first_stage):
-        self.__dict__["_schedule"] = pp_schedule
-        self.__dict__["_model_parts"] = model_parts
-        self.__dict__["_has_first_stage"] = has_first_stage
-
-    def __getattr__(self, name):
-        return getattr(self._schedule, name)
-
-    def __setattr__(self, name, value):
-        setattr(self._schedule, name, value)
-
-    def step(self, *args, **kwargs):
-        if not self._has_first_stage or len(args) == 0:
-            return self._schedule.step(*args, **kwargs)
-
-        # On first call, trigger FSDP lazy init which is normally done by
-        # the root module's forward pre-hook. We need it initialized before
-        # prepare_vision_inputs() accesses FSDP-wrapped sub-modules.
-        if not self.__dict__.get("_fsdp_initialized", False):
-            self.__dict__["_fsdp_initialized"] = True
-            from torch.distributed.fsdp._fully_shard._fsdp_state import (
-                _get_module_fsdp_state,
-            )
-
-            for model_part in self._model_parts:
-                state = _get_module_fsdp_state(model_part)
-                if state is not None:
-                    state._lazy_init()
-
-        tokens = args[0]
-
-        # Pop vision-specific kwargs (consumed here, not forwarded to schedule)
-        pixel_values = kwargs.pop("pixel_values", None)
-        grid_thw = kwargs.pop("grid_thw", None)
-        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
-        grid_thw_videos = kwargs.pop("grid_thw_videos", None)
-        special_tokens = kwargs.pop("special_tokens", None)
-
-        # Run vision preprocessing on the full batch
-        model = self._model_parts[0]
-        (
-            inputs_embeds,
-            pp_deepstack_embeds,
-            mrope_freqs_cis,
-        ) = model.prepare_vision_inputs(
-            tokens,
-            pixel_values,
-            pixel_values_videos,
-            grid_thw,
-            grid_thw_videos,
-            special_tokens,
-        )
-
-        # Detach from vision graph so each PP microbatch can backward
-        # independently. We retain the original tensors and register a
-        # backward hook on the detached version to propagate gradients
-        # back through the vision encoder after the PP schedule finishes.
-        vision_embeds = inputs_embeds
-        inputs_embeds = inputs_embeds.detach().requires_grad_()
-
-        ds_originals = []
-        if pp_deepstack_embeds is not None:
-            ds_original = pp_deepstack_embeds
-            pp_deepstack_embeds = pp_deepstack_embeds.detach().requires_grad_()
-            ds_originals.append((ds_original, pp_deepstack_embeds))
-            kwargs["pp_deepstack_embeds"] = pp_deepstack_embeds
-
-        if mrope_freqs_cis is not None:
-            kwargs["mrope_freqs_cis"] = mrope_freqs_cis
-
-        result = self._schedule.step(inputs_embeds, *args[1:], **kwargs)
-
-        # Backward through vision encoder graph using accumulated gradients
-        # from the PP schedule.
-        vision_grads = []
-        vision_tensors = []
-        if inputs_embeds.grad is not None:
-            vision_tensors.append(vision_embeds)
-            vision_grads.append(inputs_embeds.grad)
-        for ds_original, ds_detached in ds_originals:
-            if ds_detached.grad is not None:
-                vision_tensors.append(ds_original)
-                vision_grads.append(ds_detached.grad)
-        if vision_tensors:
-            torch.autograd.backward(vision_tensors, vision_grads)
-
-        return result
-
-
-def pipeline_qwen3_vl(
-    model: nn.Module,
-    *,
-    parallel_dims: ParallelDims,
-    training: TrainingConfig,
-    model_converters: ModelConvertersContainer.Config,
-    parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
-    ac_config: ActivationCheckpointConfig,
-    dump_folder: str,
-    device: torch.device,
-    model_config: BaseModel.Config,
-    parallelize_fn,
-    loss_fn: LossFunction,
-) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    """Pipeline-parallelize Qwen3-VL.
-
-    Reuses the standard LLM stage assignment, then adds ``"visual"`` to the
-    first stage so the vision encoder + DeepStack layers (which only touch the
-    first few decoder layers) are co-located on stage 0.
-
-    Vision data is preprocessed outside the PP schedule via
-    _VLMPipelineScheduleWrapper so that batch-aligned tensors (inputs_embeds,
-    pp_deepstack_embeds) can be microbatch-split normally.
-    """
-    pp_mesh = parallel_dims.get_mesh("pp")
-
-    # Determine number of virtual stages (mirrors pipeline_llm logic)
-    schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
-    is_single_stage_schedule = issubclass(schedule_class, PipelineScheduleSingle)
-    layers_per_stage = parallelism.pipeline_parallel_layers_per_stage
-
-    num_layers = model_config.n_layers
-
-    input_weight = parallelism.pipeline_parallel_first_stage_less_layers
-    output_weight = parallelism.pipeline_parallel_last_stage_less_layers
-
-    if layers_per_stage is not None:
-        num_virtual_stages = math.ceil(
-            (num_layers + input_weight + output_weight) / layers_per_stage
-        )
-
-        if num_virtual_stages % parallel_dims.pp != 0:
-            raise ValueError(
-                f"Number of virtual stages ({num_virtual_stages}) must be divisible by "
-                f"pipeline parallel size ({parallel_dims.pp})."
-            )
-
-        stages_per_rank = num_virtual_stages // parallel_dims.pp
-
-        if is_single_stage_schedule and stages_per_rank != 1:
-            raise ValueError(
-                f"Single stage schedule requires exactly 1 stage per rank, "
-                f"but got {stages_per_rank}."
-            )
-        if not is_single_stage_schedule and stages_per_rank < 2:
-            raise ValueError(
-                f"Multi-stage schedule requires at least 2 stages per rank, "
-                f"but got {stages_per_rank}."
-            )
-    else:
-        stages_per_rank = 1 if is_single_stage_schedule else 2
-        num_virtual_stages = parallel_dims.pp * stages_per_rank
-
-    # Generate standard LLM FQNs, then prepend "visual" to stage 0
-    module_names_per_stage = parallelism.module_fqns_per_model_part
-    if module_names_per_stage is None:
-        module_names_per_stage = generate_llm_fqn_per_model_part(
-            num_virtual_stages, num_layers, input_weight, output_weight
-        )
-    # Add visual encoder to the first stage
-    module_names_per_stage[0].insert(0, "visual")
-
-    for i, stage_ms in enumerate(module_names_per_stage):
-        logger.debug(f"Stage {i}: {stage_ms}")
-
-    stages, model_parts = pipeline_module_split(
-        model,
-        pp_mesh,
-        parallelism.pipeline_parallel_schedule,
-        device,
-        module_names_per_stage,
-    )
-
-    # Apply SPMD parallelism to each model part
-    for i, m in enumerate(model_parts):
-        m = parallelize_fn(
-            m,
-            parallel_dims=parallel_dims,
-            training=training,
-            model_converters=model_converters,
-            parallelism=parallelism,
-            compile_config=compile_config,
-            ac_config=ac_config,
-            dump_folder=dump_folder,
-        )
-        model_parts[i] = m
-        stages[i].submod = m
-
-    pp_schedule = build_pipeline_schedule(
-        parallelism=parallelism,
-        local_batch_size=training.local_batch_size,
-        stages=stages,
-        loss_fn=loss_fn,
-    )
-
-    has_first_stage = any(stage.is_first for stage in stages)
-    has_last_stage = any(stage.is_last for stage in stages)
-
-    # Wrap schedule to preprocess vision data outside microbatching
-    pp_schedule = _VLMPipelineScheduleWrapper(pp_schedule, model_parts, has_first_stage)
-
-    return pp_schedule, model_parts, has_first_stage, has_last_stage
 
 
 def parallelize_qwen3_vl(
@@ -555,9 +318,7 @@ def parallelize_qwen3_vl(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    assert (
-        isinstance(model.visual, nn.Module) or model.visual is None
-    ), "model.visual must be an nn.Module or None (when PP splits the model)"
+    assert isinstance(model.visual, nn.Module), "model.visual must be an nn.Module"
 
     # Validate sequence length divisibility
     assert (
@@ -657,7 +418,6 @@ def parallelize_qwen3_vl(
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         )
 
@@ -667,7 +427,7 @@ def parallelize_qwen3_vl(
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
+            pp_enabled=False,
             cpu_offload=training.enable_cpu_offload,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             ep_degree=parallel_dims.ep,
