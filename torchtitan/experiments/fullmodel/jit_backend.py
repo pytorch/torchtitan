@@ -8,11 +8,15 @@ from typing import Any
 
 import torch
 import torch._functorch.config as functorch_config
+
 from torchtitan.tools.logging import logger
 
-from .configs import SimpleFSDPCompileConfig as CompileConfig
-
-from .reshard_after_forward import annotate_fsdp_all_gather
+from .configs import FullmodelCompileConfig as CompileConfig
+from .passes import (
+    autobucketing_reordering_pass,
+    fsdp_reshard_after_fwd_pass,
+    transformer_block_bucketing_reordering_pass,
+)
 
 
 def get_compile_backend_with_passes(
@@ -32,8 +36,22 @@ def get_compile_backend_with_passes(
     """
     backend = torch._dynamo.lookup_backend(compile_config.backend)
 
+    # Resolve JIT pass name from the passes list
+    jit_pass_name = None
+    if compile_config.passes:
+        if len(compile_config.passes) != 1 or compile_config.passes[0] not in {
+            "auto_bucketing",
+            "transformer_block_bucketing",
+        }:
+            raise ValueError(
+                "JIT mode currently supports at most one pass, which should be "
+                "either 'auto_bucketing' or 'transformer_block_bucketing', "
+                f"got: {compile_config.passes}"
+            )
+        jit_pass_name = compile_config.passes[0]
+
     # Apply bucketing and overlapping pass on fwd and bwd graph separately
-    if compile_config.graph_passes == "auto_bucketing":
+    if jit_pass_name == "auto_bucketing":
         # Perform auto optimization in aten fx-level and execute code in aot_eager/inductor backend
         # The autobucketing logic is here: https://github.com/pytorch/pytorch/pull/163960
         from torch._inductor.config import aten_distributed_optimizations as dist_opts
@@ -41,25 +59,15 @@ def get_compile_backend_with_passes(
             schedule_overlap_bucketing,
         )
 
-        dist_opts.collective_bucketing = True
-        torch._inductor.config.allow_buffer_reuse = False
-
         if compile_config.backend == "aot_eager":
             from torch._dynamo.backends.common import (
                 aot_autograd as aot_autograd_backend,
             )
 
-            def aot_eager_autobucketing_reordering_pass(
-                gm: torch.fx.GraphModule, example_inputs: Any
-            ) -> torch.fx.GraphModule:
-                schedule_overlap_bucketing(gm)
-                gm.recompile()
-                return gm
-
             dist_opts.insert_overlap_deps = False
             backend = aot_autograd_backend(
-                fw_compiler=aot_eager_autobucketing_reordering_pass,
-                bw_compiler=aot_eager_autobucketing_reordering_pass,
+                fw_compiler=autobucketing_reordering_pass,
+                bw_compiler=autobucketing_reordering_pass,
                 keep_inference_input_mutations=True,
             )
         elif compile_config.backend == "inductor":
@@ -69,7 +77,9 @@ def get_compile_backend_with_passes(
             ) -> torch.fx.GraphModule:
                 return schedule_overlap_bucketing(gm.owning_module)
 
+            dist_opts.collective_bucketing = True
             dist_opts.insert_overlap_deps = True
+            torch._inductor.config.allow_buffer_reuse = False
             torch._inductor.config.reorder_for_peak_memory = False
             torch._inductor.config.reorder_for_compute_comm_overlap = False
             torch._inductor.config.post_grad_custom_post_pass = (
@@ -81,33 +91,29 @@ def get_compile_backend_with_passes(
             )
         logger.info("Auto bucketing pass is applied")
 
-    elif compile_config.graph_passes == "transformer_block_bucketing":
+    elif jit_pass_name == "transformer_block_bucketing":
         # Perform manual optimization in aten fx-level and execute code in aot_eager/inductor backend
         # The manualbucketing logic is here: https://github.com/pytorch/pytorch/pull/165487
         from functools import partial
 
-        from torch._dynamo.backends.common import aot_autograd as aot_autograd_backend
         from torch._inductor.fx_passes.overlap_manual_scheduling import (
             manual_overlap_bucketing,
         )
 
-        torch._inductor.config.allow_buffer_reuse = False
-        manual_overlap_bucketing = partial(
-            manual_overlap_bucketing,
-            module_bucket_plans=fsdp_manual_buckets,
-        )
-
         if compile_config.backend == "aot_eager":
-
-            def aot_eager_transformer_block_bucketing_reordering_pass(
-                gm: torch.fx.GraphModule, example_inputs: Any
-            ) -> torch.fx.GraphModule:
-                manual_overlap_bucketing(gm, insert_overlap_deps=False)
-                return gm
+            from torch._dynamo.backends.common import (
+                aot_autograd as aot_autograd_backend,
+            )
 
             backend = aot_autograd_backend(
-                fw_compiler=aot_eager_transformer_block_bucketing_reordering_pass,
-                bw_compiler=aot_eager_transformer_block_bucketing_reordering_pass,
+                fw_compiler=partial(
+                    transformer_block_bucketing_reordering_pass,
+                    fsdp_manual_buckets=fsdp_manual_buckets,
+                ),
+                bw_compiler=partial(
+                    transformer_block_bucketing_reordering_pass,
+                    fsdp_manual_buckets=fsdp_manual_buckets,
+                ),
                 keep_inference_input_mutations=True,
             )
         elif compile_config.backend == "inductor":
@@ -116,9 +122,12 @@ def get_compile_backend_with_passes(
                 gm: torch.fx.Graph,
             ) -> torch.fx.GraphModule:
                 return manual_overlap_bucketing(
-                    gm.owning_module, insert_overlap_deps=True
+                    gm.owning_module,
+                    module_bucket_plans=fsdp_manual_buckets,
+                    insert_overlap_deps=True,
                 )
 
+            torch._inductor.config.allow_buffer_reuse = False
             torch._inductor.config.reorder_for_peak_memory = False
             torch._inductor.config.reorder_for_compute_comm_overlap = False
             torch._inductor.config.post_grad_custom_post_pass = (
@@ -133,18 +142,10 @@ def get_compile_backend_with_passes(
     else:
         logger.info("No bucketing or overlapping pass is applied")
 
-    # Apply activation checkpointing on joint graph before partitioner
     def joint_ac_pass(
         gm: torch.fx.GraphModule, example_inputs: Any
     ) -> torch.fx.GraphModule:
-        # this pass implements simplefsdp's fsdp_reshard_after_forward behavior
-        # when fsdp_reshard_after_forward set to True, it will annotate simple_fsdp AG
-        #   to CheckpointPolicy.MUST_RECOMPUTE.
-        # when fsdp_reshard_after_forward set to False, it will annotate simple_fsdp AG
-        #   to CheckpointPolicy.MUST_SAVE.
-        gm = annotate_fsdp_all_gather(gm, fsdp_reshard_after_forward)
-        gm.recompile()
-        return gm
+        return fsdp_reshard_after_fwd_pass(gm, fsdp_reshard_after_forward)
 
     def simple_fsdp_custom_pass(*args, **kwargs):
         # the ac pass has to operate in a joint graph before partitioner for ac

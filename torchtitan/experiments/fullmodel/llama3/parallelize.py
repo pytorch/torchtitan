@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+from torch.fx.traceback import annotate_fn
+
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -16,13 +18,19 @@ from torchtitan.config import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.experiments.fullmodel.common_utils import (
+    get_transformer_block_buckets,
+    maybe_disable_eager_ac,
+)
+from torchtitan.experiments.fullmodel.compilation import apply_compile
+from torchtitan.experiments.fullmodel.simple_fsdp import (
+    data_parallel,
+    MixedPrecisionPolicy,
+)
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.parallelize import apply_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
-
-from ..backend import get_compile_backend_with_passes
-from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
 
 
 # for selective op activation checkpointing
@@ -45,29 +53,19 @@ _op_sac_save_list = {
 }
 
 
-def get_transformer_block_buckets(model) -> list[list[str] | str]:
-    module_list = [
-        model.tok_embeddings,
-        [model.norm, model.output],
-    ]
-    for layer_id, transformer_block in model.layers.items():
-        module_list.append(transformer_block)
+def annotate_llama() -> None:
+    """Attach annotations to FX graph nodes with ``torch.fx.traceback.annotate_fn``
 
-    def convert_modules_to_fqns(modules, module_to_fqn_mapping):
-        """Convert a (possibly nested) list of modules to FQN strings."""
-        result = []
-        for m in modules:
-            if isinstance(m, list):
-                if fqn_list := convert_modules_to_fqns(m, module_to_fqn_mapping):
-                    result.append(fqn_list)
-            else:
-                if fqn := module_to_fqn_mapping.get(m):
-                    result.append(fqn)
-        return result
+    - Flex attention annotation: Tags FlexAttentionWrapper.forward with
+      {"compile_with_inductor": "flex_attention"} so the compiler can apply
+      regional inductor pass based on the annontation.
 
-    module_to_name = {m: n for n, m in model.named_modules()}
-    module_fqns = convert_modules_to_fqns(module_list, module_to_name)
-    return module_fqns
+    """
+    from torchtitan.models.common.attention import FlexAttentionWrapper
+
+    FlexAttentionWrapper.forward = annotate_fn(
+        {"compile_with_inductor": "flex_attention"}
+    )(FlexAttentionWrapper.forward)
 
 
 def parallelize_llama(
@@ -97,6 +95,10 @@ def parallelize_llama(
         Sequence length {training.seq_len} must be divisible by the product of TP degree
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
+
+    annotate_llama()
+
+    maybe_disable_eager_ac(compile_config, ac_config)
 
     if parallel_dims.tp_enabled:
         float8_config = find_float8_linear_config(model_converters.converters)
@@ -164,32 +166,14 @@ def parallelize_llama(
             "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
         )
 
-    if compile_config.enable and "model" in compile_config.components:
-        torch._inductor.config.reorder_for_peak_memory = False
-
-        match parallelism.fsdp_reshard_after_forward:
-            case "always":
-                fsdp_reshard_after_forward = True
-            case "never":
-                fsdp_reshard_after_forward = False
-            case "default":
-                # For PP, by default do not reshard after forward to avoid per-microbatch
-                # all-gathers, which can be expensive and non-overlapped
-                fsdp_reshard_after_forward = not parallel_dims.pp_enabled
-            case _:
-                raise ValueError(
-                    f"Invalid fsdp_reshard_after_forward_policy: {parallelism.fsdp_reshard_after_forward}."
-                )
-
-        backend = get_compile_backend_with_passes(
-            compile_config,
-            fsdp_reshard_after_forward,
-            get_transformer_block_buckets(model),
-        )
-        model = torch.compile(
-            model,
-            backend=backend,
-            fullgraph=True,
-        )
+    # Apply compilation based on mode
+    model = apply_compile(
+        model,
+        compile_config=compile_config,
+        parallelism=parallelism,
+        parallel_dims=parallel_dims,
+        dump_folder=dump_folder,
+        transformer_block_buckets=get_transformer_block_buckets(model),
+    )
 
     return model

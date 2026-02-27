@@ -1,4 +1,4 @@
-name: Compiler Toolkit 8 GPU Integration Tests
+name: Fullmodel 8 GPU Integration Tests
 
 on:
   push:
@@ -6,14 +6,12 @@ on:
     tags:
       - ciflow/8gpu/*
     paths:
-      - 'torchtitan/experiments/compiler_toolkit/**'
-      - 'torchtitan/experiments/simple_fsdp/**'
-      - '.github/workflows/integration_test_8gpu_compiler_toolkit.yaml'
+      - 'torchtitan/experiments/fullmodel/**'
+      - '.github/workflows/integration_test_8gpu_fullmodel.yaml'
   pull_request:
     paths:
-      - 'torchtitan/experiments/compiler_toolkit/**'
-      - 'torchtitan/experiments/simple_fsdp/**'
-      - '.github/workflows/integration_test_8gpu_compiler_toolkit.yaml'
+      - 'torchtitan/experiments/fullmodel/**'
+      - '.github/workflows/integration_test_8gpu_fullmodel.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -34,6 +32,8 @@ jobs:
   # Step 1: Dynamically compute the matrix based on conditions
   set-matrix:
     uses: ./.github/workflows/set-matrix.yaml
+    with:
+      runner-cuda: linux.aws.h100.8
 
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
@@ -80,4 +80,12 @@ jobs:
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        TRAIN_FILE=torchtitan.experiments.compiler_toolkit.train python -m torchtitan.experiments.compiler_toolkit.tests.integration_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4
+        python -m torchtitan.experiments.fullmodel.tests.integration_tests --gpu_arch_type ${{ matrix.gpu-arch-type }} $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8
+
+        # Run the numerics unit tests
+        pytest torchtitan/experiments/fullmodel/tests/test_numerics.py::TestSimpleFSDP -v
+        pytest torchtitan/experiments/fullmodel/tests/test_numerics.py::TestFullmodelNumerics -v
+        # Run the graph passes unit tests
+        torchrun --nproc-per-node=8 -m pytest torchtitan/experiments/fullmodel/tests/test_passes.py::TestReassignToPgPass -v
+        pytest torchtitan/experiments/fullmodel/tests/test_passes.py::TestApplySACPass -v
+        rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint

@@ -5,25 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import torch
+from torch._inductor.fx_passes.bucketing import (
+    is_all_gather_into_tensor,
+    is_wait_tensor,
+)
 from torch.utils.checkpoint import CheckpointPolicy
-
-
-def is_graph_input(node: torch.fx.Node) -> bool:
-    return node.op == "placeholder"
-
-
-def is_wait_tensor(node: torch.fx.Node) -> bool:
-    return (
-        node.op == "call_function"
-        and node.target == torch.ops._c10d_functional.wait_tensor.default
-    )
-
-
-def is_all_gather_into_tensor(node: torch.fx.Node) -> bool:
-    return (
-        node.op == "call_function"
-        and node.target == torch.ops._c10d_functional.all_gather_into_tensor.default
-    )
 
 
 def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:
@@ -35,7 +21,7 @@ def is_wait_tensor_from_fsdp(node: torch.fx.Node) -> bool:
     if is_wait_tensor(node) and is_all_gather_into_tensor(node.args[0]):
         n: torch.fx.Node = node.all_input_nodes[0]
         while len(n.all_input_nodes) == 1:
-            if is_graph_input(n.all_input_nodes[0]):
+            if n.all_input_nodes[0].op == "placeholder":
                 return True
             n = n.all_input_nodes[0]
     return False
@@ -45,7 +31,7 @@ def annotate_fsdp_all_gather(
     gm: torch.fx.GraphModule, reshard_after_forward: bool
 ) -> None:
     """
-    Force recompute all_gather nodes from simple fsdp in the graph.
+    Force recompute all_gather nodes from SimpleFSDP in the graph.
     This pass should be added in torch._inductor.config.joint_custom_post_pass
     """
     graph = gm.graph

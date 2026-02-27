@@ -20,10 +20,10 @@ from torch._functorch.aot_autograd import (
     JointWithDescriptors,
 )
 from torch._guards import tracing, TracingContext
-from torch.distributed.tensor import DTensor
-from torchtitan.config import CompileConfig, ParallelismConfig
+
+from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.compiler_toolkit.common_utils import (
+from torchtitan.experiments.fullmodel.common_utils import (
     create_extra_fsdp_pg,
     end_with_pass,
     get_extra_fsdp_pg_name,
@@ -122,7 +122,7 @@ def joint_graph_builder(
 
     Args:
         model: The model to compile
-        model_args: Tuple of model input arguments (should be DTensors)
+        model_args: Tuple of model input arguments
         model_kwargs: Dict of model input keyword arguments
         fw_compiler: Optional custom forward compiler function
         bw_compiler: Optional custom backward compiler function
@@ -131,8 +131,6 @@ def joint_graph_builder(
         job_config: Job configuration
     """
     assert isinstance(model_args, tuple)
-    for idx, arg in enumerate(model_args):
-        assert isinstance(arg, DTensor), f"Argument {idx} is of type {type(arg)}"
 
     # get joint graph
     (joint_with_descriptors, tracing_context,) = export_joint(
@@ -146,7 +144,7 @@ def joint_graph_builder(
     if compile_config is not None:
         joint_pass_names = getattr(compile_config, "joint_passes", [])
         if "inductor_decomposition" in joint_pass_names:
-            from torchtitan.experiments.compiler_toolkit.passes import (
+            from torchtitan.experiments.fullmodel.passes import (
                 inductor_decomposition_pass,
             )
 
@@ -156,7 +154,6 @@ def joint_graph_builder(
                 model=model,
                 joint_with_descriptors=joint_with_descriptors,
                 forward_inputs=model_args,
-                tracing_context=tracing_context,
             )
 
             # Prepend to joint_custom_passes
@@ -378,12 +375,9 @@ def validate_pass_names(pass_names: list[str], joint_pass_names: list[str]) -> N
             pass_names[-1] == "cudagraph"
         ), "cudagraph has to be the last pass to apply"
 
-    if (
-        "autobucketing_reordering" in pass_names
-        and "transformer_block_bucketing" in pass_names
-    ):
+    if "auto_bucketing" in pass_names and "transformer_block_bucketing" in pass_names:
         raise ValueError(
-            "Cannot apply autobucketing_reordering and transformer_block_bucketing at the same time!"
+            "Cannot apply auto_bucketing and transformer_block_bucketing at the same time!"
         )
 
     # Validate that full_inductor_compilation requires inductor_decomposition
@@ -411,10 +405,10 @@ def get_compiler_passes_from_config(
     Returns:
         List of compiler pass functions
     """
-    from torchtitan.experiments.compiler_toolkit.passes import AVAILABLE_COMPILER_PASSES
-    from torchtitan.experiments.simple_fsdp.llama3.parallelize import (
+    from torchtitan.experiments.fullmodel.common_utils import (
         get_transformer_block_buckets,
     )
+    from torchtitan.experiments.fullmodel.passes import AVAILABLE_COMPILER_PASSES
 
     pass_names = getattr(compile_config, "passes", [])
     joint_pass_names = getattr(compile_config, "joint_passes", [])
@@ -436,9 +430,7 @@ def get_compiler_passes_from_config(
                 f"Available compiler passes: {list(AVAILABLE_COMPILER_PASSES.keys())}"
             )
         if pass_name == "transformer_block_bucketing":
-            from torchtitan.experiments.compiler_toolkit.passes import (
-                reassign_to_pg_pass,
-            )
+            from torchtitan.experiments.fullmodel.passes import reassign_to_pg_pass
 
             create_extra_fsdp_pg(parallel_dims)
             fsdp_mesh = parallel_dims.get_mesh("fsdp")
@@ -470,7 +462,7 @@ def get_compiler_passes_from_config(
 def get_joint_custom_passes_from_config(
     parallel_dims: ParallelDims,
     compile_config: CompileConfig,
-    parallelism: ParallelismConfig,
+    fsdp_reshard_after_forward: bool,
 ):
     """
     Extract and validate joint custom passes from job config.
@@ -481,13 +473,13 @@ def get_joint_custom_passes_from_config(
 
     Args:
         parallel_dims: Parallelism dimensions
-        job_config: Job configuration containing parallelism.fsdp_reshard_after_forward
-                    and compile.joint_passes
+        compile_config: Compile configuration containing joint_passes
+        fsdp_reshard_after_forward: Whether to reshard after forward (already resolved)
 
     Returns:
         List of joint custom pass functions
     """
-    from torchtitan.experiments.compiler_toolkit.passes import (
+    from torchtitan.experiments.fullmodel.passes import (
         AVAILABLE_JOINT_PASSES,
         fsdp_reshard_after_fwd_pass,
         validate_flex_attn_annotation_pass,
@@ -513,21 +505,6 @@ def get_joint_custom_passes_from_config(
 
     if joint_pass_names:
         logger.info(f"Using joint passes from config: {joint_pass_names}")
-
-    # Handle FSDP reshard after forward
-    match parallelism.fsdp_reshard_after_forward:
-        case "always":
-            fsdp_reshard_after_forward = True
-        case "never":
-            fsdp_reshard_after_forward = False
-        case "default":
-            # For PP, by default do not reshard after forward to avoid per-microbatch
-            # all-gathers, which can be expensive and non-overlapped
-            fsdp_reshard_after_forward = not parallel_dims.pp_enabled
-        case _:
-            raise ValueError(
-                f"Invalid fsdp_reshard_after_forward_policy: {parallelism.fsdp_reshard_after_forward}."
-            )
 
     joint_custom_passes.append(
         functools.partial(

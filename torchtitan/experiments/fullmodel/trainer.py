@@ -7,16 +7,14 @@
 import gc
 from dataclasses import dataclass, field
 
-from torchtitan.experiments.compiler_toolkit.configs import CompilerToolkitCompileConfig
+from torchtitan.experiments.fullmodel.configs import FullmodelCompileConfig
 from torchtitan.trainer import Trainer
 
 
-class CompilerToolkitTrainer(Trainer):
+class FullmodelTrainer(Trainer):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
-        compile: CompilerToolkitCompileConfig = field(
-            default_factory=CompilerToolkitCompileConfig
-        )
+        compile: FullmodelCompileConfig = field(default_factory=FullmodelCompileConfig)
 
     def close(self) -> None:
         super().close()
