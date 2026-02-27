@@ -367,21 +367,8 @@ class Qwen3VLModel(Qwen3Model):
         buffer_device: torch.device | None = None,
         **kwargs,
     ):
-        """Initialize all weights.
-
-        Handles enable_weight_tying gracefully for PP where tok_embeddings
-        and output may not both be present on the same stage.
-        """
-        # Temporarily disable weight tying to avoid the base class assert,
-        # then tie manually with a softer check.
-        orig_weight_tying = self.enable_weight_tying
-        self.enable_weight_tying = False
+        """Initialize all weights."""
         super().init_weights(buffer_device=buffer_device, **kwargs)
-        self.enable_weight_tying = orig_weight_tying
-
-        if self.enable_weight_tying:
-            if self.tok_embeddings is not None and self.output is not None:
-                self.output.weight = self.tok_embeddings.weight
 
         if self.visual is not None:
             self.visual.init_weights()
@@ -523,9 +510,6 @@ class Qwen3VLModel(Qwen3Model):
     ) -> tuple[torch.Tensor, torch.Tensor | None, list[torch.Tensor] | None]:
         """Run tok_embeddings + vision encoder + scatter + DeepStack preparation.
 
-        This is the shared vision processing used by both prepare_vision_inputs()
-        (PP mode) and forward() (non-PP mode).
-
         Args:
             tokens: Input token IDs (batch_size, seq_len)
             pixel_values: Image patches or None
@@ -614,25 +598,28 @@ class Qwen3VLModel(Qwen3Model):
 
         return inputs_embeds, visual_pos_masks, deepstack_visual_embeds
 
-    def prepare_vision_inputs(
+    def forward(
         self,
         tokens: torch.Tensor,
-        pixel_values: torch.Tensor | None,
-        pixel_values_videos: torch.Tensor | None,
-        grid_thw: torch.Tensor | None,
-        grid_thw_videos: torch.Tensor | None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_values_videos: torch.Tensor | None = None,
+        grid_thw: torch.Tensor | None = None,
+        grid_thw_videos: torch.Tensor | None = None,
         special_tokens: SpecialTokens | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-        """Preprocess vision inputs for pipeline parallelism.
+    ):
+        """
+        Forward pass of Qwen3-VL.
 
-        Runs tok_embeddings + vision encoder + scatter + dense DeepStack on the
-        full batch, producing batch-aligned tensors that can be microbatch-split
-        by the PP schedule along dim 0.
+        Args:
+            tokens: Input token IDs (batch_size, seq_len).
+            pixel_values: Flattened image patches (num_images, max_num_patches, patch_dim)
+            pixel_values_videos: Flattened video patches (num_videos, max_num_patches, patch_dim)
+            grid_thw: Grid dimensions for images (num_images, 3)
+            grid_thw_videos: Grid dimensions for videos (num_videos, 3)
+            special_tokens: Special token definitions
 
         Returns:
-            inputs_embeds: (batch, seq_len, dim) with vision tokens scattered in
-            pp_deepstack_embeds: (batch, num_ds_layers, seq_len, dim) or None
-            mrope_freqs_cis: (batch, seq_len, 1, head_dim*2) or None
+            logits: Output logits (batch_size, seq_len, vocab_size)
         """
         inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._process_vision(
             tokens,
@@ -643,93 +630,14 @@ class Qwen3VLModel(Qwen3Model):
             special_tokens,
         )
 
-        # Convert sparse DeepStack to dense format for PP microbatch splitting
-        pp_deepstack_embeds = None
-        if deepstack_visual_embeds is not None and visual_pos_masks is not None:
-            B, S = tokens.shape
-            num_ds = len(deepstack_visual_embeds)
-            dim = deepstack_visual_embeds[0].shape[-1]
-            dense_ds = inputs_embeds.new_zeros(B, num_ds, S, dim)
-            for ds_idx, ds_embed in enumerate(deepstack_visual_embeds):
-                dense_ds[:, ds_idx][visual_pos_masks] = ds_embed.to(dense_ds.dtype)
-            pp_deepstack_embeds = dense_ds
-
-        # Compute MRoPE freqs for PP (tokens are integer IDs here, so we can scan)
-        mrope_freqs_cis = None
+        # Compute MRoPE freqs when vision inputs are present
         if grid_thw is not None or grid_thw_videos is not None:
             position_ids_3d = self._get_mrope_position_ids(
                 tokens, grid_thw, grid_thw_videos, special_tokens
             )
-            mrope_freqs_cis = self._compute_mrope_freqs(position_ids_3d, self.freqs_cis)
-
-        return inputs_embeds, pp_deepstack_embeds, mrope_freqs_cis
-
-    def forward(
-        self,
-        tokens: torch.Tensor,
-        pixel_values: torch.Tensor | None = None,
-        pixel_values_videos: torch.Tensor | None = None,
-        grid_thw: torch.Tensor | None = None,
-        grid_thw_videos: torch.Tensor | None = None,
-        special_tokens: SpecialTokens | None = None,
-        positions: torch.Tensor | None = None,
-        pp_deepstack_embeds: torch.Tensor | None = None,
-        mrope_freqs_cis: torch.Tensor | None = None,
-    ):
-        """
-        Forward pass of Qwen3-VL.
-
-        Args:
-            tokens: Input token IDs (batch_size, seq_len) or pre-processed
-                inputs_embeds (batch_size, seq_len, dim) when in PP mode.
-            pixel_values: Flattened image patches (num_images, max_num_patches, patch_dim)
-            pixel_values_videos: Flattened video patches (num_videos, max_num_patches, patch_dim)
-            grid_thw: Grid dimensions for images (num_images, 3)
-            grid_thw_videos: Grid dimensions for videos (num_videos, 3)
-            special_tokens: Special token definitions
-            positions: Position IDs for RoPE (optional)
-            pp_deepstack_embeds: Dense DeepStack embeddings (batch, num_ds, seq_len, dim)
-                from prepare_vision_inputs() in PP mode, or None.
-            mrope_freqs_cis: Pre-computed MRoPE cos/sin (batch, seq_len, 1, head_dim*2)
-                from prepare_vision_inputs() in PP mode, or None.
-
-        Returns:
-            logits: Output logits (batch_size, seq_len, vocab_size)
-        """
-        # PP mode: tokens is already inputs_embeds (float) from prepare_vision_inputs
-        deepstack_visual_embeds = None
-        visual_pos_masks = None
-
-        if tokens.dtype.is_floating_point:
-            # PP mode: vision processing already done in prepare_vision_inputs
-            inputs_embeds = tokens
+            freqs_cis = self._compute_mrope_freqs(position_ids_3d, self.freqs_cis)
         else:
-            # Non-PP mode: full vision processing
-            (
-                inputs_embeds,
-                visual_pos_masks,
-                deepstack_visual_embeds,
-            ) = self._process_vision(
-                tokens,
-                pixel_values,
-                pixel_values_videos,
-                grid_thw,
-                grid_thw_videos,
-                special_tokens,
-            )
-
-        # Compute MRoPE freqs for non-PP mode (PP mode receives pre-computed)
-        if mrope_freqs_cis is None and not tokens.dtype.is_floating_point:
-            if grid_thw is not None or grid_thw_videos is not None:
-                position_ids_3d = self._get_mrope_position_ids(
-                    tokens, grid_thw, grid_thw_videos, special_tokens
-                )
-                mrope_freqs_cis = self._compute_mrope_freqs(
-                    position_ids_3d, self.freqs_cis
-                )
-
-        # Use MRoPE freqs if available, otherwise standard 1D RoPE
-        freqs_cis = mrope_freqs_cis if mrope_freqs_cis is not None else self.freqs_cis
+            freqs_cis = self.freqs_cis
 
         # Apply transformer layers with DeepStack
         hidden_states = inputs_embeds
@@ -740,30 +648,19 @@ class Qwen3VLModel(Qwen3Model):
             layer_idx_int = int(layer_idx)
             if layer_idx_int in self.deepstack_layer_indices:
                 ds_idx = self.deepstack_layer_indices.index(layer_idx_int)
-                if pp_deepstack_embeds is not None:
-                    # Dense PP mode: (batch, num_ds, seq_len, dim)
-                    # Zeros at non-visual positions act as no-op additions
-                    if ds_idx < pp_deepstack_embeds.shape[1]:
-                        hidden_states = hidden_states + pp_deepstack_embeds[
-                            :, ds_idx
-                        ].to(hidden_states.dtype)
-                elif (
-                    deepstack_visual_embeds is not None and visual_pos_masks is not None
+                if (
+                    deepstack_visual_embeds is not None
+                    and visual_pos_masks is not None
+                    and ds_idx < len(deepstack_visual_embeds)
                 ):
-                    # Sparse non-PP mode
-                    if ds_idx < len(deepstack_visual_embeds):
-                        hidden_states = self._deepstack_process(
-                            hidden_states,
-                            visual_pos_masks,
-                            deepstack_visual_embeds[ds_idx],
-                        )
+                    hidden_states = self._deepstack_process(
+                        hidden_states,
+                        visual_pos_masks,
+                        deepstack_visual_embeds[ds_idx],
+                    )
 
         # Final normalization and output
-        hidden_states = (
-            self.norm(hidden_states) if self.norm is not None else hidden_states
-        )
-        output = (
-            self.output(hidden_states) if self.output is not None else hidden_states
-        )
+        hidden_states = self.norm(hidden_states)
+        output = self.output(hidden_states)
 
         return output
