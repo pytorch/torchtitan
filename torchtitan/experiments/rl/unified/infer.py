@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument(
         "--model-ckpt-path",
         type=str,
-        default="torchtitan/experiments/rl/example_checkpoint",
+        default="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B/",
         help="Path to TorchTitan checkpoint directory",
     )
     parser.add_argument(
@@ -70,7 +70,7 @@ def infer():
 
     # Initialize vLLM with custom TorchTitan model
     # The LLM initialization will internally:
-    # 1. Load TrainSpec for Qwen3 (from models/__init__.py register())
+    # 1. Load ModelSpec for Qwen3 (from models/__init__.py register())
     # 2. Create TorchTitanVLLMModel instance
     # 3. Create JobConfig and ParallelDims from vLLM config
     # 4. Apply parallelization using parallelize_qwen3

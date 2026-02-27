@@ -6,12 +6,11 @@
 
 
 import unittest
-from typing import Tuple
 
 import numpy as np
 import torch
 
-from torchtitan.models.moe.kernels import fill_indices_wrapper
+from torchtitan.models.common.moe.kernels import fill_indices_wrapper
 
 
 def fill_indices_cpu(
@@ -25,7 +24,7 @@ def fill_indices_cpu(
     """CPU implementation for reference."""
     # We need to preallocate the output
     device = tokens_per_expert_group.device
-    permuted_indices = torch.full((max_len,), -1, dtype=torch.int32, device=device)
+    permuted_indices = torch.full((max_len,), -1, dtype=torch.int64, device=device)
     # Fill the permuted indices
     # For each local expert
     for e in range(experts_per_rank):
@@ -43,7 +42,7 @@ def fill_indices_cpu(
                     permuted_indices[write_start:end_idx] = torch.arange(
                         start_index,
                         start_index + (end_idx - write_start),
-                        dtype=torch.int32,
+                        dtype=torch.int64,
                         device=device,
                     )
             write_start += length
@@ -71,9 +70,9 @@ class TestOptimizedKernel(unittest.TestCase):
         self,
         experts_per_rank: int,
         num_ranks: int,
-        token_range: Tuple[int, int] = (1, 16),
+        token_range: tuple[int, int] = (1, 16),
         alignment: int = 32,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         """Create test data"""
         # Create token counts
         tokens_per_expert_group = torch.randint(
@@ -415,7 +414,7 @@ class TestOptimizedKernel(unittest.TestCase):
 
 
 # NOTE: original tests, kept for reference
-# from torchtitan.models.moe.kernels import generate_permute_indices
+# from torchtitan.models.common.moe.kernels import generate_permute_indices
 
 # def simple_test():
 #     device = torch.device("cuda", 0)

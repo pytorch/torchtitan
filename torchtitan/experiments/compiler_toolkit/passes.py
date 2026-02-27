@@ -14,16 +14,21 @@ Pass Types:
 - Joint custom passes: Applied to the joint forward-backward graph before partitioning
 - Compiler passes: Applied to the partitioned forward/backward graphs
 """
-
-from typing import Any, Sequence
+import operator
+from collections.abc import Sequence
+from typing import Any
 
 import torch
 from torch._functorch.aot_autograd import JointWithDescriptors
 from torch._guards import TracingContext
 from torch._inductor.compile_fx import compile_fx_inner
+from torch._inductor.fx_passes.bucketing import (
+    is_all_gather_into_tensor as is_all_gather,
+)
 from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_bucketing
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
+from torch.utils.checkpoint import CheckpointPolicy
 from torchtitan.experiments.compiler_toolkit.cudagraph import (
     CUDAGraphWrapper,
     get_static_input_indices,
@@ -97,6 +102,91 @@ def validate_flex_attn_annotation_pass(
             torch.ops.higher_order.flex_attention_backward,
         }:
             assert "compile_with_inductor" in node.meta.get("custom", {})
+    return gm
+
+
+# Default set of ops whose outputs should be saved (not recomputed) during
+# activation checkpointing. These are compute-intensive or communication ops
+# where recomputation is expensive.
+DEFAULT_SAC_SAVE_OPS = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_efficient_attention.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
+    torch.ops.aten._scaled_dot_product_attention_math.default,
+    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
+    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+    torch.ops.aten.max.default,
+    torch._higher_order_ops.flex_attention,
+    torch.ops.torch_attn._varlen_attn,
+    torch._higher_order_ops.inductor_compiled_code,
+}
+
+
+def apply_sac_pass(
+    gm: torch.fx.GraphModule,
+    op_list_to_save: set | None = None,
+) -> torch.fx.GraphModule:
+    """
+    Apply selective activation checkpointing on the joint graph.
+
+    This pass iterates over all call_function nodes in the joint graph and annotates
+    each with a CheckpointPolicy. Ops in ``op_list_to_save`` are marked MUST_SAVE
+    (their outputs are kept as activations for the backward pass), while all other
+    ops are marked PREFER_RECOMPUTE (their outputs may be discarded and recomputed
+    during backward).
+
+    To reduce memory further, every second ``mm`` op is marked PREFER_RECOMPUTE
+    instead of MUST_SAVE, matching the behavior of the eager selective AC policy
+    in ``torchtitan.distributed.activation_checkpoint``.
+
+    The annotations are later consumed by the min-cut partitioner
+    (``min_cut_rematerialization_partition``) to split the joint graph into separate
+    forward and backward graphs.
+
+    Usage: set ``--compile.joint_passes apply_sac``.
+
+    Args:
+        gm: The joint forward-backward graph module
+        op_list_to_save: Set of op targets whose outputs should be saved.
+            Defaults to DEFAULT_SAC_SAVE_OPS if None.
+
+    Returns:
+        The annotated graph module
+    """
+    if op_list_to_save is None:
+        op_list_to_save = DEFAULT_SAC_SAVE_OPS
+
+    nodes = list(gm.graph.nodes)
+    output_node = nodes[-1].all_input_nodes[0]
+    mm_count = 0
+
+    for node in nodes:
+        if node.op != "call_function" or node.target is operator.getitem:
+            continue
+
+        node.meta["ac_graph_id"] = 0
+
+        if node.target is torch.ops.aten.mm.default:
+            mm_count += 1
+            # Save every odd mm, recompute every even mm
+            if mm_count % 2 == 0:
+                node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+            else:
+                node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        elif node.target in op_list_to_save:
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        else:
+            node.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+
+        if node is output_node:
+            break
+
+    gm.recompile()
+    logger.info(
+        "Applied selective activation checkpointing (SAC) graph pass "
+        f"({mm_count} mm ops found, {mm_count - mm_count // 2} saved)"
+    )
     return gm
 
 
@@ -262,6 +352,45 @@ def full_inductor_compilation_pass(
     return compile_fx_inner(gm, example_inputs)
 
 
+def reassign_to_pg_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs,
+    source_pg_name: str,
+    target_pg_name: str,
+) -> torch.fx.GraphModule:
+    """
+    Reassign all-gather nodes from one process group to another.
+
+    This pass rewrites all-gather nodes whose PG matches ``source_pg_name`` to use
+    ``target_pg_name`` instead.  Since each NCCL PG gets its own CUDA stream, this
+    can be used to separate AG and RS onto different streams (e.g. for AG/RS
+    overlap in the backward pass).
+
+    Must be applied BEFORE bucketing passes so that bucketed all-gathers inherit
+    the new PG name.
+
+    Args:
+        gm: The graph module (forward or backward)
+        example_inputs: Example inputs (unused, required by pass interface)
+        source_pg_name: The group_name of the process group to match
+        target_pg_name: The group_name of the process group to assign
+    """
+    count = 0
+    for node in gm.graph.nodes:
+        if is_all_gather(node):
+            # AG args: (input_tensor, group_size, group_name)
+            if node.args[2] == source_pg_name:
+                node.args = (node.args[0], node.args[1], target_pg_name)
+                count += 1
+    if count > 0:
+        logger.info(
+            f"Rewrote {count} all-gather node(s) from PG {source_pg_name} "
+            f"to PG {target_pg_name}"
+        )
+    gm.recompile()
+    return gm
+
+
 # Registry mapping pass names to pass functions
 AVAILABLE_COMPILER_PASSES = {
     "autobucketing_reordering": autobucketing_reordering_pass,
@@ -276,4 +405,5 @@ AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,
     "validate_flex_attn_annotation": validate_flex_attn_annotation_pass,
+    "apply_sac": apply_sac_pass,
 }

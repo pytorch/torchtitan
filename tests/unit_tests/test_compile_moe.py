@@ -9,8 +9,8 @@ import unittest
 import torch
 import torch.nn as nn
 
-from torchtitan.config.job_config import Compile as CompileConfig
-from torchtitan.models.llama4.infra.parallelize import apply_compile
+from torchtitan.config import CompileConfig
+from torchtitan.models.llama4.parallelize import apply_compile
 
 
 class TransformerBlock(nn.Module):
@@ -52,7 +52,7 @@ class TestApplyCompile(unittest.TestCase):
         apply_compile(unused_model1, compile_config, ep_enabled=True)
         apply_compile(unused_model2, compile_config, ep_enabled=True)
 
-        from torchtitan.models.moe import moe as moe_module
+        from torchtitan.models.common.moe import moe as moe_module
 
         # Generate sample inputs for _run_experts_grouped_mm
         num_experts = 8

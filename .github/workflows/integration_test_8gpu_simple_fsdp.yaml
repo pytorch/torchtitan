@@ -61,7 +61,14 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        python -m pip install --force-reinstall --pre torch --index-url ${{ matrix.index-url }}
+        if [ "${{ matrix.gpu-arch-type }}" = "rocm" ]; then
+          python -m pip install --force-reinstall --pre \
+            "torch==${{ matrix.torch-version }}" \
+            --index-url ${{ matrix.index-url }}
+        else
+          python -m pip install --force-reinstall --pre \
+            torch --index-url ${{ matrix.index-url }}
+        fi
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
