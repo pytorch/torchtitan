@@ -454,9 +454,20 @@ class MoE(Module):
             out (torch.Tensor): Output tensor with shape ``(bs, slen, dim)``.
         """
         # Convert DTensor to local tensor for MoE-internal computation.
-        # grad_placements=(Partial(),) ensures x.grad is Partial in backward,
-        # so gradient reduction happens once at the MoE boundary (reduce-scatter)
-        # rather than being duplicated inside the MoE.
+        # grad_placements=(Partial(),) ensures x.grad is Partial on the tp_mesh
+        # in backward, so gradient reduction (reduce-scatter from Partial to
+        # Shard(1)) happens once at the MoE boundary rather than being
+        # duplicated inside the MoE.
+        #
+        # Why grad(x) is Partial on the tp_mesh across all parallelism:
+        # - TP only / TP+EP with ETP=TP: TP-sharded expert weights (Colwise on
+        #   w1/w3, Rowwise on w2) produce Partial output gradients.
+        # - TP+EP with ETP=1: each TP rank processes a disjoint token subset
+        #   (via ReordererSequenceParallel), so grad(x) is non-zero only at
+        #   each rank's token positions(Partial).
+        #
+        # This holds for all MoE components (router.gate, routed experts, shared
+        # experts) and regardless of score_before_experts.
         if isinstance(x, DTensor):
             assert (
                 x.device_mesh.ndim == 1
