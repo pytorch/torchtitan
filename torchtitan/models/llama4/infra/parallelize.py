@@ -690,14 +690,19 @@ def apply_moe_ep_tp(
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
             if use_llep:
-                # LLEP: only shard weights, no dispatch/combine hooks
-                experts_plan = ExpertParallelLLEP()
+                # LLEP: dispatch/combine hooks with LPT-based routing
                 # pyrefly: ignore [missing-attribute]
-                transformer_block.moe._llep_enabled = True
-                # pyrefly: ignore [missing-attribute]
-                transformer_block.moe._ep_group = ep_mesh.get_group()
+                llep_config = transformer_block.moe._llep_config
+                experts_plan = ExpertParallelLLEP(
+                    max_tokens_factor=llep_config.max_tokens_factor,
+                    min_tokens_per_gemm=llep_config.min_tokens_per_gemm,
+                    adaptive_threshold=llep_config.adaptive_threshold,
+                )
                 logger.info(
-                    "Enabling Least-Loaded Expert Parallelism (LLEP) for expert parallelism"
+                    f"Enabling LLEP for expert parallelism "
+                    f"(α={llep_config.max_tokens_factor}, "
+                    f"m={llep_config.min_tokens_per_gemm}, "
+                    f"λ={llep_config.adaptive_threshold})"
                 )
             elif use_deepep:
                 # pyrefly: ignore [missing-attribute]

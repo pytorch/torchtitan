@@ -423,27 +423,77 @@ class DeepEPExpertParallel(BaseExpertParallel):
         )
 
 
-class ExpertParallelLLEP(ParallelStyle):
+class ExpertParallelLLEP(BaseExpertParallel):
     """Expert Parallelism with Least-Loaded Expert Parallelism (LLEP).
 
-    Only shards expert weights across EP ranks (Shard(0)).
-    Does NOT install dispatch/combine hooks because LLEP handles
-    token routing in MoE.forward() via the llep_moe_forward() function.
+    Shards expert weights across EP ranks (Shard(0)) and installs
+    dispatch/combine hooks that use LPT-based routing instead of
+    naive EP routing.
+
+    The dispatch hook handles:
+    - all_gather expert counts → imbalance check → LPT plan
+    - token assignment to GPUs → AllToAll dispatch → sort/pad
+
+    The combine hook handles:
+    - AllToAll combine → unsort to original token order
+
+    Weight transfer (P2P) happens inside GroupedExperts.forward() after
+    FSDP has unsharded the weights, via llep_compute_with_weights().
     """
 
-    @staticmethod
-    def _partition_fn(name, mod, device_mesh):
+    def __init__(
+        self,
+        max_tokens_factor: float = 1.1,
+        min_tokens_per_gemm: int = 1024,
+        adaptive_threshold: float = 0.0,
+    ):
+        super().__init__()
+        self._max_tokens_factor = max_tokens_factor
+        self._min_tokens_per_gemm = min_tokens_per_gemm
+        self._adaptive_threshold = adaptive_threshold
+        self._llep_state = None
+
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
         for param_name, param in mod.named_parameters(recurse=False):
-            dist_param = nn.Parameter(
-                distribute_tensor(param, device_mesh, [Shard(0)])
-            )
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
             mod.register_parameter(param_name, dist_param)
+
+    def _token_dispatch(
+        self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
+        from torchtitan.distributed.llep import llep_dispatch_tokens
+
+        routed_input, num_tokens_per_expert = inputs
+
+        dispatched_tokens, padded_counts, llep_state = llep_dispatch_tokens(
+            routed_input,
+            num_tokens_per_expert,
+            device_mesh.get_group(),
+            max_tokens_factor=self._max_tokens_factor,
+            min_tokens_per_gemm=self._min_tokens_per_gemm,
+            adaptive_threshold=self._adaptive_threshold,
+        )
+        self._llep_state = llep_state
+
+        # Return 3-tuple: GroupedExperts.forward() gets llep_state as 3rd arg
+        return dispatched_tokens, padded_counts, llep_state
+
+    def _token_combine(
+        self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
+        from torchtitan.distributed.llep import llep_combine_output
+
+        result = llep_combine_output(routed_output, self._llep_state)
+        self._llep_state = None
+        return result
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
         return distribute_module(
             module,
             device_mesh,
-            partition_fn=ExpertParallelLLEP._partition_fn,
-            input_fn=None,
-            output_fn=None,
+            partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
+            input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
+            output_fn=self._token_combine,
         )

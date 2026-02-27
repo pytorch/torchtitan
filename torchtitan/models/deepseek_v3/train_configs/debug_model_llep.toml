@@ -71,5 +71,8 @@ mode = "none"
 enable = false
 components = ["model", "loss"]
 
+[llep]
+enabled = true
+
 [debug]
 moe_force_load_balance = false
