@@ -152,14 +152,13 @@ class PolicyTrainer(Actor, Configurable):
 
     @endpoint
     async def get_weights(self) -> dict:
-        """Get vLLM weights for generator.
+        """Get model weights for generator.
 
         Returns:
-            vLLM state dict
+            model state dict
         """
         titan_state = self.model.state_dict()
-        vllm_state = torchtitan_to_vllm(titan_state)
-        return vllm_state
+        return titan_state
 
     @endpoint
     async def step(self, trajectory: TrajectoryData) -> dict:
