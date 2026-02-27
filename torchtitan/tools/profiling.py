@@ -56,9 +56,23 @@ class CommsComputeOverlapAnalyzer(ProfileAnalyzer):
 
     Note:
         This analysis uses aggregated kernel times from ``key_averages()``, which
-        sums durations across all invocations. When multiple kernels run concurrently
-        on different CUDA streams, this may underestimate actual overlap. For precise
-        timeline analysis, inspect the exported Chrome trace directly.
+        sums durations across all invocations, regardless of stream. This leads to
+        two known inaccuracies in the estimate:
+
+        - **Concurrent compute streams (overestimate):** If multiple compute kernels
+          run in parallel on different CUDA streams, their durations are each counted
+          in full in ``compute_us``, but ``trace_duration_us`` only grows by wall
+          clock time. This inflates the numerator of the overlap formula, causing
+          the estimate to be *higher* than actual overlap. A more accurate approach
+          would merge (union) per-stream intervals before summing.
+
+        - **GPU idle time (underestimate):** If the trace window includes idle time
+          (e.g. CPU-bound gaps or time between iterations), ``trace_duration_us``
+          grows while ``compute_us + comm_us`` does not, pushing ``raw_overlap``
+          toward zero and *understating* real overlap within active periods.
+
+        For a precise timeline view that avoids both issues, inspect the exported
+        Chrome trace directly.
     """
 
     def _get_trace_duration_us(self, prof: torch.profiler.profile) -> float:
