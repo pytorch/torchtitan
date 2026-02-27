@@ -1,0 +1,257 @@
+diff --git a/torchtitan/models/llama4/infra/parallelize.py b/torchtitan/models/llama4/infra/parallelize.py
+index 5836ffd1..9264915c 100644
+--- a/torchtitan/models/llama4/infra/parallelize.py
++++ b/torchtitan/models/llama4/infra/parallelize.py
+@@ -514,9 +514,10 @@ def apply_moe_ep_tp(
+     use_mxfp8_a2a: bool = False,
+ ):
+     assert ep_mesh is not None or tp_mesh is not None
+-    assert (use_deepep and not use_mxfp8_a2a) or (not use_deepep and use_mxfp8_a2a), (
+-        'DeepEP and MXFP8 all-to-all (part of quantize.grouped_mm.mx.recipe_name="mxfp8_wgrad_with_hp") are not compatible. '
+-        "Please choose one of them."
++    if use_deepep or use_mxfp8_a2a:
++        assert use_deepep or use_mxfp8_a2a, (
++            'DeepEP and MXFP8 all-to-all (part of quantize.grouped_mm.mx.recipe_name="mxfp8_wgrad_with_hp") are not compatible. '
++            "Please choose one of them."
+     )
+ 
+     # pyrefly: ignore [not-callable]
+diff --git a/torchtitan/models/moe/moe.py b/torchtitan/models/moe/moe.py
+index e9f35aa0..b274d6cd 100644
+--- a/torchtitan/models/moe/moe.py
++++ b/torchtitan/models/moe/moe.py
+@@ -4,6 +4,7 @@
+ # This source code is licensed under the BSD-style license found in the
+ # LICENSE file in the root directory of this source tree.
+ 
++from abc import ABC, abstractmethod
+ from dataclasses import dataclass
+ from typing import Literal
+ 
+@@ -16,6 +17,125 @@ from torchtitan.tools.logging import logger
+ from .utils import indices_padding_wrapper
+ 
+ 
++class QuantConfig(ABC):
++    """Abstract base class for quantization configuration in MoE layers."""
++
++    @abstractmethod
++    def should_quantize(self, layer_name: str) -> bool:
++        """Check if a specific layer should use this quantization scheme.
++
++        Args:
++            layer_name: Name of the layer (e.g., "w1", "w2", "w3")
++
++        Returns:
++            True if the layer should be quantized, False otherwise
++        """
++        pass
++
++
++class MXFP8Config(QuantConfig):
++    """Configuration for MXFP8 quantization in MoE layers.
++
++    Args:
++        enabled_layers: Set of layer names to apply mxfp8 to (e.g., {"w1", "w2", "w3"})
++        block_size: Block size for MXFP8 quantization (must be 32)
++        out_dtype: Output dtype for the result
++        kernel_preference: Kernel preference ("auto" or "emulated")
++        wgrad_with_hp: Whether to compute weight gradient in high precision
++        scale_calculation_mode: Mode for scale calculation ("rceil", "floor", etc.)
++    """
++
++    def __init__(
++        self,
++        enabled_layers: set[str] | None = None,
++        block_size: int = 32,
++        out_dtype: torch.dtype = torch.bfloat16,
++        kernel_preference: str = "auto",
++        wgrad_with_hp: bool = False,
++        scale_calculation_mode: str = "rceil",
++    ):
++        self.enabled_layers = enabled_layers if enabled_layers else {"w1", "w2", "w3"}
++        self.block_size = block_size
++        self.out_dtype = out_dtype
++        self.kernel_preference = kernel_preference
++        self.wgrad_with_hp = wgrad_with_hp
++        self.scale_calculation_mode = scale_calculation_mode
++
++    def should_quantize(self, layer_name: str) -> bool:
++        """Check if a specific layer should use mxfp8."""
++        return layer_name in self.enabled_layers
++
++
++def apply_grouped_mm(
++    A: torch.Tensor,
++    B: torch.Tensor,
++    offs: torch.Tensor,
++    quant_config: QuantConfig | None,
++) -> torch.Tensor:
++    """Apply grouped matrix multiplication with optional quantization.
++
++    Args:
++        A: Input tensor, shape (M, K)
++        B: Weight tensor, shape (E, N, K)
++        offs: Offsets tensor for grouped mm
++        quant_config: Quantization configuration (None for no quantization)
++
++    Returns:
++        Output tensor, shape (M, N)
++    """
++    # Extract layer name from parameter metadata
++    layer_name = getattr(B, "_name", None)
++
++    # Transpose B to get (E, K, N) layout
++    B_t = B.transpose(-2, -1)
++
++    # No quantization or layer not enabled for quantization
++    if quant_config is None or not quant_config.should_quantize(layer_name):
++        return torch._grouped_mm(A.bfloat16(), B_t.bfloat16(), offs=offs)
++
++    # Apply quantization based on config type
++    if isinstance(quant_config, MXFP8Config):
++        from torchao.prototype.mx_formats.grouped_mm.mxfp8_grouped_mm import (
++            _to_mxfp8_then_scaled_grouped_mm,
++        )
++        from torchao.prototype.mx_formats.config import ScaleCalculationMode
++        from torchao.quantization.quantize_.common import KernelPreference
++
++        # Map string to enum
++        kernel_pref = KernelPreference(quant_config.kernel_preference.upper())
++        scale_mode = ScaleCalculationMode[quant_config.scale_calculation_mode.upper()]
++        return _to_mxfp8_then_scaled_grouped_mm(
++            A,
++            B_t,
++            offs=offs,
++            block_size=quant_config.block_size,
++            out_dtype=quant_config.out_dtype,
++            kernel_preference=kernel_pref,
++            wgrad_with_hp=quant_config.wgrad_with_hp,
++            scale_calculation_mode=scale_mode,
++        )
++
++    elif isinstance(quant_config, FP8Config):
++        from torchao.float8.grouped_mm import (
++            _to_fp8_rowwise_then_scaled_grouped_mm,
++        )
++        return _to_fp8_rowwise_then_scaled_grouped_mm(
++            A,
++            B_t,
++            offs=offs,
++            out_dtype=quant_config.out_dtype,
++        )
++    else:
++        raise NotImplementedError(
++            f"Quantization config type {type(quant_config).__name__} not supported"
++        )
++
++
+ @dataclass
+ class MoEArgs:
+     num_experts: int = 8
+@@ -37,6 +157,9 @@ class MoEArgs:
+     _debug_force_load_balance: bool = False
+     # if True, we force each experts get same amount of token via round-robin
+ 
++    # quantization configuration
++    quant_config: QuantConfig | None = None
++
+ 
+ # can be used as dense FFN layer or shared experts in MoE layers
+ class FeedForward(nn.Module):
+@@ -113,18 +236,16 @@ def _run_experts_grouped_mm(
+     w3: torch.Tensor,
+     x: torch.Tensor,
+     num_tokens_per_expert: torch.Tensor,
++    quant_config: QuantConfig | None = None,
+ ) -> torch.Tensor:
+     offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
+ 
+-    h = F.silu(
+-        torch._grouped_mm(x.bfloat16(), w1.bfloat16().transpose(-2, -1), offs=offsets)
+-    )
+-    h = h * torch._grouped_mm(
+-        x.bfloat16(), w3.bfloat16().transpose(-2, -1), offs=offsets
+-    )
+-    out = torch._grouped_mm(h, w2.bfloat16().transpose(-2, -1), offs=offsets).type_as(x)
++    # Compute the three GEMMs with potential per-layer quantization
++    h = F.silu(apply_grouped_mm(x, w1, offsets, quant_config))
++    h = h * apply_grouped_mm(x, w3, offsets, quant_config)
++    out = apply_grouped_mm(h, w2, offsets, quant_config)
+ 
+-    return out
++    return out.type_as(x)
+ 
+ 
+ class GroupedExperts(nn.Module):
+@@ -134,22 +255,30 @@ class GroupedExperts(nn.Module):
+         hidden_dim: int,
+         num_experts: int,
+         use_grouped_mm: bool,
++        quant_config: QuantConfig | None = None,
+     ):
+         super().__init__()
+         self.num_experts = num_experts
+         self.w1 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
+         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
+         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
++
++        # Attach metadata to parameters for quantization
++        self.w1._name = "w1"
++        self.w2._name = "w2"
++        self.w3._name = "w3"
++
+         self.use_grouped_mm = use_grouped_mm
++        self.quant_config = quant_config
+ 
+     def forward(
+         self,
+         x: torch.Tensor,
+         num_tokens_per_expert: torch.Tensor,
+     ) -> torch.Tensor:
++        # Extract local tensors from DTensors if needed
++        # This handles dynamic-shape inputs in EP which cannot be easily expressed as DTensors
+         if isinstance(self.w1, DTensor):
+-            # Convert parameters from DTensors to plain Tensors, to work with
+-            # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
+             w1 = self.w1.to_local()
+             # pyrefly: ignore [missing-attribute]
+             w2 = self.w2.to_local()
+@@ -160,6 +289,12 @@ class GroupedExperts(nn.Module):
+             w2 = self.w2
+             w3 = self.w3
+ 
++        # Preserve metadata from original parameters
++        if hasattr(self.w1, "_name"):
++            w1._name = self.w1._name
++            w2._name = self.w2._name
++            w3._name = self.w3._name
++
+         if self.use_grouped_mm:
+             # NOTE: If EP is not used, we need to pad the indices
+             #       to prepare for grouped_mm;
+@@ -172,7 +307,9 @@ class GroupedExperts(nn.Module):
+                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
+             else:
+                 run_experts_fn = _run_experts_grouped_mm
+-            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
++            return run_experts_fn(
++                w1, w2, w3, x, num_tokens_per_expert, self.quant_config
++            )
+         else:
+             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+ 
+@@ -418,11 +555,13 @@ class MoE(nn.Module):
+         super().__init__()
+ 
+         num_experts = moe_args.num_experts
++
+         self.experts = GroupedExperts(
+             dim=dim,
+             hidden_dim=hidden_dim,
+             num_experts=num_experts,
+             use_grouped_mm=moe_args.use_grouped_mm,
++            quant_config=moe_args.quant_config,
+         )
+         self.router = TokenChoiceTopKRouter(
+             dim=dim,
