@@ -131,20 +131,6 @@ class GroupedExperts(nn.Module):
         trunc_normal_(self.w3, mean=0.0, std=init_std)
 
 
-class LinearFloat32(nn.Linear):
-    """Linear layer with torch.float32 compute type. Wrapper
-    class is used to maintain any hooks that are applied
-    to router.gate by other pieces of code.
-    """
-
-    def forward(self, input):
-        return F.linear(
-            input.to(torch.float32),
-            self.weight.to(torch.float32),
-            self.bias.to(torch.float32) if self.bias is not None else None,
-        )
-
-
 class TokenChoiceTopKRouter(nn.Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
         routed to top K experts based on the router scores.
@@ -181,8 +167,7 @@ class TokenChoiceTopKRouter(nn.Module):
         _debug_force_load_balance: bool = False,
     ):
         super().__init__()
-        # NOTE: gate is computed in f32 for stability of expert load balancing
-        self.gate = LinearFloat32(dim, num_experts, bias=gate_bias)
+        self.gate = nn.Linear(dim, num_experts, bias=gate_bias)
         self.num_experts = num_experts
         self.num_expert_groups = num_expert_groups
         self.num_limited_groups = num_limited_groups
