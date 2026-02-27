@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+from torch.autograd import DeviceType
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module
@@ -28,6 +29,31 @@ _COMPUTE_KEYWORDS: tuple[str, ...] = (
     "triton",
     "flash",
 )
+
+
+def _union_us(intervals: list[tuple[float, float]]) -> float:
+    """Return the total duration covered by the union of the given intervals.
+
+    Args:
+        intervals: A list of ``(start, end)`` tuples in microseconds.
+
+    Returns:
+        Total microseconds covered after merging all overlapping/adjacent
+        intervals.  Returns ``0.0`` for an empty input.
+    """
+    if not intervals:
+        return 0.0
+    sorted_ivs = sorted(intervals, key=lambda x: x[0])
+    merged_start, merged_end = sorted_ivs[0]
+    total = 0.0
+    for start, end in sorted_ivs[1:]:
+        if start <= merged_end:
+            merged_end = max(merged_end, end)
+        else:
+            total += merged_end - merged_start
+            merged_start, merged_end = start, end
+    total += merged_end - merged_start
+    return total
 
 
 class ProfileAnalyzer(ABC):
@@ -54,93 +80,53 @@ class CommsComputeOverlapAnalyzer(ProfileAnalyzer):
     runs concurrently with compute kernels. Values close to 100% indicate
     optimal overlap; values near 0% indicate the workload is communication bound.
 
-    Note:
-        This analysis uses aggregated kernel times from ``key_averages()``, which
-        sums durations across all invocations, regardless of stream. This leads to
-        two known inaccuracies in the estimate:
-
-        - **Concurrent compute streams (overestimate):** If multiple compute kernels
-          run in parallel on different CUDA streams, their durations are each counted
-          in full in ``compute_us``, but ``trace_duration_us`` only grows by wall
-          clock time. This inflates the numerator of the overlap formula, causing
-          the estimate to be *higher* than actual overlap. A more accurate approach
-          would merge (union) per-stream intervals before summing.
-
-        - **GPU idle time (underestimate):** If the trace window includes idle time
-          (e.g. CPU-bound gaps or time between iterations), ``trace_duration_us``
-          grows while ``compute_us + comm_us`` does not, pushing ``raw_overlap``
-          toward zero and *understating* real overlap within active periods.
-
-        For a precise timeline view that avoids both issues, inspect the exported
-        Chrome trace directly.
+    The analysis collects raw CUDA kernel events from ``prof.events()``,
+    classifies each by name into compute or NCCL categories, and computes the
+    union of their wall-clock time intervals using :func:`_union_us`.  Overlap
+    is then derived as ``compute_us + comm_us - active_us``, where
+    ``active_us`` is the union across both categories.  This gives a precise,
+    stream-aware measurement: concurrent kernels on different CUDA streams are
+    deduplicated, and GPU idle time is excluded from the active window
+    automatically.  Unlike aggregated kernel statistics, no post-hoc correction
+    is needed.
     """
-
-    def _get_trace_duration_us(self, prof: torch.profiler.profile) -> float:
-        """Compute trace duration from raw event timestamps."""
-        try:
-            events = prof.events()
-        except (AttributeError, RuntimeError, AssertionError):
-            return 0.0
-
-        if not events:
-            return 0.0
-
-        min_start = float("inf")
-        max_end = float("-inf")
-
-        for evt in events:
-            if hasattr(evt, "time_range") and hasattr(evt.time_range, "start"):
-                try:
-                    min_start = min(min_start, evt.time_range.start)
-                    max_end = max(max_end, evt.time_range.end)
-                except (AttributeError, TypeError):
-                    continue
-
-        if min_start == float("inf") or max_end == float("-inf"):
-            return 0.0
-
-        return max(0.0, max_end - min_start)
 
     def analyze(self, prof: torch.profiler.profile) -> None:
         """Run overlap analysis and log a summary to the console."""
-        key_averages = prof.key_averages()
+        comm_intervals: list[tuple[float, float]] = []
+        compute_intervals: list[tuple[float, float]] = []
 
-        comm_us: float = 0.0
-        compute_us: float = 0.0
-
-        for evt in key_averages:
-            name_lower = evt.key.lower()
-            device_time = evt.self_device_time_total
-
+        for evt in prof.events():
+            if evt.device_type != DeviceType.CUDA:
+                continue
+            name_lower = evt.name.lower()
+            interval = (evt.time_range.start, evt.time_range.end)
             if any(kw in name_lower for kw in _COMM_KEYWORDS):
-                comm_us += device_time
+                comm_intervals.append(interval)
             elif any(kw in name_lower for kw in _COMPUTE_KEYWORDS):
-                compute_us += device_time
+                compute_intervals.append(interval)
 
-        if comm_us == 0.0:
+        if not comm_intervals:
             logger.info(
                 "[CommsComputeOverlapAnalyzer] No NCCL kernels found in trace. "
                 "Skipping overlap report."
             )
             return
 
-        trace_duration_us = self._get_trace_duration_us(prof)
-        if trace_duration_us == 0.0:
-            trace_duration_us = compute_us + comm_us
+        compute_us = _union_us(compute_intervals)
+        comm_us = _union_us(comm_intervals)
+        active_us = _union_us(compute_intervals + comm_intervals)
 
-        trace_duration_us = max(trace_duration_us, compute_us, comm_us)
-
-        raw_overlap = compute_us + comm_us - trace_duration_us
+        raw_overlap = compute_us + comm_us - active_us
         overlap_pct = max(0.0, min(raw_overlap / comm_us * 100.0, 100.0))
 
-        # Calculate GPU time spent on unoverlapped communication (unutilized for compute)
         unoverlapped_comm_pct = 100.0 - overlap_pct
 
         logger.info(
             "[CommsComputeOverlapAnalyzer] Compute-Communication Overlap Report\n"
             f"  Total Compute Time               : {compute_us / 1e3:.2f} ms\n"
             f"  Total NCCL Time                  : {comm_us / 1e3:.2f} ms\n"
-            f"  Total Trace Time                 : {trace_duration_us / 1e3:.2f} ms\n"
+            f"  Total Active Time                : {active_us / 1e3:.2f} ms\n"
             f"  Overlap Efficiency               : {overlap_pct:.1f} %\n"
             f"  GPU Unutilized due to NCCL comms : {unoverlapped_comm_pct:.1f} %"
         )

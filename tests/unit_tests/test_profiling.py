@@ -8,12 +8,14 @@ import unittest
 from unittest.mock import MagicMock
 
 import torch
+from torch.autograd import DeviceType
 
 from torchtitan.tools.profiling import (
     CommsComputeOverlapAnalyzer,
     MemoryProfiler,
     ProfileAnalyzer,
     Profiler,
+    _union_us,
 )
 
 
@@ -41,57 +43,89 @@ class TestProfileAnalyzerABC(unittest.TestCase):
         self.assertIsInstance(analyzer, ProfileAnalyzer)
 
 
+class TestUnionUs(unittest.TestCase):
+    def test_empty_list(self):
+        """Empty input returns 0.0."""
+        self.assertEqual(_union_us([]), 0.0)
+
+    def test_single_interval(self):
+        """Single interval returns its own duration."""
+        self.assertAlmostEqual(_union_us([(10.0, 50.0)]), 40.0)
+
+    def test_non_overlapping_intervals(self):
+        """Non-overlapping intervals: total is the sum of individual durations."""
+        self.assertAlmostEqual(_union_us([(0.0, 10.0), (20.0, 30.0)]), 20.0)
+
+    def test_partially_overlapping_intervals(self):
+        """Partially overlapping intervals are merged correctly."""
+        self.assertAlmostEqual(_union_us([(0.0, 15.0), (10.0, 25.0)]), 25.0)
+
+    def test_fully_contained_interval(self):
+        """An interval fully inside another collapses to the outer duration."""
+        self.assertAlmostEqual(_union_us([(0.0, 100.0), (20.0, 50.0)]), 100.0)
+
+    def test_adjacent_intervals(self):
+        """Adjacent (touching but not overlapping) intervals are kept separate."""
+        self.assertAlmostEqual(_union_us([(0.0, 10.0), (10.0, 20.0)]), 20.0)
+
+
 class TestCommsComputeOverlapAnalyzer(unittest.TestCase):
-    def _make_mock_prof(self, key_averages=None, events=None):
+    def _make_mock_prof(self, events=None):
         prof = MagicMock(spec=torch.profiler.profile)
-        prof.key_averages.return_value = key_averages or []
         prof.events.return_value = events or []
         return prof
 
+    def _make_cuda_event(self, name, start, end):
+        evt = MagicMock()
+        evt.device_type = DeviceType.CUDA
+        evt.name = name
+        evt.time_range = MagicMock()
+        evt.time_range.start = start
+        evt.time_range.end = end
+        return evt
+
     def test_analyze_no_nccl_kernels_logs_skip(self):
         """When no NCCL kernels are present, analyze() returns without error."""
-        evt = MagicMock()
-        evt.key = "aten::mm"
-        evt.self_device_time_total = 1000.0
-        prof = self._make_mock_prof(key_averages=[evt])
-
+        evt = self._make_cuda_event("aten::mm", 0.0, 1000.0)
+        prof = self._make_mock_prof(events=[evt])
         analyzer = CommsComputeOverlapAnalyzer()
         # Should not raise; logs a "Skipping" message.
         analyzer.analyze(prof)
 
-    def test_analyze_empty_key_averages(self):
-        """Empty key_averages → no NCCL time → early return without error."""
-        prof = self._make_mock_prof(key_averages=[])
+    def test_analyze_empty_events(self):
+        """Empty events → no NCCL time → early return without error."""
+        prof = self._make_mock_prof(events=[])
         analyzer = CommsComputeOverlapAnalyzer()
+        analyzer.analyze(prof)
+
+    def test_analyze_non_cuda_events_ignored(self):
+        """Events with device_type != CUDA are ignored even if they have NCCL names."""
+        evt = MagicMock()
+        evt.device_type = DeviceType.CPU
+        evt.name = "nccl:all_reduce"
+        prof = self._make_mock_prof(events=[evt])
+        analyzer = CommsComputeOverlapAnalyzer()
+        # No CUDA NCCL events → should log "Skipping" without error.
         analyzer.analyze(prof)
 
     def test_analyze_nccl_and_compute_kernels(self):
         """With both NCCL and compute kernels present, analyze() runs to completion."""
-        nccl_evt = MagicMock()
-        nccl_evt.key = "nccl:all_reduce"
-        nccl_evt.self_device_time_total = 5000.0
-
-        compute_evt = MagicMock()
-        compute_evt.key = "aten::mm"
-        compute_evt.self_device_time_total = 8000.0
-
-        prof = self._make_mock_prof(key_averages=[nccl_evt, compute_evt])
+        # Non-overlapping: compute 0–8 ms, nccl 10–15 ms
+        compute_evt = self._make_cuda_event("aten::mm", 0.0, 8000.0)
+        nccl_evt = self._make_cuda_event("nccl:all_reduce", 10000.0, 15000.0)
+        prof = self._make_mock_prof(events=[compute_evt, nccl_evt])
         analyzer = CommsComputeOverlapAnalyzer()
         # Should not raise; logs the overlap report.
         analyzer.analyze(prof)
 
-    def test_get_trace_duration_empty_events(self):
-        """_get_trace_duration_us() returns 0.0 for empty events."""
-        prof = self._make_mock_prof(events=[])
+    def test_analyze_full_overlap(self):
+        """When compute and NCCL intervals are identical, overlap is 100%."""
+        compute_evt = self._make_cuda_event("aten::mm", 0.0, 5000.0)
+        nccl_evt = self._make_cuda_event("nccl:all_reduce", 0.0, 5000.0)
+        prof = self._make_mock_prof(events=[compute_evt, nccl_evt])
         analyzer = CommsComputeOverlapAnalyzer()
-        self.assertEqual(analyzer._get_trace_duration_us(prof), 0.0)
-
-    def test_get_trace_duration_events_exception(self):
-        """_get_trace_duration_us() returns 0.0 when events() raises."""
-        prof = MagicMock(spec=torch.profiler.profile)
-        prof.events.side_effect = RuntimeError("no trace")
-        analyzer = CommsComputeOverlapAnalyzer()
-        self.assertEqual(analyzer._get_trace_duration_us(prof), 0.0)
+        # Should not raise; overlap_pct should be 100%.
+        analyzer.analyze(prof)
 
 
 class TestProfilerConfig(unittest.TestCase):
