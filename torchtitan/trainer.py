@@ -272,6 +272,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         model_converters.convert(model)
 
+        # Check if any converter uses quantization (FP8, MX, etc.)
+        has_quantization = any(
+            getattr(cc, "_quantization_type", None) is not None
+            for cc in config.model_converters.converters
+        )
+
         # metrics logging
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
@@ -286,6 +292,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model_param_count,
             self.metrics_processor.num_flops_per_token,
         ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
+        self.metrics_processor.has_quantization = has_quantization
 
         logger.info(
             f"{color.blue}Model {model_spec.name} {model_spec.flavor} "

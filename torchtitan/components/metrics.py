@@ -312,6 +312,7 @@ class MetricsProcessor(Configurable):
     time_last_log: float
 
     num_flops_per_token: int
+    has_quantization: bool
     optimizers: OptimizersContainer | None
     lr_schedulers: LRSchedulersContainer | None
     model_parts: list[torch.nn.Module] | None
@@ -354,6 +355,7 @@ class MetricsProcessor(Configurable):
 
         # These variables have to be set later as they depend on other components or model.
         self.num_flops_per_token = -1
+        self.has_quantization = False
         self.optimizers = None
         self.lr_schedulers = None
         self.model_parts = None
@@ -479,8 +481,13 @@ class MetricsProcessor(Configurable):
         # model FLOPS utilization
         # For its definition and calculation, please refer to the PaLM paper:
         # https://arxiv.org/abs/2204.02311
-        mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
+        # MFU is based on BF16 peak FLOPS which is misleading when quantization
+        # (FP8/MX) is active, so we skip it in that case.
         tflops = self.num_flops_per_token * tps / 1e12
+        if self.has_quantization:
+            mfu = None
+        else:
+            mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
 
         time_end_to_end = time_delta / self.config.log_freq
         time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
@@ -509,9 +516,10 @@ class MetricsProcessor(Configurable):
         if extra_metrics:
             metrics.update(extra_metrics)
 
-        self.logger.log(metrics, step)
+        self.logger.log({k: v for k, v in metrics.items() if v is not None}, step)
 
         color = self.color
+        mfu_str = f"{mfu:.2f}%" if mfu is not None else "N/A"
         logger.info(
             f"{color.red}step: {step:2}  "
             f"{color.green}loss: {global_avg_loss:8.5f}  "
@@ -520,7 +528,7 @@ class MetricsProcessor(Configurable):
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
-            f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+            f"{color.magenta}mfu: {mfu_str}{color.reset}"
         )
 
         self.ntokens_since_last_log = 0
