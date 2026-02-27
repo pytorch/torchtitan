@@ -12,7 +12,7 @@ import torch
 import torch._inductor.config
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import distribute_module, DTensor, Partial
+from torch.distributed.tensor import distribute_module, DTensor
 from torch.distributed.tensor.parallel import ColwiseParallel
 from torch.distributed.tensor.placement_types import Placement
 
@@ -48,7 +48,7 @@ class ColwiseParallelWithGradPlacement(ColwiseParallel):
         self.local_input_grad_placements = local_input_grad_placements
 
     @staticmethod
-    def _prepare_input_fn(
+    def _prepare_input_fn(  # pyrefly: ignore [bad-param-name-override]
         input_layouts,
         desired_input_layouts,
         local_input_grad_placements,
@@ -87,7 +87,7 @@ class ColwiseParallelWithGradPlacement(ColwiseParallel):
             device_mesh,
             partition_fn,
             partial(
-                self._prepare_input_fn,
+                self._prepare_input_fn,  # pyrefly: ignore [bad-argument-type]
                 self.input_layouts,
                 self.desired_input_layouts,
                 self.local_input_grad_placements,
