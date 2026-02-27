@@ -146,7 +146,7 @@ class ColwiseParallelWithGradPlacement(ColwiseParallel):
         if not isinstance(input_tensor, DTensor):
             assert local_input_grad_placements is not None, (
                 "local_input_grad_placements must be specified when input is a "
-                "plain tensor. Please think about what your want the from_local(Replicate) backward behavior like."
+                "plain tensor. Please think about what you want the from_local(Replicate) backward behavior like."
             )
             input_tensor = DTensor.from_local(
                 input_tensor,
