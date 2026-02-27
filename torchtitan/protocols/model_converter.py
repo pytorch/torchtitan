@@ -31,6 +31,18 @@ class ModelConverter(Protocol):
         ...
 
 
+class QuantizationConverter(Configurable):
+    """Base class for quantization converters (FP8, MX, etc.).
+
+    All quantization converter classes should inherit from this so they can be
+    identified via isinstance checks.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pass
+
+
 class ModelConvertersContainer(Configurable, ModelConverter):
     """Model converters sequential container.
 
@@ -83,13 +95,14 @@ class ModelConvertersContainer(Configurable, ModelConverter):
 def _validate_quantization(converters: list[Configurable.Config]):
     """Validates that all quantization converters use the same quantization type.
 
-    Each quantization converter Config defines a `_quantization_type` ClassVar
-    (e.g. "float8" or "mx"). This function asserts they are all the same.
+    Each quantization converter Config inherits from QuantizationConverter.Config
+    and defines a `_quantization_type` ClassVar (e.g. "float8" or "mx").
+    This function asserts they are all the same.
     """
     existing_type: str | None = None
     for config in converters:
-        qt = getattr(config, "_quantization_type", None)
-        if qt is not None:
+        if isinstance(config, QuantizationConverter.Config):
+            qt = config._quantization_type
             if existing_type is None:
                 existing_type = qt
             else:

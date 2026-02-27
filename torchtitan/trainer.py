@@ -42,7 +42,10 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import prepare_context_parallel_input
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols import BaseModel
-from torchtitan.protocols.model_converter import ModelConvertersContainer
+from torchtitan.protocols.model_converter import (
+    ModelConvertersContainer,
+    QuantizationConverter,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
@@ -274,7 +277,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # Check if any converter uses quantization (FP8, MX, etc.)
         has_quantization = any(
-            getattr(cc, "_quantization_type", None) is not None
+            isinstance(cc, QuantizationConverter.Config)
             for cc in config.model_converters.converters
         )
 
@@ -284,6 +287,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             config_dict=config.to_dict(),
+            has_quantization=has_quantization,
         )
         color = self.metrics_processor.color
 
@@ -292,7 +296,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             model_param_count,
             self.metrics_processor.num_flops_per_token,
         ) = model_config.get_nparams_and_flops(model, config.training.seq_len)
-        self.metrics_processor.has_quantization = has_quantization
 
         logger.info(
             f"{color.blue}Model {model_spec.name} {model_spec.flavor} "

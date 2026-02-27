@@ -328,6 +328,7 @@ class MetricsProcessor(Configurable):
         ft_replica_id: int = 0,
         config_dict: dict[str, Any] | None = None,
         tag: str | None = None,
+        has_quantization: bool = False,
     ):
         self.logger = self._build_metric_logger(
             config=config,
@@ -353,9 +354,10 @@ class MetricsProcessor(Configurable):
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
 
+        self.has_quantization = has_quantization
+
         # These variables have to be set later as they depend on other components or model.
         self.num_flops_per_token = -1
-        self.has_quantization = False
         self.optimizers = None
         self.lr_schedulers = None
         self.model_parts = None
@@ -501,7 +503,6 @@ class MetricsProcessor(Configurable):
             "grad_norm": grad_norm,
             "throughput(tps)": tps,
             "tflops": tflops,
-            "mfu(%)": mfu,
             "time_metrics/end_to_end(s)": time_end_to_end,
             "time_metrics/data_loading(s)": time_data_loading,
             "time_metrics/data_loading(%)": time_data_loading_pct,
@@ -512,11 +513,13 @@ class MetricsProcessor(Configurable):
             "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
             "memory/num_ooms": device_mem_stats.num_ooms,
         }
+        if mfu is not None:
+            metrics["mfu(%)"] = mfu
 
         if extra_metrics:
             metrics.update(extra_metrics)
 
-        self.logger.log({k: v for k, v in metrics.items() if v is not None}, step)
+        self.logger.log(metrics, step)
 
         color = self.color
         mfu_str = f"{mfu:.2f}%" if mfu is not None else "N/A"

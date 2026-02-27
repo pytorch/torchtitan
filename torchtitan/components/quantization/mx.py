@@ -14,6 +14,7 @@ from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
 
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
+from torchtitan.protocols.model_converter import QuantizationConverter
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
@@ -21,14 +22,14 @@ from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 from .utils import module_filter_fn
 
 
-class MXLinearConverter(Configurable):
+class MXLinearConverter(QuantizationConverter):
     """Converts the linear layers of `model` to `MXLinear`."""
 
     filter_fqns: list[str]
     mx_config: Any  # MXLinearConfig type when imported
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(QuantizationConverter.Config):
         _quantization_type: ClassVar[str] = "mx"
 
         mxfp8_dim1_cast_kernel_choice: Literal["triton", "cuda", "torch"] = "triton"
@@ -120,12 +121,12 @@ class MXLinearConverter(Configurable):
         return
 
 
-class MXGroupedMMConverter(Configurable):
+class MXGroupedMMConverter(QuantizationConverter):
     """Converts target 3D nn.Parameters of a model, representing 'experts',
     to use MXFP8 scaled grouped GEMMs instead of a high precision grouped GEMMs."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(QuantizationConverter.Config):
         _quantization_type: ClassVar[str] = "mx"
 
         recipe_name: Literal["mxfp8"] = "mxfp8"
