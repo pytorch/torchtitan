@@ -21,7 +21,7 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import Comm as CommConfig, Debug as DebugConfig, TORCH_DTYPE_MAP
+from torchtitan.config import CommConfig, DebugConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
@@ -127,7 +127,7 @@ def set_determinism(
         # reproducibility, since the autotune results may not be deterministic.
         from torch.nn.attention.flex_attention import flex_attention
 
-        from torchtitan.models.attention import FlexAttentionWrapper
+        from torchtitan.models.common.attention import FlexAttentionWrapper
 
         FlexAttentionWrapper._compiled_flex_attn = torch.compile(flex_attention)
 
@@ -243,19 +243,19 @@ def get_train_context(enable_loss_parallel: bool) -> TrainContext:
 def maybe_enable_amp(
     parallel_dims: ParallelDims, mixed_precision_param: str, device_type: str
 ) -> contextlib.AbstractContextManager[None] | torch.autocast:
-    if parallel_dims.fsdp_enabled or parallel_dims.dp_replicate_enabled:
+    if parallel_dims.fsdp_enabled:
         # FSDP handles mixed precision internally
-        logger.info("Mixed precision training is handled by fully_shard or replicate")
+        logger.info("Mixed precision training is handled by fully_shard")
         return contextlib.nullcontext()
     else:
         if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
             logger.warning(
-                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP/DDP is enabled."
+                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP is enabled."
             )
             logger.info("Mixed precision training is disabled")
             return contextlib.nullcontext()
         else:
-            # the following code will only be executed for single-device training
+            # the following code will only be executed for DDP or single-device training
             logger.info("Mixed precision training is handled by AMP")
             return torch.autocast(
                 device_type,
@@ -293,6 +293,14 @@ def init_distributed(
     base_folder: str = "",
     ranks: list[int] | None = None,
 ) -> int:
+    # Skip initialization if already initialized
+    if torch.distributed.is_initialized():
+        logger.warning(
+            "torch.distributed is already initialized. Skipping init_distributed. "
+            "The provided comm_config and other settings will not take effect."
+        )
+        return torch.distributed.get_world_size()
+
     if comm_config.mode in ("fake_backend", "local_tensor"):
         ngpu_str = os.environ.get("NGPU")
         if ngpu_str is None:

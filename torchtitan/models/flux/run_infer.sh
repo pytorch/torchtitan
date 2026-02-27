@@ -12,11 +12,12 @@ set -ex
 # LOG_RANK=0,1 NGPU=4 ./torchtitan/models/flux/run_train.sh
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
-CONFIG_FILE=${CONFIG_FILE:-"./torchtitan/models/flux/train_configs/debug_model.toml"}
+MODEL=${MODEL:-"flux"}
+CONFIG=${CONFIG:-"flux_debugmodel"}
 
 PYTORCH_ALLOC_CONF="expandable_segments:True" \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
--m torchtitan.models.flux.inference.infer --job.config_file ${CONFIG_FILE} \
+-m torchtitan.models.flux.inference.infer --module ${MODEL} --config ${CONFIG} \
 --checkpoint.enable \
 --checkpoint.exclude_from_loading=lr_scheduler,dataloader,optimizer "$@"
