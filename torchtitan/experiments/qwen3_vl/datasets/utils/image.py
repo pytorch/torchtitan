@@ -25,6 +25,8 @@ def process_image(
     merge_size: int = 2,
     max_pixels: int = 16777216,
     min_pixels: int = 65536,
+    image_mean: tuple[float, ...] = (0.5, 0.5, 0.5),
+    image_std: tuple[float, ...] = (0.5, 0.5, 0.5),
 ) -> torch.Tensor | None:
     """Process a single image into normalized tensor format for Qwen3-VL.
 
@@ -32,9 +34,10 @@ def process_image(
         image: PIL Image, bytes, or URL string
         patch_size: Size of each spatial patch
         merge_size: Spatial merge size factor
-        temporal_patch_size: Temporal patch size for videos
         max_pixels: Maximum number of pixels
         min_pixels: Minimum number of pixels
+        image_mean: Per-channel mean for normalization
+        image_std: Per-channel std for normalization
 
     Returns:
         Tensor of shape (1, H, W, 3) or None if processing fails
@@ -66,13 +69,12 @@ def process_image(
             min_patch_per_image=min_patch_per_image,
         )
 
-        # Convert to numpy and normalize using Qwen3-VL normalization
+        # Convert to numpy and normalize
         img_array = np.array(image)
         img_array = img_array / 255.0
 
-        # From Qwen3-VL preprocessor_config.json
-        mean = np.array([0.5, 0.5, 0.5])
-        std = np.array([0.5, 0.5, 0.5])
+        mean = np.array(image_mean)
+        std = np.array(image_std)
         img_array = (img_array - mean) / std
 
         # Convert to tensor (1, H, W, 3) with dummy temporal dim
@@ -137,7 +139,11 @@ def _resize_image_by_patch_count(
         original_height = int(original_height * scale_factor)
 
     resized_height, resized_width = _smart_resize(
-        original_height, original_width, factor, max_patch_per_image, min_patch_per_image
+        original_height,
+        original_width,
+        factor,
+        max_patch_per_image,
+        min_patch_per_image,
     )
     return image.resize((resized_width, resized_height))
 

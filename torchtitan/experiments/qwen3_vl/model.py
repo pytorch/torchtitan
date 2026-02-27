@@ -17,9 +17,9 @@ import torch
 from torch import nn
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
-from torchtitan.models.common.attention import GQAttention
 from torchtitan.tools.logging import logger
 
 from .vision_encoder import Qwen3VLVisionEncoder
@@ -123,9 +123,7 @@ class Qwen3VLModel(Qwen3Model):
             self.rope = _dc.replace(self.rope, max_seq_len=seq_len)
 
             if self.layer.moe is not None:
-                self.layer.moe._debug_force_load_balance = (
-                    debug.moe_force_load_balance
-                )
+                self.layer.moe._debug_force_load_balance = debug.moe_force_load_balance
 
             if (
                 parallelism.context_parallel_degree > 1
@@ -170,6 +168,198 @@ class Qwen3VLModel(Qwen3Model):
         self.deepstack_layer_indices = list(
             range(len(config.encoder.deepstack_visual_indicies))
         )
+
+    @staticmethod
+    def _apply_interleaved_mrope(
+        freqs: torch.Tensor,
+        mrope_section: list[int],
+    ) -> torch.Tensor:
+        """Interleave T/H/W frequency dimensions for MRoPE.
+
+        Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
+        interleaved [THWTHWTHW...TT], preserving frequency continuity.
+
+        Args:
+            freqs: (3, batch, seq_len, head_dim) — per-dimension frequencies.
+            mrope_section: [temporal, height, width] section sizes.
+
+        Returns:
+            (batch, seq_len, head_dim) with T/H/W interleaved.
+        """
+        freqs_t = freqs[0].clone()
+        for dim, offset in enumerate((1, 2), start=1):  # H, W
+            length = mrope_section[dim] * 3
+            idx = slice(offset, length, 3)
+            freqs_t[..., idx] = freqs[dim, ..., idx]
+        return freqs_t
+
+    def _get_mrope_position_ids(
+        self,
+        input_ids: torch.Tensor,
+        grid_thw: torch.Tensor | None,
+        grid_thw_videos: torch.Tensor | None,
+        special_tokens: SpecialTokens | None,
+    ) -> torch.Tensor:
+        """Build 3D position IDs (temporal, height, width) for MRoPE.
+
+        Args:
+            input_ids: (batch, seq_len) token IDs.
+            grid_thw: (num_images, 3) grid dimensions for images.
+            grid_thw_videos: (num_videos, 3) grid dimensions for videos.
+            special_tokens: Special token definitions.
+
+        Returns:
+            (3, batch, seq_len) position IDs.
+        """
+        # For videos, split by temporal dimension (timestamps separate frames)
+        if grid_thw_videos is not None:
+            grid_thw_videos = torch.repeat_interleave(
+                grid_thw_videos, grid_thw_videos[:, 0], dim=0
+            )
+            grid_thw_videos[:, 0] = 1
+
+        spatial_merge_size = (
+            self.visual.spatial_merge_size if self.visual is not None else 2
+        )
+        image_token_id = (
+            special_tokens.img_id if special_tokens is not None else self.image_token_id
+        )
+        video_token_id = self.video_token_id
+        vision_start_token_id = self.vision_start_token_id
+
+        batch_size, seq_len = input_ids.shape
+        position_ids = torch.ones(
+            3,
+            batch_size,
+            seq_len,
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
+
+        image_index, video_index = 0, 0
+        for i in range(batch_size):
+            tokens = input_ids[i]
+            vision_start_indices = torch.argwhere(
+                tokens == vision_start_token_id
+            ).squeeze(1)
+            vision_tokens = tokens[vision_start_indices + 1]
+            image_nums = (vision_tokens == image_token_id).sum().item()
+            video_nums = (vision_tokens == video_token_id).sum().item()
+            input_tokens = tokens.tolist()
+            llm_pos_ids_list: list = []
+            st = 0
+            remain_images, remain_videos = image_nums, video_nums
+
+            for _ in range(image_nums + video_nums):
+                if image_token_id in input_tokens and remain_images > 0:
+                    ed_image = input_tokens.index(image_token_id, st)
+                else:
+                    ed_image = len(input_tokens) + 1
+                if video_token_id in input_tokens and remain_videos > 0:
+                    ed_video = input_tokens.index(video_token_id, st)
+                else:
+                    ed_video = len(input_tokens) + 1
+
+                if ed_image < ed_video:
+                    t, h, w = (
+                        grid_thw[image_index][0],
+                        grid_thw[image_index][1],
+                        grid_thw[image_index][2],
+                    )
+                    image_index += 1
+                    remain_images -= 1
+                    ed = ed_image
+                else:
+                    t, h, w = (
+                        grid_thw_videos[video_index][0],
+                        grid_thw_videos[video_index][1],
+                        grid_thw_videos[video_index][2],
+                    )
+                    video_index += 1
+                    remain_videos -= 1
+                    ed = ed_video
+
+                llm_grid_t, llm_grid_h, llm_grid_w = (
+                    t.item(),
+                    h.item() // spatial_merge_size,
+                    w.item() // spatial_merge_size,
+                )
+                text_len = ed - st
+
+                st_idx = (
+                    llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+                )
+                llm_pos_ids_list.append(
+                    torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                )
+
+                t_index = (
+                    torch.arange(llm_grid_t)
+                    .view(-1, 1)
+                    .expand(-1, llm_grid_h * llm_grid_w)
+                    .flatten()
+                )
+                h_index = (
+                    torch.arange(llm_grid_h)
+                    .view(1, -1, 1)
+                    .expand(llm_grid_t, -1, llm_grid_w)
+                    .flatten()
+                )
+                w_index = (
+                    torch.arange(llm_grid_w)
+                    .view(1, 1, -1)
+                    .expand(llm_grid_t, llm_grid_h, -1)
+                    .flatten()
+                )
+                llm_pos_ids_list.append(
+                    torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+                )
+                st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+
+            if st < len(input_tokens):
+                st_idx = (
+                    llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+                )
+                text_len = len(input_tokens) - st
+                llm_pos_ids_list.append(
+                    torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                )
+
+            llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+            position_ids[:, i, :] = llm_positions.to(position_ids.device)
+
+        return position_ids
+
+    def _compute_mrope_freqs(
+        self,
+        position_ids_3d: torch.Tensor,
+        freqs_cis: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute interleaved MRoPE cos/sin from 3D position IDs.
+
+        Args:
+            position_ids_3d: (3, batch, seq_len) position IDs.
+            freqs_cis: (max_seq_len, head_dim * 2) with cos and sin concatenated.
+
+        Returns:
+            (batch, seq_len, 1, head_dim * 2) pre-computed MRoPE cos/sin.
+        """
+        head_dim_x2 = freqs_cis.shape[-1]
+        head_dim = head_dim_x2 // 2
+        cos_cache = freqs_cis[:, :head_dim]  # (max_seq_len, head_dim)
+        sin_cache = freqs_cis[:, head_dim:]  # (max_seq_len, head_dim)
+
+        # Gather cos/sin for each of the 3 dimensions
+        # position_ids_3d: (3, batch, seq_len)
+        cos_3d = cos_cache[position_ids_3d.long()]  # (3, batch, seq_len, head_dim)
+        sin_3d = sin_cache[position_ids_3d.long()]  # (3, batch, seq_len, head_dim)
+
+        # Interleave T/H/W dimensions
+        mrope_cos = self._apply_interleaved_mrope(cos_3d, self.mrope_section)
+        mrope_sin = self._apply_interleaved_mrope(sin_3d, self.mrope_section)
+
+        # Concatenate and add n_heads dimension: (batch, seq_len, 1, head_dim*2)
+        return torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(2)
 
     def init_weights(
         self,
@@ -350,9 +540,7 @@ class Qwen3VLModel(Qwen3Model):
             deepstack_visual_embeds: list of (num_visual_tokens, dim) or None
         """
         img_token_id = (
-            special_tokens.img_id
-            if special_tokens is not None
-            else self.image_token_id
+            special_tokens.img_id if special_tokens is not None else self.image_token_id
         )
         vid_token_id = self.video_token_id
 
@@ -434,7 +622,7 @@ class Qwen3VLModel(Qwen3Model):
         grid_thw: torch.Tensor | None,
         grid_thw_videos: torch.Tensor | None,
         special_tokens: SpecialTokens | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Preprocess vision inputs for pipeline parallelism.
 
         Runs tok_embeddings + vision encoder + scatter + dense DeepStack on the
@@ -444,16 +632,15 @@ class Qwen3VLModel(Qwen3Model):
         Returns:
             inputs_embeds: (batch, seq_len, dim) with vision tokens scattered in
             pp_deepstack_embeds: (batch, num_ds_layers, seq_len, dim) or None
+            mrope_freqs_cis: (batch, seq_len, 1, head_dim*2) or None
         """
-        inputs_embeds, visual_pos_masks, deepstack_visual_embeds = (
-            self._process_vision(
-                tokens,
-                pixel_values,
-                pixel_values_videos,
-                grid_thw,
-                grid_thw_videos,
-                special_tokens,
-            )
+        inputs_embeds, visual_pos_masks, deepstack_visual_embeds = self._process_vision(
+            tokens,
+            pixel_values,
+            pixel_values_videos,
+            grid_thw,
+            grid_thw_videos,
+            special_tokens,
         )
 
         # Convert sparse DeepStack to dense format for PP microbatch splitting
@@ -467,7 +654,15 @@ class Qwen3VLModel(Qwen3Model):
                 dense_ds[:, ds_idx][visual_pos_masks] = ds_embed.to(dense_ds.dtype)
             pp_deepstack_embeds = dense_ds
 
-        return inputs_embeds, pp_deepstack_embeds
+        # Compute MRoPE freqs for PP (tokens are integer IDs here, so we can scan)
+        mrope_freqs_cis = None
+        if grid_thw is not None or grid_thw_videos is not None:
+            position_ids_3d = self._get_mrope_position_ids(
+                tokens, grid_thw, grid_thw_videos, special_tokens
+            )
+            mrope_freqs_cis = self._compute_mrope_freqs(position_ids_3d, self.freqs_cis)
+
+        return inputs_embeds, pp_deepstack_embeds, mrope_freqs_cis
 
     def forward(
         self,
@@ -479,6 +674,7 @@ class Qwen3VLModel(Qwen3Model):
         special_tokens: SpecialTokens | None = None,
         positions: torch.Tensor | None = None,
         pp_deepstack_embeds: torch.Tensor | None = None,
+        mrope_freqs_cis: torch.Tensor | None = None,
     ):
         """
         Forward pass of Qwen3-VL.
@@ -494,6 +690,8 @@ class Qwen3VLModel(Qwen3Model):
             positions: Position IDs for RoPE (optional)
             pp_deepstack_embeds: Dense DeepStack embeddings (batch, num_ds, seq_len, dim)
                 from prepare_vision_inputs() in PP mode, or None.
+            mrope_freqs_cis: Pre-computed MRoPE cos/sin (batch, seq_len, 1, head_dim*2)
+                from prepare_vision_inputs() in PP mode, or None.
 
         Returns:
             logits: Output logits (batch_size, seq_len, vocab_size)
@@ -507,21 +705,36 @@ class Qwen3VLModel(Qwen3Model):
             inputs_embeds = tokens
         else:
             # Non-PP mode: full vision processing
-            inputs_embeds, visual_pos_masks, deepstack_visual_embeds = (
-                self._process_vision(
-                    tokens,
-                    pixel_values,
-                    pixel_values_videos,
-                    grid_thw,
-                    grid_thw_videos,
-                    special_tokens,
-                )
+            (
+                inputs_embeds,
+                visual_pos_masks,
+                deepstack_visual_embeds,
+            ) = self._process_vision(
+                tokens,
+                pixel_values,
+                pixel_values_videos,
+                grid_thw,
+                grid_thw_videos,
+                special_tokens,
             )
+
+        # Compute MRoPE freqs for non-PP mode (PP mode receives pre-computed)
+        if mrope_freqs_cis is None and not tokens.dtype.is_floating_point:
+            if grid_thw is not None or grid_thw_videos is not None:
+                position_ids_3d = self._get_mrope_position_ids(
+                    tokens, grid_thw, grid_thw_videos, special_tokens
+                )
+                mrope_freqs_cis = self._compute_mrope_freqs(
+                    position_ids_3d, self.freqs_cis
+                )
+
+        # Use MRoPE freqs if available, otherwise standard 1D RoPE
+        freqs_cis = mrope_freqs_cis if mrope_freqs_cis is not None else self.freqs_cis
 
         # Apply transformer layers with DeepStack
         hidden_states = inputs_embeds
         for layer_idx, layer in self.layers.items():
-            hidden_states = layer(hidden_states, self.freqs_cis, None, positions)
+            hidden_states = layer(hidden_states, freqs_cis, None, None)
 
             # Apply DeepStack: add visual features to early layer hidden states
             layer_idx_int = int(layer_idx)
@@ -535,8 +748,7 @@ class Qwen3VLModel(Qwen3Model):
                             :, ds_idx
                         ].to(hidden_states.dtype)
                 elif (
-                    deepstack_visual_embeds is not None
-                    and visual_pos_masks is not None
+                    deepstack_visual_embeds is not None and visual_pos_masks is not None
                 ):
                     # Sparse non-PP mode
                     if ds_idx < len(deepstack_visual_embeds):
@@ -550,6 +762,8 @@ class Qwen3VLModel(Qwen3Model):
         hidden_states = (
             self.norm(hidden_states) if self.norm is not None else hidden_states
         )
-        output = self.output(hidden_states) if self.output is not None else hidden_states
+        output = (
+            self.output(hidden_states) if self.output is not None else hidden_states
+        )
 
         return output

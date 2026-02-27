@@ -43,7 +43,9 @@ class MultiModalCollatorNLD:
 
     def __post_init__(self):
         # Calculate raw patches limit (before spatial merging)
-        self.max_raw_patches_per_image = self.max_patches_per_image * (self.spatial_merge_size ** 2)
+        self.max_raw_patches_per_image = self.max_patches_per_image * (
+            self.spatial_merge_size**2
+        )
 
     def collate_images(
         self, all_images: list[torch.Tensor]
@@ -61,7 +63,9 @@ class MultiModalCollatorNLD:
             return None, None
 
         results = [
-            image_to_patches(img, self.patch_size, self.temporal_patch_size, self.spatial_merge_size)
+            image_to_patches(
+                img, self.patch_size, self.temporal_patch_size, self.spatial_merge_size
+            )
             for img in all_images
         ]
         all_patches = [r[0] for r in results]
@@ -69,7 +73,7 @@ class MultiModalCollatorNLD:
 
         # Pad to same length for batched processing
         # Ensure max_num_patch is divisible by spatial_merge_size^2 for merger
-        merge_unit = self.spatial_merge_size ** 2
+        merge_unit = self.spatial_merge_size**2
         max_num_patch = max(p.shape[0] for p in all_patches)
         if max_num_patch % merge_unit != 0:
             max_num_patch = ((max_num_patch // merge_unit) + 1) * merge_unit
@@ -78,7 +82,7 @@ class MultiModalCollatorNLD:
 
         padded_patches = torch.zeros(len(all_patches), max_num_patch, patch_dim)
         for i, patches in enumerate(all_patches):
-            padded_patches[i, :patches.shape[0]] = patches
+            padded_patches[i, : patches.shape[0]] = patches
 
         grid_thw = torch.stack(grid_thw_list, dim=0)  # (num_images, 3)
 

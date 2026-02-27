@@ -115,7 +115,7 @@ def forward_hf(model_path, hf_inputs_list, gpus):
         }
         logits = model(**inputs).logits
         outputs_list.append(logits[:, -1:, :].cpu())
-        print(f"  HF sample {i+1}/{len(hf_inputs_list)} done")
+        print(f"  HF sample {i + 1}/{len(hf_inputs_list)} done")
 
     del model
     torch.cuda.empty_cache()
@@ -269,11 +269,11 @@ def forward_tt(model_flavor, checkpoint_path, tt_inputs_list, gpus):
 
     special_tokens = SpecialTokens(
         img_token="<|image_pad|>",
-        img_id=model_config.image_token_id,
+        img_id=model_config.image_token_id,  # pyrefly: ignore[missing-attribute]
         vision_start_token="<|vision_start|>",
-        vision_start_id=model_config.vision_start_token_id,
+        vision_start_id=model_config.vision_start_token_id,  # pyrefly: ignore[missing-attribute]
         vision_end_token="<|vision_end|>",
-        vision_end_id=model_config.vision_end_token_id,
+        vision_end_id=model_config.vision_end_token_id,  # pyrefly: ignore[missing-attribute]
         pad_token="<|endoftext|>",
         pad_id=model_config.eos_id if hasattr(model_config, "eos_id") else 151643,
     )
@@ -289,7 +289,7 @@ def forward_tt(model_flavor, checkpoint_path, tt_inputs_list, gpus):
             special_tokens=special_tokens,
         )
         outputs_list.append(logits[:, -1:, :].cpu())
-        print(f"  TT sample {i+1}/{len(tt_inputs_list)} done")
+        print(f"  TT sample {i + 1}/{len(tt_inputs_list)} done")
 
     del model
     torch.cuda.empty_cache()
@@ -335,7 +335,7 @@ def print_token_structure(
         )
         snippet_ids = tokens[start:end]
 
-        print(f"\n  Token structure (positions {start}-{end-1}):")
+        print(f"\n  Token structure (positions {start}-{end - 1}):")
         for idx, tid in enumerate(snippet_ids):
             pos = start + idx
             if tid == image_token_id:
@@ -387,7 +387,7 @@ def build_multimodal_inputs(hf_model_path, num_samples=3, image_size=224, verbos
                 ],
             }
         ]
-        hf_inputs = processor.apply_chat_template(
+        hf_inputs = processor.apply_chat_template(  # pyrefly: ignore[missing-attribute]
             messages,
             tokenize=True,
             add_generation_prompt=True,
@@ -439,9 +439,9 @@ def compare_outputs(hf_outputs, tt_outputs):
     print("Comparing HuggingFace vs TorchTitan outputs...")
     print(f"{'=' * 60}")
 
-    total_loss = 0
-    total_top1 = 0
-    total_topk = 0
+    total_loss: float = 0
+    total_top1: float = 0
+    total_topk: float = 0
 
     for i, (hf_out, tt_out) in enumerate(zip(hf_outputs, tt_outputs)):
         sample_loss = loss_fn(hf_out.float(), tt_out.float())
@@ -454,7 +454,7 @@ def compare_outputs(hf_outputs, tt_outputs):
             hf_out.float().flatten(), tt_out.float().flatten(), dim=0
         ).item()
         print(
-            f"  Sample {i+1}: KL={sample_loss.item():.10e}, "
+            f"  Sample {i + 1}: KL={sample_loss.item():.10e}, "
             f"cos_sim={cos_sim:.10f}, top1_match={top1:.2f}, top5_overlap={topk:.2f}"
         )
 
