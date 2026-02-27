@@ -4,10 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# autopipe.py
 import functools
 from collections import deque
-from typing import Dict, List, Tuple
 
 COMM_OVERHEAD = 0
 MAX_INT64 = 2**63 - 1
@@ -16,11 +14,11 @@ INF = 10**18
 
 
 def _prefix_sum_and_dp(
-    model: List[int],
+    model: list[int],
     num_stages: int,
-    block_time: List[List[int]],
-    prefix_sum: List[int],
-    dp: List[List[int]],
+    block_time: list[list[int]],
+    prefix_sum: list[int],
+    dp: list[list[int]],
 ):
     """C++ calculate_prefix_sum_and_dp"""
     num_blocks = len(model)
@@ -52,12 +50,12 @@ def _prefix_sum_and_dp(
 
 
 def _reconstruct(
-    model: List[int],
-    prefix_sum: List[int],
-    dp: List[List[int]],
+    model: list[int],
+    prefix_sum: list[int],
+    dp: list[list[int]],
     rem_blocks: int,
     rem_parts: int,
-    out: List[List[int]],
+    out: list[list[int]],
 ):
     """C++ reconstruct_partitions"""
     if rem_blocks == 0 and rem_parts == 0:
@@ -79,14 +77,14 @@ def _reconstruct(
 
 
 def _block_partition_algo(
-    model: List[int], num_stages: int, block_time: List[List[int]]
-) -> List[List[int]]:
+    model: list[int], num_stages: int, block_time: list[list[int]]
+) -> list[list[int]]:
     """C++ block_partition_algorithm"""
-    prefix_sum: List[int] = []
-    dp: List[List[int]] = []
+    prefix_sum: list[int] = []
+    dp: list[list[int]] = []
     _prefix_sum_and_dp(model, num_stages, block_time, prefix_sum, dp)
 
-    parts: List[List[int]] = []
+    parts: list[list[int]] = []
     _reconstruct(model, prefix_sum, dp, len(model), num_stages, parts)
     parts.reverse()
     return parts
@@ -94,11 +92,11 @@ def _block_partition_algo(
 
 # ---------- Time Cal ----------
 def _calc_stage_times(
-    partition: List[List[int]],
-    block_time: List[List[int]],
-    fwd: List[int],
-    bwd: List[int],
-    last_mb: List[int],
+    partition: list[list[int]],
+    block_time: list[list[int]],
+    fwd: list[int],
+    bwd: list[int],
+    last_mb: list[int],
 ):
     """C++ calculate_stage_times"""
     num_stages = len(partition)
@@ -114,8 +112,8 @@ def _calc_stage_times(
 
 
 def _steady_phase(
-    last_mb: List[int], fwd: List[int], bwd: List[int]
-) -> Tuple[int, int]:
+    last_mb: list[int], fwd: list[int], bwd: list[int]
+) -> tuple[int, int]:
     """C++ calculate_steady_phase"""
     num_stages = len(last_mb)
     num_micro = num_stages * 2
@@ -183,7 +181,7 @@ def _steady_phase(
 
 
 def _cooldown(
-    num_stages: int, critical: int, last_fwd_start: int, fwd: List[int], bwd: List[int]
+    num_stages: int, critical: int, last_fwd_start: int, fwd: list[int], bwd: list[int]
 ) -> int:
     """C++ calculate_cooldown_phase"""
     sz = num_stages - critical
@@ -209,8 +207,8 @@ def _cooldown(
 
 
 def _training_time(
-    partition: List[List[int]], block_time: List[List[int]]
-) -> Tuple[int, int]:
+    partition: list[list[int]], block_time: list[list[int]]
+) -> tuple[int, int]:
     """C++ calculate_training_time"""
     num_stages = len(partition)
     last_mb = [0] * num_stages
@@ -237,19 +235,19 @@ def _training_time(
 
 # ---------- 最优分区搜索 ----------
 def _find_best(
-    block_time: List[List[int]],
+    block_time: list[list[int]],
     num_stages: int,
-    init_partition: List[List[int]],
-    prefix_sum: List[int],
-    dp: List[List[int]],
-) -> Dict:
+    init_partition: list[list[int]],
+    prefix_sum: list[int],
+    dp: list[list[int]],
+) -> dict:
     """
     C++ find_best_partition
     return: {"partition": [[...], ...], "cost": int, "critical_stage": int}
     """
 
     # Hash func: C++ VectorHash
-    @functools.lru_cache(maxsize=None)
+    @functools.cache
     def _hash(p):
         h = 0
         for inner in p:
@@ -296,7 +294,7 @@ def _find_best(
 
             # Redo the critical stage partitioning for these blocks with the same DP.
             model_before = blocks_before
-            new_parts: List[List[int]] = []
+            new_parts: list[list[int]] = []
             _reconstruct(
                 model_before, prefix_sum, dp, len(model_before), critical, new_parts
             )
@@ -323,8 +321,8 @@ def _find_best(
 
 # ---------- main ----------
 def auto_partition(
-    forward_times: List[int], backward_times: List[int], num_stages: int
-) -> List[int]:
+    forward_times: list[int], backward_times: list[int], num_stages: int
+) -> list[int]:
 
     if not forward_times or not backward_times:
         raise ValueError("Input vectors cannot be empty")
@@ -337,8 +335,8 @@ def auto_partition(
     model = list(range(len(forward_times)))
 
     init_partition = _block_partition_algo(model, num_stages, block_time)
-    prefix_sum: List[int] = []
-    dp: List[List[int]] = []
+    prefix_sum: list[int] = []
+    dp: list[list[int]] = []
     _prefix_sum_and_dp(model, num_stages, block_time, prefix_sum, dp)
 
     best = _find_best(block_time, num_stages, init_partition, prefix_sum, dp)

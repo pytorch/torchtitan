@@ -6,7 +6,7 @@
 import copy
 import math
 import os
-from typing import Callable
+from collections.abs import Callable
 
 import torch
 import torch.nn as nn
