@@ -21,9 +21,6 @@ import os
 # See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-# Import unified module - this automatically registers TorchTitan models with vLLM
-from torchtitan.experiments.rl import unified  # noqa: F401
-
 from torchtitan.experiments.rl.unified.config_registry import rl_grpo_qwen3_0_6b
 
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -37,7 +34,16 @@ def generate():
 
     config = rl_grpo_qwen3_0_6b()
     gen_config = config.generator
-    model_path = config.trainer.checkpoint.initial_load_path
+    model_path = config.trainer.hf_assets_path
+
+    # Register TorchTitan model with vLLM before engine creation
+    from torchtitan.experiments.rl.unified.plugin import (
+        register_model_to_vllm_model_registry,
+        VLLM_MODEL_NAME,
+    )
+
+    register_model_to_vllm_model_registry(config.model_spec)
+    logger.info("Registered TorchTitan model with vLLM")
 
     logger.debug("Initializing vLLM LLMEngine with TorchTitan model")
     logger.debug(f"Model: {model_path}")
@@ -62,7 +68,7 @@ def generate():
         # Seed
         seed=gen_config.seed,
         # HuggingFace overrides
-        hf_overrides={"architectures": ["Qwen3TorchTitanForCausalLM"]},
+        hf_overrides={"architectures": [VLLM_MODEL_NAME]},
     )
 
     logger.debug("Initializing LLMEngine from EngineArgs...")

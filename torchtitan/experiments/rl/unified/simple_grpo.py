@@ -18,12 +18,12 @@ python3 torchtitan/experiments/rl/unified/simple_grpo.py
 """
 
 import asyncio
+import dataclasses
 import logging
 from dataclasses import dataclass, field
 
 import torch
 
-import torchtitan.experiments.rl.unified  # noqa: F401 — registers models with vLLM
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
 from torchtitan.config import Configurable
@@ -87,12 +87,23 @@ async def main():
 
     # TODO: Make simple_grpo.py take --config as input
     config = rl_grpo_qwen3_0_6b()
-    trainer_cfg = config.trainer
+
+    # Override parallelize_fn with the RL-specific version that only applies
+    # TP with full-DTensor plan for now.
+    # TODO: change to core torchtitan's Qwen3 parallelize function
+    from torchtitan.experiments.rl.unified.models.parallelize import (
+        parallelize_qwen3 as parallelize_qwen3_for_vllm,
+    )
+
+    config.model_spec = dataclasses.replace(
+        config.model_spec,
+        parallelize_fn=parallelize_qwen3_for_vllm,
+    )
 
     # Compute world size for trainer and generator
     # TODO: refine the world size computation and check
-    trainer_ddp_size = trainer_cfg.parallelism.data_parallel_replicate_degree
-    trainer_tp_size = trainer_cfg.parallelism.tensor_parallel_degree
+    trainer_ddp_size = config.trainer.parallelism.data_parallel_replicate_degree
+    trainer_tp_size = config.trainer.parallelism.tensor_parallel_degree
 
     # RL Training config
     num_steps = config.num_steps
@@ -147,7 +158,7 @@ async def main():
         Generator,
         config.generator,
         model_spec=config.model_spec,
-        model_path=trainer_cfg.checkpoint.initial_load_path,
+        model_path=config.trainer.hf_assets_path,
         dump_folder=config.dump_folder,
         batch_invariant_mode=config.batch_invariant_mode,
         policy_optimization=config.policy_optimization,
