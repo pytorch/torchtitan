@@ -46,7 +46,7 @@ from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.tools.logging import logger
-from torchtitan.tools.profiling import Profiler
+from torchtitan.tools.profiler import Profiler
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -479,8 +479,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 pp_has_last_stage=pp_has_last_stage,
             )
 
-        self.profiler = config.profiler.build()
-
         logger.info(
             "Trainer is initialized with "
             f"local batch size {config.training.local_batch_size}, "
@@ -787,7 +785,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.checkpointer.load(step=config.checkpoint.load_step)
         logger.info(f"Training starts at step {self.step + 1}")
 
-        with self.profiler.active(
+        with config.profiler.build(
             global_step=self.step,
             base_folder=config.dump_folder,
         ) as prof_session:

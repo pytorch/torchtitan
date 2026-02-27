@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import torch
 from torch.autograd import DeviceType
+
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module
@@ -96,7 +97,8 @@ class CommsComputeOverlapAnalyzer(ProfileAnalyzer):
         comm_intervals: list[tuple[float, float]] = []
         compute_intervals: list[tuple[float, float]] = []
 
-        for evt in prof.events():
+        events = prof.events() or []
+        for evt in events:
             if evt.device_type != DeviceType.CUDA:
                 continue
             name_lower = evt.name.lower()
@@ -189,22 +191,23 @@ class MemoryProfiler:
 class Profiler(Configurable):
     """Owns profiling and memory snapshot lifecycle for a training run.
 
-    Instantiate via ``Profiler.Config.build()`` and use as a context manager in
-    the training loop via :meth:`active`.
-
     If ``config.enable_overlap_analysis`` is ``True``, a
     :class:`CommsComputeOverlapAnalyzer` is automatically added to the internal
     analyzers list and run after each trace export.
 
     Example::
 
-        with self.profiler.active(global_step=step, base_folder=folder) as prof:
+        with Profiler(config, global_step=step, base_folder=folder) as prof:
             for step in training_loop:
                 ...
                 prof.step()
 
     Args:
         config: A ``Profiler.Config`` instance.
+        global_step: Starting training step (used to align the profiler schedule).
+        base_folder: Root directory for profiler trace and memory snapshot output.
+        leaf_folder: Optional subdirectory appended to trace/snapshot paths
+            (e.g. per-replica folder in fault-tolerant training).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -248,37 +251,24 @@ class Profiler(Configurable):
         (distributed run).
         """
 
-    def __init__(self, config: "Profiler.Config") -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        global_step: int = 0,
+        base_folder: str = "",
+        leaf_folder: str = "",
+    ) -> None:
         self._config = config
         self._analyzers: list[ProfileAnalyzer] = []
         if config.enable_overlap_analysis:
             self._analyzers.append(CommsComputeOverlapAnalyzer())
         # TODO: support list[ProfileAnalyzer.Config] in Profiler.Config for extensible analyzers
-        # runtime args stored by active(); defaults used if active() not called
-        self._global_step: int = 0
-        self._base_folder: str = ""
-        self._leaf_folder: str = ""
-        self.torch_profiler = None
-        self.memory_profiler = None
-
-    def active(
-        self,
-        *,
-        global_step: int = 0,
-        base_folder: str = "",
-        leaf_folder: str = "",
-    ) -> "Profiler":
-        """Store runtime args and return self for use as a context manager.
-
-        Example::
-
-            with self.profiler.active(global_step=step, base_folder=folder) as prof:
-                prof.step()
-        """
         self._global_step = global_step
         self._base_folder = base_folder
         self._leaf_folder = leaf_folder
-        return self
+        self.torch_profiler = None
+        self.memory_profiler = None
 
     def __enter__(self) -> "Profiler":
         self.torch_profiler = self.build_torch_profiler(
@@ -334,6 +324,8 @@ class Profiler(Configurable):
         )
 
         rank = torch.distributed.get_rank()
+        # TODO: For asymmetric workloads (e.g. MoE), consider aggregating
+        # overlap stats across ranks rather than reporting only rank 0.
         run_diagnostics = (
             bool(self._analyzers)
             and torch.distributed.is_initialized()

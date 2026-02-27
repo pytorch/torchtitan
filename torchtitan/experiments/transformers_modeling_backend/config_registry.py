@@ -18,7 +18,7 @@ from torchtitan.experiments.transformers_modeling_backend.configs import (
     TransformersBackendConfig,
 )
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.tools.profiling import Profiler
+from torchtitan.tools.profiler import Profiler
 
 from . import model_registry
 

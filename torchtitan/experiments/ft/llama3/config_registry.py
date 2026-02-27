@@ -13,7 +13,7 @@ from torchtitan.experiments.ft.config.job_config import FaultTolerance
 from torchtitan.experiments.ft.optimizer import FTOptimizersContainer
 from torchtitan.experiments.ft.trainer import FaultTolerantTrainer
 from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.tools.profiling import Profiler
+from torchtitan.tools.profiler import Profiler
 
 from . import model_registry
 

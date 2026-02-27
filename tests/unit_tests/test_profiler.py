@@ -10,9 +10,8 @@ from unittest.mock import MagicMock
 import torch
 from torch.autograd import DeviceType
 
-from torchtitan.tools.profiling import (
+from torchtitan.tools.profiler import (
     CommsComputeOverlapAnalyzer,
-    MemoryProfiler,
     ProfileAnalyzer,
     Profiler,
     _union_us,
@@ -198,47 +197,41 @@ class TestProfilerDisabledPaths(unittest.TestCase):
         )
         self.assertIsNone(result)
 
-    def test_active_returns_profiler_itself(self):
-        """active() returns the Profiler instance (self)."""
-        profiler = Profiler(Profiler.Config())
-        result = profiler.active(global_step=5, base_folder="/tmp", leaf_folder="rank0")
-        self.assertIs(result, profiler)
-
-    def test_active_stores_runtime_args(self):
-        """active() stores global_step, base_folder, leaf_folder on the instance."""
-        profiler = Profiler(Profiler.Config())
-        profiler.active(global_step=42, base_folder="/data", leaf_folder="sub")
+    def test_runtime_args_stored_on_init(self):
+        """Runtime kwargs passed to __init__ are stored on the instance."""
+        profiler = Profiler(
+            Profiler.Config(), global_step=42, base_folder="/data", leaf_folder="sub"
+        )
         self.assertEqual(profiler._global_step, 42)
         self.assertEqual(profiler._base_folder, "/data")
         self.assertEqual(profiler._leaf_folder, "sub")
 
-    def test_active_as_context_manager_step_is_noop(self):
-        """With everything disabled, active() as context manager and step() don't raise."""
+    def test_context_manager_step_is_noop(self):
+        """With everything disabled, context manager and step() don't raise."""
         profiler = Profiler(Profiler.Config())
-        with profiler.active(global_step=0, base_folder="/tmp") as prof:
+        with profiler as prof:
             self.assertIs(prof, profiler)
             self.assertIsNone(prof.torch_profiler)
             self.assertIsNone(prof.memory_profiler)
             prof.step()
             prof.step()
 
-    def test_active_default_args(self):
-        """active() works with all default keyword args."""
+    def test_default_args_context_manager(self):
+        """Profiler with default runtime args works as a context manager."""
         profiler = Profiler(Profiler.Config())
-        with profiler.active() as prof:
+        with profiler as prof:
             prof.step()
 
     def test_step_noop_when_both_profilers_none(self):
         """step() is a no-op when torch_profiler and memory_profiler are both None."""
         profiler = Profiler(Profiler.Config())
-        # should not raise even without entering the context manager
         profiler.step()
         profiler.step()
 
     def test_exit_resets_profiler_attrs(self):
         """After __exit__, torch_profiler and memory_profiler are reset to None."""
         profiler = Profiler(Profiler.Config())
-        with profiler.active():
+        with profiler:
             pass
         self.assertIsNone(profiler.torch_profiler)
         self.assertIsNone(profiler.memory_profiler)
@@ -251,16 +244,18 @@ class TestProfilerEnabledPathsGPU(unittest.TestCase):
     def test_build_torch_profiler_returns_active_handle(self):
         import tempfile
 
-        profiler = Profiler(
-            Profiler.Config(
-                enable_profiling=True,
-                profile_freq=4,
-                profiler_warmup=1,
-                profiler_active=1,
-            )
-        )
         with tempfile.TemporaryDirectory() as tmpdir:
-            with profiler.active(global_step=0, base_folder=tmpdir):
+            profiler = Profiler(
+                Profiler.Config(
+                    enable_profiling=True,
+                    profile_freq=4,
+                    profiler_warmup=1,
+                    profiler_active=1,
+                ),
+                global_step=0,
+                base_folder=tmpdir,
+            )
+            with profiler:
                 self.assertIsNotNone(profiler.torch_profiler)
 
 

@@ -354,8 +354,6 @@ class FaultTolerantTrainer(Trainer):
                 pp_has_last_stage=pp_has_last_stage,
             )
 
-        self.profiler = config.profiler.build()
-
         logger.info(
             "Trainer is initialized with "
             f"local batch size {config.training.local_batch_size}, "
@@ -524,7 +522,7 @@ class FaultTolerantTrainer(Trainer):
             else f"replica_{self.ft_manager.replica_id}"
         )
         with (
-            self.profiler.active(
+            config.profiler.build(
                 global_step=self.step,
                 base_folder=config.dump_folder,
                 leaf_folder=leaf_folder,
