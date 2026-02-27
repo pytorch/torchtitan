@@ -25,11 +25,11 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import ParallelDims
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.llama3.parallelize import (
     apply_compile,
     apply_ddp,

@@ -5,9 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.tensor_parallel import NoParallel
 
 __all__ = [
     "ParallelDims",
-    "NoParallel",
 ]

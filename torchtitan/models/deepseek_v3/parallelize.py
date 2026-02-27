@@ -24,11 +24,11 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama3.parallelize import apply_ddp
 from torchtitan.models.llama4.parallelize import (

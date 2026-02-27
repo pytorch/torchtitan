@@ -26,7 +26,7 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.dual_pipe_v import (
     DualPipeExpertParallel,
@@ -37,6 +37,7 @@ from torchtitan.distributed.expert_parallel import (
     ExpertParallel,
     ReordererSequenceParallel,
 )
+from torchtitan.distributed.tensor_parallel import NoParallel
 from torchtitan.models.gpt_oss.model import GptOssModel
 from torchtitan.models.llama3.parallelize import apply_ddp
 from torchtitan.models.llama4.parallelize import apply_fsdp

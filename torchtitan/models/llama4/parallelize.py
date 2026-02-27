@@ -31,7 +31,7 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
@@ -49,6 +49,7 @@ from torchtitan.distributed.expert_parallel import (
 from torchtitan.distributed.tensor_parallel import (
     ColwiseParallelWithGradPlacement,
     maybe_enable_async_tp,
+    NoParallel,
 )
 from torchtitan.models.common.moe import moe as moe_module
 from torchtitan.models.llama3.parallelize import (
