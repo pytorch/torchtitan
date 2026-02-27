@@ -11,6 +11,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
+# Following HF transformers convention (CHAT_TEMPLATE_FILE in transformers/utils/hub.py),
+# a standalone Jinja file at the model root takes priority over an inline template in
+# tokenizer_config.json. Models like GPT-OSS use this pattern.
+CHAT_TEMPLATE_FILE = "chat_template.jinja"
+
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
@@ -27,6 +32,7 @@ class BaseTokenizer(ABC, Configurable):
 
     def __init__(self):
         self.eos_id = None
+        self._chat_template = None
 
     @abstractmethod
     def encode(self, *args, **kwargs) -> list[int]:
@@ -40,14 +46,44 @@ class BaseTokenizer(ABC, Configurable):
     def get_vocab_size(self) -> int:
         ...
 
+    def set_chat_template(self, template: str) -> None:
+        """Compile and store a Jinja chat template."""
+        # usort:skip -- usort rewrites this to `import jinja2`, which doesn't load the sandbox submodule
+        import jinja2.sandbox
+
+        # Some models (e.g. Llama3.1-Instruct) use raise_exception() in their
+        # Jinja templates for input validation.
+        def raise_exception(msg):
+            raise jinja2.exceptions.TemplateError(msg)
+
+        env = jinja2.sandbox.SandboxedEnvironment()
+        env.globals[
+            "raise_exception"
+        ] = raise_exception  # pyrefly: ignore [unsupported-operation]
+        self._chat_template = env.from_string(template)
+
+    def apply_chat_template(self, messages: list[dict[str, str]], **kwargs) -> str:
+        """Render messages through the Jinja chat template. Returns formatted text.
+
+        Messages should be a list of dicts with "role" and "content" keys, e.g.
+        [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}].
+
+        Additional template variables (e.g. add_generation_prompt, tools) can be
+        passed as kwargs.
+        """
+        if self._chat_template is None:
+            raise ValueError("No chat template set. Call set_chat_template() first.")
+        return self._chat_template.render(messages=messages, **kwargs)
+
 
 class HuggingFaceTokenizer(BaseTokenizer):
     """
     A tokenizer wrapper that handles BOS/EOS token inference and encoding.
 
     This class loads tokenizer files and automatically infers BOS/EOS tokens from
-    a configuration file (tokenizer_config.json). It provides an encode method that adds
-    BOS/EOS tokens based on whether the underlying tokenizer adds them automatically.
+    a configuration file (tokenizer_config.json) as well as specific formatting related to
+    chat templates. It provides an encode method that adds BOS/EOS tokens based on whether the
+    underlying tokenizer adds them automatically.
 
     Args:
         config (Config): Configurable config (currently empty).
@@ -80,10 +116,22 @@ class HuggingFaceTokenizer(BaseTokenizer):
         self._hf_config = self._load_config(
             os.path.join(tokenizer_path, "tokenizer_config.json")
         )
+        if self._hf_config is None:
+            raise ValueError(f"Could not find tokenizer config at {tokenizer_path}")
 
         # Infer special tokens and adding BOS/EOS behavior
         self._infer_special_tokens()
         self._infer_should_add_bos_eos()
+
+        # Auto-load chat template: standalone .jinja file takes priority
+        # (e.g. GPT-OSS), then fall back to inline in tokenizer_config.json
+        # (e.g. Llama3, Qwen3, DeepSeek V3).
+        jinja_path = os.path.join(tokenizer_path, CHAT_TEMPLATE_FILE)
+        if os.path.exists(jinja_path):
+            with open(jinja_path) as f:
+                self.set_chat_template(f.read())
+        elif "chat_template" in self._hf_config:
+            self.set_chat_template(self._hf_config["chat_template"])
 
     def _load_config(self, config_path: str) -> dict | None:
         """Load configuration from JSON file if it exists."""
