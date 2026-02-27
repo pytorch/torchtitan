@@ -15,11 +15,10 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan.experiments.rl.unified.actors.generator import (
+    SamplingConfig,
     VLLMGenerator,
-    VLLMSamplingConfig,
 )
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.unified.configs import GRPOConfig
 from torchtitan.experiments.rl.unified.simple_grpo import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
@@ -47,11 +46,6 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             ),
             hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         ),
-        grpo_config=GRPOConfig(
-            beta=0.1,
-            group_size=8,
-            use_stable_grpo=False,
-        ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             gpu_memory_limit=0.5,
@@ -59,7 +53,8 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
-            sampling=VLLMSamplingConfig(
+            num_samples_per_prompt=8,
+            sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
                 max_tokens=100,
@@ -90,18 +85,14 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 data_parallel_replicate_degree=1,
             ),
         ),
-        grpo_config=GRPOConfig(
-            beta=0.1,
-            group_size=4,
-            use_stable_grpo=False,
-        ),
         generator=VLLMGenerator.Config(
             gpu_memory_limit=0.3,
             enforce_eager=True,
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
             ),
-            sampling=VLLMSamplingConfig(
+            num_samples_per_prompt=4,
+            sampling=SamplingConfig(
                 temperature=1.0,
                 max_tokens=50,
             ),

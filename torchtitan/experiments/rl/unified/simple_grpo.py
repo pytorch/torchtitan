@@ -34,7 +34,6 @@ from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.unified.actors.grader import Grader
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.unified.configs import GRPOConfig
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -63,9 +62,6 @@ class RLTrainer(Configurable):
         batch_invariant_mode: bool = True
         """Enable batch-invariant mode for deterministic NCCL collective
         operations and bitwise-reproducible forward/backward passes."""
-
-        grpo_config: GRPOConfig = field(default_factory=GRPOConfig)
-        """GRPO algorithm hyperparameters."""
 
         trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
         """PolicyTrainer config. Controls optimizer, training, parallelism"""
@@ -139,7 +135,7 @@ class RLTrainer(Configurable):
             PolicyTrainer,
             config.trainer,
             model_spec=config.model_spec,
-            grpo_config=config.grpo_config,
+            num_samples_per_prompt=config.generator.num_samples_per_prompt,
             batch_invariant_mode=config.batch_invariant_mode,
             hf_assets_path=config.hf_assets_path,
         )
@@ -148,7 +144,6 @@ class RLTrainer(Configurable):
         self.grader = trainer_mesh.spawn(
             "grader",
             Grader,
-            config.grpo_config,
         )
 
         # Wait for trainer to be fully initialized on all ranks then collect weights
@@ -165,9 +160,7 @@ class RLTrainer(Configurable):
             model_spec=config.model_spec,
             model_path=config.hf_assets_path,
             batch_invariant_mode=config.batch_invariant_mode,
-            grpo_config=config.grpo_config,
             prompt_texts=self.prompt_texts,
-            expected_answers=self.expected_answers,
         )
 
         # Initialize generator with trainer weights.
@@ -186,13 +179,16 @@ class RLTrainer(Configurable):
 
         for step in range(num_steps):
             # Fully sync RL loop with separate scoring step
-            # 1. VLLMGenerator produces episode (without rewards)
+            # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
             # TODO: Create a queue to use all episode from all GPUs
-            episode = self.generator.generate.call().get().item(gpus=0)
-            # 2. Grader computes rewards
-            scored_episode = self.grader.score.call(episode).get().item(gpus=0)
+            episodes = self.generator.generate.call().get().item(gpus=0)
+            # Attach expected answers to each episode
+            for episode, answer in zip(episodes, self.expected_answers):
+                episode.expected_answer = answer
+            # 2. Grader computes rewards per episode
+            scored_episodes = self.grader.score.call(episodes).get().item(gpus=0)
             # 3. Trainer computes advantages and updates policy
-            metrics = self.trainer_actor.step.call(scored_episode).get().item(gpus=0)
+            metrics = self.trainer_actor.step.call(scored_episodes).get().item(gpus=0)
             # 4. Sync weights back to generator (all TP ranks)
             weight_mesh = self.trainer_actor.get_weights.call().get()
             weights = {

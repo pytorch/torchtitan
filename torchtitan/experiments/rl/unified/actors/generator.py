@@ -15,13 +15,12 @@ from torch.distributed.tensor import DTensor
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
 
-from torchtitan.experiments.rl.unified.actors.grader import Episode
-from torchtitan.experiments.rl.unified.configs import GRPOConfig
-
 from torchtitan.experiments.rl.unified.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )
+
+from torchtitan.experiments.rl.unified.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
 
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, slots=True)
-class VLLMSamplingConfig:
+class SamplingConfig:
     """Sampling parameters passed to vLLM's SamplingParams."""
 
     temperature: float = 0.8
@@ -59,9 +58,8 @@ class VLLMGenerator(Actor, Configurable):
         config: Generator-specific configuration.
         model_path: Path to the HF model checkpoint.
         batch_invariant_mode: Enable batch-invariant mode for deterministic ops.
-        grpo_config: GRPO hyperparameters.
         prompt_texts: List of prompt strings.
-        expected_answers: List of expected answer strings.
+        TODO: refine `prompt_texts` according to input type (eg, a list of token sequences, or conversion)
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -71,7 +69,7 @@ class VLLMGenerator(Actor, Configurable):
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         """Parallelism configuration for the vLLM engine."""
 
-        sampling: VLLMSamplingConfig = field(default_factory=VLLMSamplingConfig)
+        sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
 
         attention_backend: str = "FLASH_ATTN"
@@ -86,6 +84,9 @@ class VLLMGenerator(Actor, Configurable):
         enforce_eager: bool = True
         """Disable CUDA graphs in vLLM (use eager execution)."""
 
+        num_samples_per_prompt: int = 8
+        """Number of completions to generate per prompt."""
+
         seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
 
@@ -96,9 +97,7 @@ class VLLMGenerator(Actor, Configurable):
         model_spec: ModelSpec,
         model_path: str,
         batch_invariant_mode: bool,
-        grpo_config: GRPOConfig,
         prompt_texts: list[str],
-        expected_answers: list[str],
     ):
         self.config = config
         self.model_spec = model_spec
@@ -114,13 +113,12 @@ class VLLMGenerator(Actor, Configurable):
         os.environ["VLLM_ATTENTION_BACKEND"] = config.attention_backend
 
         self.prompt_texts = prompt_texts
-        self.expected_answers = expected_answers
 
         # Extract needed fields from configs
         self.model_path = model_path
         self.max_new_tokens = config.sampling.max_tokens
         self.temperature = config.sampling.temperature
-        self.group_size = grpo_config.group_size
+        self.num_samples_per_prompt = config.num_samples_per_prompt
 
         # Build vLLM engine
         engine_kwargs = dict(
@@ -155,8 +153,8 @@ class VLLMGenerator(Actor, Configurable):
         return self._engine.model_executor.driver_worker.get_model()
 
     @endpoint
-    async def generate(self) -> Episode:
-        """Generate episodes and return Episode with zero rewards.
+    async def generate(self) -> list[Episode]:
+        """Generate episodes and return list of Episode (one per prompt) with zero rewards.
         Called by the orchestrator (simple_grpo.py). The Grader fills in rewards.
         """
         logger.debug(
@@ -168,7 +166,7 @@ class VLLMGenerator(Actor, Configurable):
             sampling_params = SamplingParams(
                 temperature=self.temperature,
                 max_tokens=self.max_new_tokens,
-                n=self.group_size,
+                n=self.num_samples_per_prompt,
                 seed=self.config.seed,
                 logprobs=1,
                 prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
@@ -184,40 +182,38 @@ class VLLMGenerator(Actor, Configurable):
                 request_outputs = self._engine.step()
                 all_outputs.extend(request_outputs)
 
-            # Extract completions and log probs
-            completions = []
-            token_ids_list = []
-            token_log_probs_list = []
-            prompt_token_ids_list = []
-
+            # Build one Episode per prompt
+            episodes = []
             for output in all_outputs:
                 prompt_token_ids = output.prompt_token_ids
 
+                completions = []
                 for sample in output.outputs:
-                    completions.append(sample.text)
-                    prompt_token_ids_list.append(prompt_token_ids)
-                    token_ids_list.append(sample.token_ids)
                     per_token_log_probs = [
                         list(logprob_dict.values())[0].logprob
                         for logprob_dict in sample.logprobs
                     ]
-                    token_log_probs_list.append(per_token_log_probs)
+                    completions.append(
+                        Episode.Completion(
+                            text=sample.text,
+                            token_ids=sample.token_ids,
+                            token_log_probs=per_token_log_probs,
+                        )
+                    )
 
-        # Create episode with zero rewards (Grader will fill them in)
-        episode = Episode(
-            policy_version=self.policy_version,
-            completions=completions,
-            vllm_token_ids=token_ids_list,
-            vllm_token_log_probs=token_log_probs_list,
-            prompt_token_ids=prompt_token_ids_list,
-            expected_answers=self.expected_answers,
-            rewards=torch.zeros(len(completions)),
-        )
+                episodes.append(
+                    Episode(
+                        policy_version=self.policy_version,
+                        prompt_token_ids=prompt_token_ids,
+                        completions=completions,
+                        rewards=torch.zeros(len(completions)),
+                    )
+                )
 
         logger.info(
             f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
         )
-        return episode
+        return episodes
 
     @endpoint
     async def update(self, version: int, state_dict: dict) -> None:

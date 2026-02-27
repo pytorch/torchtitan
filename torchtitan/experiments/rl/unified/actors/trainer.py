@@ -13,21 +13,24 @@ import torch
 import torch.distributed.checkpoint as dcp
 from monarch.actor import Actor, endpoint
 from torch.distributed._tensor import DTensor
+from torch.distributed.checkpoint.state_dict import (
+    set_model_state_dict,
+    StateDictOptions,
+)
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.rl.unified.actors.grader import Episode
 from torchtitan.experiments.rl.unified.actors.utils import (
     compute_policy_gradient_loss,
     compute_token_log_probs,
     verify_logprob_identity,
 )
-from torchtitan.experiments.rl.unified.configs import GRPOConfig
 from torchtitan.experiments.rl.unified.models.attention import (
     replace_with_vllm_compatible_flash_attention,
 )
+from torchtitan.experiments.rl.unified.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
@@ -42,7 +45,7 @@ class PolicyTrainer(Actor, Configurable):
 
     Args:
         config: PolicyTrainer.Config for model/optimizer/parallelism settings.
-        grpo_config: GRPO hyperparameters.
+        num_samples_per_prompt: Number of completions per prompt (from sampling config).
         model_spec: Model specification (model config, parallelize_fn, state_dict_adapter).
         hf_assets_path: Path to HF assets folder for checkpoint loading.
     """
@@ -69,7 +72,7 @@ class PolicyTrainer(Actor, Configurable):
         config: Config,
         *,
         model_spec: ModelSpec,
-        grpo_config: GRPOConfig,
+        num_samples_per_prompt: int,
         batch_invariant_mode: bool,
         hf_assets_path: str = "./tests/assets/tokenizer",
     ):
@@ -77,9 +80,7 @@ class PolicyTrainer(Actor, Configurable):
         self.model_spec = model_spec
 
         # GRPO settings
-        self.group_size = grpo_config.group_size
-        self.grpo_beta = grpo_config.beta
-        self.use_stable_grpo = grpo_config.use_stable_grpo
+        self.num_samples_per_prompt = num_samples_per_prompt
 
         # Device setup
         device_module, device_type = utils.device_module, utils.device_type
@@ -138,8 +139,7 @@ class PolicyTrainer(Actor, Configurable):
 
         logger.debug(
             f"PolicyTrainer initialized: "
-            f"group_size={self.group_size}, grpo_beta={self.grpo_beta}, "
-            f"use_stable_grpo={self.use_stable_grpo}"
+            f"num_samples_per_prompt={self.num_samples_per_prompt}"
         )
 
     def _load_initial_hf_weights(self, model, checkpoint_path: str) -> None:
@@ -159,11 +159,6 @@ class PolicyTrainer(Actor, Configurable):
         hf_state_dict = self.sd_adapter.to_hf(model.state_dict())
         dcp.load(hf_state_dict, storage_reader=storage_reader)
         torchtitan_state_dict = self.sd_adapter.from_hf(hf_state_dict)
-
-        from torch.distributed.checkpoint.state_dict import (
-            set_model_state_dict,
-            StateDictOptions,
-        )
 
         set_model_state_dict(
             model=model,
@@ -233,7 +228,6 @@ class PolicyTrainer(Actor, Configurable):
             Advantage tensor.
         """
         from torchtitan.experiments.rl.vllm_compat.simple_rl import (
-            compute_grpo_advantages,
             compute_grpo_advantages_stable,
         )
 
@@ -245,12 +239,9 @@ class PolicyTrainer(Actor, Configurable):
         else:
             rewards_normalized = rewards - reward_mean
 
-        if self.use_stable_grpo:
-            return compute_grpo_advantages_stable(rewards_normalized, self.group_size)
-        else:
-            return compute_grpo_advantages(
-                rewards_normalized, self.group_size, beta=self.grpo_beta
-            )
+        return compute_grpo_advantages_stable(
+            rewards_normalized, self.num_samples_per_prompt
+        )
 
     @endpoint
     async def get_weights(self) -> dict:
@@ -273,13 +264,13 @@ class PolicyTrainer(Actor, Configurable):
         }
 
     @endpoint
-    async def step(self, episode: Episode) -> dict:
+    async def step(self, episodes: list[Episode]) -> dict:
         """Perform one training step.
 
         Computes advantages from rewards, then updates the policy.
 
         Args:
-            episode: Episode data with rewards filled by Grader
+            episodes: List of Episode data (one per prompt) with rewards filled by Grader
 
         Returns:
             Training metrics
@@ -288,26 +279,37 @@ class PolicyTrainer(Actor, Configurable):
             f"{os.getpid()=} PolicyTrainer starts to train {self.policy_version} "
         )
 
-        # Compute advantages from rewards
-        advantages = self._compute_advantages(episode.rewards)
+        # Flatten episodes into parallel lists for existing utils
+        all_token_ids: list[list[int]] = []
+        all_prompt_token_ids: list[list[int]] = []
+        all_token_log_probs: list[list[float]] = []
+        for episode in episodes:
+            for completion in episode.completions:
+                all_token_ids.append(completion.token_ids)
+                all_prompt_token_ids.append(episode.prompt_token_ids)
+                all_token_log_probs.append(completion.token_log_probs)
+
+        # Compute advantages: cat all rewards, compute, then use flat tensor
+        all_rewards = torch.cat([episode.rewards for episode in episodes])
+        advantages = self._compute_advantages(all_rewards)
 
         # Compute reference log probs using frozen ref_model
         ref_token_log_probs = []
         device = next(self.model.parameters()).device
         with torch.no_grad():
-            for prompt_toks, gen_toks in zip(
-                episode.prompt_token_ids, episode.vllm_token_ids
-            ):
+            for prompt_toks, gen_toks in zip(all_prompt_token_ids, all_token_ids):
                 token_lps = compute_token_log_probs(
                     self.ref_model, prompt_toks, gen_toks, device
                 )
                 ref_token_log_probs.append(token_lps)
 
-        # Compute loss
+        # Compute loss.
+        # TODO: compute the forward_backward first and then pass this to the loss to
+        # keep the loss function only computing the loss itself
         loss, loss_metrics, batch_token_log_probs = compute_policy_gradient_loss(
             self.model,
-            episode.vllm_token_ids,
-            episode.prompt_token_ids,
+            all_token_ids,
+            all_prompt_token_ids,
             advantages,
             ref_token_log_probs,
             kl_coef=0.1,
@@ -315,7 +317,7 @@ class PolicyTrainer(Actor, Configurable):
 
         # Verify logprob identity and compute log ratio (train/generator)
         verification_result = verify_logprob_identity(
-            episode.vllm_token_log_probs,
+            all_token_log_probs,
             batch_token_log_probs,
         )
         logger.info(
@@ -346,11 +348,11 @@ class PolicyTrainer(Actor, Configurable):
         # Return metrics
         metrics = {
             "loss": loss.item(),
-            "reward_mean": episode.rewards.mean().item(),
-            "reward_std": episode.rewards.std().item(),
+            "reward_mean": all_rewards.mean().item(),
+            "reward_std": all_rewards.std().item(),
             "advantage_mean": advantages.mean().item(),
             "advantage_std": advantages.std().item(),
-            "sample_completion": episode.completions[0][:80],
+            "sample_completion": episodes[0].completions[0].text[:80],
             "policy_version": self.policy_version,
             "grad_norm": grad_norm.item() if hasattr(grad_norm, "item") else grad_norm,
             "logprob_bitwise_identical": verification_result["bitwise_identical"],
