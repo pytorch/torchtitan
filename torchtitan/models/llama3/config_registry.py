@@ -25,7 +25,7 @@ from torchtitan.hf_datasets.text_datasets import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model_converter import ModelConvertersContainer
-from torchtitan.tools.profiling import Profiler
+from torchtitan.tools.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 from . import model_registry
