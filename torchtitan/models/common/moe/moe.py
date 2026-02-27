@@ -137,9 +137,9 @@ class LinearFloat32(nn.Linear):
     to router.gate by other pieces of code.
     """
 
-    def forward(self, x):
+    def forward(self, input):
         return F.linear(
-            x.to(torch.float32),
+            input.to(torch.float32),
             self.weight.to(torch.float32),
             self.bias.to(torch.float32) if self.bias is not None else None,
         )
