@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import ClassVar, Protocol
 
 import torch.nn as nn
 
@@ -40,7 +40,7 @@ class QuantizationConverter(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        _quantization_type: ClassVar[str]
 
 
 class ModelConvertersContainer(Configurable, ModelConverter):
