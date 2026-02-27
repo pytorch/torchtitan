@@ -130,6 +130,8 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Use TorchTitan model config directly (no HF config mapping)
         self.config = model_spec.model
         logger.debug(f"Creating model with config: {self.config}")
+
+        # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()
 
         # RoPE config from model for cache extension
@@ -142,14 +144,9 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             vllm_config
         )
 
-        # Replace attention with vLLM paged attention
-        tp_size = self.parallel_dims.tp
-        if tp_size > 1:
-            assert (
-                self.config.layer.attention.n_heads % tp_size == 0
-            ), "Only support when n_heads can be divided by tp_size"
-
-        replace_with_vllm_attention(self.model, tp_degree=tp_size)
+        # Replace attention with vLLM compatible flash attention
+        # TODO: Use config system to replace with vllm Attention
+        replace_with_vllm_attention(self.model, tp_degree=self.parallel_dims.tp)
 
         # NOTE: We need to apply parallelize within model.__init__ because vllm
         # doesn't separate model creation and parallelism application and instead
@@ -158,6 +155,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             model=self.model,
             parallel_dims=self.parallel_dims,
             parallelism=parallelism,
+            has_position_id=True,  # vLLM always passes positions explicitly
         )
 
         # Initial load model weights from HuggingFace checkpoint path
@@ -255,20 +253,15 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Get embeddings
         h = self.model.tok_embeddings(tokens_2d)
 
-        # Get RoPE cache (handle model-specific attribute names)
-        # Use hasattr to avoid ambiguous boolean value error with tensors
-        if hasattr(self.model, "freqs_cis"):
-            rope_attr = self.model.freqs_cis
-        else:
-            rope_attr = None
-
         # Extend RoPE cache if needed (vLLM profiling may use 2x max_seq_len)
         if positions is not None:
             max_position = positions.max().item()
         else:
             max_position = 0
 
-        rope_cache = self._extend_rope_cache_if_needed(rope_attr, max_position)
+        rope_cache = self._extend_rope_cache_if_needed(
+            self.model.freqs_cis, max_position
+        )
         positions = positions.unsqueeze(0)
 
         # Pass through transformer layers
@@ -277,8 +270,6 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         h = self.model.norm(h)
         # When parallelism is applied, get full tensor before return to vLLM Engine
-        # The original placement is Shard(1) (shard on sequence dimension, as it will prepare for sequence parallel in `self.norm`).
-        # vLLM's engine expects plain, non-distributed tensors to slice the last token for each request.
         if isinstance(h, DTensor):
             h = h.full_tensor()
 
@@ -313,34 +304,21 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         return logits
 
-    def load_weights_from_state_dict(self, trainer_state_dict):
+    def load_weights_from_state_dict(self, state_dict):
         """
-        Load model weights directly from a state dict containing DTensor.
+        Load model weights from a state dict.
+
+        Expects DTensor-wrapped tensors matching the model's placements.
+        The caller is responsible for reconstructing DTensors from plain
+        local tensors before calling this method.
         """
-
-        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
-
-        # Convert to DTensor if target is DTensor (when the target model is sharded)
-        for name, tensor in trainer_state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                target_dtensor = model_state_dict[name]
-                device_mesh = target_dtensor.device_mesh
-                trainer_state_dict[name] = DTensor.from_local(
-                    tensor.to(device_mesh.device_type),
-                    device_mesh=device_mesh,
-                    placements=[Replicate()],
-                )
-
-        # Load state dict
         set_model_state_dict(
             model=self.model,
-            model_state_dict=trainer_state_dict,
+            model_state_dict=state_dict,
             options=StateDictOptions(strict=False),
         )
 
-        loaded_params = trainer_state_dict.keys()
-
-        return loaded_params
+        return state_dict.keys()
 
     def _initial_load_weights(self, checkpoint_path):
         """
@@ -365,13 +343,30 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Convert HF state dict to TorchTitan format
         torchtitan_state_dict = adapter.from_hf(hf_state_dict)
 
+        model_state_dict = {k: v for k, v in self.model.state_dict().items()}
+
+        # Convert to DTensor if target is DTensor (when the target model is sharded)
+        # This only happens when initial loading from HF full state dict
+        for name, tensor in torchtitan_state_dict.items():
+            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
+                if isinstance(tensor, DTensor):
+                    continue
+                target_dtensor = model_state_dict[name]
+                device_mesh = target_dtensor.device_mesh
+                torchtitan_state_dict[name] = DTensor.from_local(
+                    tensor.to(device_mesh.device_type),
+                    device_mesh=device_mesh,
+                    placements=[Replicate()],
+                )
+
         return self.load_weights_from_state_dict(torchtitan_state_dict)
 
     def load_weights(self, weights_iter):
         """
         vLLM required API.
-        Load weights from HF checkpoint using the provided state dict adapter.
-        vLLM engine would call this function to load model weights.
+
+        This is a no-op method since model weights are already loaded during initialization.
+        Returns the names of all parameters that have been loaded so vLLM's safety check passes.
 
         Args:
             weights_iter: Iterator of (name, tensor) pairs from HF checkpoint
@@ -380,9 +375,6 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             Set of loaded parameter names
         """
 
-        # Since our model weights are already loaded during initialization,
-        # we need to return the names of all parameters that have been loaded
-        # so vLLM's safety check passes.
         loaded_param_names = set()
         for name, _ in self.model.named_parameters():
             loaded_param_names.add("model." + name)
