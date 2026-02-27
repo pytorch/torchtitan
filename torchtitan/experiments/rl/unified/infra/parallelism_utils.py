@@ -14,12 +14,10 @@ tensor parallelism to TorchTitan models in vLLM using TorchTitan's ParallelDims.
 
 import torch.distributed as dist
 from torchtitan.config import CommConfig, ParallelismConfig, TrainingConfig
-from torchtitan.trainer import Trainer
-
-JobConfig = Trainer.Config
 from torchtitan.distributed import utils as dist_utils
 
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.trainer import Trainer
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
@@ -60,7 +58,7 @@ def create_parallel_dims_from_vllm_config(vllm_config: VllmConfig) -> ParallelDi
         world_size=world_size,
     )
 
-    logger.info(
+    logger.debug(
         f"Created ParallelDims from vLLM config: "
         f"DP={parallel_dims.dp_replicate}, TP={parallel_dims.tp}, "
         f"CP={parallel_dims.cp}, PP={parallel_dims.pp}"
@@ -98,29 +96,31 @@ def create_trainer_parallel_dims(ddp_size, tp_size) -> ParallelDims:
     )
 
 
-def create_job_config_from_vllm_config(
+def create_trainer_config_from_vllm_config(
     vllm_config: VllmConfig,
-    model_name: str = "qwen3",
     hf_assets_path: str = "/path/to/hf/assets",
-) -> JobConfig:
+) -> Trainer.Config:
     """
-    Create TorchTitan JobConfig from vLLM configuration.
+    Create a Trainer.Config from vLLM configuration.
+
+    Maps vLLM parallelism and training settings to a Trainer.Config so that
+    TorchTitan's parallelize functions can be called with the correct kwargs.
 
     Args:
         vllm_config: vLLM configuration object containing model, parallel, and cache configs
-        model_name: Model name to use (default: "qwen3")
-        hf_assets_path: Path to HuggingFace assets directory (default: "/path/to/hf/assets")
+        hf_assets_path: Path to HuggingFace assets directory
 
     Returns:
-        JobConfig object with settings mapped from vLLM config
-    """
-    # Create JobConfig with defaults
-    job_config = JobConfig()
+        Trainer.Config with settings mapped from vLLM config
 
-    job_config.hf_assets_path = hf_assets_path
+    TODO: Remove this function once explicitly register vllm model instead of import
+    """
+    config = Trainer.Config()
+
+    config.hf_assets_path = hf_assets_path
 
     parallel_config = vllm_config.parallel_config
-    job_config.parallelism = ParallelismConfig(
+    config.parallelism = ParallelismConfig(
         data_parallel_replicate_degree=parallel_config.data_parallel_size,
         data_parallel_shard_degree=1,  # vLLM doesn't use FSDP sharding in inference
         context_parallel_degree=parallel_config.decode_context_parallel_size,
@@ -130,9 +130,9 @@ def create_job_config_from_vllm_config(
         expert_tensor_parallel_degree=1,  # Not used in vLLM inference yet
     )
 
-    job_config.training = TrainingConfig(
+    config.training = TrainingConfig(
         local_batch_size=1,  # Inference typically processes one batch at a time
         steps=1,  # Single step for inference
     )
 
-    return job_config
+    return config
