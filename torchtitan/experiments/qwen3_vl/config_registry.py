@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
-
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
@@ -20,14 +18,12 @@ from torchtitan.trainer import Trainer
 from . import model_registry
 from .datasets.mm_datasets import MMDataLoader
 
-_HF_MODELS = os.path.expanduser("~/hf_models/Qwen")
-
 
 def qwen3_vl_debugmodel() -> Trainer.Config:
     spec = model_registry("debugmodel")
     encoder = spec.model.encoder
     return Trainer.Config(
-        hf_assets_path=f"{_HF_MODELS}/Qwen3-VL-2B-Instruct",
+        hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=spec,
         dataloader=MMDataLoader.Config(
@@ -63,7 +59,7 @@ def qwen3_vl_debugmodel_moe() -> Trainer.Config:
     spec = model_registry("debugmodel_moe")
     encoder = spec.model.encoder
     return Trainer.Config(
-        hf_assets_path=f"{_HF_MODELS}/Qwen3-VL-2B-Instruct",
+        hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=spec,
         dataloader=MMDataLoader.Config(
@@ -98,7 +94,7 @@ def qwen3_vl_2b() -> Trainer.Config:
     spec = model_registry("2B")
     encoder = spec.model.encoder
     return Trainer.Config(
-        hf_assets_path=f"{_HF_MODELS}/Qwen3-VL-2B-Instruct",
+        hf_assets_path="./assets/hf/Qwen3-VL-2B-Instruct",
         model_spec=spec,
         dataloader=MMDataLoader.Config(
             dataset="cc12m",
@@ -133,7 +129,7 @@ def qwen3_vl_8b() -> Trainer.Config:
     spec = model_registry("8B")
     encoder = spec.model.encoder
     return Trainer.Config(
-        hf_assets_path=f"{_HF_MODELS}/Qwen3-VL-8B-Instruct",
+        hf_assets_path="./assets/hf/Qwen3-VL-8B-Instruct",
         model_spec=spec,
         dataloader=MMDataLoader.Config(
             dataset="cc12m",
@@ -168,7 +164,7 @@ def qwen3_vl_30b_a3b() -> Trainer.Config:
     spec = model_registry("30B-A3B")
     encoder = spec.model.encoder
     return Trainer.Config(
-        hf_assets_path=f"{_HF_MODELS}/Qwen3-VL-30B-A3B-Instruct",
+        hf_assets_path="./assets/hf/Qwen3-VL-30B-A3B-Instruct",
         model_spec=spec,
         dataloader=MMDataLoader.Config(
             dataset="cc12m",
