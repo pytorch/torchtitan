@@ -28,8 +28,7 @@ class Configurable:
     ``field(init=False)`` so they are excluded from ``Config.__init__``.
     Pre-set values (via attribute assignment or inheritance) that conflict
     with a ``build()`` kwarg raise ``ValueError``; matching values are
-    accepted.  The legacy ``None``-sentinel pattern (``field: type | None =
-    None``) is still supported for backward compatibility.
+    accepted.
 
     Enforcement: Configurable.__init_subclass__ checks that every Config uses
     @dataclass(kw_only=True, slots=True). This check runs on the OUTER class
@@ -87,11 +86,10 @@ class Configurable:
             if kwargs_in_config:
                 # All kwargs are config fields: validate & absorb into clone.
                 for key, value in kwargs.items():
-                    current = getattr(self, key, None)
-                    if current is not None and current != value:
+                    if hasattr(self, key) and getattr(self, key) != value:
                         raise ValueError(
                             f"{type(self).__name__}.build() conflict for "
-                            f"'{key}': config has {current!r} but got {value!r}"
+                            f"'{key}': config has {getattr(self, key)!r} but got {value!r}"
                         )
                 return self._owner(config=self._replace(**kwargs))
 
