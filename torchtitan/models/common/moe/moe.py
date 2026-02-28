@@ -302,6 +302,8 @@ class TokenChoiceTopKRouter(nn.Module):
 
     def init_weights(self, init_std: float):
         trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+        if self.gate.bias is not None:
+            nn.init.zeros_(self.gate.bias)
 
 
 # NOTE: the reason we make this a stateless module is to support
