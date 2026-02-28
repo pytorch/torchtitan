@@ -13,11 +13,9 @@ class Configurable:
 
     Every configurable class:
     - Inherits from Configurable (or Module for nn.Module components)
-    - Defines a nested Config(Configurable.Config) with
-      @dataclass(kw_only=True, slots=True)
+    - Defines a nested Config(Configurable.Config) with @dataclass(kw_only=True, slots=True)
     - Gets build() auto-wired via __init_subclass__ (no manual override needed)
-    - Accepts __init__(self, config: Config) or
-      __init__(self, config: Config, **runtime_kwargs)
+    - Accepts __init__(self, config: Config) or __init__(self, config: Config, **runtime_kwargs)
       We will deprecate the later usage once we migrate all components to make
       all required fields in config.
 
@@ -89,7 +87,7 @@ class Configurable:
                 )
 
             if kwargs_in_config:
-                # All kwargs are config fields: validate & absorb into clone.
+                # All kwargs are config fields: validate and absorb into clone.
                 for key, value in kwargs.items():
                     if hasattr(self, key) and getattr(self, key) != value:
                         raise ValueError(

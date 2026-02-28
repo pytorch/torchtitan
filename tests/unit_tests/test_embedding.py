@@ -35,7 +35,6 @@ class TestEmbedding(unittest.TestCase):
         config = Embedding.Config()
         emb = config.build(num_embeddings=50, embedding_dim=16)
 
-        # Set all weights to zero, then call init_weights
         nn.init.zeros_(emb.weight)
         self.assertTrue(torch.all(emb.weight == 0))
         emb.init_weights()

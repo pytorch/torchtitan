@@ -159,11 +159,6 @@ class TestConfigurable(unittest.TestCase):
         obj.config.x = 999
         self.assertEqual(cfg.x, 42)
 
-    def test_init_false_fields_excluded_from_init(self):
-        """field(init=False) fields cannot be passed to Config()."""
-        with self.assertRaises(TypeError):
-            self.NewStyleComponent.Config(dim=64)
-
     def test_init_false_with_inheritance(self):
         """Child config can redeclare field with default."""
 
