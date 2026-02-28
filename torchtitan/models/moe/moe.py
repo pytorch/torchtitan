@@ -29,6 +29,10 @@ class MoEArgs:
     route_scale: float = 1.0
     gate_bias: bool = False
     score_before_experts: bool = True
+    # TopK-then-Score (True) vs Score-then-TopK (False):
+    #   True: Select top-K by raw logits, then apply score_func (GPT-OSS style)
+    #   False: Apply score_func to all experts, then select top-K (DeepSeek-V3 style)
+    topk_before_score: bool = True
 
     # token-choice with optional node limited routing
     top_k: int = 1
@@ -36,6 +40,14 @@ class MoEArgs:
     num_limited_groups: int | None = None
     use_grouped_mm: bool = True  # grouped mm or for-loop for the experts computation
     load_balance_coeff: float | None = 1e-3
+
+    use_expert_bias: bool = False  # Set to True for GPT-OSS expert MLP biases
+
+    expert_orthogonality_coeff: float = 0.0
+    # When > 0, adds an auxiliary loss penalizing cosine similarity between
+    # the outputs of the top-k experts selected for each token. This encourages
+    # experts to produce differentiated outputs, improving specialization.
+    # Disabled by default (0.0). Typical values: 0.001 - 0.1
 
     _debug_force_load_balance: bool = False
     # if True, we force each experts get same amount of token via round-robin
@@ -218,6 +230,7 @@ class TokenChoiceTopKRouter(nn.Module):
         route_norm: bool,
         route_scale: float,
         gate_bias: bool,
+        topk_before_score: bool = True,
         _debug_force_load_balance: bool = False,
     ):
         super().__init__()
@@ -229,6 +242,7 @@ class TokenChoiceTopKRouter(nn.Module):
         self.score_func = score_func
         self.route_norm = route_norm
         self.route_scale = route_scale
+        self.topk_before_score = topk_before_score
         self._debug_force_load_balance = _debug_force_load_balance
 
     def _debug_force_load_balance_routing(
@@ -308,36 +322,59 @@ class TokenChoiceTopKRouter(nn.Module):
                 - num_tokens_per_expert (torch.Tensor):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
-        # scores shape (bs*slen, num_experts)
-        scores = self.gate(x)
+        # Get raw router logits shape (bs*slen, num_experts)
+        router_logits = self.gate(x)
 
-        # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
-        if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
-        elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1)
+        if self.topk_before_score:
+            # TopK-then-Score: Select top-K by raw logits, then apply score_func (GPT-OSS style)
+            # This matches HuggingFace GPT-OSS implementation
+            if expert_bias is not None:
+                router_top_logits, selected_experts_indices = torch.topk(
+                    router_logits + expert_bias, k=self.top_k, dim=1
+                )
+            else:
+                router_top_logits, selected_experts_indices = torch.topk(
+                    router_logits, k=self.top_k, dim=1
+                )
+
+            # Apply score function to ONLY the selected top-K expert logits
+            if self.score_func == "sigmoid":
+                top_scores = torch.sigmoid(router_top_logits.to(torch.float32))
+            elif self.score_func == "softmax":
+                top_scores = F.softmax(router_top_logits.to(torch.float32), dim=1)
+            else:
+                raise NotImplementedError(f"Unknown score function {self.score_func}")
         else:
-            raise NotImplementedError(f"Unknown score function {self.score_func}")
+            # Score-then-TopK: Apply score_func to all experts, then select top-K (DeepSeek-V3 style)
+            # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
+            if self.score_func == "sigmoid":
+                scores = torch.sigmoid(router_logits.to(torch.float32))
+            elif self.score_func == "softmax":
+                scores = F.softmax(router_logits.to(torch.float32), dim=1)
+            else:
+                raise NotImplementedError(f"Unknown score function {self.score_func}")
 
-        scores_for_choice = scores if expert_bias is None else scores + expert_bias
-        # Apply node-limited routing if configured
-        if self.num_expert_groups is not None:
-            scores_for_choice = self._get_node_limited_routing_scores(scores_for_choice)
-        _, selected_experts_indices = torch.topk(
-            scores_for_choice, k=self.top_k, dim=-1, sorted=False
-        )
+            scores_for_choice = scores if expert_bias is None else scores + expert_bias
+            # Apply node-limited routing if configured
+            if self.num_expert_groups is not None:
+                scores_for_choice = self._get_node_limited_routing_scores(
+                    scores_for_choice
+                )
+            _, selected_experts_indices = torch.topk(
+                scores_for_choice, k=self.top_k, dim=-1, sorted=False
+            )
 
-        # top scores shape (bs*slen, top_k)
-        # NOTE: The expert_bias is only used for routing. The gating value
-        #       top_scores is still derived from the original scores.
-        top_scores = scores.gather(dim=1, index=selected_experts_indices)
+            # top scores shape (bs*slen, top_k)
+            # NOTE: The expert_bias is only used for routing. The gating value
+            #       top_scores is still derived from the original scores.
+            top_scores = scores.gather(dim=1, index=selected_experts_indices)
 
         # debug override: balanced round-robin routing
         if self._debug_force_load_balance:
             (
                 selected_experts_indices,
                 top_scores,
-            ) = self._debug_force_load_balance_routing(scores)
+            ) = self._debug_force_load_balance_routing(router_logits)
 
         if self.route_norm:
             denominator = top_scores.sum(dim=-1, keepdim=True) + 1e-20
@@ -439,6 +476,7 @@ class MoE(nn.Module):
             route_norm=moe_args.route_norm,
             route_scale=moe_args.route_scale,
             gate_bias=moe_args.gate_bias,
+            topk_before_score=moe_args.topk_before_score,
             _debug_force_load_balance=moe_args._debug_force_load_balance,
         )
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=moe_args.top_k)
@@ -448,6 +486,12 @@ class MoE(nn.Module):
             else None
         )
         self.score_before_experts = moe_args.score_before_experts
+
+        # Expert orthogonality loss: penalizes cosine similarity between
+        # the outputs of top-k experts for each token, encouraging specialization.
+        # See: "Advancing Expert Specialization for Better MoE" (arXiv:2505.22323)
+        self.expert_orthogonality_coeff = moe_args.expert_orthogonality_coeff
+        self._aux_ortho_loss: torch.Tensor | None = None
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: tokens_per_expert is accumulated in the model forward pass.
@@ -538,6 +582,41 @@ class MoE(nn.Module):
         routed_output_unsorted = routed_output_unsorted.reshape(
             -1, self.router.top_k, dim
         )
+
+        # Expert orthogonality loss: penalize cosine similarity between
+        # per-expert outputs for each token. Uses assignment (not accumulation)
+        # so AC recomputation simply overwrites — no double-counting.
+        # Computed in native dtype (bf16) for the bmm; only the small (N,K,K)
+        # similarity matrix is upcast to float32 for the final reduction.
+        #
+        # Memory note: normed (N, K, dim) is saved for bmm backward and escapes
+        # the AC boundary via _aux_ortho_loss. At 131K tokens × 24 layers, this
+        # would be ~67 GiB. We sample a fixed subset of tokens to bound memory
+        # at ~2 GiB total (24 layers × 0.088 GiB each), preserving an unbiased
+        # gradient estimate.
+        _ORTHO_MAX_TOKENS = 4096
+        if (
+            self.training
+            and self.expert_orthogonality_coeff > 0
+            and self.router.top_k > 1
+        ):
+            n_tokens = routed_output_unsorted.shape[0]
+            if n_tokens > _ORTHO_MAX_TOKENS:
+                # Deterministic strided sampling — compatible with torch.compile
+                # and gives identical results on AC recomputation
+                stride = n_tokens // _ORTHO_MAX_TOKENS
+                ortho_input = routed_output_unsorted[::stride][:_ORTHO_MAX_TOKENS]
+            else:
+                ortho_input = routed_output_unsorted
+            normed = F.normalize(ortho_input, dim=-1)  # (S, K, dim) bf16
+            sim = torch.bmm(normed, normed.transpose(-1, -2))  # (S, K, K) bf16
+            # Upcast the tiny sim matrix, zero diagonal, compute mean squared off-diagonal
+            sim_f32 = sim.float()
+            sim_f32.diagonal(dim1=-2, dim2=-1).zero_()
+            k = self.router.top_k
+            ortho_loss = sim_f32.pow(2).sum() / (ortho_input.shape[0] * k * (k - 1))
+            self._aux_ortho_loss = self.expert_orthogonality_coeff * ortho_loss
+
         if not self.score_before_experts:
             out_experts = (
                 torch.bmm(

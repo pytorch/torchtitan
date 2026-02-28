@@ -403,6 +403,7 @@ class GptOssModel(ModelProtocol):
             case "block_causal":
                 B = input_batch.shape[0]
                 assert tokenizer.eos_id is not None
+                basic_mask_mods.append(get_causal_mask_mod())
                 basic_mask_mods.append(
                     get_document_mask_mod(input_batch, tokenizer.eos_id)
                 )

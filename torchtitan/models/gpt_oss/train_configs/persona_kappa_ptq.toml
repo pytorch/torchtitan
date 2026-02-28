@@ -1,0 +1,74 @@
+[job]
+dump_folder = "./outputs/persona_kappa_ptq"
+description = "GPT-OSS 20B persona_kappa PTQ calibration + NVFP4 export"
+print_config = true
+
+[profiling]
+enable_profiling = false
+enable_memory_snapshot = false
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+enable_wandb = false
+
+[model]
+name = "gpt_oss"
+flavor = "20b"
+hf_assets_path = "./outputs/gpt-oss-20b"
+
+# Optimizer section required by ConfigManager but not used for PTQ
+[optimizer]
+name = "AdamW"
+lr = 1e-5
+
+[lr_scheduler]
+warmup_steps = 0
+
+[training]
+local_batch_size = 1
+global_batch_size = 4
+seq_len = 131072
+steps = 0
+dataset = "persona_kappa"
+pack_samples = true
+pad_samples = false
+add_bos_eos = false
+mask_non_assistant = true
+gc_freq = 60
+dtype = "bfloat16"
+mixed_precision_param = "bfloat16"
+mixed_precision_reduce = "float32"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default"
+tensor_parallel_degree = 4
+enable_async_tensor_parallel = false
+expert_parallel_degree = 1
+expert_tensor_parallel_degree = 1
+
+[checkpoint]
+enable = false
+export_dtype = "bfloat16"
+# Load from the QAT-trained checkpoint
+# Change this path to point to your QAT output (step-100) or fine-tuned checkpoint
+initial_load_path = "./outputs/persona_kappa_qat/checkpoint_persona_kappa_qat/step-100"
+initial_load_model_only = true
+
+[activation_checkpoint]
+mode = "selective"
+selective_ac_option = '1'
+
+[compile]
+enable = true
+
+[qat]
+enable = true
+config = "NVFP4_MLP_WEIGHT_ONLY_CFG"
+calib_steps = 16
+
+[validation]
+enable = false

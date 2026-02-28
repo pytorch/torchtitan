@@ -435,6 +435,47 @@ class CheckpointManager:
 
         return ret
 
+    def _load_hf_state_dict_to_model(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        is_distributed: bool,
+    ) -> None:
+        """Load HuggingFace state dict into model with appropriate distributed handling.
+
+        This helper handles the common pattern of loading a state dict into the model,
+        with proper handling for both distributed (broadcast from rank 0) and
+        non-distributed (direct load) cases.
+
+        Args:
+            state_dict: The state dict to load (only needs data on rank 0 if distributed)
+            is_distributed: Whether we're in distributed mode (world_size > 1)
+        """
+        if is_distributed:
+            # Broadcast from rank 0 and convert to DTensors
+            for model in self.states[MODEL].model:
+                set_model_state_dict(
+                    model,
+                    model_state_dict=state_dict,
+                    options=StateDictOptions(
+                        strict=False,
+                        full_state_dict=True,
+                        broadcast_from_rank0=True,
+                    ),
+                )
+            logger.info(f"Loaded {len(state_dict)} tensors via broadcast from rank 0")
+        else:
+            # Single process - load directly without broadcast
+            for model in self.states[MODEL].model:
+                set_model_state_dict(
+                    model,
+                    model_state_dict=state_dict,
+                    options=StateDictOptions(strict=False),
+                )
+            logger.info(f"Loaded {len(state_dict)} tensors directly (non-distributed)")
+
+        # Reinitialize the cached state dict after loading
+        self.states[MODEL].cache_state_dict = self.states[MODEL]._get_state_dict()
+
     def dcp_load(
         self,
         state_dict: dict[str, Any],
@@ -448,24 +489,48 @@ class CheckpointManager:
             checkpoint_id (str): The checkpoint id to load.
             from_hf (bool): Whether to load from HuggingFace checkpoint with
                 its own model definition and safetensors format.
+            from_quantized (bool): Whether the HF checkpoint is MXFP4 quantized.
         """
 
         if from_hf:
             assert (
                 self.sd_adapter is not None
             ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            hf_state_dict = self.sd_adapter.to_hf(state_dict)
-            hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
-                checkpoint_id, from_quantized
+            assert MODEL in self.states, (
+                "Cannot load HF checkpoint: MODEL state not registered. "
+                "Ensure model is added to CheckpointManager states before loading."
             )
 
-            dcp.load(
-                hf_state_dict,
-                storage_reader=hf_storage_reader,
-            )
+            # Check if we're in distributed mode
+            is_distributed = dist.is_initialized() and dist.get_world_size() > 1
 
-            state_dict = self.sd_adapter.from_hf(hf_state_dict)
-            self.states[MODEL].load_state_dict(state_dict)
+            # Use direct loading to bypass buggy dcp.load() for HF checkpoints
+            # dcp.load() has issues with DTensor state dicts (pickle errors) and
+            # QuantizedHuggingFaceStorageReader (wrong shape metadata for MXFP4)
+            if from_quantized and hasattr(self.sd_adapter, "load_hf_safetensors_direct"):
+                # Use adapter's direct loader for MXFP4 quantized checkpoints
+                loader_fn = self.sd_adapter.load_hf_safetensors_direct
+            else:
+                # Fall back to dcp.load for non-quantized (shouldn't happen often)
+                hf_state_dict = self.sd_adapter.to_hf(state_dict)
+                hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
+                    checkpoint_id, from_quantized
+                )
+                dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
+                loaded_state_dict = self.sd_adapter.from_hf(hf_state_dict)
+                self.states[MODEL].load_state_dict(loaded_state_dict)
+                return
+
+            # Load state dict (only on rank 0 if distributed, to minimize I/O)
+            if is_distributed:
+                rank = dist.get_rank()
+                loaded_state_dict = loader_fn(checkpoint_id) if rank == 0 else {}
+            else:
+                loaded_state_dict = loader_fn(checkpoint_id)
+
+            # Load into model with appropriate distributed handling
+            self._load_hf_state_dict_to_model(loaded_state_dict, is_distributed)
+            return
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 

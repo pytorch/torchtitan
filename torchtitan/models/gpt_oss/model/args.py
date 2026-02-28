@@ -96,6 +96,10 @@ class GptOssModelArgs(BaseModelArgs):
         # Set MoE implementation based on expert parallel comm backend
         self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
 
+        # Use block_causal masking when packing to prevent cross-document attention
+        if job_config.training.pack_samples:
+            self.attn_mask_type = "block_causal"
+
         # Validate RoPE parameters against HF checkpoint config if loading from HF
         if (
             job_config.checkpoint.initial_load_in_hf

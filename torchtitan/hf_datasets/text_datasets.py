@@ -20,6 +20,9 @@ Usage:
     Use mask_non_assistant=True for Harmony format training.
 """
 
+import bisect
+import random
+from collections import Counter
 from dataclasses import asdict
 from functools import partial
 from typing import Any, Callable
@@ -105,6 +108,16 @@ DATASETS = {
         loader=_load_harmony_jsonl,
         sample_processor=_process_harmony_text,
     ),
+    "persona_iota": DatasetConfig(
+        path="/home/w/datasets/persona_iota_train/persona-iota.jsonl",
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
+    "persona_kappa": DatasetConfig(
+        path="/home/w/datasets/persona-kappa-curated.jsonl",
+        loader=_load_harmony_jsonl,
+        sample_processor=_process_harmony_text,
+    ),
 }
 
 
@@ -186,7 +199,9 @@ class HuggingFacePackedDataset(IterableDataset, Stateful):
                 self.pad_id = tokenizer.tokenizer.token_to_id("<|endoftext|>")
             except (AttributeError, KeyError):
                 # Tokenizer doesn't support token_to_id or token not in vocab
-                logger.debug("Could not find <|endoftext|> token, will use eos_id fallback")
+                logger.debug(
+                    "Could not find <|endoftext|> token, will use eos_id fallback"
+                )
         if self.pad_id is None:
             self.pad_id = tokenizer.eos_id
             logger.warning(
@@ -245,7 +260,7 @@ class HuggingFacePackedDataset(IterableDataset, Stateful):
             #   - labels are shifted: labels[i] = input[i+1]
             #   - The last real token predicts the first PAD token (valid)
             #   - PAD tokens predicting more PAD tokens (invalid, masked out)
-            labels[-(num_padding - 1):] = self.IGNORE_INDEX
+            labels[-(num_padding - 1) :] = self.IGNORE_INDEX
 
         # Apply Harmony loss masking if enabled
         # This sets labels to IGNORE_INDEX for non-assistant tokens
@@ -253,10 +268,9 @@ class HuggingFacePackedDataset(IterableDataset, Stateful):
             if sample_mask is not None:
                 # Use pre-computed mask (from packing)
                 # Pad mask with False for padding tokens
-                full_mask = torch.cat([
-                    sample_mask,
-                    torch.zeros(num_padding, dtype=torch.bool)
-                ])
+                full_mask = torch.cat(
+                    [sample_mask, torch.zeros(num_padding, dtype=torch.bool)]
+                )
             else:
                 # Compute mask on-the-fly
                 # Create mask for the full sequence (before shift)
@@ -561,12 +575,430 @@ class HuggingFaceTextDataset(IterableDataset, Stateful):
         return _state_dict
 
 
+class HuggingFaceDynamicBatchDataset(IterableDataset, Stateful):
+    """Dataset with ordered greedy dynamic batching.
+
+    Processes documents in dataset order (preserving curriculum), greedily
+    packing them into micro-batches where batch_size * padded_len <= token_budget.
+    Each micro-batch is padded to a calibrated alignment level.
+
+    The design is a "quantization" framework:
+    - Alignment levels = representable values (like MXFP8 quantization grid)
+    - Padding tokens = quantization error (rounding-up waste)
+    - Model forward uses 2D [B, padded_len] ("FP4 compute tensor")
+    - Loss uses 1D [B*S, vocab] after flatten ("FP32 accumulation")
+
+    Note: When dp_world_size > 1, each rank independently builds its batch
+    schedule from its data shard. Batch counts are synchronized to the minimum
+    across ranks to prevent distributed hangs. Curriculum ordering is preserved
+    within each shard but not globally across shards.
+
+    Yields: tuple of ({"input": Tensor[B, padded_len]}, labels Tensor[B, padded_len])
+    where B and padded_len vary per batch.
+    """
+
+    IGNORE_INDEX = -100
+
+    def __init__(
+        self,
+        dataset_name: str,
+        dataset_path: str | None,
+        tokenizer: BaseTokenizer,
+        seq_len: int = 2048,
+        batch_size: int = 1,
+        dp_rank: int = 0,
+        dp_world_size: int = 1,
+        infinite: bool = False,
+        add_bos_eos: bool = True,
+        mask_non_assistant: bool = False,
+        alignment: int = 128,
+        max_levels: int = 12,
+        bucket_boundaries: list[int] | None = None,
+        seq_len_divisor: int = 1,
+    ) -> None:
+        dataset_name = dataset_name.lower()
+
+        path, dataset_loader, text_processor = _validate_dataset(
+            dataset_name, dataset_path
+        )
+        ds = dataset_loader(path)
+
+        self.dataset_name = dataset_name
+        self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
+        self._tokenizer = tokenizer
+        self.seq_len = seq_len
+        self.base_batch_size = batch_size
+        self.dp_rank = dp_rank
+        self.dp_world_size = dp_world_size
+        self.infinite = infinite
+        self._text_processor = text_processor
+        self.add_bos_eos = add_bos_eos
+        self.mask_non_assistant = mask_non_assistant
+
+        # Alignment must satisfy both FlexAttention BLOCK_SIZE and TP/CP.
+        self._alignment = max(alignment, seq_len_divisor)
+        if self._alignment % seq_len_divisor != 0:
+            self._alignment = (
+                (self._alignment + seq_len_divisor - 1)
+                // seq_len_divisor
+                * seq_len_divisor
+            )
+
+        # Canonical maximum alignment level: seq_len rounded up to alignment.
+        # Used consistently in calibration, manual override, and budget.
+        self._max_level = (
+            (seq_len + self._alignment - 1) // self._alignment * self._alignment
+        )
+
+        # Token budget: constant total tokens per micro-step (Option A).
+        # GPU utilization stays ~100% regardless of document length.
+        self._token_budget = self._max_level * batch_size
+
+        # Get pad token (same logic as HuggingFacePackedDataset)
+        self.pad_id = getattr(tokenizer, "pad_id", None)
+        if self.pad_id is None:
+            try:
+                self.pad_id = tokenizer.tokenizer.token_to_id("<|endoftext|>")
+            except (AttributeError, KeyError):
+                pass
+        if self.pad_id is None:
+            self.pad_id = tokenizer.eos_id
+            logger.warning(
+                f"No pad token found, using eos_id={self.pad_id} for padding"
+            )
+
+        # Pre-tokenize all documents (stored as int32 tensors for memory efficiency;
+        # Python lists would use ~28 bytes/int vs 4 bytes for int32 tensors)
+        self._tokenized: list[torch.Tensor] = []
+        self._loss_masks: list[torch.Tensor | None] = []
+        self._lengths: list[int] = []
+
+        max_token_len = seq_len + 1  # +1 for input/label shift
+
+        logger.info("Pre-tokenizing documents for dynamic batching...")
+        n_truncated = 0
+        for sample in self._data:
+            text = self._text_processor(sample)
+            tokens = tokenizer.encode(text, add_bos=add_bos_eos, add_eos=add_bos_eos)
+            if len(tokens) > max_token_len:
+                tokens = tokens[:max_token_len]
+                n_truncated += 1
+
+            self._tokenized.append(torch.tensor(tokens, dtype=torch.int32))
+            self._lengths.append(len(tokens))
+
+            # Compute loss mask if needed
+            if mask_non_assistant:
+                x = torch.LongTensor(tokens)
+                mask = create_loss_mask(x, padding_token=self.pad_id)
+                self._loss_masks.append(mask)
+            else:
+                self._loss_masks.append(None)
+
+        n_samples = len(self._tokenized)
+        logger.info(
+            f"  {n_samples:,} documents tokenized "
+            f"({n_truncated} truncated to {seq_len})"
+        )
+
+        # Compute alignment levels: either manual override or auto-calibration
+        if bucket_boundaries:
+            # Manual override: filter to <= max_level, validate alignment
+            levels = sorted(b for b in bucket_boundaries if b <= self._max_level)
+            if not levels or levels[-1] < self._max_level:
+                levels.append(self._max_level)
+            bad = [b for b in levels if b % self._alignment != 0]
+            if bad:
+                raise ValueError(
+                    f"Bucket boundaries {bad} are not divisible by "
+                    f"alignment={self._alignment} (max of FlexAttention "
+                    f"BLOCK_SIZE={alignment} and seq_len_divisor={seq_len_divisor}). "
+                )
+            self._alignment_levels = levels
+        else:
+            # Auto-calibrate from data distribution
+            self._alignment_levels = self._calibrate_alignment_levels(
+                max_levels, self._alignment
+            )
+
+        logger.info(
+            f"Dynamic batching: {len(self._alignment_levels)} alignment levels, "
+            f"alignment={self._alignment}, token_budget={self._token_budget:,}"
+        )
+        for level in self._alignment_levels:
+            logger.info(f"  level {level:>7,}")
+
+        # Build ordered batches (greedy packing in dataset order)
+        self._batches = self._build_ordered_batches()
+        self._sync_batch_count()
+        self._log_batch_stats()
+
+        # Checkpointing state
+        self._epoch = 0
+        self._batch_idx = 0
+
+    def _calibrate_alignment_levels(self, max_levels: int, alignment: int) -> list[int]:
+        """Compute data-aware alignment levels minimizing total padding waste.
+
+        Algorithm: round each document length up to the alignment boundary,
+        then select max_levels representative values using quantile-based
+        selection (analogous to NF4's representable values — more levels where
+        more documents cluster). The last slot is always reserved for
+        self._max_level to ensure all documents can be accommodated.
+        """
+        if max_levels < 1:
+            raise ValueError(f"dynamic_batch_max_levels must be >= 1, got {max_levels}")
+        max_level = self._max_level
+
+        # Round each doc length up to alignment boundary
+        rounded = []
+        for length in self._lengths:
+            r = ((length + alignment - 1) // alignment) * alignment
+            r = min(r, max_level)
+            rounded.append(r)
+
+        freq = Counter(rounded)
+        sorted_vals = sorted(freq.keys())
+
+        # Ensure max_level is always present
+        if not sorted_vals or sorted_vals[-1] < max_level:
+            sorted_vals.append(max_level)
+            sorted_vals = sorted(set(sorted_vals))
+
+        if len(sorted_vals) <= max_levels:
+            return sorted_vals
+
+        # Quantile-based selection: pick levels at equal-mass quantiles.
+        # Reserve the last slot for max_level (hard requirement).
+        usable_slots = max_levels - 1
+        total = sum(freq.values())
+        cumulative = 0
+        levels = []
+        target_mass = total / usable_slots if usable_slots > 0 else total
+        next_target = target_mass
+
+        for val in sorted_vals:
+            if val == max_level:
+                continue  # reserved for final slot
+            cumulative += freq.get(val, 0)
+            if cumulative >= next_target:
+                levels.append(val)
+                next_target = cumulative + target_mass
+            if len(levels) >= usable_slots:
+                break
+
+        # Always append max_level as the final level
+        levels.append(max_level)
+        return levels
+
+    def _snap_to_level(self, length: int) -> int:
+        """Snap a length to the smallest alignment level >= length."""
+        idx = bisect.bisect_left(self._alignment_levels, length)
+        if idx < len(self._alignment_levels):
+            return self._alignment_levels[idx]
+        return self._alignment_levels[-1]
+
+    def _build_ordered_batches(self) -> list[tuple[list[int], int]]:
+        """Form micro-batches by walking documents in dataset order.
+
+        Greedily packs documents until the token budget would be exceeded.
+        Each batch is padded to the per-batch max, snapped to the nearest
+        alignment level. This preserves dataset curriculum ordering.
+
+        Returns: list of (sample_indices, padded_len) tuples
+        """
+        batches: list[tuple[list[int], int]] = []
+        current_batch: list[int] = []
+        max_len = 0
+
+        n_overbudget = 0
+        for idx in range(len(self._tokenized)):
+            doc_len = self._lengths[idx]
+            candidate_max = max(max_len, doc_len)
+            candidate_padded = self._snap_to_level(candidate_max)
+
+            # Would adding this doc exceed token budget?
+            if (
+                current_batch
+                and (len(current_batch) + 1) * candidate_padded > self._token_budget
+            ):
+                # Close current batch
+                padded_len = self._snap_to_level(max_len)
+                batches.append((list(current_batch), padded_len))
+                # Start new batch with this doc
+                current_batch = [idx]
+                max_len = doc_len
+                # Warn if a single doc exceeds budget (OOM risk)
+                single_padded = self._snap_to_level(doc_len)
+                if single_padded > self._token_budget:
+                    n_overbudget += 1
+                    if n_overbudget <= 5:
+                        logger.warning(
+                            f"Document {idx} (len={doc_len}, padded={single_padded}) "
+                            f"exceeds token_budget={self._token_budget:,}"
+                        )
+            else:
+                current_batch.append(idx)
+                max_len = candidate_max
+
+        if n_overbudget > 0:
+            logger.warning(
+                f"{n_overbudget} documents exceed token_budget="
+                f"{self._token_budget:,} when padded. These batches may "
+                f"cause OOM. Consider increasing seq_len or TP degree."
+            )
+
+        # Close final batch
+        if current_batch:
+            padded_len = self._snap_to_level(max_len)
+            batches.append((list(current_batch), padded_len))
+
+        return batches
+
+    def _sync_batch_count(self):
+        """Truncate batch list to the minimum count across all DP ranks.
+
+        Each rank independently builds its batch schedule from its data shard.
+        Different document length distributions across shards can produce
+        different batch counts. Without synchronization, one rank would exhaust
+        its data while others still await an all-reduce, causing a deadlock.
+        """
+        if self.dp_world_size <= 1:
+            return
+        import torch.distributed as dist
+
+        local_count = torch.tensor([len(self._batches)], dtype=torch.long)
+        dist.all_reduce(local_count, op=dist.ReduceOp.MIN)
+        min_count = local_count.item()
+        if min_count < len(self._batches):
+            logger.warning(
+                f"Truncating {len(self._batches)} batches to {min_count} "
+                f"(min across {self.dp_world_size} DP ranks) to prevent "
+                f"distributed hangs"
+            )
+            self._batches = self._batches[:min_count]
+
+    def _log_batch_stats(self):
+        """Log statistics about the ordered greedy batch schedule."""
+        n_batches = len(self._batches)
+        if n_batches == 0:
+            logger.warning("No batches created for this rank")
+            return
+        n_samples = sum(len(b[0]) for b in self._batches)
+        batch_sizes = [len(b[0]) for b in self._batches]
+        padded_lens = [b[1] for b in self._batches]
+
+        # Compute total valid tokens vs total padded tokens
+        total_valid = sum(self._lengths)
+        total_padded = sum(len(b[0]) * b[1] for b in self._batches)
+        waste_pct = (1.0 - total_valid / total_padded) * 100 if total_padded > 0 else 0
+
+        # Count unique padded lengths (FlexAttention recompilation count)
+        unique_levels = len(set(padded_lens))
+
+        logger.info(
+            f"Ordered greedy schedule: {n_batches} batches, "
+            f"{n_samples}/{len(self._tokenized)} samples"
+        )
+        logger.info(
+            f"  batch_size range: [{min(batch_sizes)}, {max(batch_sizes)}], "
+            f"padded_len range: [{min(padded_lens):,}, {max(padded_lens):,}]"
+        )
+        logger.info(
+            f"  padding waste: {waste_pct:.1f}%, "
+            f"unique padded_lens: {unique_levels} "
+            f"(FlexAttention recompilations)"
+        )
+
+    def _build_padded_batch(
+        self, sample_indices: list[int], padded_len: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build a padded batch of [B, padded_len] tensors.
+
+        Args:
+            sample_indices: Indices into self._tokenized for this batch.
+            padded_len: The alignment level this batch is padded to.
+
+        Returns:
+            (input_ids [B, padded_len], labels [B, padded_len])
+        """
+        B = len(sample_indices)
+        # +1 for the input/label shift: we need padded_len+1 total tokens
+        # so that input_ids[:, :-1] and labels[:, 1:] both have padded_len length
+        total_len = padded_len + 1
+        padded = torch.full((B, total_len), self.pad_id, dtype=torch.long)
+
+        for i, sidx in enumerate(sample_indices):
+            tokens = self._tokenized[sidx]
+            padded[i, : len(tokens)] = tokens.to(torch.long)
+
+        input_ids = padded[:, :-1]  # [B, padded_len]
+        labels = padded[:, 1:].clone()  # [B, padded_len]
+
+        # Mask padding positions in labels
+        for i, sidx in enumerate(sample_indices):
+            real_len = len(self._tokenized[sidx])
+            num_padding = total_len - real_len
+            if num_padding > 1:
+                labels[i, -(num_padding - 1) :] = self.IGNORE_INDEX
+
+        # Apply Harmony loss masking if enabled
+        if self.mask_non_assistant:
+            for i, sidx in enumerate(sample_indices):
+                mask = self._loss_masks[sidx]
+                if mask is not None:
+                    num_padding = total_len - len(self._tokenized[sidx])
+                    full_mask = torch.cat(
+                        [mask, torch.zeros(num_padding, dtype=torch.bool)]
+                    )
+                    shifted_mask = full_mask[1:]
+                    labels[i, ~shifted_mask] = self.IGNORE_INDEX
+
+        return input_ids, labels
+
+    def __iter__(self):
+        while True:
+            while self._batch_idx < len(self._batches):
+                sample_indices, padded_len = self._batches[self._batch_idx]
+                input_ids, labels = self._build_padded_batch(sample_indices, padded_len)
+                self._batch_idx += 1
+                yield {"input": input_ids}, labels
+
+            if not self.infinite:
+                break
+            self._epoch += 1
+            self._batch_idx = 0
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "epoch": self._epoch,
+            "batch_idx": self._batch_idx,
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        if "epoch" not in state_dict or "batch_idx" not in state_dict:
+            logger.warning(
+                "Incompatible dataloader state_dict (likely from a different "
+                "batching strategy). Starting from epoch=0, batch_idx=0."
+            )
+            return
+        self._epoch = state_dict["epoch"]
+        self._batch_idx = state_dict["batch_idx"]
+        if self._batch_idx > len(self._batches):
+            logger.warning(
+                f"Checkpoint batch_idx={self._batch_idx} exceeds current "
+                f"batch count={len(self._batches)}. Resetting to 0."
+            )
+            self._batch_idx = 0
+
+
 def build_text_dataloader(
     dp_world_size: int,
     dp_rank: int,
     tokenizer: BaseTokenizer,
     job_config: JobConfig,
     infinite: bool = True,
+    seq_len_divisor: int = 1,
 ) -> ParallelAwareDataloader:
     """Build a data loader for HuggingFace datasets.
 
@@ -581,24 +1013,26 @@ def build_text_dataloader(
     dataset_path = job_config.training.dataset_path
     batch_size = job_config.training.local_batch_size
     seq_len = job_config.training.seq_len
-    pack_samples = getattr(job_config.training, "pack_samples", False)
-    pad_samples = getattr(job_config.training, "pad_samples", False)
-    add_bos_eos = getattr(job_config.training, "add_bos_eos", True)
-    mask_non_assistant = getattr(job_config.training, "mask_non_assistant", False)
+    pack_samples = job_config.training.pack_samples
+    pad_samples = job_config.training.pad_samples
+    add_bos_eos = job_config.training.add_bos_eos
+    mask_non_assistant = job_config.training.mask_non_assistant
+    dynamic_batch = job_config.training.dynamic_batch
 
     # Validate mutually exclusive options
-    if pack_samples and pad_samples:
+    if sum([pack_samples, pad_samples, dynamic_batch]) > 1:
         raise ValueError(
-            "pack_samples and pad_samples are mutually exclusive. "
-            "Use pack_samples=True for greedy packing (multiple samples per sequence), "
-            "or pad_samples=True for one sample per sequence with padding."
+            "pack_samples, pad_samples, and dynamic_batch are mutually exclusive. "
+            "Use exactly one: pack_samples for greedy packing, pad_samples for "
+            "one sample per sequence, or dynamic_batch for ordered greedy batching."
         )
 
     # Validate mask_non_assistant configuration
     if mask_non_assistant:
-        if not (pack_samples or pad_samples):
+        if not (pack_samples or pad_samples or dynamic_batch):
             raise ValueError(
-                "mask_non_assistant=True requires pack_samples=True or pad_samples=True. "
+                "mask_non_assistant=True requires pack_samples=True, pad_samples=True, "
+                "or dynamic_batch=True. "
                 "The chunking dataset (HuggingFaceTextDataset) does not support loss masking."
             )
         if add_bos_eos:
@@ -608,15 +1042,58 @@ def build_text_dataloader(
                 "add_bos_eos=False for Harmony chat format data."
             )
 
+    if dynamic_batch:
+        alignment = job_config.training.dynamic_batch_alignment
+        max_levels = job_config.training.dynamic_batch_max_levels
+        bucket_boundaries = job_config.training.dynamic_batch_buckets or None
+
+        logger.info("Using dynamic batch dataset (ordered greedy packing)")
+        if not add_bos_eos:
+            logger.info("BOS/EOS tokens disabled (using pre-formatted data)")
+        if mask_non_assistant:
+            logger.info(
+                "Loss masking enabled: only assistant tokens contribute to loss"
+            )
+
+        hf_ds = HuggingFaceDynamicBatchDataset(
+            dataset_name=dataset_name,
+            dataset_path=dataset_path,
+            tokenizer=tokenizer,
+            seq_len=seq_len,
+            batch_size=batch_size,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            infinite=infinite,
+            add_bos_eos=add_bos_eos,
+            mask_non_assistant=mask_non_assistant,
+            alignment=alignment,
+            max_levels=max_levels,
+            bucket_boundaries=bucket_boundaries,
+            seq_len_divisor=seq_len_divisor,
+        )
+
+        # Dataset yields pre-batched tensors, so DataLoader uses batch_size=None
+        return ParallelAwareDataloader(
+            hf_ds,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+            batch_size=None,
+            **asdict(job_config.training.dataloader),
+        )
+
     if pack_samples or pad_samples:
         if pad_samples:
-            logger.info("Using padded dataset (one sample per sequence, remainder padded)")
+            logger.info(
+                "Using padded dataset (one sample per sequence, remainder padded)"
+            )
         else:
             logger.info("Using packed dataset (preserves sample boundaries)")
         if not add_bos_eos:
             logger.info("BOS/EOS tokens disabled (using pre-formatted data)")
         if mask_non_assistant:
-            logger.info("Loss masking enabled: only assistant tokens contribute to loss")
+            logger.info(
+                "Loss masking enabled: only assistant tokens contribute to loss"
+            )
         hf_ds = HuggingFacePackedDataset(
             dataset_name=dataset_name,
             dataset_path=dataset_path,

@@ -1,20 +1,19 @@
 [job]
-dump_folder = "./outputs/persona_theta"
-description = "GPT-OSS 20B persona_theta fine-tuning (131K context via YaRN)"
+dump_folder = "./outputs/profile_20b_32k"
+description = "GPT-OSS 20B memory profiling (32K seq_len, 2 GPUs)"
 print_config = true
 
 [profiling]
 enable_profiling = false
 save_traces_folder = "profile_trace"
-profile_freq = 100
-enable_memory_snapshot = false
+profile_freq = 1
+enable_memory_snapshot = true
 save_memory_snapshot_folder = "memory_snapshot"
 
 [metrics]
-log_freq = 5
+log_freq = 1
 disable_color_printing = false
-enable_tensorboard = true
-save_tb_folder = "tb_persona_theta"
+enable_tensorboard = false
 enable_wandb = false
 
 [model]
@@ -48,18 +47,18 @@ norms = 0.0
 bias = 0.0
 
 [lr_scheduler]
-warmup_steps = 40
-decay_ratio = 0.7
+warmup_steps = 0
+decay_ratio = 0.0
 decay_type = "cosine"
-min_lr_factor = 0.3
+min_lr_factor = 1.0
 
 [training]
 local_batch_size = 1
-global_batch_size = 8
-seq_len = 131072
+global_batch_size = 2
+seq_len = 32768
 max_norm = 1.0
-steps = 399
-dataset = "persona_theta"
+steps = 3
+dataset = "persona_iota"
 pack_samples = true
 pad_samples = false
 add_bos_eos = false
@@ -67,7 +66,6 @@ mask_non_assistant = true
 gc_freq = 60
 freeze_router_bias = true
 freeze_expert_bias = false
-# expert_orthogonality_coeff = 0.01  # penalize similar expert outputs to improve specialization
 dtype = "bfloat16"
 mixed_precision_param = "bfloat16"
 mixed_precision_reduce = "float32"
@@ -76,15 +74,15 @@ mixed_precision_reduce = "float32"
 data_parallel_replicate_degree = 1
 data_parallel_shard_degree = -1
 fsdp_reshard_after_forward = "default"
-tensor_parallel_degree = 4
+tensor_parallel_degree = 2
 enable_async_tensor_parallel = false
 expert_parallel_degree = 1
 expert_tensor_parallel_degree = 1
 
 [checkpoint]
 enable = true
-folder = "checkpoint_persona_theta"
-interval = 134
+folder = "checkpoint_profile_20b_32k"
+interval = 9999
 enable_first_step_checkpoint = false
 last_save_model_only = false
 export_dtype = "float32"
@@ -102,6 +100,3 @@ enable = true
 
 [validation]
 enable = false
-dataset = "c4_validation"
-freq = 250
-steps = 50

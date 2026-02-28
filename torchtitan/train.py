@@ -15,6 +15,7 @@ from typing import Any, cast, Iterable, Iterator
 import torch
 import torch.distributed.checkpoint.stateful
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.tensor import DTensor, Replicate
 
 import torchtitan.protocols.train_spec as train_spec_module
 from torchtitan.components.checkpoint import CheckpointManager
@@ -37,7 +38,9 @@ from torchtitan.tools.profiling import (
 )
 
 
-def _freeze_moe_parameters(model_parts: list[torch.nn.Module], job_config: JobConfig) -> None:
+def _freeze_moe_parameters(
+    model_parts: list[torch.nn.Module], job_config: JobConfig
+) -> None:
     """Freeze MoE router/expert bias parameters based on config."""
     freeze_router = getattr(job_config.training, "freeze_router_bias", False)
     freeze_expert = getattr(job_config.training, "freeze_expert_bias", False)
@@ -51,7 +54,10 @@ def _freeze_moe_parameters(model_parts: list[torch.nn.Module], job_config: JobCo
             should_freeze = False
             if freeze_router and "moe.router.gate.bias" in name:
                 should_freeze = True
-            if freeze_expert and "moe.expert_bias" in name:
+            # Freeze expert MLP biases (mlp1_bias, mlp2_bias) loaded from pretrained model
+            if freeze_expert and (
+                "moe.experts.mlp1_bias" in name or "moe.experts.mlp2_bias" in name
+            ):
                 should_freeze = True
 
             if should_freeze and param.requires_grad:
@@ -61,6 +67,27 @@ def _freeze_moe_parameters(model_parts: list[torch.nn.Module], job_config: JobCo
 
     if frozen_count > 0:
         logger.info(f"Froze {frozen_count} MoE bias parameters")
+
+
+def _configure_expert_orthogonality(
+    model_parts: list[torch.nn.Module], job_config: JobConfig
+) -> None:
+    """Set expert orthogonality coefficient on MoE modules from training config."""
+    coeff = getattr(job_config.training, "expert_orthogonality_coeff", 0.0)
+    if coeff <= 0.0:
+        return
+
+    count = 0
+    for model in model_parts:
+        for module in model.modules():
+            if hasattr(module, "expert_orthogonality_coeff"):
+                module.expert_orthogonality_coeff = coeff
+                count += 1
+
+    if count > 0:
+        logger.info(
+            f"Expert orthogonality loss enabled: coeff={coeff} across {count} MoE layers"
+        )
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful):
@@ -154,6 +181,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             dp_rank=batch_rank,
             tokenizer=self.tokenizer,
             job_config=job_config,
+            seq_len_divisor=parallel_dims.seq_len_divisor,
         )
 
         # build model (using meta init)
@@ -296,6 +324,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         # Freeze MoE parameters if configured (before optimizer creation)
         _freeze_moe_parameters(self.model_parts, job_config)
 
+        # Set expert orthogonality loss coefficient on MoE modules
+        _configure_expert_orthogonality(self.model_parts, job_config)
+
         # build optimizer after applying parallelisms to the model
         self.optimizers = self.train_spec.build_optimizers_fn(
             self.model_parts, job_config.optimizer, parallel_dims
@@ -426,7 +457,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
-            ntokens_batch = labels.numel()
+            # Count only valid tokens (exclude padding/masked positions)
+            # to avoid inflating TPS/MFU metrics with dynamic batching
+            ntokens_batch = (labels != IGNORE_INDEX).sum().item()
             self.ntokens_seen += ntokens_batch
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
@@ -481,9 +514,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         attn_type = getattr(self.model_args, "attn_type", "sdpa")
         if attn_type in ["flex", "varlen"]:
-            assert (
-                self.tokenizer is not None
-            ), "tokenizer is required for flex/varlen attention"
+            assert self.tokenizer is not None, (
+                "tokenizer is required for flex/varlen attention"
+            )
             model = cast(ModelProtocol, self.model_parts[0])
             extra_kwargs["attention_masks"] = model.get_attention_masks(
                 input_batch=inputs,
@@ -555,12 +588,70 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with self.train_context():
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
+                    # Flatten [B, S, V] → [B*S, V] for loss computation.
+                    # With dynamic_batch, B and S vary per micro-step. Pad
+                    # to seq_len so the compiled loss always sees a constant
+                    # shape — avoids compound symbol B*S at graph boundary.
+                    pred = pred.flatten(0, 1)
+                    labels = labels.flatten(0, 1)
+                    if self.job_config.training.dynamic_batch:
+                        seq_len = self.job_config.training.seq_len
+                        n_tokens = pred.shape[0]
+                        if n_tokens < seq_len:
+                            pad_n = seq_len - n_tokens
+                            # F.pad on a Shard(-1) DTensor triggers all-gather
+                            # to Replicate, breaking loss_parallel. Pad the
+                            # local shard directly to preserve placement.
+                            if isinstance(pred, DTensor):
+                                local_pred = pred.to_local()
+                                local_pred = torch.nn.functional.pad(
+                                    local_pred, (0, 0, 0, pad_n)
+                                )
+                                pred = DTensor.from_local(
+                                    local_pred,
+                                    pred.device_mesh,
+                                    pred.placements,
+                                )
+                            else:
+                                pred = torch.nn.functional.pad(pred, (0, 0, 0, pad_n))
+                            labels = torch.nn.functional.pad(
+                                labels,
+                                (0, pad_n),
+                                value=IGNORE_INDEX,
+                            )
                     # Compute loss sum (reduction='sum')
                     loss_sum = self.loss_fn(pred, labels)
 
                     # Scale the loss by the inverse of the total weight denominator before backward
                     # This ensures gradients are properly normalized across all microbatches
                     loss = loss_sum / global_valid_tokens
+
+                    # Collect expert orthogonality auxiliary losses from MoE layers.
+                    # Uses requires_grad to check if any loss was accumulated (no CUDA sync).
+                    # Accumulates across gradient accumulation microbatches via tensor addition.
+                    ortho_loss_total = torch.tensor(0.0, device=loss.device)
+                    for module in model_parts[0].modules():
+                        ortho = getattr(module, "_aux_ortho_loss", None)
+                        if ortho is not None:
+                            ortho_loss_total = ortho_loss_total + ortho
+                            module._aux_ortho_loss = None
+                    if ortho_loss_total.requires_grad:
+                        # ortho_loss is a plain Tensor (computed on replicated
+                        # MoE data with use_local_input=True). loss may be a
+                        # DTensor (from loss_parallel). Wrap as Replicate to
+                        # avoid mixed Tensor/DTensor in backward.
+                        if isinstance(loss, DTensor):
+                            ortho_loss_total = DTensor.from_local(
+                                ortho_loss_total,
+                                loss.device_mesh,
+                                [Replicate()],
+                            )
+                        loss = loss + ortho_loss_total
+                        prev = getattr(self, "_ortho_loss_for_logging", None)
+                        current = ortho_loss_total.detach()
+                        self._ortho_loss_for_logging = (
+                            prev + current if prev is not None else current
+                        )
 
                 # need to free pred before bwd to avoid peaking memory
                 del pred
@@ -664,6 +755,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
         }
+        ortho_loss = getattr(self, "_ortho_loss_for_logging", None)
+        if ortho_loss is not None:
+            extra_metrics["loss_metrics/expert_ortho_loss"] = ortho_loss.item()
+            self._ortho_loss_for_logging = None
         self.metrics_processor.log(
             self.step,
             global_avg_loss,
@@ -672,11 +767,123 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             extra_metrics=extra_metrics,
         )
 
+    def _setup_qat(self):
+        """Apply ModelOpt quantization and run calibration forward passes.
+
+        Inserts TensorQuantizer (fake-quant) modules into MLP weight paths
+        via mtq.quantize(), then runs a short calibration loop to collect
+        activation statistics (amax values) for scale initialization.
+        Must be called after checkpoint loading (model has real weights).
+
+        Note: Weight-only configs (MXFP4/NVFP4_MLP_WEIGHT_ONLY) insert only
+        buffers (not Parameters), so the existing optimizer does not need to be
+        rebuilt — gradients flow through via STE to the original weight params.
+        """
+        import warnings
+
+        import modelopt.torch.quantization as mtq
+        from modelopt.torch.quantization.nn.modules.quant_module import QuantModule
+        from modelopt.torch.utils.distributed import ParallelState
+
+        from torchtitan.models.gpt_oss.model.quant_moe import (
+            TORCHTITAN_QAT_CONFIGS,
+            register_gpt_oss_quant_module,
+        )
+
+        qat_config = self.job_config.qat
+
+        # Register GptOssGroupedExperts for quantization before mtq.quantize()
+        register_gpt_oss_quant_module()
+
+        # Resolve config: check torchtitan custom configs first, then ModelOpt
+        quant_cfg = TORCHTITAN_QAT_CONFIGS.get(qat_config.config)
+        if quant_cfg is None:
+            quant_cfg = getattr(mtq, qat_config.config, None)
+        if quant_cfg is None or not isinstance(quant_cfg, dict):
+            available = list(TORCHTITAN_QAT_CONFIGS.keys())
+            raise ValueError(
+                f"Unknown quantization config: '{qat_config.config}'. "
+                f"Torchtitan configs: {available}"
+            )
+
+        calib_steps = qat_config.calib_steps
+
+        logger.info(
+            f"QAT: Applying {qat_config.config} with {calib_steps} calibration steps"
+        )
+
+        # Use a raw dataloader iterator for calibration — NOT batch_generator,
+        # which updates ntokens_seen and metrics counters. The dataloader will
+        # be re-iterated in train(), so calibration batches are consumed and
+        # discarded from the data stream without polluting training metrics.
+        calib_iterator = iter(self.dataloader)
+
+        def forward_loop(model):
+            for i in range(calib_steps):
+                input_dict, labels = next(calib_iterator)
+                # Move to GPU
+                for k, v in input_dict.items():
+                    if isinstance(v, torch.Tensor):
+                        input_dict[k] = v.to(self.device)
+                labels = labels.to(self.device)
+                inputs, labels, extra_inputs, extra_kwargs = (
+                    self.post_dataloading_process(input_dict, labels)
+                )
+                with torch.no_grad():
+                    pred = model(inputs, **extra_inputs, **extra_kwargs)
+                    del pred  # Free logits immediately to reduce peak memory
+                logger.info(f"QAT calibration step {i + 1}/{calib_steps}")
+
+        # Configure TP process group for ModelOpt quantized modules.
+        # mtq.quantize() inserts QuantModule wrappers that need to know the TP
+        # topology for distributed amax synchronization. We extract the TP group
+        # from torchtitan's DeviceMesh and set it on each inserted QuantModule.
+        tp_mesh = self.parallel_dims.get_optional_mesh("tp")
+        tp_group = tp_mesh.get_group() if tp_mesh is not None else -1
+        tp_parallel_state = ParallelState(
+            data_parallel_group=None,
+            tensor_parallel_group=tp_group,
+        )
+
+        # Suppress the default parallel_state warning during quantize() — we
+        # set the correct TP group immediately after module insertion.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*no parallel_state is set.*")
+            for model in self.model_parts:
+                mtq.quantize(model, quant_cfg, forward_loop)
+
+        # Set TP parallel state on all inserted quantized modules
+        for model in self.model_parts:
+            for module in model.modules():
+                if isinstance(module, QuantModule):
+                    module.parallel_state = tp_parallel_state
+
+        # Print summary on rank 0
+        if torch.distributed.get_rank() == 0:
+            for model in self.model_parts:
+                mtq.print_quant_summary(model)
+
+        logger.info(
+            "QAT: Quantization applied, training will proceed with fake-quant ops"
+        )
+
     @record
     def train(self):
         job_config = self.job_config
 
         self.checkpointer.load(step=job_config.checkpoint.load_step)
+
+        # Sync CPU optimizer shadow params after checkpoint loading
+        # This is critical for CPUOffloadOptimizer which creates CPU copies during __init__
+        # before checkpoint loading happens. Without this, the CPU optimizer uses random init
+        # values and corrupts the model on the first optimizer.step().
+        if hasattr(self.optimizers, "sync_params_gpu_to_cpu"):
+            self.optimizers.sync_params_gpu_to_cpu()
+
+        # Apply QAT fake-quantization after weights are loaded but before training
+        if job_config.qat.enable:
+            self._setup_qat()
+
         logger.info(f"Training starts at step {self.step + 1}")
 
         with (
@@ -706,9 +913,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 )
 
                 # Run validation if validator is available
-                if (
-                    self.job_config.validation.enable
-                    and self.validator.should_validate(self.step)
+                if self.job_config.validation.enable and self.validator.should_validate(
+                    self.step
                 ):
                     self.validator.validate(self.model_parts, self.step)
 
@@ -742,7 +948,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # Store RoPE parameters for validation on resume (model-agnostic)
         rope_params = {}
-        for param in ("rope_theta", "rope_factor", "ntk_alpha", "ntk_beta", "original_seq_len"):
+        for param in (
+            "rope_theta",
+            "rope_factor",
+            "ntk_alpha",
+            "ntk_beta",
+            "original_seq_len",
+        ):
             if hasattr(self.model_args, param):
                 rope_params[param] = getattr(self.model_args, param)
         if rope_params:
@@ -764,15 +976,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     # Use tolerance for float comparison
                     if isinstance(saved_value, float):
                         if abs(saved_value - current_value) > 1e-6:
-                            mismatches.append(f"{param}: checkpoint={saved_value} vs config={current_value}")
+                            mismatches.append(
+                                f"{param}: checkpoint={saved_value} vs config={current_value}"
+                            )
                     elif saved_value != current_value:
-                        mismatches.append(f"{param}: checkpoint={saved_value} vs config={current_value}")
+                        mismatches.append(
+                            f"{param}: checkpoint={saved_value} vs config={current_value}"
+                        )
 
             if mismatches:
                 raise ValueError(
-                    "RoPE parameter mismatch between checkpoint and current config:\n" +
-                    "\n".join(f"  - {m}" for m in mismatches) +
-                    "\n\nEnsure your TOML config matches the checkpoint's RoPE settings."
+                    "RoPE parameter mismatch between checkpoint and current config:\n"
+                    + "\n".join(f"  - {m}" for m in mismatches)
+                    + "\n\nEnsure your TOML config matches the checkpoint's RoPE settings."
                 )
 
     def close(self) -> None:
@@ -812,12 +1028,12 @@ def main(trainer_class: type[Trainer]) -> None:
             return
 
         if config.checkpoint.create_seed_checkpoint:
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
-            assert (
-                config.checkpoint.enable
-            ), "Must enable checkpointing when creating a seed checkpoint."
+            assert int(os.environ["WORLD_SIZE"]) == 1, (
+                "Must create seed checkpoint using a single device, to disable sharding."
+            )
+            assert config.checkpoint.enable, (
+                "Must enable checkpointing when creating a seed checkpoint."
+            )
             trainer.checkpointer.save(curr_step=0, last_step=True)
             logger.info("Created seed checkpoint")
         else:

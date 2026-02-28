@@ -18,10 +18,18 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
 def cross_entropy_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Cross-entropy loss with sum reduction for token-based normalization."""
+    """Cross-entropy loss with sum reduction for token-based normalization.
+
+    Accepts either 3D pred [B, S, V] (flattened internally) or pre-flattened
+    2D pred [B*S, V]. Pre-flattening avoids torch.compile recompilation when
+    B and S vary across micro-steps (dynamic batching).
+    """
+    if pred.dim() == 3:
+        pred = pred.flatten(0, 1)
+        labels = labels.flatten(0, 1)
     return torch.nn.functional.cross_entropy(
-        pred.flatten(0, 1).float(),
-        labels.flatten(0, 1),
+        pred.float(),
+        labels,
         reduction="sum",
         ignore_index=IGNORE_INDEX,
     )

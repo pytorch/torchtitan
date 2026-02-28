@@ -50,13 +50,14 @@ gptoss_configs = {
             num_experts=32,
             num_shared_experts=0,
             score_func="softmax",
-            route_norm=True,
+            route_norm=False,  # GPT-OSS doesn't use route normalization
             route_scale=1.0,
             gate_bias=True,
             score_before_experts=False,
             top_k=4,
             use_grouped_mm=True,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=1e-2,
+            use_expert_bias=True,  # GPT-OSS models have learned expert biases
         ),
     ),
     "120b": GptOssModelArgs(
@@ -65,13 +66,14 @@ gptoss_configs = {
             num_experts=128,
             num_shared_experts=0,
             score_func="softmax",
-            route_norm=True,
+            route_norm=False,  # GPT-OSS doesn't use route normalization
             route_scale=1.0,
             gate_bias=True,
             score_before_experts=False,
             top_k=4,
             use_grouped_mm=True,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,  # Disabled for fine-tuning
+            use_expert_bias=True,  # GPT-OSS models have learned expert biases
         ),
     ),
 }

@@ -164,6 +164,88 @@ class Optimizer:
     register_post_accumulate_grad_hook after the optimizer is built.
     """
 
+    cpu_offload: bool = False
+    """
+    Whether to offload optimizer state and computation to CPU using DeepSpeed's
+    CPUAdam. This reduces GPU memory usage by keeping optimizer states (momentum,
+    variance) on CPU. Useful for training larger models or on systems where CPU
+    memory is abundant. Requires: pip install deepspeed
+    """
+
+    lr_multipliers: "LRMultipliers" = field(default_factory=lambda: LRMultipliers())
+    """Per-group learning rate multipliers for fine-grained control over parameter updates"""
+
+    weight_decay_multipliers: "WeightDecayMultipliers" = field(
+        default_factory=lambda: WeightDecayMultipliers()
+    )
+    """Per-group weight decay multipliers. Use 0.0 for embeddings, output, norms, biases."""
+
+
+@dataclass
+class LRMultipliers:
+    """Learning rate multipliers for different parameter groups.
+
+    Each multiplier is applied to the base learning rate to compute the
+    effective learning rate for that parameter group.
+
+    Example: base_lr=1e-5, experts=2.0 → experts get lr=2e-5
+    """
+
+    embeddings: float = 1.0
+    """Multiplier for embedding layer (tok_embeddings.weight)"""
+
+    output: float = 1.0
+    """Multiplier for output layer (output.weight, norm.weight - final RMSNorm before output)"""
+
+    attention: float = 1.0
+    """Multiplier for attention layers (wq, wk, wv, wo projections and sinks)"""
+
+    experts: float = 1.0
+    """Multiplier for MoE expert weights (mlp1/mlp2 weights and biases)"""
+
+    routers: float = 1.0
+    """Multiplier for MoE router/gate layers"""
+
+    norms: float = 1.0
+    """Multiplier for normalization layers (attention_norm, ffn_norm)"""
+
+    bias: float = 1.0
+    """Multiplier for all bias parameters. Bias parameters are matched first,
+    so this takes precedence over layer-specific multipliers for bias terms."""
+
+
+@dataclass
+class WeightDecayMultipliers:
+    """Weight decay multipliers for different parameter groups.
+
+    Each multiplier is applied to the base weight_decay to compute the
+    effective weight decay for that parameter group. Use 0.0 to disable
+    weight decay for specific groups (recommended for embeddings, norms, biases).
+
+    Example: base weight_decay=0.1, embeddings=0.0 → embeddings get wd=0
+    """
+
+    embeddings: float = 1.0
+    """Multiplier for embedding layer (recommend 0.0)"""
+
+    output: float = 1.0
+    """Multiplier for output layer and final norm (recommend 0.0)"""
+
+    attention: float = 1.0
+    """Multiplier for attention layers (wq, wk, wv, wo projections)"""
+
+    experts: float = 1.0
+    """Multiplier for MoE expert weights"""
+
+    routers: float = 1.0
+    """Multiplier for MoE router/gate layers"""
+
+    norms: float = 1.0
+    """Multiplier for normalization layers (recommend 0.0)"""
+
+    bias: float = 1.0
+    """Multiplier for all bias parameters (recommend 0.0)"""
+
 
 @dataclass
 class LRScheduler:
@@ -331,7 +413,39 @@ class Training:
     """
     Enable loss masking for non-assistant tokens (Harmony format).
     When True, only assistant response tokens contribute to the loss.
-    Requires pack_samples=True or pad_samples=True.
+    Requires pack_samples=True, pad_samples=True, or dynamic_batch=True.
+    """
+
+    dynamic_batch: bool = False
+    """
+    Enable dynamic batching with ordered greedy packing. Documents are
+    processed in dataset order (preserving curriculum), greedily packed
+    into micro-batches where batch_size * padded_len <= token_budget,
+    and padded to calibrated alignment levels. Mutually exclusive with
+    pack_samples and pad_samples.
+    """
+
+    dynamic_batch_alignment: int = 128
+    """
+    Base alignment granularity for dynamic batching. All padded lengths
+    are rounded up to multiples of this value. Must be divisible by
+    seq_len_divisor (= TP * 2 * CP) and >= FlexAttention BLOCK_SIZE (128).
+    """
+
+    dynamic_batch_max_levels: int = 12
+    """
+    Maximum number of distinct alignment levels (padded lengths).
+    Fewer levels = fewer FlexAttention recompilations but more padding.
+    Levels are auto-calibrated from the data distribution using
+    quantile-based selection.
+    """
+
+    dynamic_batch_buckets: list[int] = field(default_factory=list)
+    """
+    Manual override for alignment levels. If non-empty, these are used
+    instead of auto-calibration. Each value must be a multiple of
+    dynamic_batch_alignment. Only values <= max_level (seq_len rounded
+    up to alignment) are used.
     """
 
     freeze_router_bias: bool = False
@@ -342,8 +456,20 @@ class Training:
 
     freeze_expert_bias: bool = False
     """
-    Freeze the expert bias buffer (layers.*.moe.expert_bias).
-    This is the load-balancing bias; freezing prevents it from adapting during training.
+    Freeze the expert MLP bias parameters (layers.*.moe.experts.mlp1_bias, mlp2_bias).
+    These are the learned biases in the expert feed-forward layers loaded from pretrained models.
+    Use this to prevent the expert biases from changing during fine-tuning.
+    """
+
+    expert_orthogonality_coeff: float = 0.0
+    """
+    Coefficient for expert output orthogonality loss. When > 0, adds an auxiliary
+    loss that penalizes cosine similarity between the outputs of the top-k experts
+    selected for each token, encouraging expert specialization during SFT.
+    The total auxiliary loss is summed across all MoE layers (24 for 20B, 36 for 120B),
+    so the effective per-layer weight is this value.
+    Disabled by default (0.0). Typical range: 0.001 - 0.01.
+    See: "Advancing Expert Specialization for Better MoE" (arXiv:2505.22323)
     """
 
 
@@ -875,6 +1001,24 @@ class Quantize:
 
 
 @dataclass
+class QAT:
+    enable: bool = False
+    """Whether to enable Quantization-Aware Training via ModelOpt (modelopt.torch.quantization)."""
+
+    config: str = "MXFP4_MLP_WEIGHT_ONLY_CFG"
+    """
+    ModelOpt quantization config name. Applied via mtq.quantize() to insert fake-quantization
+    ops into the model before training. Supported configs include:
+    MXFP4_MLP_WEIGHT_ONLY_CFG, NVFP4_MLP_WEIGHT_ONLY_CFG, NVFP4_MLP_ONLY_CFG
+    """
+
+    calib_steps: int = 10
+    """Number of calibration forward passes to run before training begins.
+    These passes collect activation statistics (amax values) used to set quantization scales.
+    Weight-only configs (MXFP4/NVFP4_MLP_WEIGHT_ONLY) need fewer steps than activation configs."""
+
+
+@dataclass
 class Comm:
     init_timeout_seconds: int = 300
     """Timeout for communication operations, during initialization and first train step."""
@@ -1015,9 +1159,9 @@ class Validation:
     """DataLoader configuration"""
 
     def __post_init__(self):
-        assert (
-            self.steps > 0 or self.steps == -1
-        ), "validation steps must be positive or -1"
+        assert self.steps > 0 or self.steps == -1, (
+            "validation steps must be positive or -1"
+        )
 
 
 @dataclass
@@ -1055,6 +1199,7 @@ class JobConfig:
     )
     compile: Compile = field(default_factory=Compile)
     quantize: Quantize = field(default_factory=Quantize)
+    qat: QAT = field(default_factory=QAT)
     comm: Comm = field(default_factory=Comm)
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)

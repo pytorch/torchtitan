@@ -235,6 +235,19 @@ class ConfigManager:
                 str_from_instance=lambda instance: [",".join(instance)],
             )
 
+        @registry.primitive_rule
+        def list_int_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
+            """Support for comma separated int list parsing"""
+            if type_info.type != list[int]:
+                return None
+            return tyro.constructors.PrimitiveConstructorSpec(
+                nargs=1,
+                metavar="N,N,N,...",
+                instance_from_str=lambda args: [int(x) for x in args[0].split(",")],
+                is_instance=lambda instance: all(isinstance(i, int) for i in instance),
+                str_from_instance=lambda instance: [",".join(str(i) for i in instance)],
+            )
+
 
 # Initialize the custom registry for tyro
 custom_registry = tyro.constructors.ConstructorRegistry()
@@ -254,7 +267,6 @@ if __name__ == "__main__":
     # -----------------------------------------------------------------------------
 
     try:
-
         # pyrefly: ignore[missing-import]
         from rich import print as rprint
 
