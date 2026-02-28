@@ -7,11 +7,9 @@
 import os
 import pickle
 import time
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
-from torch.autograd import DeviceType
 
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
@@ -19,119 +17,6 @@ from torchtitan.tools.utils import device_module
 
 # how much memory allocation/free ops to record in memory snapshots
 MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
-
-_COMM_KEYWORDS: tuple[str, ...] = ("nccl",)
-_COMPUTE_KEYWORDS: tuple[str, ...] = (
-    "gemm",
-    "aten",
-    "cublas",
-    "cutlass",
-    "cudnn",
-    "triton",
-    "flash",
-)
-
-
-def _union_us(intervals: list[tuple[float, float]]) -> float:
-    """Return the total duration covered by the union of the given intervals.
-
-    Args:
-        intervals: A list of ``(start, end)`` tuples in microseconds.
-
-    Returns:
-        Total microseconds covered after merging all overlapping/adjacent
-        intervals.  Returns ``0.0`` for an empty input.
-    """
-    if not intervals:
-        return 0.0
-    sorted_ivs = sorted(intervals, key=lambda x: x[0])
-    merged_start, merged_end = sorted_ivs[0]
-    total = 0.0
-    for start, end in sorted_ivs[1:]:
-        if start <= merged_end:
-            merged_end = max(merged_end, end)
-        else:
-            total += merged_end - merged_start
-            merged_start, merged_end = start, end
-    total += merged_end - merged_start
-    return total
-
-
-class ProfileAnalyzer(ABC):
-    """Abstract base class for profiler trace analyzers.
-
-    Implement this interface to create custom analyzers that run automatically
-    after each profiler trace is exported.
-    """
-
-    @abstractmethod
-    def analyze(self, prof: torch.profiler.profile) -> None:
-        """Analyze a completed profiler trace.
-
-        Args:
-            prof: A ``torch.profiler.profile`` object with collected trace data.
-        """
-        ...
-
-
-class CommsComputeOverlapAnalyzer(ProfileAnalyzer):
-    """Analyzes compute-communication overlap from a PyTorch profiler trace.
-
-    Computes overlap efficiency: the fraction of NCCL communication time that
-    runs concurrently with compute kernels. Values close to 100% indicate
-    optimal overlap; values near 0% indicate the workload is communication bound.
-
-    The analysis collects raw CUDA kernel events from ``prof.events()``,
-    classifies each by name into compute or NCCL categories, and computes the
-    union of their wall-clock time intervals using :func:`_union_us`.  Overlap
-    is then derived as ``compute_us + comm_us - active_us``, where
-    ``active_us`` is the union across both categories.  This gives a precise,
-    stream-aware measurement: concurrent kernels on different CUDA streams are
-    deduplicated, and GPU idle time is excluded from the active window
-    automatically.  Unlike aggregated kernel statistics, no post-hoc correction
-    is needed.
-    """
-
-    def analyze(self, prof: torch.profiler.profile) -> None:
-        """Run overlap analysis and log a summary to the console."""
-        comm_intervals: list[tuple[float, float]] = []
-        compute_intervals: list[tuple[float, float]] = []
-
-        events = prof.events() or []
-        for evt in events:
-            if evt.device_type != DeviceType.CUDA:
-                continue
-            name_lower = evt.name.lower()
-            interval = (evt.time_range.start, evt.time_range.end)
-            if any(kw in name_lower for kw in _COMM_KEYWORDS):
-                comm_intervals.append(interval)
-            elif any(kw in name_lower for kw in _COMPUTE_KEYWORDS):
-                compute_intervals.append(interval)
-
-        if not comm_intervals:
-            logger.info(
-                "[CommsComputeOverlapAnalyzer] No NCCL kernels found in trace. "
-                "Skipping overlap report."
-            )
-            return
-
-        compute_us = _union_us(compute_intervals)
-        comm_us = _union_us(comm_intervals)
-        active_us = _union_us(compute_intervals + comm_intervals)
-
-        raw_overlap = compute_us + comm_us - active_us
-        overlap_pct = max(0.0, min(raw_overlap / comm_us * 100.0, 100.0))
-
-        unoverlapped_comm_pct = 100.0 - overlap_pct
-
-        logger.info(
-            "[CommsComputeOverlapAnalyzer] Compute-Communication Overlap Report\n"
-            f"  Total Compute Time               : {compute_us / 1e3:.2f} ms\n"
-            f"  Total NCCL Time                  : {comm_us / 1e3:.2f} ms\n"
-            f"  Total Active Time                : {active_us / 1e3:.2f} ms\n"
-            f"  Overlap Efficiency               : {overlap_pct:.1f} %\n"
-            f"  GPU Unutilized due to NCCL comms : {unoverlapped_comm_pct:.1f} %"
-        )
 
 
 class MemoryProfiler:
@@ -191,10 +76,6 @@ class MemoryProfiler:
 class Profiler(Configurable):
     """Owns profiling and memory snapshot lifecycle for a training run.
 
-    If ``config.enable_overlap_analysis`` is ``True``, a
-    :class:`CommsComputeOverlapAnalyzer` is automatically added to the internal
-    analyzers list and run after each trace export.
-
     Example::
 
         with Profiler(config, global_step=step, base_folder=folder) as prof:
@@ -204,7 +85,11 @@ class Profiler(Configurable):
 
     Args:
         config: A ``Profiler.Config`` instance.
-        global_step: Starting training step (used to align the profiler schedule).
+        global_step: The training step at which profiling begins.  When
+            resuming from a checkpoint this should be the loaded step so that
+            trace directories are named correctly (e.g. ``iteration_100``
+            instead of ``iteration_0``) and memory-snapshot frequency alignment
+            is preserved.
         base_folder: Root directory for profiler trace and memory snapshot output.
         leaf_folder: Optional subdirectory appended to trace/snapshot paths
             (e.g. per-replica folder in fault-tolerant training).
@@ -241,16 +126,6 @@ class Profiler(Configurable):
         save_memory_snapshot_folder: str = "memory_snapshot"
         """Memory snapshot files location."""
 
-        enable_overlap_analysis: bool = False
-        """
-        Enable compute-communication overlap analysis after each profiler trace.
-
-        When set to true, a CommsComputeOverlapAnalyzer is run after each trace
-        export to report compute-communication overlap efficiency. This is only
-        active when profiling is enabled and the process group is initialized
-        (distributed run).
-        """
-
     def __init__(
         self,
         config: Config,
@@ -260,10 +135,6 @@ class Profiler(Configurable):
         leaf_folder: str = "",
     ) -> None:
         self._config = config
-        self._analyzers: list[ProfileAnalyzer] = []
-        if config.enable_overlap_analysis:
-            self._analyzers.append(CommsComputeOverlapAnalyzer())
-        # TODO: support list[ProfileAnalyzer.Config] in Profiler.Config for extensible analyzers
         self._global_step = global_step
         self._base_folder = base_folder
         self._leaf_folder = leaf_folder
@@ -324,13 +195,6 @@ class Profiler(Configurable):
         )
 
         rank = torch.distributed.get_rank()
-        # TODO: For asymmetric workloads (e.g. MoE), consider aggregating
-        # overlap stats across ranks rather than reporting only rank 0.
-        run_diagnostics = (
-            bool(self._analyzers)
-            and torch.distributed.is_initialized()
-            and rank == 0
-        )
 
         def trace_handler(prof):
             curr_trace_dir_name = "iteration_" + str(prof.step_num)
@@ -346,10 +210,6 @@ class Profiler(Configurable):
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
             )
-
-            if run_diagnostics:
-                for analyzer in self._analyzers:
-                    analyzer.analyze(prof)
 
         logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
 
@@ -401,4 +261,6 @@ class Profiler(Configurable):
         rank = torch.distributed.get_rank()
 
         logger.info(f"Memory profiler active. Snapshot will be saved at {snapshot_dir}")
-        return MemoryProfiler(global_step, cfg.profile_freq, snapshot_dir, leaf_folder, rank)
+        return MemoryProfiler(
+            global_step, cfg.profile_freq, snapshot_dir, leaf_folder, rank
+        )
