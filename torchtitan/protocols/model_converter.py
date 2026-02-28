@@ -4,10 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 from dataclasses import dataclass, field
-from typing import ClassVar, Protocol
+from typing import Protocol
 
 import torch.nn as nn
 
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
@@ -29,18 +30,6 @@ class ModelConverter(Protocol):
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
         """Post-optimizer (optional) hook (e.g. compute weights statistics)."""
         ...
-
-
-class QuantizationConverter(Configurable):
-    """Base class for quantization converters (FP8, MX, etc.).
-
-    All quantization converter classes should inherit from this so they can be
-    identified via isinstance checks.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        _quantization_type: ClassVar[str]
 
 
 class ModelConvertersContainer(Configurable, ModelConverter):

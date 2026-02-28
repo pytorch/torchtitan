@@ -113,15 +113,11 @@ def get_peak_flops(device_name: str) -> float:
         # Ref: https://www.tomshardware.com/news/
         # nvidias-latest-regulation-compliant-gpu-for-china-has-been-delayed-to-early-next-year
         return 148e12
-    elif "GB300" in device_name:
-        # Grace Blackwell Ultra Superchip (Grace CPU + Blackwell Ultra GPU)
+    elif "GB200" in device_name or "GB300" in device_name:
+        # Grace Blackwell Superchips (Grace CPU + Blackwell GPU)
         # BF16 dense per GPU: 2,500 TFLOPS (half of 5,000 TFLOPS with sparsity)
-        # data from https://www.nvidia.com/en-us/data-center/dgx-gb300
-        return 2.5e15
-    elif "GB200" in device_name:
-        # Grace Blackwell Superchip (Grace CPU + Blackwell GPU)
-        # BF16 dense per GPU: 2,500 TFLOPS (10 PFLOPS for 2 GPUs with sparsity / 2 / 2)
-        # data from https://www.nvidia.com/en-us/data-center/dgx-gb200
+        # GB200 data from https://www.nvidia.com/en-us/data-center/dgx-gb200
+        # GB300 data from https://www.nvidia.com/en-us/data-center/dgx-gb300
         return 2.5e15
     elif "B200" in device_name:
         # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703

@@ -10,11 +10,13 @@ from typing import ClassVar, Literal
 import torch
 import torch._inductor.config
 import torch.nn as nn
-from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.components.quantization import (
+    FP8_GROUP_ALIGNMENT_SIZE,
+    QuantizationConverter,
+)
 
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
-from torchtitan.protocols.model_converter import QuantizationConverter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
