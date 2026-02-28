@@ -13,15 +13,18 @@ class Configurable:
 
     Every configurable class:
     - Inherits from Configurable (or Module for nn.Module components)
-    - Defines a nested Config(Configurable.Config) with @dataclass(kw_only=True, slots=True)
+    - Defines a nested Config(Configurable.Config) with
+      @dataclass(kw_only=True, slots=True)
     - Gets build() auto-wired via __init_subclass__ (no manual override needed)
-    - Accepts __init__(self, config: Config) or __init__(self, config: Config, **runtime_kwargs)
+    - Accepts __init__(self, config: Config) or
+      __init__(self, config: Config, **runtime_kwargs)
       We will deprecate the later usage once we migrate all components to make
       all required fields in config.
 
     build() auto-detects kwargs mode:
-    - All kwargs are config fields → absorbed into a cloned config, __init__ gets only config.
-    - All kwargs are NOT config fields → forwarded to __init__ as keyword arguments.
+    - All kwargs are config fields -> absorbed into a cloned config, __init__ gets only
+      config.
+    - All kwargs are NOT config fields -> forwarded to __init__ as keyword arguments.
     - Mixed → raises TypeError.
 
     Fields that are supplied at ``build()`` time should use
@@ -49,16 +52,18 @@ class Configurable:
             """
             clone = replace(self)
             for f in fields(self):
-                if not f.init:
-                    if f.name in overrides:
-                        setattr(clone, f.name, overrides[f.name])
-                    elif hasattr(self, f.name):
-                        setattr(clone, f.name, getattr(self, f.name))
-                    else:
-                        raise TypeError(
-                            f"{type(self).__name__} field '{f.name}' "
-                            f"(init=False) was not provided via build()"
-                        )
+                if f.init:
+                    continue
+
+                if f.name in overrides:
+                    setattr(clone, f.name, overrides[f.name])
+                elif hasattr(self, f.name):
+                    setattr(clone, f.name, getattr(self, f.name))
+                else:
+                    raise TypeError(
+                        f"{type(self).__name__} field '{f.name}' "
+                        f"(init=False) was not provided via build()"
+                    )
             return clone
 
         def build(self, **kwargs):
@@ -89,7 +94,8 @@ class Configurable:
                     if hasattr(self, key) and getattr(self, key) != value:
                         raise ValueError(
                             f"{type(self).__name__}.build() conflict for "
-                            f"'{key}': config has {getattr(self, key)!r} but got {value!r}"
+                            f"'{key}': config has {getattr(self, key)!r} "
+                            f"but got {value!r}"
                         )
                 return self._owner(config=self._replace(**kwargs))
 
