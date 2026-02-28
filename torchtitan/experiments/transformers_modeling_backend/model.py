@@ -614,7 +614,7 @@ class HFTransformerModel(BaseModel):
         # This method replicates the behavior of the original PreTrainedModel.init_weights,
         # but with a custom weight initialization function that skips nn.Identity modules (when PP is enabled)
 
-        if self.model.config.pruned_heads:
+        if getattr(self.model.config, "pruned_heads", None):
             logger.info("Pruning heads as per model configuration.")
             self.model.prune_heads(self.model.config.pruned_heads)
 
