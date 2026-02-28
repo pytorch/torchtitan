@@ -36,23 +36,17 @@ uv pip install torch vllm xformers  --pre \
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torchtitan/experiments/rl/example_checkpoint --all --hf_token=...
 ```
 
-4. Run inference:
+4. Run inference with unified model definition:
 ```bash
-python torchtitan/experiments/rl/unified/infer.py
+torchrun --nproc_per_node=<world_size> \
+      torchtitan/experiments/rl/unified/inference_example.py
 ```
 
-Run with TP:
-```bash
-python torchtitan/experiments/rl/unified/infer.py --tensor-parallel-size 2
-
+5. Run simple GRPO rl loop
 ```
-
-5. Run simple rl loop
-```bash
-VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
+python3 torchtitan/experiments/rl/unified/simple_grpo.py --module rl.unified --config rl_grpo_qwen3_0_6b --hf_assets_path=<path_to_model_checkpoint>
 ```
-Right now we only support VLLM_COMPAT mode, which could achieve trainer and generator bitwise identical. We are working on support UNIFIED mode,
-which uses a unified model definition for trainer and generator.
+We use a unified model definition for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 
 ## TODO
 Work on batch invariance:
@@ -62,10 +56,10 @@ Work on batch invariance:
 
 Work on the RL loop:
 1. Design trainer API and integrate with [train.py](https://github.com/pytorch/torchtitan/blob/main/torchtitan/train.py#L475)
-2. Remove hardcoded configs and dependency on Qwen3 Model. Use torchtitan's config/ModelSpec instead, to work with any model.
+2. Remove hardcoded configs and dependency on Qwen3 Model. Use torchtitan's config/TrainSpec instead, to work with any model.
 3. Need to load the gsm8k dataset using TorchTitan dataset.
 4. Need to properly implement weight saving and loading using TorchTitan's checkpoint mechanism, or use TorchStore. Also need to
     replace `vllm_to_torchtitan` and `torchtitan_to_vllm` calls to TorchTitan [state dict adaptor](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/qwen3/model/state_dict_adapter.py).
 5. Right now we only support trainer run on multiple processes using DDP, and generator using TP, need to onboard more parallelism.
 6. Right now we only support VLLM_COMPAT mode to achieve batch invariance and bitwise determinism, need to support UNIFIED mode.
-7. In the longer term, need to add trajectory queue to achieve async, right now trainer and generator are running synchronously.
+7. In the longer term, need to add episode queue to achieve async, right now trainer and generator are running synchronously.
