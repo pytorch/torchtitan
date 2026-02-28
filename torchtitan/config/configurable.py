@@ -24,10 +24,12 @@ class Configurable:
     - All kwargs are NOT config fields → forwarded to __init__ as keyword arguments.
     - Mixed → raises TypeError.
 
-    Config uses ``None`` as a sentinel for "not yet specified".  Fields that
-    should be overridable at ``build()`` time must default to ``None``.  Any
-    non-``None`` value is treated as pre-specified and will conflict if a
-    different value is passed via ``build()``.
+    Fields that are supplied at ``build()`` time should use
+    ``field(init=False)`` so they are excluded from ``Config.__init__``.
+    Pre-set values (via attribute assignment or inheritance) that conflict
+    with a ``build()`` kwarg raise ``ValueError``; matching values are
+    accepted.  The legacy ``None``-sentinel pattern (``field: type | None =
+    None``) is still supported for backward compatibility.
 
     Enforcement: Configurable.__init_subclass__ checks that every Config uses
     @dataclass(kw_only=True, slots=True). This check runs on the OUTER class
@@ -39,6 +41,27 @@ class Configurable:
     class Config:
         _owner: ClassVar[type | None] = None
 
+        def _replace(self, **overrides):
+            """Copy this config via ``replace()``, apply *overrides*, and
+            validate that every ``field(init=False)`` slot has been set.
+
+            Raises ``TypeError`` if any ``init=False`` field is neither
+            pre-set on *self* nor supplied in *overrides*.
+            """
+            clone = replace(self)
+            for f in fields(self):
+                if not f.init:
+                    if f.name in overrides:
+                        setattr(clone, f.name, overrides[f.name])
+                    elif hasattr(self, f.name):
+                        setattr(clone, f.name, getattr(self, f.name))
+                    else:
+                        raise TypeError(
+                            f"{type(self).__name__} field '{f.name}' "
+                            f"(init=False) was not provided via build()"
+                        )
+            return clone
+
         def build(self, **kwargs):
             """Construct the owning class. Auto-wired by __init_subclass__."""
             if self._owner is None:
@@ -47,7 +70,7 @@ class Configurable:
                     "Define Config inside a Configurable subclass."
                 )
             if not kwargs:
-                return self._owner(config=replace(self))
+                return self._owner(config=self._replace())
 
             config_field_names = {f.name for f in fields(self)}
             kwargs_in_config = set(kwargs) & config_field_names
@@ -64,16 +87,16 @@ class Configurable:
             if kwargs_in_config:
                 # All kwargs are config fields: validate & absorb into clone.
                 for key, value in kwargs.items():
-                    current = getattr(self, key)
+                    current = getattr(self, key, None)
                     if current is not None and current != value:
                         raise ValueError(
                             f"{type(self).__name__}.build() conflict for "
                             f"'{key}': config has {current!r} but got {value!r}"
                         )
-                return self._owner(config=replace(self, **kwargs))
+                return self._owner(config=self._replace(**kwargs))
 
             # TODO: Old style, will be deprecated.
-            return self._owner(config=replace(self), **kwargs)
+            return self._owner(config=self._replace(), **kwargs)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -87,7 +110,7 @@ class Configurable:
                         "@dataclass(kw_only=True, slots=True)"
                     )
                 for f in fields(config_cls):
-                    if not f.kw_only:
+                    if f.init and not f.kw_only:
                         raise TypeError(
                             f"{cls.__name__}.Config field '{f.name}' "
                             "must be keyword-only"

@@ -14,6 +14,8 @@ from torchtitan.protocols.module import Module
 
 from .utils import trunc_normal_
 
+__all__ = ["FeedForward", "compute_ffn_hidden_dim"]
+
 
 def compute_ffn_hidden_dim(
     dim: int,

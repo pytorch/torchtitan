@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -53,15 +54,31 @@ class TestEmbedding(unittest.TestCase):
 
     def test_config_pre_specified_build(self):
         """Embedding.Config with both fields pre-specified builds with no kwargs."""
-        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        config = Embedding.Config()
+        config.num_embeddings = 100
+        config.embedding_dim = 32
         emb = config.build()
         self.assertIsInstance(emb, Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_partial_pre_specified(self):
         """Embedding.Config with one field pre-specified, other via build()."""
-        config = Embedding.Config(num_embeddings=100)
+        config = Embedding.Config()
+        config.num_embeddings = 100
         emb = config.build(embedding_dim=32)
+        self.assertIsInstance(emb, Embedding)
+        self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
+
+    def test_config_inheritance_preset(self):
+        """Inheriting Embedding.Config can put fields back in __init__."""
+
+        @dataclass(kw_only=True, slots=True)
+        class PresetConfig(Embedding.Config):
+            num_embeddings: int = 100
+            embedding_dim: int = 32
+
+        config = PresetConfig()
+        emb = config.build()
         self.assertIsInstance(emb, Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 

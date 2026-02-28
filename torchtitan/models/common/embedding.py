@@ -4,11 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch.nn as nn
 
 from torchtitan.protocols.module import Module
+
+__all__ = ["Embedding"]
 
 
 class Embedding(nn.Embedding, Module):
@@ -20,27 +22,22 @@ class Embedding(nn.Embedding, Module):
     - The Module protocol is satisfied and ``build()`` is inherited from
       ``Configurable.Config``.
 
-    ``num_embeddings`` and ``embedding_dim`` live in ``Config`` (defaulting
-    to ``None``).  They are typically supplied via ``build()`` kwargs from
-    the parent model and passed into a cloned config.
+    ``num_embeddings`` and ``embedding_dim`` use ``field(init=False)`` so
+    they are excluded from ``Config.__init__``.  They are typically supplied
+    via ``build()`` kwargs from the parent model.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         # ``num_embeddings`` and ``embedding_dim`` are usually passed by the
-        # parent modules through build(). So the default values are None to
-        # fit Configurable.Config convention.
-        num_embeddings: int | None = None
-        embedding_dim: int | None = None
+        # parent modules through build(). Using field(init=False) excludes
+        # them from Config.__init__.
+        num_embeddings: int = field(init=False)
+        embedding_dim: int = field(init=False)
         init_mean: float = 0.0
         init_std: float = 1.0
 
     def __init__(self, config: Config):
-        if config.num_embeddings is None or config.embedding_dim is None:
-            raise TypeError(
-                "Embedding requires num_embeddings and embedding_dim. "
-                "Either set them in Config or pass them to build()."
-            )
         super().__init__(config.num_embeddings, config.embedding_dim)
         self.config = config
 
