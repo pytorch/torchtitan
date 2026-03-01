@@ -10,9 +10,11 @@ from typing import ClassVar, Literal
 import torch
 import torch._inductor.config
 import torch.nn as nn
-from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
+from torchtitan.components.quantization import (
+    FP8_GROUP_ALIGNMENT_SIZE,
+    QuantizationConverter,
+)
 
-from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
@@ -23,9 +25,9 @@ from .utils import module_filter_fn
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
-class Float8LinearConverter(Configurable):
+class Float8LinearConverter(QuantizationConverter):
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(QuantizationConverter.Config):
         _quantization_type: ClassVar[str] = "float8"
 
         enable_fsdp_float8_all_gather: bool = False
@@ -202,9 +204,9 @@ class Float8LinearConverter(Configurable):
             precompute_float8_dynamic_scale_for_fsdp(m)
 
 
-class Float8GroupedMMConverter(Configurable):
+class Float8GroupedMMConverter(QuantizationConverter):
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(QuantizationConverter.Config):
         _quantization_type: ClassVar[str] = "float8"
 
         fqns: list[str] | str = field(default_factory=list)
