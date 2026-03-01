@@ -14,7 +14,7 @@ The integration consists of two main components:
 ## Quick Start
 ### Prerequisites
 
-0. Create environment with uv:
+0. Create and activate environment with uv:
 ```bash
 uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
