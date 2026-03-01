@@ -36,8 +36,6 @@ uv pip install torch vllm xformers  --pre \
 
 **NOTE:** The pre-built vLLM wheels are only compatible with CUDA 12.8, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu128, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
 
-**NOTE:** If you run into a vLLM import error, you may have to set the LD_PRELOAD environment variable to point to libcublas.so.
-
 
 3. Install TorchTitan in editable mode:
 ```bash
@@ -55,9 +53,9 @@ torchrun --nproc_per_node=<world_size> \
       torchtitan/experiments/rl/unified/inference_example.py
 ```
 
-6. Run simple GRPO rl loop
+6. Run simple GRPO RL loop
 ```bash
-python3 torchtitan/experiments/rl/unified/simple_grpo.py --module rl.unified --config rl_grpo_qwen3_0_6b --hf_assets_path=<path_to_model_checkpoint>
+python torchtitan/experiments/rl/unified/simple_grpo.py --module rl.unified --config rl_grpo_qwen3_0_6b --hf_assets_path=<path_to_model_checkpoint>
 ```
 We use a unified model definition for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 
