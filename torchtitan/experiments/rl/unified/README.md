@@ -14,6 +14,12 @@ The integration consists of two main components:
 ## Quick Start
 ### Prerequisites
 
+0. Create and activate environment with uv:
+```bash
+uv venv --python 3.12 titan-rl
+source titan-rl/bin/activate
+```
+
 1. Install Monarch:
 ```bash
 uv pip install torchmonarch
@@ -21,7 +27,7 @@ uv pip install torchmonarch
 
 
 2. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
-```
+```bash
 # Install vllm with nightly torch
 uv pip install torch vllm xformers  --pre \
 --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
@@ -31,20 +37,25 @@ uv pip install torch vllm xformers  --pre \
 **NOTE:** The pre-built vLLM wheels are only compatible with CUDA 12.8, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu128, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
 
 
-3. Download `Qwen/Qwen3-0.6B` checkpoint from HuggingFace to `torchtitan/experiments/rl/example_checkpoint` folder.
+3. Install TorchTitan in editable mode:
+```bash
+uv pip install -e .
+```
+
+4. Download `Qwen/Qwen3-0.6B` checkpoint from HuggingFace to `torchtitan/experiments/rl/example_checkpoint` folder.
 ```bash
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torchtitan/experiments/rl/example_checkpoint --all --hf_token=...
 ```
 
-4. Run inference with unified model definition:
+5. Run inference with unified model definition:
 ```bash
 torchrun --nproc_per_node=<world_size> \
       torchtitan/experiments/rl/unified/inference_example.py
 ```
 
-5. Run simple GRPO rl loop
-```
-python3 torchtitan/experiments/rl/unified/simple_grpo.py --module rl.unified --config rl_grpo_qwen3_0_6b --hf_assets_path=<path_to_model_checkpoint>
+6. Run simple GRPO RL loop
+```bash
+python torchtitan/experiments/rl/unified/simple_grpo.py --module rl.unified --config rl_grpo_qwen3_0_6b --hf_assets_path=<path_to_model_checkpoint>
 ```
 We use a unified model definition for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 
