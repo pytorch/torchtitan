@@ -8,7 +8,7 @@ This work is inspired by https://github.com/vllm-project/vllm/pull/28685.
 The integration consists of two main components:
 
 1. **Model Adapter** (`model/qwen3.py`): A custom model class that extends vLLM's `Qwen3ForCausalLM` to handle TorchTitan checkpoint naming conventions
-2. **Inference Script** (`infer.py`): A simple script to register the model and run inference
+2. **Inference Script** (`inference_example.py`): A simple script to register the model and run inference
 
 
 ## Quick Start

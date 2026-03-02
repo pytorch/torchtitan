@@ -36,6 +36,11 @@ def generate():
     gen_config = config.generator
     model_path = config.trainer.hf_assets_path
 
+    # Override with RL-specific parallelize_fn that supports has_position_id
+    from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
+
+    config.model_spec.parallelize_fn = parallelize_qwen3
+
     # Register TorchTitan model with vLLM before engine creation
     from torchtitan.experiments.rl.unified.plugin import (
         register_model_to_vllm_model_registry,
@@ -52,7 +57,7 @@ def generate():
     )
 
     # Create EngineArgs from config
-    engine_args = EngineArgs(
+    engine_kwargs = dict(
         # Model configuration
         model=model_path,
         trust_remote_code=True,
@@ -65,11 +70,12 @@ def generate():
         # Memory and performance
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=gen_config.enforce_eager,
-        # Seed
-        seed=gen_config.seed,
         # HuggingFace overrides
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
     )
+    if gen_config.seed is not None:
+        engine_kwargs["seed"] = gen_config.seed
+    engine_args = EngineArgs(**engine_kwargs)
 
     logger.debug("Initializing LLMEngine from EngineArgs...")
     engine = LLMEngine.from_engine_args(engine_args)
