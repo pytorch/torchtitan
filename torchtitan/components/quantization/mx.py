@@ -11,7 +11,6 @@ from typing import Any, ClassVar, Literal
 
 import torch.nn as nn
 from torchtitan.components.quantization import MXFP8_GROUP_ALIGNMENT_SIZE
-
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
@@ -187,9 +186,7 @@ class MXGroupedMMConverter(Configurable):
         """
         if not self.enabled:
             return
-        from torchao.prototype.moe_training.config import (
-            MXFP8GroupedMMConfig
-        )
+        from torchao.prototype.moe_training.config import MXFP8GroupedMMConfig
         from torchao.quantization.quant_api import quantize_
 
         def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:

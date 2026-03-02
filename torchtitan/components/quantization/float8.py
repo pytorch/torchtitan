@@ -11,7 +11,6 @@ import torch
 import torch._inductor.config
 import torch.nn as nn
 from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
-
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
@@ -34,9 +33,9 @@ class Float8LinearConverter(Configurable):
         precompute_float8_dynamic_scale_for_fsdp: bool = False
         """Whether precompute float8 scales dynamically for FSDP, recommended for tensorwise scaling"""
 
-        recipe_name: Literal[
-            "tensorwise", "rowwise", "rowwise_with_gw_hp"
-        ] | None = None
+        recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = (
+            None
+        )
         """If specified, creates float8 config from recipe name"""
 
         filter_fqns: list[str] = field(default_factory=list)
@@ -253,9 +252,7 @@ class Float8GroupedMMConverter(Configurable):
         from torchao.quantization.quant_api import quantize_
 
         try:
-            from torchao.prototype.moe_training.config import (
-                FP8GroupedMMConfig,
-            )
+            from torchao.prototype.moe_training.config import FP8GroupedMMConfig
         except ImportError as e:
             raise ImportError(
                 "torchao installation does not have MoE training support. Please install torchao nightly build."
