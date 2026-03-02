@@ -125,6 +125,7 @@ def autopipe_partition(model: nn.Module, num_stages: int, job_config: JobConfig)
         mflops_fwd,
         mflops_bwd,
         num_stages,
+        2 * num_stages,
     )
     parts.append(len(model))  # Add the total number of layers
     return parts

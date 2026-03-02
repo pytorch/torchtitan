@@ -96,10 +96,11 @@ def _calc_stage_times(
     fwd: list[int],
     bwd: list[int],
     last_mb: list[int],
+    num_micro: int, 
 ):
     """C++ calculate_stage_times"""
     num_stages = len(partition)
-    num_micro = num_stages * 2
+    # num_micro = num_stages * 2
     for i in range(num_stages):
         last_mb[i] = num_micro - num_stages + i
 
@@ -111,11 +112,11 @@ def _calc_stage_times(
 
 
 def _steady_phase(
-    last_mb: list[int], fwd: list[int], bwd: list[int]
+    last_mb: list[int], fwd: list[int], bwd: list[int], num_micro: int
 ) -> tuple[int, int]:
     """C++ calculate_steady_phase"""
     num_stages = len(last_mb)
-    num_micro = num_stages * 2
+    # num_micro = num_stages * 2
 
     dp = [[[0, 0] for _ in range(num_micro)] for __ in range(num_stages + 2)]
 
@@ -206,7 +207,7 @@ def _cooldown(
 
 
 def _training_time(
-    partition: list[list[int]], block_time: list[list[int]]
+    partition: list[list[int]], block_time: list[list[int]], num_micro: int, 
 ) -> tuple[int, int]:
     """C++ calculate_training_time"""
     num_stages = len(partition)
@@ -219,7 +220,7 @@ def _training_time(
         fwd[i + 1] = sum(block_time[0][b] for b in partition[i])
         bwd[i + 1] = sum(block_time[1][b] for b in partition[i])
 
-    steady_time, critical = _steady_phase(last_mb, fwd, bwd)
+    steady_time, critical = _steady_phase(last_mb, fwd, bwd, num_micro)
     if steady_time == MAX_INT64:
         raise RuntimeError("Failed to calculate steady phase")
 
@@ -238,6 +239,7 @@ def _find_best(
     init_partition: list[list[int]],
     prefix_sum: list[int],
     dp: list[list[int]],
+    num_micro: int,
 ) -> dict:
     """
     C++ find_best_partition
@@ -258,8 +260,8 @@ def _find_best(
         last_mb = [0] * num_stages
         fwd = [0] * (num_stages + 2)
         bwd = [0] * (num_stages + 2)
-        _calc_stage_times(cur, block_time, fwd, bwd, last_mb)
-        cost, critical = _training_time(cur, block_time)
+        _calc_stage_times(cur, block_time, fwd, bwd, last_mb, num_micro)
+        cost, critical = _training_time(cur, block_time, num_micro)
 
         # update best
         if cost < best["cost"]:
@@ -303,7 +305,7 @@ def _find_best(
 
 # ---------- main ----------
 def auto_partition(
-    forward_times: list[int], backward_times: list[int], num_stages: int
+    forward_times: list[int], backward_times: list[int], num_stages: int, num_micro: int, 
 ) -> list[int]:
 
     if not forward_times or not backward_times:
@@ -321,7 +323,7 @@ def auto_partition(
     dp: list[list[int]] = []
     _prefix_sum_and_dp(model, num_stages, block_time, prefix_sum, dp)
 
-    best = _find_best(block_time, num_stages, init_partition, prefix_sum, dp)
+    best = _find_best(block_time, num_stages, init_partition, prefix_sum, dp, num_micro)
 
     result = [stage[0] for stage in best["partition"]]
     return result
@@ -334,8 +336,9 @@ if __name__ == "__main__":
         fwd_flops = [10, 20, 30, 15, 25]  # five block
         bwd_flops = [10, 20, 30, 15, 25]
         for stages in 1, 2, 3, 4, 5:
-            test_out = auto_partition(fwd_flops, bwd_flops, stages)
-            print(f"stages={stages}, result={test_out}, len={len(test_out)}")
+            for num_micro in 2 * stages, 3 * stages, 4 * stages:
+                test_out = auto_partition(fwd_flops, bwd_flops, stages, num_micro)
+                print(f"stages={stages}, num_micro={num_micro}, result={test_out}, len={len(test_out)}")
 
     except Exception as e:
         traceback.print_exc()
