@@ -36,7 +36,8 @@ def generate():
     gen_config = config.generator
     model_path = config.trainer.hf_assets_path
 
-    # Override with RL-specific parallelize_fn that supports has_position_id
+    # Patch model_spec to use the RL-specific parallelize function.
+    # TODO: Switch to canonical Qwen3 parallel plan
     from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
 
     config.model_spec.parallelize_fn = parallelize_qwen3
