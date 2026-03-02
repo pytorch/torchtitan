@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 import torch
 
 from monarch.actor import this_host
-from monarch.utils import setup_env_for_distributed
+from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import Configurable
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
@@ -124,7 +124,7 @@ class RLTrainer(Configurable):
         )
 
         # Set up distributed env vars so that actors are connected via c10d
-        await setup_env_for_distributed(
+        await setup_torch_elastic_env_async(
             trainer_mesh,
             master_addr="localhost",  # TODO: figure out what to set
             master_port=29501,  # TODO: figure out what to set
