@@ -11,15 +11,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-# Following HF transformers convention (CHAT_TEMPLATE_FILE in transformers/utils/hub.py),
-# a standalone Jinja file at the model root takes priority over an inline template in
-# tokenizer_config.json. Models like GPT-OSS use this pattern.
-CHAT_TEMPLATE_FILE = "chat_template.jinja"
-
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
-from typing_extensions import override
 
 
 class BaseTokenizer(ABC, Configurable):
@@ -62,6 +56,10 @@ class BaseTokenizer(ABC, Configurable):
         ] = raise_exception  # pyrefly: ignore [unsupported-operation]
         self._chat_template = env.from_string(template)
 
+    def _validate_messages(self, messages: list[dict[str, Any]]) -> None:
+        """Validate messages before rendering. Override in subclasses to add validation."""
+        pass
+
     def apply_chat_template(self, messages: list[dict[str, str]], **kwargs) -> str:
         """Render messages through the Jinja chat template. Returns formatted text.
 
@@ -71,6 +69,7 @@ class BaseTokenizer(ABC, Configurable):
         Additional template variables (e.g. add_generation_prompt, tools) can be
         passed as kwargs.
         """
+        self._validate_messages(messages)
         if self._chat_template is None:
             raise ValueError("No chat template set. Call set_chat_template() first.")
         return self._chat_template.render(messages=messages, **kwargs)
@@ -89,6 +88,22 @@ class HuggingFaceTokenizer(BaseTokenizer):
         config (Config): Configurable config (currently empty).
         tokenizer_path (str): Path to directory containing tokenizer files
     """
+
+    # Following HF transformers convention (CHAT_TEMPLATE_FILE in transformers/utils/hub.py),
+    # a standalone Jinja file at the model root takes priority over an inline template in
+    # tokenizer_config.json. Models like GPT-OSS use this pattern.
+    CHAT_TEMPLATE_FILE = "chat_template.jinja"
+
+    # Valid message schema following HF chat content patterns:
+    # https://huggingface.co/docs/transformers/en/chat_content_patterns
+    VALID_ROLES = {"system", "user", "assistant", "tool"}
+    VALID_CONTENT_TYPES = {"text", "image", "video", "audio"}
+    ALLOWED_KEYS: dict[str, set[str]] = {
+        "system": {"role", "content"},
+        "user": {"role", "content"},
+        "assistant": {"role", "content", "tool_calls"},
+        "tool": {"role", "content", "name", "tool_call_id"},
+    }
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseTokenizer.Config):
@@ -126,7 +141,7 @@ class HuggingFaceTokenizer(BaseTokenizer):
         # Auto-load chat template: standalone .jinja file takes priority
         # (e.g. GPT-OSS), then fall back to inline in tokenizer_config.json
         # (e.g. Llama3, Qwen3, DeepSeek V3).
-        jinja_path = os.path.join(tokenizer_path, CHAT_TEMPLATE_FILE)
+        jinja_path = os.path.join(tokenizer_path, self.CHAT_TEMPLATE_FILE)
         if os.path.exists(jinja_path):
             with open(jinja_path) as f:
                 self.set_chat_template(f.read())
@@ -429,7 +444,6 @@ class HuggingFaceTokenizer(BaseTokenizer):
 
         return token_ids
 
-    @override
     def decode(self, *args, **kwargs) -> str:
         """
         Decode token IDs back to text.
@@ -472,3 +486,97 @@ class HuggingFaceTokenizer(BaseTokenizer):
     def id_to_token(self, token_id: int) -> str | None:
         """Convert ID to token."""
         return self.tokenizer.id_to_token(token_id)
+
+    def _validate_messages(self, messages: list[dict[str, Any]]) -> None:
+        """Validate messages follow the HF chat content patterns spec.
+
+        Checks message types, roles, allowed keys per role, required fields,
+        and content block structure (text, image, video, audio).
+
+        Raises TypeError or ValueError with a descriptive message on failure.
+        """
+        for i, msg in enumerate(messages):
+            if not isinstance(msg, dict):
+                raise TypeError(f"Message {i}: expected dict, got {type(msg).__name__}")
+            if "role" not in msg:
+                raise ValueError(f"Message {i}: missing required 'role' key")
+            role = msg["role"]
+            if role not in self.VALID_ROLES:
+                raise ValueError(
+                    f"Message {i}: invalid role '{role}', "
+                    f"expected one of {sorted(self.VALID_ROLES)}"
+                )
+
+            # Reject unexpected keys
+            extra = set(msg.keys()) - self.ALLOWED_KEYS[role]
+            if extra:
+                raise ValueError(
+                    f"Message {i}: unexpected keys {sorted(extra)} for role "
+                    f"'{role}', allowed: {sorted(self.ALLOWED_KEYS[role])}"
+                )
+
+            # Role-specific required fields
+            if role == "assistant":
+                if "content" not in msg and "tool_calls" not in msg:
+                    raise ValueError(
+                        f"Message {i}: assistant message must have "
+                        "'content' or 'tool_calls'"
+                    )
+                if "tool_calls" in msg:
+                    if not isinstance(msg["tool_calls"], list):
+                        raise TypeError(f"Message {i}: 'tool_calls' must be a list")
+                    for j, tc in enumerate(msg["tool_calls"]):
+                        if (
+                            not isinstance(tc, dict)
+                            or tc.get("type") != "function"
+                            or "function" not in tc
+                        ):
+                            raise ValueError(
+                                f"Message {i}, tool_call {j}: must have "
+                                "'type': 'function' and 'function' key"
+                            )
+            else:
+                if "content" not in msg:
+                    raise ValueError(
+                        f"Message {i}: {role} message missing required " "'content' key"
+                    )
+
+            # Validate content format when present
+            if "content" in msg:
+                content = msg["content"]
+                if isinstance(content, str):
+                    pass
+                elif isinstance(content, list):
+                    self._validate_content_blocks(i, content)
+                else:
+                    raise TypeError(
+                        f"Message {i}: 'content' must be a string or list, "
+                        f"got {type(content).__name__}"
+                    )
+
+    def _validate_content_blocks(
+        self, msg_idx: int, blocks: list[dict[str, Any]]
+    ) -> None:
+        """Validate multimodal content blocks within a message."""
+        for j, block in enumerate(blocks):
+            if not isinstance(block, dict) or "type" not in block:
+                raise ValueError(
+                    f"Message {msg_idx}, block {j}: content block must be "
+                    "a dict with 'type' key"
+                )
+            btype = block["type"]
+            if btype not in self.VALID_CONTENT_TYPES:
+                raise ValueError(
+                    f"Message {msg_idx}, block {j}: invalid type '{btype}', "
+                    f"expected one of {sorted(self.VALID_CONTENT_TYPES)}"
+                )
+            if btype == "text" and "text" not in block:
+                raise ValueError(
+                    f"Message {msg_idx}, block {j}: text block missing " "'text' key"
+                )
+            if btype in ("image", "video", "audio"):
+                if "url" not in block and "path" not in block:
+                    raise ValueError(
+                        f"Message {msg_idx}, block {j}: {btype} block must "
+                        "have 'url' or 'path'"
+                    )

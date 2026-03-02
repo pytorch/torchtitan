@@ -20,6 +20,8 @@ from torch.testing._internal.common_utils import (
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 
 
+# ChatML (Chat Markup Language) template format.
+# See: https://platform.openai.com/docs/guides/text-generation#chat-markup-language-chatml
 CHATML_TEMPLATE = (
     "{% for msg in messages %}"
     "<|im_start|>{{ msg.role }}\n{{ msg.content }}<|im_end|>\n"
@@ -462,6 +464,96 @@ class TestHuggingFaceChatTemplateAutoLoad(unittest.TestCase):
             result = tok.apply_chat_template(SAMPLE_MESSAGES)
             # Should use the .jinja file (just outputs content), not the inline ChatML
             self.assertEqual(result, "Hello")
+
+
+class TestHuggingFaceMessageValidation(unittest.TestCase):
+    """Tests for HuggingFaceTokenizer._validate_messages (HF schema enforcement)."""
+
+    def setUp(self):
+        self.tok = HuggingFaceTokenizer(tokenizer_path=ASSETS_TOKENIZER)
+
+    def test_accepts_valid_messages(self):
+        """Basic text, tool call flow, and multimodal content all pass."""
+        valid_cases = {
+            "basic": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+            ],
+            "tool_calls": [
+                {"role": "user", "content": "What's the weather?"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"type": "function", "function": {"name": "get_weather"}},
+                    ],
+                },
+                {"role": "tool", "content": "72F", "name": "get_weather"},
+            ],
+            "multimodal": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "url": "https://example.com/img.jpg"},
+                        {"type": "text", "text": "What is this?"},
+                    ],
+                },
+            ],
+        }
+        for name, messages in valid_cases.items():
+            with self.subTest(name):
+                self.tok._validate_messages(messages)
+
+    def test_rejects_bad_message_structure(self):
+        """Non-dict, missing role, invalid role, and extra keys are rejected."""
+        cases = {
+            "non_dict": (["not a dict"], TypeError),
+            "missing_role": ([{"content": "hello"}], ValueError),
+            "invalid_role": ([{"role": "bot", "content": "hi"}], ValueError),
+            "extra_keys": (
+                [{"role": "user", "content": "hi", "extra": "bad"}],
+                ValueError,
+            ),
+            "contents_typo": ([{"role": "user", "contents": "hello"}], ValueError),
+            "content_wrong_type": ([{"role": "user", "content": 123}], TypeError),
+        }
+        for name, (messages, exc_type) in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(exc_type):
+                    self.tok._validate_messages(messages)
+
+    def test_rejects_bad_tool_calls(self):
+        """Assistant messages need content or tool_calls; tool_calls must be well-formed."""
+        cases = {
+            "missing_both": ([{"role": "assistant"}], ValueError),
+            "not_a_list": ([{"role": "assistant", "tool_calls": "bad"}], TypeError),
+            "malformed_entry": (
+                [{"role": "assistant", "tool_calls": [{"bad": "entry"}]}],
+                ValueError,
+            ),
+        }
+        for name, (messages, exc_type) in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(exc_type):
+                    self.tok._validate_messages(messages)
+
+    def test_rejects_bad_content_blocks(self):
+        """Content blocks must have valid type and required fields."""
+        cases = {
+            "missing_type": [{"text": "no type key"}],
+            "invalid_type": [{"type": "pdf"}],
+            "text_missing_text": [{"type": "text"}],
+            "image_missing_url_and_path": [{"type": "image"}],
+        }
+        for name, blocks in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(ValueError):
+                    self.tok._validate_messages([{"role": "user", "content": blocks}])
+
+    def test_validation_called_by_apply_chat_template(self):
+        """apply_chat_template should reject invalid messages before rendering."""
+        with self.assertRaises(ValueError):
+            self.tok.apply_chat_template([{"role": "user", "contents": "typo"}])
 
 
 instantiate_parametrized_tests(TestTokenizerIntegration)
