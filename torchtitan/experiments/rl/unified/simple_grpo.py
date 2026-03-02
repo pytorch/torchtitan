@@ -225,6 +225,7 @@ class RLTrainer(Configurable):
             "correct": correct,
             "total": num_samples,
             "format_rate": format_ok / num_samples,
+            "format_ok": format_ok,
         }
         logger.info(
             f"Eval: Accuracy={result['accuracy']:.0%} ({correct}/{num_samples}) "
@@ -295,7 +296,7 @@ class RLTrainer(Configurable):
             avg_len = sum(all_token_lens) / len(all_token_lens)
 
             logger.info(
-                f"Step {step:3d} | Loss: {metrics['loss']:.4f} | "
+                f"Step {step:2d} | Loss: {metrics['loss']:.4f} | "
                 f"Reward: {metrics['reward_mean']:+.3f} | "
                 f"Correct: {correct_count}/{total_count} | "
                 f"Avg tokens: {avg_len:.0f} | "
@@ -331,12 +332,12 @@ class RLTrainer(Configurable):
         logger.info(
             f"Pre-training:  Accuracy={pre_eval['accuracy']:.0%} "
             f"({pre_eval['correct']}/{pre_eval['total']}) "
-            f"Format={pre_eval['format_rate']:.0%}"
+            f"Format={pre_eval['format_rate']:.0%} ({pre_eval['format_ok']}/{pre_eval['total']})"
         )
         logger.info(
             f"Post-training: Accuracy={post_eval['accuracy']:.0%} "
             f"({post_eval['correct']}/{post_eval['total']}) "
-            f"Format={post_eval['format_rate']:.0%}"
+            f"Format={post_eval['format_rate']:.0%} ({post_eval['format_ok']}/{post_eval['total']})"
         )
         logger.info("=" * 80)
 
