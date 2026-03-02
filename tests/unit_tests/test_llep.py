@@ -20,10 +20,6 @@ Run multi-GPU test:
     torchrun --nproc_per_node=2 tests/unit_tests/test_llep.py --distributed
 """
 
-import argparse
-import sys
-import os
-
 import torch
 import torch.nn.functional as F
 
@@ -52,7 +48,9 @@ def test_lpt_planning():
 
     # Test for rank 0
     plan = compute_llep_lpt_plan(
-        global_counts, ep_size, ep_rank=0,
+        global_counts,
+        ep_size,
+        ep_rank=0,
         num_local_experts=num_local_experts,
         max_tokens_factor=1.1,
         min_tokens_per_gemm=10,
@@ -61,8 +59,10 @@ def test_lpt_planning():
     print(f"  GPU loads: {plan.gpu_loads.tolist()}")
     print(f"  Weight transfers: {len(plan.weight_transfers)}")
     for wt in plan.weight_transfers:
-        print(f"    Expert {wt.expert_id}: GPU {wt.src_rank} -> GPU {wt.dst_rank} "
-              f"(tokens {wt.token_start}-{wt.token_end})")
+        print(
+            f"    Expert {wt.expert_id}: GPU {wt.src_rank} -> GPU {wt.dst_rank} "
+            f"(tokens {wt.token_start}-{wt.token_end})"
+        )
 
     # Verify load is more balanced than naive (all on native GPU)
     naive_gpu0_load = sum(global_counts[:num_local_experts].tolist())
@@ -77,15 +77,21 @@ def test_lpt_planning():
         (llep_gpu0_load + llep_gpu1_load) / 2, 1
     )
 
-    print(f"  Naive imbalance ratio: {naive_imbalance:.2f} "
-          f"(GPU0={naive_gpu0_load}, GPU1={naive_gpu1_load})")
-    print(f"  LLEP imbalance ratio:  {llep_imbalance:.2f} "
-          f"(GPU0={llep_gpu0_load}, GPU1={llep_gpu1_load})")
+    print(
+        f"  Naive imbalance ratio: {naive_imbalance:.2f} "
+        f"(GPU0={naive_gpu0_load}, GPU1={naive_gpu1_load})"
+    )
+    print(
+        f"  LLEP imbalance ratio:  {llep_imbalance:.2f} "
+        f"(GPU0={llep_gpu0_load}, GPU1={llep_gpu1_load})"
+    )
 
-    assert llep_imbalance <= naive_imbalance, \
-        f"LLEP should reduce imbalance: {llep_imbalance} > {naive_imbalance}"
-    assert len(plan.weight_transfers) > 0, \
-        "Should have weight transfers for imbalanced routing"
+    assert (
+        llep_imbalance <= naive_imbalance
+    ), f"LLEP should reduce imbalance: {llep_imbalance} > {naive_imbalance}"
+    assert (
+        len(plan.weight_transfers) > 0
+    ), "Should have weight transfers for imbalanced routing"
 
     # Verify expert 0 is spilled (it's the hot expert)
     spilled_experts = {wt.expert_id for wt in plan.weight_transfers}
@@ -108,7 +114,9 @@ def test_lpt_balanced_case():
     global_counts = torch.full((num_experts,), 100, dtype=torch.int64)
 
     plan = compute_llep_lpt_plan(
-        global_counts, ep_size, ep_rank=0,
+        global_counts,
+        ep_size,
+        ep_rank=0,
         num_local_experts=num_local_experts,
         max_tokens_factor=1.1,
         min_tokens_per_gemm=10,
@@ -118,8 +126,9 @@ def test_lpt_balanced_case():
     print(f"  GPU loads: {plan.gpu_loads.tolist()}")
     print(f"  Weight transfers: {len(plan.weight_transfers)}")
 
-    assert len(plan.weight_transfers) == 0, \
-        "Balanced routing should have no weight transfers"
+    assert (
+        len(plan.weight_transfers) == 0
+    ), "Balanced routing should have no weight transfers"
 
     print("  PASSED\n")
 
@@ -165,16 +174,25 @@ def test_swiglu_ffn():
     expert_ids = torch.randint(0, num_experts, (num_tokens,))
 
     out = llep_swiglu_ffn(
-        x, expert_ids,
-        w1, w2, w3,
-        {}, {}, {},  # No foreign experts
-        ep_rank=0, num_local_experts=num_experts,
+        x,
+        expert_ids,
+        w1,
+        w2,
+        w3,
+        {},
+        {},
+        {},  # No foreign experts
+        ep_rank=0,
+        num_local_experts=num_experts,
     )
 
     print(f"  Input shape: {x.shape}")
     print(f"  Output shape: {out.shape}")
     print(f"  Output dtype: {out.dtype}")
-    assert out.shape == (num_tokens, dim), f"Expected {(num_tokens, dim)}, got {out.shape}"
+    assert out.shape == (
+        num_tokens,
+        dim,
+    ), f"Expected {(num_tokens, dim)}, got {out.shape}"
     assert not torch.isnan(out).any(), "Output contains NaN"
 
     # Verify against manual computation for one expert
@@ -221,10 +239,16 @@ def test_swiglu_ffn_with_foreign():
     expert_ids = torch.tensor([0, 1, 3, 0, 1, 3, 0, 1, 3, 0, 1, 3, 0, 1, 3, 0])
 
     out = llep_swiglu_ffn(
-        x, expert_ids,
-        w1_local, w2_local, w3_local,
-        foreign_w1, foreign_w2, foreign_w3,
-        ep_rank=ep_rank, num_local_experts=num_local_experts,
+        x,
+        expert_ids,
+        w1_local,
+        w2_local,
+        w3_local,
+        foreign_w1,
+        foreign_w2,
+        foreign_w3,
+        ep_rank=ep_rank,
+        num_local_experts=num_local_experts,
     )
 
     print(f"  Input shape: {x.shape}")
@@ -247,98 +271,11 @@ def test_swiglu_ffn_with_foreign():
     print("  PASSED\n")
 
 
-def test_distributed_llep_forward():
-    """Test full LLEP forward with distributed training (requires torchrun)."""
-    import torch.distributed as dist
-
-    if not dist.is_initialized():
-        dist.init_process_group(backend="nccl")
-
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    device = torch.device(f"cuda:{rank}")
-    torch.cuda.set_device(device)
-
-    if rank == 0:
-        print(f"\n=== Test Distributed LLEP Forward (world_size={world_size}) ===")
-
-    from torchtitan.distributed.llep import llep_moe_forward
-
-    torch.manual_seed(42 + rank)
-
-    # Model config
-    dim = 64
-    hidden_dim = 128
-    num_experts = world_size * 4  # 4 experts per GPU
-    num_local_experts = 4
-    top_k = 2
-    num_tokens = 32
-
-    # Local expert weights (each rank has its own shard)
-    w1 = torch.randn(num_local_experts, hidden_dim, dim, device=device, dtype=torch.bfloat16)
-    w2 = torch.randn(num_local_experts, dim, hidden_dim, device=device, dtype=torch.bfloat16)
-    w3 = torch.randn(num_local_experts, hidden_dim, dim, device=device, dtype=torch.bfloat16)
-
-    # Input tokens
-    x = torch.randn(num_tokens, dim, device=device, dtype=torch.bfloat16)
-
-    # Create imbalanced routing: 70% of tokens go to expert 0
-    selected = torch.zeros(num_tokens, top_k, dtype=torch.int64, device=device)
-    num_hot = int(num_tokens * 0.7)
-    selected[:num_hot, 0] = 0  # Hot expert
-    selected[:num_hot, 1] = 1
-    selected[num_hot:, 0] = torch.randint(0, num_experts, (num_tokens - num_hot,), device=device)
-    selected[num_hot:, 1] = torch.randint(0, num_experts, (num_tokens - num_hot,), device=device)
-
-    scores = torch.rand(num_tokens, top_k, device=device, dtype=torch.float32)
-    scores = scores / scores.sum(dim=-1, keepdim=True)
-
-    ep_group = dist.group.WORLD
-
-    out = llep_moe_forward(
-        hidden_states=x,
-        top_scores=scores,
-        selected_experts_indices=selected,
-        w1=w1, w2=w2, w3=w3,
-        ep_group=ep_group,
-        num_experts=num_experts,
-        score_before_experts=False,
-        max_tokens_factor=1.1,
-        min_tokens_per_gemm=4,
-    )
-
-    if rank == 0:
-        print(f"  Input shape: {x.shape}")
-        print(f"  Output shape: {out.shape}")
-        print(f"  Output has NaN: {torch.isnan(out).any().item()}")
-        assert out.shape == (num_tokens, dim), f"Shape mismatch: {out.shape}"
-        assert not torch.isnan(out).any(), "Output contains NaN"
-        print("  PASSED\n")
-
-    dist.barrier()
-
-    # Compare with standard EP (no LLEP) to verify correctness is maintained
-    # This is a smoke test - exact numerical match is not expected due to
-    # different computation ordering
-    if rank == 0:
-        print("  LLEP distributed forward completed successfully!")
-
-    dist.destroy_process_group()
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--distributed", action="store_true",
-                        help="Run distributed test (requires torchrun)")
-    args = parser.parse_args()
-
-    if args.distributed:
-        test_distributed_llep_forward()
-    else:
-        print("Running LLEP unit tests...\n")
-        test_lpt_planning()
-        test_lpt_balanced_case()
-        test_gpu_imbalance_ratio()
-        test_swiglu_ffn()
-        test_swiglu_ffn_with_foreign()
-        print("All unit tests passed!")
+    print("Running LLEP unit tests...\n")
+    test_lpt_planning()
+    test_lpt_balanced_case()
+    test_gpu_imbalance_ratio()
+    test_swiglu_ffn()
+    test_swiglu_ffn_with_foreign()
+    print("All unit tests passed!")

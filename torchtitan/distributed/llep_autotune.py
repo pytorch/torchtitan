@@ -147,7 +147,11 @@ def _compute_imbalance_ratio(
 ) -> float:
     """Compute max_gpu_load / mean_gpu_load from expert counts."""
     effective = ep_size * num_local_experts
-    counts = expert_counts[:effective] if expert_counts.size(0) > effective else expert_counts
+    counts = (
+        expert_counts[:effective]
+        if expert_counts.size(0) > effective
+        else expert_counts
+    )
     gpu_loads = counts.view(ep_size, num_local_experts).sum(dim=1).float()
     mean_load = gpu_loads.mean()
     if mean_load == 0:
@@ -297,7 +301,9 @@ def find_optimal_params(
                 # Track worst-case foreign experts on any single GPU
                 foreign_per_gpu: dict[int, int] = {}
                 for wt in plan.weight_transfers:
-                    foreign_per_gpu[wt.dst_rank] = foreign_per_gpu.get(wt.dst_rank, 0) + 1
+                    foreign_per_gpu[wt.dst_rank] = (
+                        foreign_per_gpu.get(wt.dst_rank, 0) + 1
+                    )
                 if foreign_per_gpu:
                     worst_foreign = max(worst_foreign, max(foreign_per_gpu.values()))
 
@@ -336,7 +342,10 @@ def find_optimal_params(
             # Neither acceptable — prefer better balance
             if worst_balance < best_worst_balance:
                 should_replace = True
-            elif worst_balance == best_worst_balance and total_transfers < best_total_transfers:
+            elif (
+                worst_balance == best_worst_balance
+                and total_transfers < best_total_transfers
+            ):
                 should_replace = True
 
         if should_replace:

@@ -49,23 +49,6 @@ output = llep_compute_with_weights(
 combined = llep_combine_output(output, state)
 ```
 
-### Legacy Monolithic API
-
-For standalone use outside the MoE module:
-
-```python
-from torchtitan.distributed.llep import llep_moe_forward
-
-output = llep_moe_forward(
-    hidden_states, top_scores, selected_experts,
-    w1, w2, w3, ep_group, num_experts,
-    score_before_experts=True,
-    max_tokens_factor=1.1,
-    min_tokens_per_gemm=1024,
-    adaptive_threshold=1.3,
-)
-```
-
 ## Configuration
 
 LLEP is configured via `LLEPConfig` (defined in `torchtitan/models/moe/moe.py`):
@@ -129,14 +112,13 @@ The implementation includes several optimizations over the initial port (see `do
 All tests run via `torchrun` and require at least 2 GPUs:
 
 ```bash
-# Unit tests (LPT planning, FFN, basic distributed)
+# Unit tests (LPT planning, FFN, no GPU required)
 python tests/unit_tests/test_llep.py
-torchrun --nproc_per_node=2 tests/unit_tests/test_llep.py --distributed
 
-# Forward/backward correctness vs standard EP (55 tests)
-torchrun --nproc_per_node=2 tests/unit_tests/test_llep_correctness.py
+# Optimization correctness (grouped MM, Triton kernels, numerical, 17 tests)
+torchrun --nproc_per_node=1 tests/unit_tests/test_llep_correctness.py
 
-# Hook-based flow comprehensive tests (63 tests)
+# Hook-based flow comprehensive tests (59 tests, requires >= 2 GPUs)
 torchrun --nproc_per_node=2 tests/unit_tests/test_llep_hooks.py
 
 # Run specific category
@@ -144,18 +126,12 @@ torchrun --nproc_per_node=2 tests/unit_tests/test_llep_hooks.py --category topk
 
 # List all tests
 torchrun --nproc_per_node=2 tests/unit_tests/test_llep_hooks.py --list
-
-# Triton kernel correctness + benchmarks
-torchrun --nproc_per_node=2 tests/unit_tests/test_new_kernels.py
-torchrun --nproc_per_node=2 tests/unit_tests/test_llep_bench.py
 ```
 
 ### Test Coverage
 
 | Test File | Tests | What It Covers |
 |-----------|-------|----------------|
-| `test_llep.py` | 6 | LPT planning, SwiGLU FFN, basic distributed forward |
-| `test_llep_correctness.py` | 55 | Legacy `llep_moe_forward` vs standard EP and single-GPU reference (forward, backward, kernels, numerical) |
-| `test_llep_hooks.py` | 63 | Hook-based flow (`dispatch` -> `compute` -> `combine`) across top_k, hyperparams, dimensions, backward, edge cases, and legacy parity |
-| `test_llep_bench.py` | - | Benchmark: old vs optimized implementations |
-| `test_new_kernels.py` | - | Triton kernel correctness (pad, unpad, send_matrix) |
+| `test_llep.py` | 5 | LPT planning, SwiGLU FFN (single-process) |
+| `test_llep_correctness.py` | 17 | Grouped MM vs for-loop, Triton fused_silu_gate, numerical stability, benchmarks |
+| `test_llep_hooks.py` | 59 | Hook-based flow (`dispatch` -> `compute` -> `combine`) across top_k, hyperparams, dimensions, backward, edge cases |

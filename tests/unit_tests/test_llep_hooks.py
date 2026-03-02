@@ -10,9 +10,9 @@ Comprehensive correctness tests for the hook-based LLEP flow:
     llep_dispatch_tokens -> llep_compute_with_weights -> llep_combine_output
 
 Tests that the hook-based decomposition produces numerically identical
-results to standard EP and legacy llep_moe_forward().
+results to standard EP (all-to-all reference).
 
-Test categories (63 tests total):
+Test categories (59 tests total):
  1. top_k sweep         — top_k={1,2,4,8} x 5 routing patterns  (20 tests)
  2. alpha sweep         — max_tokens_factor={1.0,1.1,1.3,2.0} x 3 patterns  (12 tests)
  3. min_tokens sweep    — min_tokens_per_gemm={1,4,64,1024}  (4 tests)
@@ -22,7 +22,6 @@ Test categories (63 tests total):
  7. Dimension sweep     — (dim,hidden)={(64,128),(128,256),(256,768)}  (3 tests)
  8. Backward            — gradient correctness, float32  (6 tests)
  9. score_before        — score_before_experts={True,False}  (2 tests)
-10. Hooks vs Legacy     — parity with llep_moe_forward  (4 tests)
 
 Run (requires >= 2 GPUs):
     torchrun --nproc_per_node=2 tests/unit_tests/test_llep_hooks.py
@@ -65,8 +64,16 @@ def broadcast_tensor(tensor, src=0, group=None):
 # ---------------------------------------------------------------------------
 # Routing patterns
 # ---------------------------------------------------------------------------
-def create_routing(num_tokens, num_experts, top_k, device, pattern="balanced",
-                   hot_expert_ratio=0.7, num_hot_experts=2, seed=42):
+def create_routing(
+    num_tokens,
+    num_experts,
+    top_k,
+    device,
+    pattern="balanced",
+    hot_expert_ratio=0.7,
+    num_hot_experts=2,
+    seed=42,
+):
     """
     Create deterministic routing patterns for testing.
 
@@ -86,7 +93,9 @@ def create_routing(num_tokens, num_experts, top_k, device, pattern="balanced",
     if pattern == "balanced":
         for k in range(top_k):
             selected[:, k] = (torch.arange(num_tokens, device=device) + k) % num_experts
-        scores = torch.rand(num_tokens, top_k, device=device, dtype=torch.float32, generator=g)
+        scores = torch.rand(
+            num_tokens, top_k, device=device, dtype=torch.float32, generator=g
+        )
         scores = scores / scores.sum(dim=-1, keepdim=True)
 
     elif pattern == "imbalanced":
@@ -100,7 +109,9 @@ def create_routing(num_tokens, num_experts, top_k, device, pattern="balanced",
             else:
                 for k in range(top_k):
                     selected[i, k] = cold_experts[(i + k) % len(cold_experts)]
-        scores = torch.rand(num_tokens, top_k, device=device, dtype=torch.float32, generator=g)
+        scores = torch.rand(
+            num_tokens, top_k, device=device, dtype=torch.float32, generator=g
+        )
         scores = scores / scores.sum(dim=-1, keepdim=True)
 
     elif pattern == "extreme":
@@ -115,7 +126,9 @@ def create_routing(num_tokens, num_experts, top_k, device, pattern="balanced",
                 selected[i, k] = torch.randint(
                     0, num_experts, (1,), device=device, generator=g
                 ).item()
-        scores = torch.rand(num_tokens, top_k, device=device, dtype=torch.float32, generator=g)
+        scores = torch.rand(
+            num_tokens, top_k, device=device, dtype=torch.float32, generator=g
+        )
         scores = scores / scores.sum(dim=-1, keepdim=True)
 
     elif pattern == "single_hot":
@@ -128,7 +141,9 @@ def create_routing(num_tokens, num_experts, top_k, device, pattern="balanced",
         selected = torch.randint(
             0, num_experts, (num_tokens, top_k), device=device, generator=g
         )
-        scores = torch.rand(num_tokens, top_k, device=device, dtype=torch.float32, generator=g)
+        scores = torch.rand(
+            num_tokens, top_k, device=device, dtype=torch.float32, generator=g
+        )
         scores = scores / scores.sum(dim=-1, keepdim=True)
 
     else:
@@ -140,9 +155,18 @@ def create_routing(num_tokens, num_experts, top_k, device, pattern="balanced",
 # ---------------------------------------------------------------------------
 # Reference: Standard EP forward (all-to-all, no LLEP)
 # ---------------------------------------------------------------------------
-def reference_ep_forward(hidden_states, top_scores, selected_experts, w1_local,
-                         w2_local, w3_local, ep_group, num_experts,
-                         num_local_experts, score_before_experts=True):
+def reference_ep_forward(
+    hidden_states,
+    top_scores,
+    selected_experts,
+    w1_local,
+    w2_local,
+    w3_local,
+    ep_group,
+    num_experts,
+    num_local_experts,
+    score_before_experts=True,
+):
     """Standard all-to-all EP forward used as ground truth."""
     ep_rank = dist.get_rank(group=ep_group)
     ep_size = dist.get_world_size(group=ep_group)
@@ -171,7 +195,9 @@ def reference_ep_forward(hidden_states, top_scores, selected_experts, w1_local,
     dist.all_gather(all_expert_counts, local_expert_counts, group=ep_group)
 
     all_counts_np = np.stack([ec.cpu().numpy() for ec in all_expert_counts])
-    send_matrix_np = all_counts_np.reshape(ep_size, ep_size, num_local_experts).sum(axis=2)
+    send_matrix_np = all_counts_np.reshape(ep_size, ep_size, num_local_experts).sum(
+        axis=2
+    )
     input_split_sizes = send_matrix_np[ep_rank].tolist()
     output_split_sizes = send_matrix_np[:, ep_rank].tolist()
 
@@ -180,29 +206,52 @@ def reference_ep_forward(hidden_states, top_scores, selected_experts, w1_local,
 
     if total_send > 0 or total_recv > 0:
         recv_hidden = torch.empty(total_recv, dim, device=device, dtype=dtype)
-        dist.all_to_all_single(recv_hidden, sorted_hidden.contiguous(),
-                               output_split_sizes, input_split_sizes, group=ep_group)
+        dist.all_to_all_single(
+            recv_hidden,
+            sorted_hidden.contiguous(),
+            output_split_sizes,
+            input_split_sizes,
+            group=ep_group,
+        )
         recv_scores = torch.empty(total_recv, device=device, dtype=sorted_scores.dtype)
-        dist.all_to_all_single(recv_scores, sorted_scores.contiguous(),
-                               output_split_sizes, input_split_sizes, group=ep_group)
+        dist.all_to_all_single(
+            recv_scores,
+            sorted_scores.contiguous(),
+            output_split_sizes,
+            input_split_sizes,
+            group=ep_group,
+        )
         recv_experts = torch.empty(total_recv, device=device, dtype=torch.int64)
-        dist.all_to_all_single(recv_experts, sorted_experts.to(torch.int64).contiguous(),
-                               output_split_sizes, input_split_sizes, group=ep_group)
+        dist.all_to_all_single(
+            recv_experts,
+            sorted_experts.to(torch.int64).contiguous(),
+            output_split_sizes,
+            input_split_sizes,
+            group=ep_group,
+        )
     else:
         recv_hidden = torch.empty(0, dim, device=device, dtype=dtype)
         recv_scores = torch.empty(0, device=device, dtype=sorted_scores.dtype)
         recv_experts = torch.empty(0, device=device, dtype=torch.int64)
 
     if score_before_experts and recv_hidden.numel() > 0:
-        recv_hidden = (recv_hidden.to(torch.float32) * recv_scores.reshape(-1, 1)).to(dtype)
+        recv_hidden = (recv_hidden.to(torch.float32) * recv_scores.reshape(-1, 1)).to(
+            dtype
+        )
 
     if recv_hidden.numel() > 0:
         native_start = ep_rank * num_local_experts
         compute_dtype = w1_local.dtype
-        x = recv_hidden.to(compute_dtype) if recv_hidden.dtype != compute_dtype else recv_hidden
+        x = (
+            recv_hidden.to(compute_dtype)
+            if recv_hidden.dtype != compute_dtype
+            else recv_hidden
+        )
         sorted_ids, sort_perm = recv_experts.sort(stable=True)
         x_sorted = x[sort_perm]
-        unique_experts_t, counts = torch.unique_consecutive(sorted_ids, return_counts=True)
+        unique_experts_t, counts = torch.unique_consecutive(
+            sorted_ids, return_counts=True
+        )
         offsets = torch.zeros(len(counts) + 1, dtype=torch.int64, device=device)
         offsets[1:] = counts.cumsum(0)
         out_sorted = torch.empty_like(x_sorted)
@@ -211,7 +260,9 @@ def reference_ep_forward(hidden_states, top_scores, selected_experts, w1_local,
             s = offsets[idx].item()
             e = offsets[idx + 1].item()
             local_idx = eid - native_start
-            h = F.silu(x_sorted[s:e] @ w1_local[local_idx].T) * (x_sorted[s:e] @ w3_local[local_idx].T)
+            h = F.silu(x_sorted[s:e] @ w1_local[local_idx].T) * (
+                x_sorted[s:e] @ w3_local[local_idx].T
+            )
             out_sorted[s:e] = h @ w2_local[local_idx].T
         inverse_perm = sort_perm.argsort()
         recv_output = out_sorted[inverse_perm]
@@ -219,12 +270,19 @@ def reference_ep_forward(hidden_states, top_scores, selected_experts, w1_local,
         recv_output = torch.empty(0, dim, device=device, dtype=dtype)
 
     if not score_before_experts and recv_output.numel() > 0:
-        recv_output = (recv_output.to(torch.float32) * recv_scores.reshape(-1, 1)).to(dtype)
+        recv_output = (recv_output.to(torch.float32) * recv_scores.reshape(-1, 1)).to(
+            dtype
+        )
 
     if total_send > 0 or total_recv > 0:
         send_output = torch.empty(total_send, dim, device=device, dtype=dtype)
-        dist.all_to_all_single(send_output, recv_output.contiguous(),
-                               input_split_sizes, output_split_sizes, group=ep_group)
+        dist.all_to_all_single(
+            send_output,
+            recv_output.contiguous(),
+            input_split_sizes,
+            output_split_sizes,
+            group=ep_group,
+        )
     else:
         send_output = torch.empty(0, dim, device=device, dtype=dtype)
 
@@ -235,15 +293,25 @@ def reference_ep_forward(hidden_states, top_scores, selected_experts, w1_local,
 # ---------------------------------------------------------------------------
 # Single-GPU reference (for backward comparison)
 # ---------------------------------------------------------------------------
-def single_gpu_reference_forward(hidden_states, top_scores, selected_experts,
-                                 w1_all, w2_all, w3_all,
-                                 score_before_experts=True):
+def single_gpu_reference_forward(
+    hidden_states,
+    top_scores,
+    selected_experts,
+    w1_all,
+    w2_all,
+    w3_all,
+    score_before_experts=True,
+):
     """Single-GPU reference: no distributed ops, pure local computation."""
     num_tokens, dim = hidden_states.shape
     top_k = selected_experts.shape[1]
     dtype = hidden_states.dtype
     compute_dtype = w1_all.dtype
-    x = hidden_states.to(compute_dtype) if hidden_states.dtype != compute_dtype else hidden_states
+    x = (
+        hidden_states.to(compute_dtype)
+        if hidden_states.dtype != compute_dtype
+        else hidden_states
+    )
 
     output = torch.zeros(num_tokens, dim, device=x.device, dtype=compute_dtype)
 
@@ -272,8 +340,9 @@ def single_gpu_reference_forward(hidden_states, top_scores, selected_experts,
 # ---------------------------------------------------------------------------
 # LLEP hook pre/post processing (mirrors MoE.forward)
 # ---------------------------------------------------------------------------
-def _preprocess_for_hooks(x, selected_experts, top_scores, num_experts,
-                          score_before_experts):
+def _preprocess_for_hooks(
+    x, selected_experts, top_scores, num_experts, score_before_experts
+):
     """Flatten, sort by expert, apply scores — what MoE.forward does before hooks."""
     top_k = selected_experts.shape[1]
     dim = x.shape[1]
@@ -288,7 +357,9 @@ def _preprocess_for_hooks(x, selected_experts, top_scores, num_experts,
     routed_input = hidden_topk[sorted_indices]
 
     if score_before_experts:
-        routed_input = (routed_input.float() * sorted_scores.unsqueeze(1)).to(routed_input.dtype)
+        routed_input = (routed_input.float() * sorted_scores.unsqueeze(1)).to(
+            routed_input.dtype
+        )
 
     num_tokens_per_expert = torch.bincount(
         sorted_experts_ids.to(torch.int64), minlength=num_experts
@@ -329,9 +400,9 @@ def run_hooks_test(
     Returns (max_diff, passed, backward_info).
     """
     from torchtitan.distributed.llep import (
-        llep_dispatch_tokens,
-        llep_compute_with_weights,
         llep_combine_output,
+        llep_compute_with_weights,
+        llep_dispatch_tokens,
     )
 
     rank = dist.get_rank()
@@ -340,17 +411,23 @@ def run_hooks_test(
     ep_group = dist.group.WORLD
     num_local_experts = num_experts // world_size
 
-    assert num_local_experts * world_size == num_experts, (
-        f"num_experts={num_experts} not divisible by world_size={world_size}"
-    )
+    assert (
+        num_local_experts * world_size == num_experts
+    ), f"num_experts={num_experts} not divisible by world_size={world_size}"
 
     # Shared weights (broadcast from rank 0)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    all_w1 = torch.randn(num_experts, hidden_dim, dim, device=device, dtype=dtype) * 0.02
-    all_w2 = torch.randn(num_experts, dim, hidden_dim, device=device, dtype=dtype) * 0.02
-    all_w3 = torch.randn(num_experts, hidden_dim, dim, device=device, dtype=dtype) * 0.02
+    all_w1 = (
+        torch.randn(num_experts, hidden_dim, dim, device=device, dtype=dtype) * 0.02
+    )
+    all_w2 = (
+        torch.randn(num_experts, dim, hidden_dim, device=device, dtype=dtype) * 0.02
+    )
+    all_w3 = (
+        torch.randn(num_experts, hidden_dim, dim, device=device, dtype=dtype) * 0.02
+    )
     broadcast_tensor(all_w1, src=0, group=ep_group)
     broadcast_tensor(all_w2, src=0, group=ep_group)
     broadcast_tensor(all_w3, src=0, group=ep_group)
@@ -365,7 +442,12 @@ def run_hooks_test(
     x = torch.randn(num_tokens, dim, device=device, dtype=dtype) * 0.1
     broadcast_tensor(x, src=0, group=ep_group)
     selected_experts, top_scores = create_routing(
-        num_tokens, num_experts, top_k, device, pattern=pattern, seed=seed,
+        num_tokens,
+        num_experts,
+        top_k,
+        device,
+        pattern=pattern,
+        seed=seed,
     )
     broadcast_tensor(selected_experts, src=0, group=ep_group)
     broadcast_tensor(top_scores, src=0, group=ep_group)
@@ -373,11 +455,15 @@ def run_hooks_test(
     # --- Reference: Standard EP ---
     dist.barrier(group=ep_group)
     ref_output = reference_ep_forward(
-        x.clone(), top_scores.clone(), selected_experts.clone(),
+        x.clone(),
+        top_scores.clone(),
+        selected_experts.clone(),
         all_w1[local_start:local_end].clone(),
         all_w2[local_start:local_end].clone(),
         all_w3[local_start:local_end].clone(),
-        ep_group, num_experts, num_local_experts,
+        ep_group,
+        num_experts,
+        num_local_experts,
         score_before_experts=score_before_experts,
     )
 
@@ -385,23 +471,38 @@ def run_hooks_test(
     dist.barrier(group=ep_group)
 
     routed_input, ntpe, sorted_indices = _preprocess_for_hooks(
-        x, selected_experts, top_scores, num_experts, score_before_experts,
+        x,
+        selected_experts,
+        top_scores,
+        num_experts,
+        score_before_experts,
     )
 
     dispatched, padded_counts, state = llep_dispatch_tokens(
-        routed_input, ntpe, ep_group,
+        routed_input,
+        ntpe,
+        ep_group,
         max_tokens_factor=max_tokens_factor,
         min_tokens_per_gemm=min_tokens_per_gemm,
         adaptive_threshold=adaptive_threshold,
     )
     output = llep_compute_with_weights(
-        dispatched, padded_counts, w1_local, w2_local, w3_local,
-        state, use_grouped_mm=True,
+        dispatched,
+        padded_counts,
+        w1_local,
+        w2_local,
+        w3_local,
+        state,
+        use_grouped_mm=True,
     )
     combined = llep_combine_output(output, state)
 
     hooks_result = _postprocess_hooks_output(
-        combined, sorted_indices, num_tokens, top_k, dim,
+        combined,
+        sorted_indices,
+        num_tokens,
+        top_k,
+        dim,
     )
 
     # --- Compare ---
@@ -412,10 +513,22 @@ def run_hooks_test(
     backward_info = None
     if check_backward and passed:
         backward_info = _run_backward_check(
-            x, top_scores, selected_experts, all_w1, all_w2, all_w3,
-            num_experts, num_local_experts, top_k, dim, ep_group,
-            score_before_experts, max_tokens_factor, min_tokens_per_gemm,
-            adaptive_threshold, backward_atol,
+            x,
+            top_scores,
+            selected_experts,
+            all_w1,
+            all_w2,
+            all_w3,
+            num_experts,
+            num_local_experts,
+            top_k,
+            dim,
+            ep_group,
+            score_before_experts,
+            max_tokens_factor,
+            min_tokens_per_gemm,
+            adaptive_threshold,
+            backward_atol,
         )
         passed = passed and backward_info["passed"]
 
@@ -424,16 +537,28 @@ def run_hooks_test(
 
 
 def _run_backward_check(
-    x, top_scores, selected_experts, all_w1, all_w2, all_w3,
-    num_experts, num_local_experts, top_k, dim, ep_group,
-    score_before_experts, max_tokens_factor, min_tokens_per_gemm,
-    adaptive_threshold, backward_atol,
+    x,
+    top_scores,
+    selected_experts,
+    all_w1,
+    all_w2,
+    all_w3,
+    num_experts,
+    num_local_experts,
+    top_k,
+    dim,
+    ep_group,
+    score_before_experts,
+    max_tokens_factor,
+    min_tokens_per_gemm,
+    adaptive_threshold,
+    backward_atol,
 ):
     """Run backward pass and compare gradients against single-GPU reference."""
     from torchtitan.distributed.llep import (
-        llep_dispatch_tokens,
-        llep_compute_with_weights,
         llep_combine_output,
+        llep_compute_with_weights,
+        llep_dispatch_tokens,
     )
 
     rank = dist.get_rank()
@@ -451,8 +576,13 @@ def _run_backward_check(
     x_ref = x.clone().detach().requires_grad_(True)
 
     ref_out = single_gpu_reference_forward(
-        x_ref, top_scores.clone(), selected_experts.clone(),
-        ref_w1, ref_w2, ref_w3, score_before_experts=score_before_experts,
+        x_ref,
+        top_scores.clone(),
+        selected_experts.clone(),
+        ref_w1,
+        ref_w2,
+        ref_w3,
+        score_before_experts=score_before_experts,
     )
     ref_out.sum().backward()
 
@@ -465,15 +595,23 @@ def _run_backward_check(
     dist.barrier(group=ep_group)
 
     routed, ntpe, sorted_idx = _preprocess_for_hooks(
-        x_hooks, selected_experts, top_scores, num_experts, score_before_experts,
+        x_hooks,
+        selected_experts,
+        top_scores,
+        num_experts,
+        score_before_experts,
     )
     disp, pc, st = llep_dispatch_tokens(
-        routed, ntpe, ep_group,
+        routed,
+        ntpe,
+        ep_group,
         max_tokens_factor=max_tokens_factor,
         min_tokens_per_gemm=min_tokens_per_gemm,
         adaptive_threshold=adaptive_threshold,
     )
-    out = llep_compute_with_weights(disp, pc, w1_bwd, w2_bwd, w3_bwd, st, use_grouped_mm=True)
+    out = llep_compute_with_weights(
+        disp, pc, w1_bwd, w2_bwd, w3_bwd, st, use_grouped_mm=True
+    )
     comb = llep_combine_output(out, st)
     result = _postprocess_hooks_output(comb, sorted_idx, num_tokens, top_k, dim)
     result.sum().backward()
@@ -506,99 +644,6 @@ def _run_backward_check(
     }
 
 
-def run_hooks_vs_legacy_test(
-    num_tokens=64,
-    num_experts=16,
-    top_k=2,
-    dim=64,
-    hidden_dim=128,
-    pattern="imbalanced",
-    dtype=torch.bfloat16,
-    atol=1e-2,
-    seed=42,
-    score_before_experts=True,
-    max_tokens_factor=1.1,
-    min_tokens_per_gemm=1,
-    adaptive_threshold=0.0,
-):
-    """Compare hook-based LLEP against legacy llep_moe_forward."""
-    from torchtitan.distributed.llep import (
-        llep_dispatch_tokens,
-        llep_compute_with_weights,
-        llep_combine_output,
-        llep_moe_forward,
-    )
-
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    device = torch.device(f"cuda:{rank}")
-    ep_group = dist.group.WORLD
-    num_local_experts = num_experts // world_size
-
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-
-    all_w1 = torch.randn(num_experts, hidden_dim, dim, device=device, dtype=dtype) * 0.02
-    all_w2 = torch.randn(num_experts, dim, hidden_dim, device=device, dtype=dtype) * 0.02
-    all_w3 = torch.randn(num_experts, hidden_dim, dim, device=device, dtype=dtype) * 0.02
-    broadcast_tensor(all_w1, src=0, group=ep_group)
-    broadcast_tensor(all_w2, src=0, group=ep_group)
-    broadcast_tensor(all_w3, src=0, group=ep_group)
-
-    local_start = rank * num_local_experts
-    local_end = local_start + num_local_experts
-    w1_local = all_w1[local_start:local_end].clone().contiguous()
-    w2_local = all_w2[local_start:local_end].clone().contiguous()
-    w3_local = all_w3[local_start:local_end].clone().contiguous()
-
-    x = torch.randn(num_tokens, dim, device=device, dtype=dtype) * 0.1
-    broadcast_tensor(x, src=0, group=ep_group)
-    selected_experts, top_scores = create_routing(
-        num_tokens, num_experts, top_k, device, pattern=pattern, seed=seed,
-    )
-    broadcast_tensor(selected_experts, src=0, group=ep_group)
-    broadcast_tensor(top_scores, src=0, group=ep_group)
-
-    # --- Legacy ---
-    dist.barrier(group=ep_group)
-    legacy_output = llep_moe_forward(
-        hidden_states=x.clone(),
-        top_scores=top_scores.clone(),
-        selected_experts_indices=selected_experts.clone(),
-        w1=w1_local.clone(), w2=w2_local.clone(), w3=w3_local.clone(),
-        ep_group=ep_group, num_experts=num_experts,
-        score_before_experts=score_before_experts,
-        max_tokens_factor=max_tokens_factor,
-        min_tokens_per_gemm=min_tokens_per_gemm,
-        adaptive_threshold=adaptive_threshold,
-    )
-
-    # --- Hooks ---
-    dist.barrier(group=ep_group)
-    routed_input, ntpe, sorted_indices = _preprocess_for_hooks(
-        x, selected_experts, top_scores, num_experts, score_before_experts,
-    )
-    dispatched, padded_counts, state = llep_dispatch_tokens(
-        routed_input, ntpe, ep_group,
-        max_tokens_factor=max_tokens_factor,
-        min_tokens_per_gemm=min_tokens_per_gemm,
-        adaptive_threshold=adaptive_threshold,
-    )
-    output = llep_compute_with_weights(
-        dispatched, padded_counts,
-        w1_local.clone(), w2_local.clone(), w3_local.clone(),
-        state, use_grouped_mm=True,
-    )
-    combined = llep_combine_output(output, state)
-    hooks_result = _postprocess_hooks_output(
-        combined, sorted_indices, num_tokens, top_k, dim,
-    )
-
-    max_diff = (legacy_output - hooks_result).abs().max().item()
-    dist.barrier(group=ep_group)
-    return max_diff, max_diff < atol, None
-
-
 # ---------------------------------------------------------------------------
 # Test definitions
 # ---------------------------------------------------------------------------
@@ -610,9 +655,14 @@ def _topk_tests():
             tests[f"topk_{top_k}_{pattern}"] = {
                 "fn": run_hooks_test,
                 "kwargs": dict(
-                    num_tokens=64, num_experts=16, top_k=top_k, dim=64,
-                    hidden_dim=128, pattern=pattern,
-                    max_tokens_factor=1.1, min_tokens_per_gemm=1,
+                    num_tokens=64,
+                    num_experts=16,
+                    top_k=top_k,
+                    dim=64,
+                    hidden_dim=128,
+                    pattern=pattern,
+                    max_tokens_factor=1.1,
+                    min_tokens_per_gemm=1,
                 ),
             }
     return tests
@@ -626,9 +676,14 @@ def _alpha_tests():
             tests[f"alpha_{alpha}_{pattern}"] = {
                 "fn": run_hooks_test,
                 "kwargs": dict(
-                    num_tokens=64, num_experts=16, top_k=4, dim=64,
-                    hidden_dim=128, pattern=pattern,
-                    max_tokens_factor=alpha, min_tokens_per_gemm=1,
+                    num_tokens=64,
+                    num_experts=16,
+                    top_k=4,
+                    dim=64,
+                    hidden_dim=128,
+                    pattern=pattern,
+                    max_tokens_factor=alpha,
+                    min_tokens_per_gemm=1,
                 ),
             }
     return tests
@@ -641,9 +696,14 @@ def _min_tokens_tests():
         tests[f"min_tokens_{m}"] = {
             "fn": run_hooks_test,
             "kwargs": dict(
-                num_tokens=64, num_experts=16, top_k=4, dim=64,
-                hidden_dim=128, pattern="imbalanced",
-                max_tokens_factor=1.1, min_tokens_per_gemm=m,
+                num_tokens=64,
+                num_experts=16,
+                top_k=4,
+                dim=64,
+                hidden_dim=128,
+                pattern="imbalanced",
+                max_tokens_factor=1.1,
+                min_tokens_per_gemm=m,
             ),
         }
     return tests
@@ -656,9 +716,14 @@ def _lambda_tests():
         tests[f"lambda_{lam}"] = {
             "fn": run_hooks_test,
             "kwargs": dict(
-                num_tokens=64, num_experts=16, top_k=4, dim=64,
-                hidden_dim=128, pattern="imbalanced",
-                max_tokens_factor=1.1, min_tokens_per_gemm=1,
+                num_tokens=64,
+                num_experts=16,
+                top_k=4,
+                dim=64,
+                hidden_dim=128,
+                pattern="imbalanced",
+                max_tokens_factor=1.1,
+                min_tokens_per_gemm=1,
                 adaptive_threshold=lam,
             ),
         }
@@ -672,9 +737,14 @@ def _expert_count_tests():
         tests[f"experts_{num_experts}_ep{min_ep}"] = {
             "fn": run_hooks_test,
             "kwargs": dict(
-                num_tokens=64, num_experts=num_experts, top_k=4, dim=64,
-                hidden_dim=128, pattern="imbalanced",
-                max_tokens_factor=1.1, min_tokens_per_gemm=1,
+                num_tokens=64,
+                num_experts=num_experts,
+                top_k=4,
+                dim=64,
+                hidden_dim=128,
+                pattern="imbalanced",
+                max_tokens_factor=1.1,
+                min_tokens_per_gemm=1,
             ),
             "min_gpus": min_ep,
         }
@@ -688,9 +758,14 @@ def _token_count_tests():
         tests[f"tokens_{n}"] = {
             "fn": run_hooks_test,
             "kwargs": dict(
-                num_tokens=n, num_experts=16, top_k=2, dim=64, hidden_dim=128,
+                num_tokens=n,
+                num_experts=16,
+                top_k=2,
+                dim=64,
+                hidden_dim=128,
                 pattern="balanced" if n <= 4 else "imbalanced",
-                max_tokens_factor=2.0, min_tokens_per_gemm=1,
+                max_tokens_factor=2.0,
+                min_tokens_per_gemm=1,
             ),
         }
     return tests
@@ -703,9 +778,14 @@ def _dim_tests():
         tests[f"dim_{dim}_h{hidden_dim}"] = {
             "fn": run_hooks_test,
             "kwargs": dict(
-                num_tokens=32, num_experts=16, top_k=4, dim=dim,
-                hidden_dim=hidden_dim, pattern="imbalanced",
-                max_tokens_factor=1.1, min_tokens_per_gemm=1,
+                num_tokens=32,
+                num_experts=16,
+                top_k=4,
+                dim=dim,
+                hidden_dim=hidden_dim,
+                pattern="imbalanced",
+                max_tokens_factor=1.1,
+                min_tokens_per_gemm=1,
             ),
         }
     return tests
@@ -719,10 +799,18 @@ def _backward_tests():
             tests[f"backward_{pattern}_topk{top_k}"] = {
                 "fn": run_hooks_test,
                 "kwargs": dict(
-                    num_tokens=32, num_experts=16, top_k=top_k, dim=64,
-                    hidden_dim=128, pattern=pattern, dtype=torch.float32,
-                    max_tokens_factor=1.5, min_tokens_per_gemm=1,
-                    atol=1e-4, check_backward=True, backward_atol=1e-2,
+                    num_tokens=32,
+                    num_experts=16,
+                    top_k=top_k,
+                    dim=64,
+                    hidden_dim=128,
+                    pattern=pattern,
+                    dtype=torch.float32,
+                    max_tokens_factor=1.5,
+                    min_tokens_per_gemm=1,
+                    atol=1e-4,
+                    check_backward=True,
+                    backward_atol=1e-2,
                 ),
             }
     return tests
@@ -735,25 +823,15 @@ def _score_before_tests():
         tests[f"score_before_{val}"] = {
             "fn": run_hooks_test,
             "kwargs": dict(
-                num_tokens=64, num_experts=16, top_k=4, dim=64,
-                hidden_dim=128, pattern="imbalanced",
-                max_tokens_factor=1.1, min_tokens_per_gemm=1,
+                num_tokens=64,
+                num_experts=16,
+                top_k=4,
+                dim=64,
+                hidden_dim=128,
+                pattern="imbalanced",
+                max_tokens_factor=1.1,
+                min_tokens_per_gemm=1,
                 score_before_experts=val,
-            ),
-        }
-    return tests
-
-
-def _parity_tests():
-    """Category 10: hooks vs legacy llep_moe_forward parity."""
-    tests = {}
-    for top_k in [1, 2, 4, 8]:
-        tests[f"parity_topk_{top_k}"] = {
-            "fn": run_hooks_vs_legacy_test,
-            "kwargs": dict(
-                num_tokens=64, num_experts=16, top_k=top_k, dim=64,
-                hidden_dim=128, pattern="imbalanced",
-                max_tokens_factor=1.1, min_tokens_per_gemm=1,
             ),
         }
     return tests
@@ -772,7 +850,6 @@ CATEGORY_BUILDERS = {
     "dims": ("Category 7: Dimension Sweep", _dim_tests),
     "backward": ("Category 8: Backward Correctness", _backward_tests),
     "score_before": ("Category 9: score_before_experts", _score_before_tests),
-    "parity": ("Category 10: Hooks vs Legacy Parity", _parity_tests),
 }
 
 
@@ -792,12 +869,18 @@ def build_all_tests():
 def main():
     parser = argparse.ArgumentParser(description="LLEP Hook Comprehensive Tests")
     parser.add_argument(
-        "--category", type=str, default=None,
+        "--category",
+        type=str,
+        default=None,
         help="Run a specific category (topk, alpha, min_tokens, lambda, experts, "
-             "tokens, dims, backward, score_before, parity).",
+        "tokens, dims, backward, score_before, parity).",
     )
-    parser.add_argument("--test", type=str, default=None, help="Run a specific test by name.")
-    parser.add_argument("--list", action="store_true", help="List available tests and exit.")
+    parser.add_argument(
+        "--test", type=str, default=None, help="Run a specific test by name."
+    )
+    parser.add_argument(
+        "--list", action="store_true", help="List available tests and exit."
+    )
     args = parser.parse_args()
 
     rank, world_size = setup()
@@ -833,7 +916,9 @@ def main():
                 print(f"Available: {list(CATEGORY_BUILDERS.keys())}")
             dist.destroy_process_group()
             sys.exit(1)
-        tests_to_run = {k: v for k, v in all_tests.items() if v["category"] == args.category}
+        tests_to_run = {
+            k: v for k, v in all_tests.items() if v["category"] == args.category
+        }
     else:
         tests_to_run = all_tests
 
@@ -892,7 +977,9 @@ def main():
     if rank == 0:
         total = passed + failed + skipped
         print(f"\n{'='*70}")
-        print(f"  Results: {passed} passed, {failed} failed, {skipped} skipped out of {total} tests")
+        print(
+            f"  Results: {passed} passed, {failed} failed, {skipped} skipped out of {total} tests"
+        )
         if errors:
             print(f"\n  Failed:")
             for name, err in errors:
