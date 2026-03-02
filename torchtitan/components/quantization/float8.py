@@ -35,9 +35,9 @@ class Float8LinearConverter(QuantizationConverter):
         precompute_float8_dynamic_scale_for_fsdp: bool = False
         """Whether precompute float8 scales dynamically for FSDP, recommended for tensorwise scaling"""
 
-        recipe_name: Literal["tensorwise", "rowwise", "rowwise_with_gw_hp"] | None = (
-            None
-        )
+        recipe_name: Literal[
+            "tensorwise", "rowwise", "rowwise_with_gw_hp"
+        ] | None = None
         """If specified, creates float8 config from recipe name"""
 
         filter_fqns: list[str] = field(default_factory=list)
