@@ -31,7 +31,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         num_steps=10,
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=1e-6),
+            optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
@@ -57,7 +57,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=128,
+                max_tokens=100,
             ),
             attention_backend="FLASH_ATTN",
         ),

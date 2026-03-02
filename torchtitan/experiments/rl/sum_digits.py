@@ -6,7 +6,7 @@
 
 import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 
@@ -15,7 +15,6 @@ import torch
 class Task:
     question: str
     correct_answer: int
-    metadata: dict = field(default_factory=dict)
 
 
 def extract_answer(text: str) -> int | None:
@@ -74,7 +73,7 @@ class SumDigitsSpec:
         answer = sum(int(d) for num in numbers for d in str(num))
         question = f"What is the total digit sum of {numbers}?"
         return Task(
-            question=question, correct_answer=answer, metadata={"numbers": numbers}
+            question=question, correct_answer=answer
         )
 
     def get_system_prompt(self) -> str:
@@ -110,6 +109,6 @@ def sum_digits_reward_function(
             and len(answer_tags) == 1
             and re.search(r"\[ANSWER\]\s*-?\d+\s*$", completion)
         ):
-            reward += 0.5
+            reward += 0.2
         rewards.append(reward)
     return torch.tensor(rewards, dtype=torch.float32)

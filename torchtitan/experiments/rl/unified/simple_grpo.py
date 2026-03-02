@@ -26,17 +26,16 @@ import logging
 from dataclasses import dataclass, field
 
 import torch
-
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
 from torchtitan.config import Configurable
 from torchtitan.config.manager import ConfigManager
-from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.sum_digits import (
     extract_answer,
     sum_digits_reward_function,
     SumDigitsSpec,
 )
+from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.unified.actors.grader import Grader
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
 from torchtitan.protocols.model_spec import ModelSpec
@@ -67,6 +66,9 @@ class RLTrainer(Configurable):
         batch_invariant_mode: bool = True
         """Enable batch-invariant mode for deterministic NCCL collective
         operations and bitwise-reproducible forward/backward passes."""
+
+        num_prompts_per_step: int = 5
+        """Number of prompts to generate per training step."""
 
         log_samples: bool = False
         """Log per-sample outputs during eval and training steps."""
@@ -113,7 +115,6 @@ class RLTrainer(Configurable):
         # Task specification for generating prompts
         self.task_spec = SumDigitsSpec(seed=42)
         self.system_prompt = self.task_spec.get_system_prompt()
-        self.num_prompts = 5
 
         # Create process mesh for trainer (generator is collocated on same mesh)
         # TODO: Make the world size according to parallel degrees
@@ -168,8 +169,8 @@ class RLTrainer(Configurable):
         """Generate a batch of prompts and expected answers from the task spec."""
         prompt_texts = []
         expected_answers = []
-        for _ in range(self.num_prompts):
-            task = self.task_spec.generate_task()
+        for _ in range(self.config.num_prompts_per_step):
+            task: Task = self.task_spec.generate_task()
             prompt_texts.append(self.system_prompt + "\n\n" + task.question)
             expected_answers.append(str(task.correct_answer))
         return prompt_texts, expected_answers
@@ -256,7 +257,9 @@ class RLTrainer(Configurable):
             # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
             # TODO: Create a queue to use all episode from all GPUs
             t0 = time.perf_counter()
-            episodes = self.generator.generate.call(self.prompt_texts).get().item(gpus=0)
+            episodes = (
+                self.generator.generate.call(self.prompt_texts).get().item(gpus=0)
+            )
             t_generate = time.perf_counter() - t0
 
             # Attach expected answers to each episode
@@ -281,21 +284,15 @@ class RLTrainer(Configurable):
                 for gpu in range(self.trainer_world_size)
             }
             self.generator.update.call(metrics["policy_version"], weights).get()
-            t_weight_sync = time.perf_counter() - t0
+            t_sync_weights = time.perf_counter() - t0
 
             # Count correct rewards from scored episodes
-            all_rewards = [
-                c.reward
-                for ep in scored_episodes
-                for c in ep.completions
-            ]
+            all_rewards = [c.reward for ep in scored_episodes for c in ep.completions]
             correct_count = sum(1 for r in all_rewards if r > 0)
             total_count = len(all_rewards)
 
             all_token_lens = [
-                len(c.token_ids)
-                for ep in scored_episodes
-                for c in ep.completions
+                len(c.token_ids) for ep in scored_episodes for c in ep.completions
             ]
             avg_len = sum(all_token_lens) / len(all_token_lens)
 
@@ -304,7 +301,7 @@ class RLTrainer(Configurable):
                 f"Reward: {metrics['reward_mean']:+.3f} | "
                 f"Correct: {correct_count}/{total_count} | "
                 f"Avg tokens: {avg_len:.0f} | "
-                f"Time: gen={t_generate:.1f}s train={t_train:.1f}s weight_weight_sync={t_weight_sync:.1f}s"
+                f"Time: generate={t_generate:.1f}s train={t_train:.1f}s sync_weights={t_sync_weights:.1f}s"
             )
 
             if self.config.log_samples:

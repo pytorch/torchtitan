@@ -338,5 +338,7 @@ class PolicyTrainer(Actor, Configurable):
             ],
             **loss_metrics,
         }
-        logger.debug(f"{os.getpid()=} PolicyTrainer finished step {self.policy_version}")
+        logger.debug(
+            f"{os.getpid()=} PolicyTrainer finished step {self.policy_version}"
+        )
         return metrics

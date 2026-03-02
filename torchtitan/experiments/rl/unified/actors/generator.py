@@ -92,6 +92,10 @@ class VLLMGenerator(Actor, Configurable):
         seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
 
+        stop_strings: list[str] = field(default_factory=list)
+        """Stop strings for generation. Generation stops when any of these
+        strings is produced. The stop string is included in the output."""
+
     def __init__(
         self,
         config: Config,
@@ -160,7 +164,7 @@ class VLLMGenerator(Actor, Configurable):
         Called by the orchestrator (simple_grpo.py). The Grader fills in rewards.
 
         Args:
-            prompt_texts: List of prompt strings to generate completions for.
+            prompt_texts: List of prompt strings for which to generate completions.
         """
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
@@ -176,6 +180,8 @@ class VLLMGenerator(Actor, Configurable):
                 logprobs=1,
                 prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
                 output_kind=RequestOutputKind.FINAL_ONLY,  # Only return completed outputs
+                stop=self.config.stop_strings or None,
+                include_stop_str_in_output=True,
             )
 
             for request_id, prompt in enumerate(prompt_texts):
