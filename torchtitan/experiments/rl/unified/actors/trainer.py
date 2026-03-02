@@ -244,7 +244,7 @@ class PolicyTrainer(Actor, Configurable):
             Training metrics
         """
         logger.debug(
-            f"{os.getpid()=} PolicyTrainer starts to train {self.policy_version} "
+            f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
 
         # Compute advantages.
@@ -294,7 +294,7 @@ class PolicyTrainer(Actor, Configurable):
             all_token_log_probs,
             batch_token_log_probs,
         )
-        logger.info(
+        logger.debug(
             f"Logprob verification: bitwise_identical={verification_result['logprob_bitwise_identical']}, "
             f"max_delta={verification_result['logprob_max_delta']:.6e}, "
             f"diff_mean={verification_result['logprob_diff_mean']:.6e}, "
@@ -338,5 +338,5 @@ class PolicyTrainer(Actor, Configurable):
             ],
             **loss_metrics,
         }
-        logger.debug(f"{os.getpid()=} PolicyTrainer finish step {self.policy_version}")
+        logger.debug(f"{os.getpid()=} PolicyTrainer finished step {self.policy_version}")
         return metrics

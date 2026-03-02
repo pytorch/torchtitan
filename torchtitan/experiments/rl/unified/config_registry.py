@@ -48,7 +48,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            gpu_memory_limit=0.5,
+            gpu_memory_limit=0.4,
             enforce_eager=True,
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
@@ -57,7 +57,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
-                max_tokens=100,
+                max_tokens=128,
             ),
             attention_backend="FLASH_ATTN",
         ),

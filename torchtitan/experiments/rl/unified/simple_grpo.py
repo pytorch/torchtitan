@@ -32,9 +32,13 @@ from monarch.utils import setup_env_for_distributed
 from torchtitan.config import Configurable
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
+from torchtitan.experiments.rl.sum_digits import (
+    extract_answer,
+    sum_digits_reward_function,
+    SumDigitsSpec,
+)
 from torchtitan.experiments.rl.unified.actors.grader import Grader
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.vllm_compat.simple_rl import trivial_reward_function
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -63,6 +67,9 @@ class RLTrainer(Configurable):
         batch_invariant_mode: bool = True
         """Enable batch-invariant mode for deterministic NCCL collective
         operations and bitwise-reproducible forward/backward passes."""
+
+        log_samples: bool = False
+        """Log per-sample outputs during eval and training steps."""
 
         trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
         """PolicyTrainer config. Controls optimizer, training, parallelism"""
@@ -103,19 +110,10 @@ class RLTrainer(Configurable):
             * config.trainer.parallelism.tensor_parallel_degree
         )
 
-        # Use fake dataset for test. TODO: Implement real RL dataloader.
-        logger.debug("Using default prompts")
-        prompts_with_answers = [
-            ("The capital of France is", "paris"),
-            ("What is 7 times 8?", "56"),
-            ("The first president of the United States was", "washington"),
-            ("The chemical symbol for water is", "h2o"),
-            ("The largest planet in our solar system is", "jupiter"),
-        ]
-        self.prompt_texts = [p[0] for p in prompts_with_answers]
-        self.expected_answers = [p[1] for p in prompts_with_answers]
-
-        logger.debug(f"Loaded {len(self.prompt_texts)} prompts")
+        # Task specification for generating prompts
+        self.task_spec = SumDigitsSpec(seed=42)
+        self.system_prompt = self.task_spec.get_system_prompt()
+        self.num_prompts = 5
 
         # Create process mesh for trainer (generator is collocated on same mesh)
         # TODO: Make the world size according to parallel degrees
@@ -144,7 +142,7 @@ class RLTrainer(Configurable):
         self.grader = trainer_mesh.spawn(
             "grader",
             Grader,
-            trivial_reward_function,
+            sum_digits_reward_function,
         )
 
         # Wait for trainer to be fully initialized on all ranks then collect weights
@@ -161,11 +159,77 @@ class RLTrainer(Configurable):
             model_spec=config.model_spec,
             model_path=config.hf_assets_path,
             batch_invariant_mode=config.batch_invariant_mode,
-            prompt_texts=self.prompt_texts,
         )
 
         # Initialize generator with trainer weights.
         self.generator.update.call(0, initial_weights).get()
+
+    def _generate_prompts(self) -> tuple[list[str], list[str]]:
+        """Generate a batch of prompts and expected answers from the task spec."""
+        prompt_texts = []
+        expected_answers = []
+        for _ in range(self.num_prompts):
+            task = self.task_spec.generate_task()
+            prompt_texts.append(self.system_prompt + "\n\n" + task.question)
+            expected_answers.append(str(task.correct_answer))
+        return prompt_texts, expected_answers
+
+    async def evaluate(self, num_samples: int = 20) -> dict:
+        """Run evaluation on held-out prompts.
+
+        Generates on eval prompts, scores them, and reports accuracy.
+
+        Args:
+            num_samples: Number of eval prompts to generate
+
+        Returns:
+            Dict with accuracy, correct, total, format_rate
+        """
+        import re
+
+        eval_spec = SumDigitsSpec(seed=99)  # Different seed from training
+        eval_prompts = []
+        eval_answers = []
+        eval_tasks = []
+        for _ in range(num_samples):
+            task: Task = eval_spec.generate_task()
+            eval_prompts.append(self.system_prompt + "\n\n" + task.question)
+            eval_answers.append(str(task.correct_answer))
+            eval_tasks.append(task)
+
+        # Generate on eval prompts
+        episodes = self.generator.generate.call(eval_prompts).get().item(gpus=0)
+
+        # Score: check first completion per episode
+        correct = 0
+        format_ok = 0
+        for episode, task in zip(episodes, eval_tasks):
+            text = episode.completions[0].text
+            extracted = extract_answer(text)
+            is_correct = extracted == task.correct_answer
+            has_tag = bool(re.search(r"\[ANSWER\]", text))
+            correct += int(is_correct)
+            format_ok += int(has_tag)
+
+            if self.config.log_samples:
+                mark = "+" if is_correct else "-"
+                logger.info(f"  [{mark}] Q: {task.question}")
+                logger.info(f"       A: {text[:200]}")
+                logger.info(
+                    f"       extracted={extracted} expected={task.correct_answer}"
+                )
+
+        result = {
+            "accuracy": correct / num_samples,
+            "correct": correct,
+            "total": num_samples,
+            "format_rate": format_ok / num_samples,
+        }
+        logger.info(
+            f"Eval: Accuracy={result['accuracy']:.0%} ({correct}/{num_samples}) "
+            f"Format={result['format_rate']:.0%} ({format_ok}/{num_samples})"
+        )
+        return result
 
     async def train(self):
         """Run the RL training loop.
@@ -174,47 +238,111 @@ class RLTrainer(Configurable):
         """
         num_steps = self.config.num_steps
 
-        logger.info("\n" + "=" * 80)
+        # Pre-training evaluation
+        logger.info("Evaluating pre-training baseline...")
+        pre_eval = await self.evaluate()
+
+        logger.info("=" * 80)
         logger.info(f"Starting RL training for {num_steps} steps")
         logger.info("=" * 80)
 
         for step in range(num_steps):
+            import time
+
+            # Generate new prompts each step
+            self.prompt_texts, self.expected_answers = self._generate_prompts()
+
             # Fully sync RL loop with separate scoring step
             # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
             # TODO: Create a queue to use all episode from all GPUs
-            episodes = self.generator.generate.call().get().item(gpus=0)
+            t0 = time.perf_counter()
+            episodes = self.generator.generate.call(self.prompt_texts).get().item(gpus=0)
+            t_generate = time.perf_counter() - t0
+
             # Attach expected answers to each episode
             for episode, answer in zip(episodes, self.expected_answers):
                 episode.expected_answer = answer
+
             # 2. Grader computes rewards per episode
+            t0 = time.perf_counter()
             scored_episodes = self.grader.score.call(episodes).get().item(gpus=0)
+            t_grade = time.perf_counter() - t0
+
             # 3. Trainer computes advantages and updates policy
+            t0 = time.perf_counter()
             metrics = self.trainer_actor.step.call(scored_episodes).get().item(gpus=0)
+            t_train = time.perf_counter() - t0
+
             # 4. Sync weights back to generator (all TP ranks)
+            t0 = time.perf_counter()
             weight_mesh = self.trainer_actor.get_weights.call().get()
             weights = {
                 gpu: weight_mesh.item(gpus=gpu)
                 for gpu in range(self.trainer_world_size)
             }
             self.generator.update.call(metrics["policy_version"], weights).get()
+            t_weight_sync = time.perf_counter() - t0
+
+            # Count correct rewards from scored episodes
+            all_rewards = [
+                c.reward
+                for ep in scored_episodes
+                for c in ep.completions
+            ]
+            correct_count = sum(1 for r in all_rewards if r > 0)
+            total_count = len(all_rewards)
+
+            all_token_lens = [
+                len(c.token_ids)
+                for ep in scored_episodes
+                for c in ep.completions
+            ]
+            avg_len = sum(all_token_lens) / len(all_token_lens)
 
             logger.info(
-                f"\nStep {step:3d} | Loss: {metrics['loss']:.4f} | "
+                f"Step {step:3d} | Loss: {metrics['loss']:.4f} | "
                 f"Reward: {metrics['reward_mean']:+.3f} | "
-                f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
-                f"max={metrics['logprob_diff_max']:.4e}"
+                f"Correct: {correct_count}/{total_count} | "
+                f"Avg tokens: {avg_len:.0f} | "
+                f"Time: gen={t_generate:.1f}s train={t_train:.1f}s weight_weight_sync={t_weight_sync:.1f}s"
             )
-            logger.debug(f"  Sample: {metrics['sample_completion']}...")
+
+            if self.config.log_samples:
+                for ep, answer in zip(scored_episodes, self.expected_answers):
+                    idx = 0  # Log first completion per prompt
+                    comp = ep.completions[idx]
+                    extracted = extract_answer(comp.text)
+                    mark = "+" if comp.reward > 0 else "-"
+                    question = ep.completions[0].text[:80].replace("\n", " ")
+                    logger.info(
+                        f"  [{mark}] expected={answer} extracted={extracted} "
+                        f"reward={comp.reward:+.1f}"
+                    )
+                    logger.info(f"       {comp.text[:200].replace(chr(10), ' ')}")
 
             # Check for divergence
             if not torch.isfinite(torch.tensor(metrics["loss"])):
-                logger.debug("\n" + "!" * 80)
-                logger.debug("ERROR: Loss is NaN/Inf! Training diverged.")
-                logger.debug("!" * 80)
+                logger.info("!" * 80)
+                logger.info("ERROR: Loss is NaN/Inf! Training diverged.")
+                logger.info("!" * 80)
                 break
 
-        logger.info("\n" + "=" * 80)
+        # Post-training evaluation
         logger.info("RL Training complete")
+        logger.info("Evaluating post-training performance...")
+        post_eval = await self.evaluate()
+
+        logger.info("=" * 80)
+        logger.info(
+            f"Pre-training:  Accuracy={pre_eval['accuracy']:.0%} "
+            f"({pre_eval['correct']}/{pre_eval['total']}) "
+            f"Format={pre_eval['format_rate']:.0%}"
+        )
+        logger.info(
+            f"Post-training: Accuracy={post_eval['accuracy']:.0%} "
+            f"({post_eval['correct']}/{post_eval['total']}) "
+            f"Format={post_eval['format_rate']:.0%}"
+        )
         logger.info("=" * 80)
 
 

@@ -99,7 +99,6 @@ class VLLMGenerator(Actor, Configurable):
         model_spec: ModelSpec,
         model_path: str,
         batch_invariant_mode: bool,
-        prompt_texts: list[str],
     ):
         self.config = config
         self.model_spec = model_spec
@@ -113,8 +112,6 @@ class VLLMGenerator(Actor, Configurable):
         if batch_invariant_mode:
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
             init_batch_invariance(AttentionBackendEnum[config.attention_backend])
-
-        self.prompt_texts = prompt_texts
 
         # Extract needed fields from configs
         self.model_path = model_path
@@ -133,6 +130,7 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=config.enforce_eager,
+            disable_log_stats=True,
             hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum[config.attention_backend],
@@ -157,9 +155,12 @@ class VLLMGenerator(Actor, Configurable):
         return self._engine.model_executor.driver_worker.get_model()
 
     @endpoint
-    async def generate(self) -> list[Episode]:
+    async def generate(self, prompt_texts: list[str]) -> list[Episode]:
         """Generate episodes and return list of Episode (one per prompt).
         Called by the orchestrator (simple_grpo.py). The Grader fills in rewards.
+
+        Args:
+            prompt_texts: List of prompt strings to generate completions for.
         """
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
@@ -177,7 +178,7 @@ class VLLMGenerator(Actor, Configurable):
                 output_kind=RequestOutputKind.FINAL_ONLY,  # Only return completed outputs
             )
 
-            for request_id, prompt in enumerate(self.prompt_texts):
+            for request_id, prompt in enumerate(prompt_texts):
                 self._engine.add_request(str(request_id), prompt, sampling_params)
 
             # Step through engine until all requests are finished
@@ -213,7 +214,7 @@ class VLLMGenerator(Actor, Configurable):
                     )
                 )
 
-        logger.info(
+        logger.debug(
             f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
         )
         return episodes
