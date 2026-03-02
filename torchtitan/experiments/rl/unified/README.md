@@ -8,7 +8,7 @@ This work is inspired by https://github.com/vllm-project/vllm/pull/28685.
 The integration consists of two main components:
 
 1. **Model Adapter** (`model/qwen3.py`): A custom model class that extends vLLM's `Qwen3ForCausalLM` to handle TorchTitan checkpoint naming conventions
-2. **Inference Script** (`infer.py`): A simple script to register the model and run inference
+2. **Inference Script** (`inference_example.py`): A simple script to register the model and run inference
 
 
 ## Quick Start
@@ -49,9 +49,10 @@ python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torch
 
 5. Run inference with unified model definition:
 ```bash
-torchrun --nproc_per_node=<world_size> \
-      torchtitan/experiments/rl/unified/inference_example.py
+torchrun --nproc_per_node=2 torchtitan/experiments/rl/unified/inference_example.py
 ```
+
+**NOTE:**: Set `--nproc_per_node` to the world size, which should match the `tensor_parallel_degree` in the `VLLMGenerator` config.
 
 6. Run simple GRPO RL loop
 ```bash
