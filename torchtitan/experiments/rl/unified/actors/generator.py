@@ -6,7 +6,6 @@
 
 import logging
 import os
-
 from dataclasses import dataclass, field
 
 import torch
@@ -14,16 +13,13 @@ from monarch.actor import Actor, endpoint
 from torch.distributed.tensor import DTensor
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
-
 from torchtitan.experiments.rl.unified.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )
-
 from torchtitan.experiments.rl.unified.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
-
 from vllm.config import AttentionConfig
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
@@ -91,10 +87,6 @@ class VLLMGenerator(Actor, Configurable):
 
         seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
-
-        stop_strings: list[str] = field(default_factory=list)
-        """Stop strings for generation. Generation stops when any of these
-        strings is produced. The stop string is included in the output."""
 
     def __init__(
         self,
@@ -180,8 +172,6 @@ class VLLMGenerator(Actor, Configurable):
                 logprobs=1,
                 prompt_logprobs=1,  # Also get prompt log probs to access prompt token IDs
                 output_kind=RequestOutputKind.FINAL_ONLY,  # Only return completed outputs
-                stop=self.config.stop_strings or None,
-                include_stop_str_in_output=True,
             )
 
             for request_id, prompt in enumerate(prompt_texts):

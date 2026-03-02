@@ -72,9 +72,7 @@ class SumDigitsSpec:
         numbers = [self._rng.randint(10, 99) for _ in range(n)]
         answer = sum(int(d) for num in numbers for d in str(num))
         question = f"What is the total digit sum of {numbers}?"
-        return Task(
-            question=question, correct_answer=answer
-        )
+        return Task(question=question, correct_answer=answer)
 
     def get_system_prompt(self) -> str:
         return _SYSTEM_PROMPT

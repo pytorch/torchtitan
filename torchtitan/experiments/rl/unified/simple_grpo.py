@@ -23,6 +23,8 @@ python3 torchtitan/experiments/rl/unified/simple_grpo.py \
 
 import asyncio
 import logging
+import re
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -186,8 +188,6 @@ class RLTrainer(Configurable):
         Returns:
             Dict with accuracy, correct, total, format_rate
         """
-        import re
-
         eval_spec = SumDigitsSpec(seed=99)  # Different seed from training
         eval_prompts = []
         eval_answers = []
@@ -248,8 +248,6 @@ class RLTrainer(Configurable):
         logger.info("=" * 80)
 
         for step in range(num_steps):
-            import time
-
             # Generate new prompts each step
             self.prompt_texts, self.expected_answers = self._generate_prompts()
 
