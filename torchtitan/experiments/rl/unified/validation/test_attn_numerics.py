@@ -98,7 +98,6 @@ def create_vllm_engine(config):
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.enforce_eager,
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_backend=gen_config.attention_backend,
         compilation_config=CompilationConfig(

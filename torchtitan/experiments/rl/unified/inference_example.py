@@ -70,11 +70,25 @@ def generate():
         distributed_executor_backend=("external_launcher"),
         # Memory and performance
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.enforce_eager,
+        enforce_eager=(
+            gen_config.compilation_backend == "none"
+            and gen_config.cudagraph_mode == "none"
+        ),
         # HuggingFace overrides
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_backend=gen_config.attention_backend,
     )
+    from torchtitan.experiments.rl.unified.actors.generator import (
+        resolve_compilation_config,
+    )
+
+    compilation_config = resolve_compilation_config(
+        gen_config.compilation_backend,
+        gen_config.cudagraph_mode,
+        gen_config.parallelism.tensor_parallel_degree,
+    )
+    if compilation_config is not None:
+        engine_kwargs["compilation_config"] = compilation_config
     if gen_config.seed is not None:
         engine_kwargs["seed"] = gen_config.seed
     engine_args = EngineArgs(**engine_kwargs)

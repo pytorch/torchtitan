@@ -8,6 +8,7 @@ import logging
 import os
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 from monarch.actor import Actor, endpoint
@@ -24,12 +25,49 @@ from torchtitan.experiments.rl.unified.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
 
-from vllm.config import AttentionConfig
+from vllm.config import AttentionConfig, CompilationConfig
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_compilation_config(
+    compilation_backend: str, cudagraph_mode: str, tp_degree: int
+) -> CompilationConfig | None:
+    """Build a vLLM ``CompilationConfig``, or return ``None`` when both
+    compilation and CUDA graphs are disabled.
+
+    Resolves cudagraph mode for TP compatibility (full capture hangs with
+    TP > 1 due to DTensor collectives) and validates that piecewise capture
+    is not requested without torch.compile.
+    """
+    if compilation_backend == "none" and cudagraph_mode == "none":
+        return None
+
+    # Full CUDA graph capture hangs with TP > 1 — fall back to piecewise.
+    if tp_degree > 1 and cudagraph_mode in ("full_and_piecewise", "full"):
+        logger.warning(
+            "Changed cudagraph_mode to 'piecewise' for TP > 1 "
+            "(full capture incompatible with DTensor collectives)"
+        )
+        cudagraph_mode = "piecewise"
+
+    if compilation_backend == "none" and cudagraph_mode in (
+        "piecewise",
+        "full_and_piecewise",
+    ):
+        raise ValueError(
+            f"cudagraph_mode='{cudagraph_mode}' requires piecewise graph "
+            "capture which depends on torch.compile. Set compilation_backend "
+            "to 'eager' or 'inductor'."
+        )
+
+    return CompilationConfig(
+        backend=compilation_backend,
+        cudagraph_mode=cudagraph_mode,
+    )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -83,8 +121,19 @@ class VLLMGenerator(Actor, Configurable):
         gpu_memory_limit: float = 0.5
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
-        enforce_eager: bool = True
-        """Disable CUDA graphs in vLLM (use eager execution)."""
+        compilation_backend: Literal["none", "eager", "inductor"] = "eager"
+        """torch.compile backend for vLLM.
+        When set to a value other than "none", enables compilation with the specified backend.
+        See https://docs.vllm.ai/en/stable/api/vllm/config/#vllm.config.CompilationConfig.backend
+        NOTE: inductor will offer the best performance, but will impact numerics - use eager for
+        bitwise identical results."""
+
+        cudagraph_mode: Literal[
+            "none", "piecewise", "full", "full_and_piecewise"
+        ] = "piecewise"
+        """CUDA graph capture mode for vLLM.
+        NOTE: Full graph is not compatible with TP > 1 due to DTensor collectives.
+        See https://docs.vllm.ai/en/latest/design/v1/torch_compile.html#cuda-graph"""
 
         num_samples_per_prompt: int = 8
         """Number of completions to generate per prompt."""
@@ -132,12 +181,21 @@ class VLLMGenerator(Actor, Configurable):
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
-            enforce_eager=config.enforce_eager,
+            enforce_eager=(
+                config.compilation_backend == "none" and config.cudagraph_mode == "none"
+            ),
             hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum[config.attention_backend],
             ),
         )
+        compilation_config = resolve_compilation_config(
+            config.compilation_backend,
+            config.cudagraph_mode,
+            config.parallelism.tensor_parallel_degree,
+        )
+        if compilation_config is not None:
+            engine_kwargs["compilation_config"] = compilation_config
         if config.seed is not None:
             engine_kwargs["seed"] = config.seed
         engine_args = EngineArgs(**engine_kwargs)
