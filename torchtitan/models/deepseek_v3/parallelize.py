@@ -15,6 +15,7 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
+
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -178,7 +179,7 @@ def parallelize_deepseekv3(
 
     dp_mesh: DeviceMesh | None = None
     if parallel_dims.fsdp_enabled or parallel_dims.ep_enabled:
-        # apply FSDP or HSDP, potentially with Context Paralle
+        # apply FSDP or HSDP, potentially with Context Parallel
         dp_mesh_names = (
             ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
         )
