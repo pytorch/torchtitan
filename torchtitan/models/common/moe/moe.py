@@ -365,6 +365,58 @@ class TokenReorderer(nn.Module):
             num_tokens_per_expert,
         )
 
+class ExpertCombineFunction(torch.autograd.Function):
+    """Custom autograd Function that computes the expert combination
+    y_{n,:} = sum_k s_{n,k} * R_{n,k,:}
+    Inputs expected:
+    - `s` : shape (N, K) (router scores)
+    - `R`  : shape (N, K, D) (routed experts outputs)
+    Returns:
+    - y : shape (N, D)
+    """
+
+    @staticmethod
+    def forward(ctx, s, R, out_dtype=None):
+        assert s.dtype == torch.float32, "Expect router scores to be float32"
+        assert R.dtype == torch.bfloat16, "Expect routed experts outputs to be bfloat16"
+
+        # Ensure expectations about input shapes are met
+        assert s.dim() == 2, "Expect s to have shape (N, K)"
+        assert R.dim() == 3, "R is expected to be a 3D tensor"
+        assert s.shape[0] == R.shape[0], "Batch size of s and R must match"
+        assert s.shape[1] == R.shape[1], "Number of experts in s and R must match"
+
+        ctx.save_for_backward(s, R)
+        ctx.out_dtype = out_dtype
+
+        R_f = R.to(torch.float32)
+        y = torch.bmm(s.unsqueeze(1), R_f).squeeze(1)
+
+        if out_dtype is not None:
+            return y.to(out_dtype)
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        s, R = ctx.saved_tensors
+        assert s.dtype == torch.float32, "Expect router scores to be float32"
+        assert R.dtype == torch.bfloat16, "Expect routed experts outputs to be bfloat16"
+
+        # Forward bmm is in float, so we also compute the gradients in float.
+
+        # grad_output: (N, D)
+        grad_y = grad_output.unsqueeze(1)  # (N,1,D)
+
+        # grad w.r.t. s: (N,1,K) = (N,1,D) @ (N,D,K).  (batched sgemv)
+        Rt = R.transpose(1, 2)  # R^T along the non-batch dims
+        grad_s = torch.bmm(grad_y.to(torch.float32), Rt.to(torch.float32)).to(s.dtype).squeeze(1)
+
+        # grad w.r.t. R: (N,K,D) = (N,K,1) @ (N,1,D) = (N,1,D) * (N,K,1).  (batched outer product)
+        grad_R = (grad_y.to(torch.float32) * s.unsqueeze(2)).to(R.dtype)
+
+        return grad_s, grad_R, None
+
+
 
 class MoE(Module):
     @dataclass(kw_only=True, slots=True)
@@ -516,13 +568,18 @@ class MoE(Module):
             -1, self.router.top_k, dim
         )
         if not self.score_before_experts:
-            out_experts = (
-                torch.bmm(
-                    top_scores.reshape(-1, 1, self.router.top_k),
-                    routed_output_unsorted.float(),
-                )
-                .to(x.dtype)
-                .squeeze(1)
+            # out_experts = (
+            #     torch.bmm(
+            #         top_scores.reshape(-1, 1, self.router.top_k),
+            #         routed_output_unsorted.float(),
+            #     )
+            #     .to(x.dtype)
+            #     .squeeze(1)
+            # )
+            out_experts = ExpertCombineFunction.apply(
+                top_scores,  # (bs*slen, top_k)
+                routed_output_unsorted,
+                x.dtype,
             )
         else:
             out_experts = routed_output_unsorted.sum(dim=1)
