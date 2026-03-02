@@ -35,7 +35,6 @@ from torchtitan.models.common.moe.utils import (
 )
 
 
-_hybrid_ep_cls: Any = None  # Lazily-loaded HybridEPBuffer class
 _buffer: Any = None  # Global buffer instance
 
 
@@ -95,21 +94,6 @@ def _apply_scores(
         return hidden * scores.to(hidden.dtype).reshape(-1, 1), None
     return hidden, scores
 
-
-def _require_hybridep() -> Any:
-    """Lazily import HybridEPBuffer, raising helpful error if unavailable."""
-    global _hybrid_ep_cls
-    if _hybrid_ep_cls is not None:
-        return _hybrid_ep_cls
-    try:
-        from deep_ep import HybridEPBuffer
-    except ImportError as e:
-        raise ImportError(
-            "HybridEP requires deep_ep library. "
-            "Install from: https://github.com/deepseek-ai/DeepEP, branch: hybrid-ep"
-        ) from e
-    _hybrid_ep_cls = HybridEPBuffer
-    return _hybrid_ep_cls
 
 
 # Custom op registration for torch.compile and SAC compatibility
@@ -377,7 +361,14 @@ def get_buffer(
     if fp8_dispatch:
         raise AssertionError("HybridEP FP8 dispatch not yet supported")
 
-    HybridEPBuffer = _require_hybridep()
+    try:
+        from deep_ep import HybridEPBuffer
+    except ImportError as e:
+        raise ImportError(
+            "HybridEP requires deep_ep library. "
+            "Install from: https://github.com/deepseek-ai/DeepEP, branch: hybrid-ep"
+        ) from e
+
     max_tokens_per_rank = num_tokens
 
     needs_reinit = (
