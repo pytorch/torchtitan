@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import functools
 from collections import deque
 
 COMM_OVERHEAD = 0
@@ -215,7 +214,6 @@ def _training_time(
     fwd = [0] * (num_stages + 2)
     bwd = [0] * (num_stages + 2)
 
-    # 计算阶段时间
     for i in range(num_stages):
         last_mb[i] = num_stages * 2 - num_stages + i
         fwd[i + 1] = sum(block_time[0][b] for b in partition[i])
@@ -233,7 +231,7 @@ def _training_time(
     return flush, critical
 
 
-# ---------- 最优分区搜索 ----------
+# ---------- Optimal Partition Search ----------
 def _find_best(
     block_time: list[list[int]],
     num_stages: int,
@@ -246,25 +244,9 @@ def _find_best(
     return: {"partition": [[...], ...], "cost": int, "critical_stage": int}
     """
 
-    # Hash func: C++ VectorHash
-    @functools.cache
-    def _hash(p):
-        h = 0
-        for inner in p:
-            for v in inner:
-                h ^= (v + 0x9E3779B9) + (h << 6) + (h >> 2)
-        return h
-
-    # C++ VectorEqual
-    def _eq(a, b):
-        return len(a) == len(b) and all(
-            len(ai) == len(bi) and all(av == bv for av, bv in zip(ai, bi))
-            for ai, bi in zip(a, b)
-        )
-
     visited = set()
     queue = deque([init_partition])
-    visited.add(_hash(tuple(tuple(r) for r in init_partition)))
+    visited.add(hash(tuple(tuple(r) for r in init_partition)))
 
     # Best result
     best = {"partition": init_partition, "cost": INF, "critical_stage": MAX_INT32}
@@ -310,8 +292,8 @@ def _find_best(
             for stage in range(critical + 1, len(cur)):
                 full_new.append(cur[stage])
 
-            # "Hash deduplication
-            key = _hash(tuple(tuple(r) for r in full_new))
+            # Hash deduplication
+            key = hash(tuple(tuple(r) for r in full_new))
             if key not in visited:
                 visited.add(key)
                 queue.append(full_new)
