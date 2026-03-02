@@ -11,7 +11,7 @@ Example inference script using TorchTitan models with vLLM LLMEngine.
 This script uses the RL unified config_registry to configure both
 the vLLM engine and sampling parameters.
 
-Run: torchrun --nproc_per_node=<world_size> \
+Run: torchrun --nproc_per_node=2 \
       torchtitan/experiments/rl/unified/infer.py
 """
 import os
@@ -70,10 +70,13 @@ def generate():
         distributed_executor_backend=("external_launcher"),
         # Memory and performance
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.enforce_eager,
+        enforce_eager=gen_config.compile.is_eager,
         # HuggingFace overrides
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
     )
+    vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+    if vllm_compilation_config is not None:
+        engine_kwargs["compilation_config"] = vllm_compilation_config
     if gen_config.seed is not None:
         engine_kwargs["seed"] = gen_config.seed
     engine_args = EngineArgs(**engine_kwargs)
