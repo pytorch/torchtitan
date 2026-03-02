@@ -1,4 +1,5 @@
-# Copyright (c) Nous Research. All rights reserved.
+# Copyright (c) Nous Research and affiliates.
+# All rights reserved.
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
