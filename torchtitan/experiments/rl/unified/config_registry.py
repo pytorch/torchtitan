@@ -20,6 +20,7 @@ from torchtitan.experiments.rl.unified.actors.generator import (
 )
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
 from torchtitan.experiments.rl.unified.simple_grpo import RLTrainer
+from torchtitan.experiments.rl.unified.sum_digits import SumDigitsTaskSpec
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -27,6 +28,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B."""
     return RLTrainer.Config(
         model_spec=model_registry("0.6B"),
+        task=SumDigitsTaskSpec(seed=42),
         hf_assets_path="/data/users/jianiw/model/qwen3-0.6b",
         num_steps=10,
         batch_invariant_mode=True,
@@ -48,7 +50,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            gpu_memory_limit=0.4,
+            gpu_memory_limit=0.5,
             enforce_eager=True,
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
@@ -68,6 +70,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     """Debug config for quick iteration — small model, few steps."""
     return RLTrainer.Config(
         model_spec=model_registry("debugmodel"),
+        task=SumDigitsTaskSpec(seed=42),
         num_steps=5,
         batch_invariant_mode=False,
         trainer=PolicyTrainer.Config(

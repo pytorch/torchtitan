@@ -23,8 +23,6 @@ python3 torchtitan/experiments/rl/unified/simple_grpo.py \
 
 import asyncio
 import logging
-import re
-import time
 from dataclasses import dataclass, field
 
 import torch
@@ -32,14 +30,10 @@ from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
 from torchtitan.config import Configurable
 from torchtitan.config.manager import ConfigManager
-from torchtitan.experiments.rl.sum_digits import (
-    extract_answer,
-    sum_digits_reward_function,
-    SumDigitsSpec,
-)
 from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.unified.actors.grader import Grader
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.unified.task_spec import Task, TaskSpec
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -56,6 +50,10 @@ class RLTrainer(Configurable):
         """Model specification shared by trainer and generator.
         Set programmatically via config_registry (not from CLI)."""
 
+        task: TaskSpec | None = None
+        """Task specification for generating prompts and scoring.
+        Set programmatically via config_registry (not from CLI)."""
+
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
 
@@ -69,11 +67,8 @@ class RLTrainer(Configurable):
         """Enable batch-invariant mode for deterministic NCCL collective
         operations and bitwise-reproducible forward/backward passes."""
 
-        num_prompts_per_step: int = 5
+        num_episodes_per_step: int = 5
         """Number of prompts to generate per training step."""
-
-        log_samples: bool = False
-        """Log per-sample outputs during eval and training steps."""
 
         trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
         """PolicyTrainer config. Controls optimizer, training, parallelism"""
@@ -115,7 +110,7 @@ class RLTrainer(Configurable):
         )
 
         # Task specification for generating prompts
-        self.task_spec = SumDigitsSpec(seed=42)
+        self.task_spec = config.task
         self.system_prompt = self.task_spec.get_system_prompt()
 
         # Create process mesh for trainer (generator is collocated on same mesh)
@@ -145,7 +140,7 @@ class RLTrainer(Configurable):
         self.grader = trainer_mesh.spawn(
             "grader",
             Grader,
-            sum_digits_reward_function,
+            self.task_spec.reward_function,
         )
 
         # Wait for trainer to be fully initialized on all ranks then collect weights
@@ -171,7 +166,7 @@ class RLTrainer(Configurable):
         """Generate a batch of prompts and expected answers from the task spec."""
         prompt_texts = []
         expected_answers = []
-        for _ in range(self.config.num_prompts_per_step):
+        for _ in range(self.config.num_episodes_per_step):
             task: Task = self.task_spec.generate_task()
             prompt_texts.append(self.system_prompt + "\n\n" + task.question)
             expected_answers.append(str(task.correct_answer))
@@ -188,14 +183,12 @@ class RLTrainer(Configurable):
         Returns:
             Dict with accuracy, correct, total, format_rate
         """
-        eval_spec = SumDigitsSpec(seed=99)  # Different seed from training
+        eval_spec = self.task_spec.create_eval_instance()
         eval_prompts = []
-        eval_answers = []
         eval_tasks = []
         for _ in range(num_samples):
-            task: Task = eval_spec.generate_task()
+            task = eval_spec.generate_task()
             eval_prompts.append(self.system_prompt + "\n\n" + task.question)
-            eval_answers.append(str(task.correct_answer))
             eval_tasks.append(task)
 
         # Generate on eval prompts
@@ -206,19 +199,9 @@ class RLTrainer(Configurable):
         format_ok = 0
         for episode, task in zip(episodes, eval_tasks):
             text = episode.completions[0].text
-            extracted = extract_answer(text)
-            is_correct = extracted == task.correct_answer
-            has_tag = bool(re.search(r"\[ANSWER\]", text))
-            correct += int(is_correct)
-            format_ok += int(has_tag)
-
-            if self.config.log_samples:
-                mark = "+" if is_correct else "-"
-                logger.info(f"  [{mark}] Q: {task.question}")
-                logger.info(f"       A: {text[:200]}")
-                logger.info(
-                    f"       extracted={extracted} expected={task.correct_answer}"
-                )
+            result = self.task_spec.evaluate_completion(text, task)
+            correct += int(result["correct"])
+            format_ok += int(result["format_ok"])
 
         result = {
             "accuracy": correct / num_samples,
@@ -255,66 +238,44 @@ class RLTrainer(Configurable):
             # Fully sync RL loop with separate scoring step
             # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
             # TODO: Create a queue to use all episode from all GPUs
-            t0 = time.perf_counter()
             episodes = (
                 self.generator.generate.call(self.prompt_texts).get().item(gpus=0)
             )
-            t_generate = time.perf_counter() - t0
 
             # Attach expected answers to each episode
             for episode, answer in zip(episodes, self.expected_answers):
                 episode.expected_answer = answer
 
             # 2. Grader computes rewards per episode
-            t0 = time.perf_counter()
             scored_episodes = self.grader.score.call(episodes).get().item(gpus=0)
-            t_grade = time.perf_counter() - t0
 
             # 3. Trainer computes advantages and updates policy
-            t0 = time.perf_counter()
             metrics = self.trainer_actor.step.call(scored_episodes).get().item(gpus=0)
-            t_train = time.perf_counter() - t0
 
             # 4. Sync weights back to generator (all TP ranks)
-            t0 = time.perf_counter()
             weight_mesh = self.trainer_actor.get_weights.call().get()
             weights = {
                 gpu: weight_mesh.item(gpus=gpu)
                 for gpu in range(self.trainer_world_size)
             }
             self.generator.update.call(metrics["policy_version"], weights).get()
-            t_sync_weights = time.perf_counter() - t0
-
-            # Count correct rewards from scored episodes
-            all_rewards = [c.reward for ep in scored_episodes for c in ep.completions]
-            correct_count = sum(1 for r in all_rewards if r > 0)
-            total_count = len(all_rewards)
 
             all_token_lens = [
                 len(c.token_ids) for ep in scored_episodes for c in ep.completions
             ]
             avg_len = sum(all_token_lens) / len(all_token_lens)
 
-            logger.info(
-                f"Step {step:2d} | Loss: {metrics['loss']:.4f} | "
-                f"Reward: {metrics['reward_mean']:+.3f} | "
-                f"Correct: {correct_count}/{total_count} | "
-                f"Avg tokens: {avg_len:.0f} | "
-                f"Time: generate={t_generate:.1f}s train={t_train:.1f}s sync_weights={t_sync_weights:.1f}s"
-            )
+            task_metrics = self.task_spec.compute_step_metrics(scored_episodes)
+            task_metrics_str = " | ".join(f"{k}: {v}" for k, v in task_metrics.items())
 
-            if self.config.log_samples:
-                for ep, answer in zip(scored_episodes, self.expected_answers):
-                    idx = 0  # Log first completion per prompt
-                    comp = ep.completions[idx]
-                    extracted = extract_answer(comp.text)
-                    mark = "+" if comp.reward > 0 else "-"
-                    question = ep.completions[0].text[:80].replace("\n", " ")
-                    logger.info(
-                        f"  [{mark}] expected={answer} extracted={extracted} "
-                        f"reward={comp.reward:+.1f}"
-                    )
-                    logger.info(f"       {comp.text[:200].replace(chr(10), ' ')}")
+            logger.info(
+                f"Step {step:2d} | Loss: {metrics['loss']:+.4f} | "
+                f"Reward: {metrics['reward_mean']:+.3f} | "
+                f"{task_metrics_str} | "
+                f"Avg tokens: {avg_len:>3.0f} | "
+                f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
+                f"max={metrics['logprob_diff_max']:.4e}"
+            )
 
             # Check for divergence
             if not torch.isfinite(torch.tensor(metrics["loss"])):
