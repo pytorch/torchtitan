@@ -801,6 +801,19 @@ def assert_losses_equal(
 
     if not result.wasSuccessful():
         log_print("Loss assertion failed!")
+        log_print()
+        log_print(
+            "Actual baseline losses (can be used to update import file if "
+            "the loss curve change is expected):"
+        )
+        log_print(
+            "Note that you should verify the loss curve change is not a "
+            "regression first!!!"
+        )
+        for step in sorted(baseline_losses.keys()):
+            loss = baseline_losses[step]
+            print(f"{step} {loss}")
+        log_print()
         sys.exit(1)
     else:
         if test_log and import_result:
