@@ -22,6 +22,9 @@ from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
     preprocess_data,
+    PATCH_HEIGHT,
+    PATCH_WIDTH,
+    IMAGE_LATENT_SIZE_RATIO,
 )
 from torchtitan.trainer import Trainer
 
@@ -38,6 +41,19 @@ class FluxTrainer(Trainer):
         inference: Inference = field(default_factory=Inference)
 
     def __init__(self, config: Config):
+        # Compute image token count: autoencoder downscales the image,
+        # then pack_latents tiles the latent into 2×2 patches.
+        # pyrefly: ignore [missing-attribute]
+        img_size = config.dataloader.img_size
+        ae_downscale = IMAGE_LATENT_SIZE_RATIO
+        latent_side_width = img_size // ae_downscale // PATCH_WIDTH
+        latent_side_height = img_size // ae_downscale // PATCH_HEIGHT
+        seq_len_img = latent_side_width * latent_side_height
+
+        # pyrefly: ignore [missing-attribute]
+        seq_len_txt = config.encoder.max_t5_encoding_len
+        config.training.seq_len = seq_len_img + seq_len_txt
+
         super().__init__(config)
 
         # Set random seed, and maybe enable deterministic mode
@@ -104,16 +120,13 @@ class FluxTrainer(Trainer):
                 dump_folder=config.dump_folder,
             )
 
+
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
     ) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
         """Override to count transformer tokens (image patches + text tokens)
         instead of raw pixel count from labels.numel().
         """
-        assert self.config.model_spec is not None
-        model_config = self.config.model_spec.model
-        tokens_per_sample = model_config.seq_len_img + model_config.seq_len_txt
-
         data_iterator = iter(data_iterable)
         while True:
             data_load_start = time.perf_counter()
@@ -123,7 +136,7 @@ class FluxTrainer(Trainer):
                 raise DataloaderExhaustedError() from ex
             input_dict, labels = batch
             bsz = labels.shape[0]
-            ntokens_batch = bsz * tokens_per_sample
+            ntokens_batch = bsz * self.config.training.seq_len
             self.ntokens_seen += ntokens_batch
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
