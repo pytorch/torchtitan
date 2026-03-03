@@ -7,6 +7,7 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 from torchtitan.components.loss import build_cross_entropy_loss
+from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import FeedForward, GQAttention, RoPE
 from torchtitan.models.common.moe import MoE
 from torchtitan.protocols.model_spec import ModelSpec
@@ -311,7 +312,7 @@ def model_registry(flavor: str) -> ModelSpec:
         flavor=flavor,
         model=qwen3_configs[flavor],
         parallelize_fn=parallelize_qwen3,
-        pipelining_fn=None,
+        pipelining_fn=pipeline_llm,
         build_loss_fn=build_cross_entropy_loss,
         post_optimizer_build_fn=None,
         state_dict_adapter=Qwen3StateDictAdapter,
