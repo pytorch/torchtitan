@@ -174,7 +174,8 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             buffer_device = None
 
         self.loss_fn = self.train_spec.build_loss_fn(
-            config.compile, parallel_dims=parallel_dims)
+            config.compile, parallel_dims=parallel_dims
+        )
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size

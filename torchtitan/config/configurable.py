@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from dataclasses import dataclass, fields, replace
 from typing import ClassVar
 
@@ -39,7 +40,33 @@ class Configurable:
 
     @dataclass(kw_only=True, slots=True)
     class Config:
+        """Base config class for all configurable components.
+
+        .. warning::
+
+            Do **not** use ``dataclasses.asdict()`` on ``Config`` instances.
+            Configs may contain ``field(init=False)`` slots that are only
+            populated at ``build()`` time; ``asdict()`` will raise
+            ``AttributeError`` for those fields.  Use :meth:`to_dict` instead.
+        """
+
         _owner: ClassVar[type | None] = None
+
+        def to_dict(self) -> dict:
+            """Serialize to a dict, safely handling unset ``field(init=False)`` slots."""
+            result = {}
+            for f in fields(self):
+                try:
+                    val = getattr(self, f.name)
+                except AttributeError:
+                    continue  # field(init=False) not yet set
+                if hasattr(val, "to_dict"):
+                    result[f.name] = val.to_dict()
+                elif dataclasses.is_dataclass(val):
+                    result[f.name] = dataclasses.asdict(val)
+                else:
+                    result[f.name] = val
+            return result
 
         def _replace(self, **overrides):
             """Copy this config via ``replace()``, apply *overrides*, and

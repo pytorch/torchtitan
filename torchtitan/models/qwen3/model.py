@@ -133,6 +133,11 @@ class Qwen3Model(Decoder):
                     f"Varlen attention is not supported with CP."
                 )
 
+            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
+                raise NotImplementedError(
+                    "Weight tying is not supported with Pipeline Parallel."
+                )
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
