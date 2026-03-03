@@ -188,7 +188,10 @@ class MXGroupedMMConverter(QuantizationConverter):
         """
         if not self.enabled:
             return
-        from torchao.prototype.moe_training.config import MXFP8GroupedMMConfig
+        from torchao.prototype.moe_training.conversion_utils import (
+            MoEScalingType,
+            MoETrainingConfig,
+        )
         from torchao.quantization.quant_api import quantize_
 
         def moe_module_filter_fn(mod: nn.Module, cur_fqn: str) -> bool:
@@ -197,7 +200,7 @@ class MXGroupedMMConverter(QuantizationConverter):
                     return True
             return False
 
-        config = MXFP8GroupedMMConfig()
+        config = MoETrainingConfig(scaling_type=MoEScalingType.MXFP8)
         quantize_(model, config=config, filter_fn=moe_module_filter_fn)
         logger.info(
             f"Converted MoE layers matching FQNS {self.moe_fqns} "
