@@ -14,7 +14,7 @@ from torchtitan.tools.utils import _round_up
 from .kernels import generate_permute_indices
 
 TOKEN_GROUP_ALIGN_SIZE_M = 1
-ValidTokenGroupAlignmentSize = Literal[1, 8, 16, 32]
+ValidTokenGroupAlignmentSize = Literal[1, 16, 32]
 
 
 def set_token_group_alignment_size_m(
@@ -24,7 +24,7 @@ def set_token_group_alignment_size_m(
     Set the token group alignment size for token groups in MoE. This is implemented by
     padding each token group size to the next multiple of TOKEN_GROUP_ALIGN_SIZE_M.
 
-    Valid values are: 1, 8, 16, or 32.
+    Valid values are: 1, 16, or 32.
     Different values are needed for different cases:
 
     * For bf16, 1 (no padding needed). BF16 grouped GEMM natively supports
