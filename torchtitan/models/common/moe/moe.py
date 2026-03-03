@@ -28,16 +28,31 @@ def _run_experts_for_loop(
     x: torch.Tensor,
     num_tokens_per_expert: torch.Tensor,
 ) -> torch.Tensor:
+    from .utils import TOKEN_GROUP_ALIGN_SIZE_M
+
     # NOTE: this would incur a synchronization between device and host
     num_tokens_per_expert_list = num_tokens_per_expert.tolist()
 
-    # side-effect code due to the usage of generate_permute_indices
-    num_padding = x.shape[0] - sum(num_tokens_per_expert_list)
+    # When padding is active (FP8/MXFP8), x may be larger than the actual
+    # token count due to alignment padding. Slice to actual tokens before
+    # compute, then re-pad after. When no padding (BF16), these are no-ops.
+    num_actual_tokens = sum(num_tokens_per_expert_list)
+    num_padding = x.shape[0] - num_actual_tokens
+
+    # Provide hints to torch.compile about the relationship between
+    # num_actual_tokens and x.shape[0], since num_actual_tokens is
+    # data-dependent (unbacked symint).
+    if TOKEN_GROUP_ALIGN_SIZE_M == 1:
+        torch._check(num_padding == 0)
+        torch._check(num_actual_tokens == x.shape[0])
+    else:
+        torch._check(num_actual_tokens >= 0)
+        torch._check(num_actual_tokens <= x.shape[0])
 
     # a tuple of tensors indexed by experts
     # each with shape (tokens_per_expert(varying), dim)
     x_splits = torch.split(
-        x[: sum(num_tokens_per_expert_list)],
+        x[:num_actual_tokens],
         split_size_or_sections=num_tokens_per_expert_list,
         dim=0,
     )
@@ -50,8 +65,8 @@ def _run_experts_for_loop(
         out_experts_splits.append(h)
     out = torch.cat(out_experts_splits, dim=0)
 
-    # side-effect code due to the usage of generate_permute_indices
-    out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
+    if num_padding > 0:
+        out = torch.vstack((out, out.new_zeros((num_padding, out.shape[-1]))))
 
     return out
 

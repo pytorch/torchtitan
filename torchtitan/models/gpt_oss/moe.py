@@ -49,6 +49,9 @@ def indices_padding_wrapper(func: Callable) -> Callable:
     tokens each expert gets is a multiple of TOKEN_GROUP_ALIGN_SIZE_M. The
     generate_permute_indices kernel also helps achieve this via padding,
     without incurring synchronization between device and host.
+
+    When TOKEN_GROUP_ALIGN_SIZE_M == 1 (BF16 path), this wrapper is a no-op
+    since BF16 grouped GEMM does not require token group alignment.
     """
 
     def wrapper(
@@ -61,6 +64,22 @@ def indices_padding_wrapper(func: Callable) -> Callable:
         num_tokens_per_expert: torch.Tensor,
         tp_degree: int = 1,
     ) -> torch.Tensor:
+        from torchtitan.models.common.moe.utils import TOKEN_GROUP_ALIGN_SIZE_M
+
+        if TOKEN_GROUP_ALIGN_SIZE_M == 1:
+            # BF16 path: no padding needed, call function directly.
+            return func(
+                mlp1_weight,
+                mlp1_bias,
+                mlp2_weight,
+                mlp2_bias,
+                swiglu_limit,
+                x,
+                num_tokens_per_expert,
+                tp_degree,
+            )
+
+        # FP8/MXFP8 path: pad token groups before computation, then unpad after.
         num_local_experts = mlp1_weight.shape[0]
         ep_degree = num_tokens_per_expert.shape[0] // num_local_experts
 
