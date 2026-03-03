@@ -13,6 +13,8 @@ from torchtitan.tools.utils import _round_up
 
 from .kernels import generate_permute_indices
 
+# TODO(pianpwk): Consider removing padding paths entirely once HybridEP integration lands,
+# moving padding to communication layer.
 TOKEN_GROUP_ALIGN_SIZE_M = 1
 ValidTokenGroupAlignmentSize = Literal[1, 16, 32]
 
