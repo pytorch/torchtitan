@@ -7,6 +7,7 @@
 import os
 
 import torch
+import torch.nn.functional as F
 
 from torchtitan.config import ConfigManager
 from torchtitan.tools.logging import init_logger, logger
@@ -39,6 +40,18 @@ def main() -> None:
 
         # pyrefly: ignore [missing-attribute]
         trainer = config.build()
+
+        # On PT ROCm 7.1 nightly wheels, we are seeing HIPBLAS_STATUS_INVALID_VALUE
+        # from hipblasLtMatmulAlgoGetHeuristic errors. Add a warmup as a workaround.
+        if torch.version.hip is not None and torch.cuda.is_available():
+            try:
+                warm_x = torch.randn(1, 1, 8, device="cuda", dtype=torch.bfloat16)
+                warm_w = torch.randn(8, 8, device="cuda", dtype=torch.bfloat16)
+                _ = F.linear(warm_x, warm_w, None)
+                torch.cuda.synchronize()
+                logger.info("ROCm warmup linear completed")
+            except RuntimeError as error:
+                logger.warning("ROCm warmup linear failed: %s", error)
 
         # pyrefly: ignore [missing-attribute]
         if config.checkpoint.create_seed_checkpoint:
