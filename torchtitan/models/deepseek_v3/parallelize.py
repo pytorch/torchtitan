@@ -158,6 +158,7 @@ def parallelize_deepseekv3(
             [block.attention.inner_attention for block in model.layers.values()],
             parallel_dims.get_mesh("cp"),
             attn_backend,
+            tensor_mesh=parallel_dims.get_optional_mesh("tp"),
         )
 
     model_compile_enabled = (

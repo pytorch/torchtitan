@@ -50,6 +50,31 @@ qwen3_configs = {
             backend="cos_sin",
         ),
     ),
+    "debugmodel_flex": Qwen3Model.Config(
+        vocab_size=2048,
+        dim=256,
+        n_layers=8,
+        enable_weight_tying=True,
+        layer=Qwen3TransformerBlock.Config(
+            norm_eps=1e-6,
+            feed_forward=FeedForward.Config(hidden_dim=3072),
+            attention=GQAttention.Config(
+                n_heads=16,
+                n_kv_heads=8,
+                head_dim=128,
+                qk_norm=True,
+                norm_eps=1e-6,
+                attn_backend="flex",
+                rope_backend="cos_sin",
+            ),
+        ),
+        rope=RoPE.Config(
+            dim=128,
+            max_seq_len=4096,
+            theta=1000000.0,
+            backend="cos_sin",
+        ),
+    ),
     "0.6B": Qwen3Model.Config(
         vocab_size=151936,
         dim=1024,
