@@ -11,7 +11,7 @@ import torch
 import torch._inductor.config
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -40,7 +40,28 @@ from torchtitan.models.llama4.parallelize import (
 )
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
+
 from torchtitan.tools.logging import logger
+
+
+def _dtensor_to_local_pre_hook(
+    module: nn.Module,
+    args: tuple,
+    kwargs: dict,
+) -> tuple[tuple, dict]:
+    """Convert DTensor args to local tensors before the CP attention hook.
+
+    When TP uses use_local_output=False, q/k/v arrive at inner_attention as
+    DTensors on the TP mesh. The CP hook expects plain tensors, so we convert
+    them here. This hook must be registered before the CP hook.
+    """
+    new_args = tuple(
+        arg.to_local() if isinstance(arg, DTensor) else arg for arg in args
+    )
+    new_kwargs = {
+        k: v.to_local() if isinstance(v, DTensor) else v for k, v in kwargs.items()
+    }
+    return new_args, new_kwargs
 
 
 # for selective op activation checkpointing
@@ -301,6 +322,17 @@ def apply_non_moe_tp(
             # pyrefly: ignore [bad-argument-type]
             parallelize_plan=layer_plan,
         )
+
+        if cp_enabled:
+            # When CP is enabled, the CP attention hook on inner_attention expects
+            # plain tensors (not TP-mesh DTensors). Register a pre-forward hook
+            # that converts DTensor q/k/v to local tensors before the CP hook runs.
+            # This hook is registered before apply_cp_to_attention_module, so it
+            # executes first in the hook chain.
+            attn = transformer_block.attention  # pyrefly: ignore [missing-attribute]
+            attn.inner_attention.register_forward_pre_hook(
+                _dtensor_to_local_pre_hook, with_kwargs=True
+            )
 
     if enable_async_tp:
         torch._inductor.config._micro_pipeline_tp = True
