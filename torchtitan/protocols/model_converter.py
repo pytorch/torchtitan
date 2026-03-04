@@ -8,6 +8,7 @@ from typing import Protocol
 
 import torch.nn as nn
 
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
@@ -83,13 +84,14 @@ class ModelConvertersContainer(Configurable, ModelConverter):
 def _validate_quantization(converters: list[Configurable.Config]):
     """Validates that all quantization converters use the same quantization type.
 
-    Each quantization converter Config defines a `_quantization_type` ClassVar
-    (e.g. "float8" or "mx"). This function asserts they are all the same.
+    Each quantization converter Config inherits from QuantizationConverter.Config
+    and defines a `_quantization_type` ClassVar (e.g. "float8" or "mx").
+    This function asserts they are all the same.
     """
     existing_type: str | None = None
     for config in converters:
-        qt = getattr(config, "_quantization_type", None)
-        if qt is not None:
+        if isinstance(config, QuantizationConverter.Config):
+            qt = config._quantization_type
             if existing_type is None:
                 existing_type = qt
             else:
