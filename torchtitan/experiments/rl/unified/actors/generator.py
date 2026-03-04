@@ -126,6 +126,7 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=config.enforce_eager,
+            # Disable vLLM logging to avoid noisy logs on every step
             disable_log_stats=True,
             hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(

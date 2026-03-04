@@ -23,6 +23,7 @@ python3 torchtitan/experiments/rl/unified/simple_grpo.py \
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
 
 import torch
@@ -33,7 +34,7 @@ from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.unified.actors.grader import Grader
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.unified.task_spec import Task, TaskSpec
+from torchtitan.experiments.rl.unified.sum_digits import extract_answer, SumDigitsTask
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,6 @@ class RLTrainer(Configurable):
 
         model_spec: ModelSpec | None = None
         """Model specification shared by trainer and generator.
-        Set programmatically via config_registry (not from CLI)."""
-
-        task: TaskSpec | None = None
-        """Task specification for generating prompts and scoring.
         Set programmatically via config_registry (not from CLI)."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
@@ -70,6 +67,9 @@ class RLTrainer(Configurable):
         num_episodes_per_step: int = 5
         """Number of prompts to generate per training step."""
 
+        log_samples: bool = False
+        """Log first completion per episode during training and eval."""
+
         trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
         """PolicyTrainer config. Controls optimizer, training, parallelism"""
 
@@ -86,6 +86,8 @@ class RLTrainer(Configurable):
         )
 
         config.model_spec.parallelize_fn = parallelize_qwen3
+
+        self.task = SumDigitsTask(seed=42)
 
     async def setup(self):
         """Spawn Monarch actors and initialize weights.
@@ -109,9 +111,7 @@ class RLTrainer(Configurable):
             * config.trainer.parallelism.tensor_parallel_degree
         )
 
-        # Task specification for generating prompts
-        self.task_spec = config.task
-        self.system_prompt = self.task_spec.get_system_prompt()
+        self.system_prompt = self.task.get_system_prompt()
 
         # Create process mesh for trainer (generator is collocated on same mesh)
         # TODO: Make the world size according to parallel degrees
@@ -140,7 +140,7 @@ class RLTrainer(Configurable):
         self.grader = trainer_mesh.spawn(
             "grader",
             Grader,
-            self.task_spec.reward_function,
+            self.task.reward_function,
         )
 
         # Wait for trainer to be fully initialized on all ranks then collect weights
@@ -162,15 +162,17 @@ class RLTrainer(Configurable):
         # Initialize generator with trainer weights.
         self.generator.update.call(0, initial_weights).get()
 
-    def _generate_prompts(self) -> tuple[list[str], list[str]]:
-        """Generate a batch of prompts and expected answers from the task spec."""
+    def _load_prompts(self) -> tuple[list[str], list[str], list[str]]:
+        """Load a batch of prompts and expected answers."""
         prompt_texts = []
         expected_answers = []
+        questions = []
         for _ in range(self.config.num_episodes_per_step):
-            task: Task = self.task_spec.generate_task()
-            prompt_texts.append(self.system_prompt + "\n\n" + task.question)
-            expected_answers.append(str(task.correct_answer))
-        return prompt_texts, expected_answers
+            question, answer = self.task.create_question()
+            prompt_texts.append(self.system_prompt + "\n\n" + question)
+            expected_answers.append(answer)
+            questions.append(question)
+        return prompt_texts, expected_answers, questions
 
     async def evaluate(self, num_samples: int = 20) -> dict:
         """Run evaluation on held-out prompts.
@@ -183,13 +185,15 @@ class RLTrainer(Configurable):
         Returns:
             Dict with accuracy, correct, total, format_rate
         """
-        eval_spec = self.task_spec.create_eval_instance()
+        eval_task = SumDigitsTask(seed=99)
         eval_prompts = []
-        eval_tasks = []
+        eval_answers = []
+        eval_questions = []
         for _ in range(num_samples):
-            task = eval_spec.generate_task()
-            eval_prompts.append(self.system_prompt + "\n\n" + task.question)
-            eval_tasks.append(task)
+            question, answer = eval_task.create_question()
+            eval_prompts.append(self.system_prompt + "\n\n" + question)
+            eval_answers.append(answer)
+            eval_questions.append(question)
 
         # Generate on eval prompts
         episodes = self.generator.generate.call(eval_prompts).get().item(gpus=0)
@@ -197,11 +201,19 @@ class RLTrainer(Configurable):
         # Score: check first completion per episode
         correct = 0
         format_ok = 0
-        for episode, task in zip(episodes, eval_tasks):
+        for episode, question, answer in zip(episodes, eval_questions, eval_answers):
             text = episode.completions[0].text
-            result = self.task_spec.evaluate_completion(text, task)
-            correct += int(result["correct"])
-            format_ok += int(result["format_ok"])
+            extracted = extract_answer(text)
+            is_correct = extracted == int(answer)
+            has_tag = bool(re.search(r"\[ANSWER\]", text))
+            correct += int(is_correct)
+            format_ok += int(has_tag)
+
+            if self.config.log_samples:
+                mark = "+" if is_correct else "-"
+                logger.info(f"  [{mark}] expected={answer} extracted={extracted}")
+                logger.info(f"       Q: {question}")
+                logger.info(f"       A: {text[:300].replace(chr(10), ' ').strip()}")
 
         result = {
             "accuracy": correct / num_samples,
@@ -232,8 +244,11 @@ class RLTrainer(Configurable):
         logger.info("=" * 80)
 
         for step in range(num_steps):
-            # Generate new prompts each step
-            self.prompt_texts, self.expected_answers = self._generate_prompts()
+            (
+                self.prompt_texts,
+                self.expected_answers,
+                self.questions,
+            ) = self._load_prompts()
 
             # Fully sync RL loop with separate scoring step
             # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
@@ -248,6 +263,23 @@ class RLTrainer(Configurable):
 
             # 2. Grader computes rewards per episode
             scored_episodes = self.grader.score.call(episodes).get().item(gpus=0)
+
+            if self.config.log_samples:
+                for ep, question, answer in zip(
+                    scored_episodes, self.questions, self.expected_answers
+                ):
+                    # Log first completion per prompt
+                    comp = ep.completions[0]
+                    extracted = extract_answer(comp.text)
+                    mark = "+" if comp.reward > 0 else "-"
+                    logger.info(
+                        f"  [{mark}] expected={answer} extracted={extracted} "
+                        f"reward={comp.reward:+.1f}"
+                    )
+                    logger.info(f"       Q: {question}")
+                    logger.info(
+                        f"       A: {comp.text[:300].replace(chr(10), ' ').strip()}"
+                    )
 
             # 3. Trainer computes advantages and updates policy
             metrics = self.trainer_actor.step.call(scored_episodes).get().item(gpus=0)
@@ -265,13 +297,14 @@ class RLTrainer(Configurable):
             ]
             avg_len = sum(all_token_lens) / len(all_token_lens)
 
-            task_metrics = self.task_spec.compute_step_metrics(scored_episodes)
-            task_metrics_str = " | ".join(f"{k}: {v}" for k, v in task_metrics.items())
+            all_rewards = [c.reward for ep in scored_episodes for c in ep.completions]
+            correct_count = sum(1 for r in all_rewards if r > 0)
+            total_count = len(all_rewards)
 
             logger.info(
                 f"Step {step:2d} | Loss: {metrics['loss']:+.4f} | "
                 f"Reward: {metrics['reward_mean']:+.3f} | "
-                f"{task_metrics_str} | "
+                f"Correct: {correct_count:>2}/{total_count} | "
                 f"Avg tokens: {avg_len:>3.0f} | "
                 f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
                 f"max={metrics['logprob_diff_max']:.4e}"
