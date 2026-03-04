@@ -28,6 +28,7 @@ def apply_cp_to_attention_module(
     attention_modules: Sequence[nn.Module],
     cp_mesh: DeviceMesh,
     attention_type: str,
+    tensor_mesh: DeviceMesh | None = None,
 ) -> None:
     """
     Apply context parallelism to attention modules.
@@ -53,7 +54,9 @@ def apply_cp_to_attention_module(
     match attention_type:
         case "flex":
             cp_plan = _ContextParallel(
-                seq_dim=2, attention_type=_ContextParallel.AttentionType.FLEX
+                seq_dim=2,
+                attention_type=_ContextParallel.AttentionType.FLEX,
+                tensor_mesh=tensor_mesh,
             )
         case "sdpa":
             # Enable the DTensor dispatcher to route SDPA operations to the
@@ -64,7 +67,9 @@ def apply_cp_to_attention_module(
             # dispatcher.
             _enable_context_parallel_dispatcher()
             cp_plan = _ContextParallel(
-                seq_dim=2, attention_type=_ContextParallel.AttentionType.SDPA
+                seq_dim=2,
+                attention_type=_ContextParallel.AttentionType.SDPA,
+                tensor_mesh=tensor_mesh,
             )
         case "varlen":
             raise NotImplementedError(
