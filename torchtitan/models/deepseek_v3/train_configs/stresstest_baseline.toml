@@ -1,0 +1,69 @@
+# Stress test: large DeepSeek-V3 MoE, standard EP (no LLEP), 32k tokens
+# Run with: torchrun --nproc_per_node=2 -m torchtitan.train --job.config_file torchtitan/models/deepseek_v3/train_configs/stresstest_baseline.toml
+
+[job]
+dump_folder = "./outputs"
+description = "Stress test: standard EP baseline, 128 experts top_k=8, 32k tokens"
+print_config = false
+
+[profiling]
+enable_profiling = false
+save_traces_folder = "profile_trace"
+profile_freq = 10
+enable_memory_snapshot = false
+save_memory_snapshot_folder = "memory_snapshot"
+
+[metrics]
+log_freq = 1
+disable_color_printing = false
+enable_tensorboard = false
+save_tb_folder = "tb"
+enable_wandb = false
+
+[model]
+name = "deepseek_v3"
+flavor = "stresstest"
+hf_assets_path = "./tests/assets/tokenizer"
+
+[optimizer]
+name = "AdamW"
+lr = 3e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+decay_type = "linear"
+min_lr_factor = 0.0
+
+[training]
+local_batch_size = 1
+seq_len = 32768
+max_norm = 1.0
+steps = 5
+dataset = "c4_test"
+
+[parallelism]
+data_parallel_replicate_degree = 1
+data_parallel_shard_degree = -1
+fsdp_reshard_after_forward = "default"
+tensor_parallel_degree = 1
+enable_async_tensor_parallel = false
+pipeline_parallel_degree = 1
+pipeline_parallel_schedule = "1F1B"
+context_parallel_degree = 1
+expert_parallel_degree = 8
+expert_tensor_parallel_degree = 1
+
+[checkpoint]
+enable = false
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = false
+components = ["model", "loss"]
+
+[debug]
+moe_force_load_balance = false

@@ -1,0 +1,85 @@
+# Mini Kimi K2 BASELINE (no LLEP): 256 experts, top_k=8, dim=3072, EP=8 (8 GPUs, 1 node)
+# Identical to mini_kimi_k2_llep_ep8.toml but with LLEP disabled for A/B speed comparison.
+
+[job]
+dump_folder = "./outputs/mini_kimi_k2_baseline_ep8"
+description = "Mini Kimi K2 BASELINE: EP=8 SEQ=8K LBS=6 NO LLEP, 256 experts top_k=8"
+
+[profiling]
+enable_profiling = false
+
+[metrics]
+log_freq = 1
+disable_color_printing = true
+
+[model]
+name = "deepseek_v3"
+flavor = "mini_kimi_k2_baseline"
+hf_assets_path = "./tests/assets/tokenizer"
+
+[optimizer]
+name = "Muon"
+lr = 7e-6
+eps = 1e-8
+weight_decay = 0.01
+beta1 = 0.9
+beta2 = 0.95
+
+# Muon-specific parameters
+mu = 0.95                    # Momentum factor for Muon
+algorithm = "muon"           # Main algorithm to use for 2D matrices
+nesterov = false             # Whether to use Nesterov momentum
+adjust_lr = "rms_norm"       # How to adjust LR: "spectral_norm", "rms_norm", or null
+flatten = false              # Whether to flatten 3D+ tensors to 2D
+use_triton = true            # Whether to use Triton kernel for Newton-Schulz
+
+# Parameter-specific optimizer selection
+scalar_optimizer = "adamw"        # For 1D parameters (biases, layer norms)
+embedding_optimizer = "adamw"     # For embedding layers
+head_optimizer = "adamw"          # For model head/output layers
+head_lr_scaling = false            # Apply 1/sqrt(dim) scaling to head layers
+
+# Learning rate scaling factors
+scalar_lr_factor = 1            # LR multiplier for scalar parameters
+embedding_lr_factor = 1         # LR multiplier for embedding parameters
+head_lr_factor = 1.0            # LR multiplier for head parameters (after head_lr_scaling)
+routing_lr_factor = 1.0         # LR multiplier for routing parameters
+expert_lr_factor = 1.0
+
+[lr_scheduler]
+warmup_steps = 20
+decay_ratio = 0.8
+decay_type = "linear"
+min_lr_factor = 0.0
+
+[training]
+dtype = "bfloat16"
+local_batch_size = 6
+seq_len = 8192
+max_norm = 1.0
+steps = 1000
+dataset = "c4_test"
+enable_cpu_offload = true
+clear_cache_between_steps = true
+skip_optimizer_step = false
+aggressive_memory_mode = "maximum"
+aggressive_memory_verbose = true
+
+[parallelism]
+data_parallel_shard_degree = -1
+expert_parallel_degree = 8
+context_parallel_degree = 1
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = true
+components = ["loss"]
+
+[debug]
+moe_force_load_balance = false
+
+[comm]
+init_timeout_seconds = 1800
+train_timeout_seconds = 1800

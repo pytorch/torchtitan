@@ -1,0 +1,66 @@
+# Test config: verify [llep] TOML section overrides flavor defaults.
+# Flavor mini_kimi_k2_llep has paper defaults (α=1.0, m=1024, λ=1.3).
+# This config overrides λ=0.0 and m=512 via TOML to prove the wiring works.
+
+[job]
+dump_folder = "./outputs/test_llep_toml_override"
+description = "Test LLEP TOML override: λ=0.0, m=512"
+
+[profiling]
+enable_profiling = false
+
+[metrics]
+log_freq = 1
+disable_color_printing = true
+
+[model]
+name = "deepseek_v3"
+flavor = "mini_kimi_k2_llep"
+hf_assets_path = "./tests/assets/tokenizer"
+
+[optimizer]
+name = "AdamW"
+lr = 8e-4
+eps = 1e-8
+
+[lr_scheduler]
+warmup_steps = 2
+decay_ratio = 0.8
+decay_type = "linear"
+min_lr_factor = 0.0
+
+[training]
+dtype = "bfloat16"
+local_batch_size = 2
+seq_len = 4096
+max_norm = 1.0
+steps = 2
+dataset = "c4_test"
+enable_cpu_offload = true
+aggressive_memory_mode = "maximum"
+
+[parallelism]
+data_parallel_shard_degree = -1
+expert_parallel_degree = 8
+context_parallel_degree = 1
+
+[activation_checkpoint]
+mode = "full"
+
+[compile]
+enable = true
+components = ["loss"]
+
+# Custom LLEP overrides — these should override the flavor defaults
+[llep]
+enabled = true
+max_tokens_factor = 1.4    # Override α from 1.0 (default) to 1.4
+adaptive_threshold = 1.5   # Override λ from 1.3 (default) to 1.5
+min_tokens_per_gemm = 512  # Override m from 1024 (default) to 512
+
+[debug]
+moe_force_load_balance = false
+
+[comm]
+init_timeout_seconds = 300
+train_timeout_seconds = 300
