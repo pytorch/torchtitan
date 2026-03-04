@@ -26,6 +26,7 @@ from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict import (
     get_model_state_dict,
@@ -73,8 +74,33 @@ class ModelWrapper(Stateful):
         }
         return state_dict
 
+    def _is_converter_key(self, key: str) -> bool:
+        """Check if a state dict key was added by a model converter."""
+        for part in self.model:
+            fn = getattr(part, "converter_key_filter", None)
+            if fn is not None and fn(key):
+                return True
+        return False
+
+    def _save_converter_keys_only(self) -> bool:
+        """Check if any model part requests saving only converter-added weights."""
+        return any(
+            getattr(part, "save_converter_keys_only", False) for part in self.model
+        )
+
+    def state_dict_to_save(self) -> dict[str, Any]:
+        full_sd = self._get_state_dict()
+        if self._save_converter_keys_only():
+            return {k: v for k, v in full_sd.items() if self._is_converter_key(k)}
+        return full_sd
+
+    def base_state_dict(self) -> dict[str, Any]:
+        """Return state dict with only the original model keys (before converters)."""
+        full_sd = self._get_state_dict()
+        return {k: v for k, v in full_sd.items() if not self._is_converter_key(k)}
+
     def state_dict(self) -> dict[str, Any]:
-        return self.cache_state_dict
+        return self.state_dict_to_save()
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         func = functools.partial(
@@ -321,6 +347,14 @@ class CheckpointManager(Configurable):
         This will load the model only, excluding the specified keys.
         """
 
+        additional_load_paths: list[str] = field(default_factory=list)
+        """
+        Additional checkpoint paths to load from after the primary checkpoint.
+        Useful for loading state dicts from multiple sources, e.g., base model
+        weights from one checkpoint and LoRA adapter weights from another.
+        Each path should contain a valid DCP checkpoint directory.
+        """
+
         enable_first_step_checkpoint: bool = False
         """
         Enable the checkpoint save at first step. This will save a checkpoint immediately
@@ -445,6 +479,7 @@ class CheckpointManager(Configurable):
         self.sd_adapter = sd_adapter
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
         self.exclude_from_loading = config.exclude_from_loading
+        self.additional_load_paths = config.additional_load_paths
         self.interval = config.interval
         self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
 
@@ -600,41 +635,63 @@ class CheckpointManager(Configurable):
     def dcp_load(
         self,
         state_dict: dict[str, Any],
-        checkpoint_id: str,
+        checkpoint_id: str | list[str],
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
-        """Load the checkpoint with dcp.
+        """Load the checkpoint(s) with dcp.
+
         Args:
             state_dict (dict): The state dict to load.
-            checkpoint_id (str): The checkpoint id to load.
-            from_hf (bool): Whether to load from HuggingFace checkpoint with
-                its own model definition and safetensors format.
+            checkpoint_id (str | list[str]): The checkpoint id(s) to load.
+                The first checkpoint is treated as the primary checkpoint.
+                Additional checkpoints are always in DCP format.
+            from_hf (bool): Whether to load the primary checkpoint from
+                HuggingFace safetensors format.
+            from_quantized (bool): Whether the HuggingFace checkpoint is quantized.
         """
+        checkpoint_ids = (
+            [checkpoint_id] if isinstance(checkpoint_id, str) else checkpoint_id
+        )
+        # planner = (
+        #    DefaultLoadPlanner(allow_partial_load=True)
+        #    if len(checkpoint_ids) > 1
+        #    else DefaultLoadPlanner()
+        # )
+        planner = DefaultLoadPlanner(allow_partial_load=True)
 
-        if from_hf:
-            assert (
-                self.sd_adapter is not None
-            ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
-            hf_state_dict = self.sd_adapter.to_hf(state_dict)
-            hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
-                checkpoint_id, from_quantized
-            )
+        for i, cid in enumerate(checkpoint_ids):
+            is_primary = i == 0
 
-            dcp.load(
-                hf_state_dict,
-                storage_reader=hf_storage_reader,
-            )
-
-            state_dict = self.sd_adapter.from_hf(hf_state_dict)
-            self.states[MODEL].load_state_dict(state_dict)
-        else:
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
-
-            # TODO: Since we flatten the model states in state_dict, we need to
-            # manually call load_state_dict() for the model. Need to fix this.
-            if MODEL in self.states:
-                self.states[MODEL].load_state_dict(state_dict)
+            if is_primary:
+                if from_hf:
+                    # HF format: model only, training states from additional checkpoints
+                    assert (
+                        self.sd_adapter is not None
+                    ), "Trying to load HF safetensors but sd_adapter is not provided."
+                    hf_state_dict = self.sd_adapter.to_hf(
+                        self.states[MODEL].base_state_dict()
+                    )
+                    hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
+                        cid, from_quantized
+                    )
+                    dcp.load(
+                        hf_state_dict,
+                        storage_reader=hf_storage_reader,
+                        planner=planner,
+                    )
+                    converted_sd = self.sd_adapter.from_hf(hf_state_dict)
+                    if MODEL in self.states:
+                        self.states[MODEL].load_state_dict(converted_sd)
+                else:
+                    dcp.load(state_dict, checkpoint_id=cid, planner=planner)
+                    if MODEL in self.states:
+                        self.states[MODEL].load_state_dict(state_dict)
+            else:
+                # Additional checkpoints: always DCP format, load all available states
+                dcp.load(state_dict, checkpoint_id=cid, planner=planner)
+                if MODEL in self.states:
+                    self.states[MODEL].load_state_dict(state_dict)
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
@@ -737,6 +794,12 @@ class CheckpointManager(Configurable):
         if not self.enable:
             return False
 
+        for path in self.additional_load_paths:
+            if not os.path.isdir(path):
+                raise ValueError(
+                    f"checkpoint.additional_load_paths contains invalid path: {path}"
+                )
+
         model_only = False
         from_hf = False
         from_quantized = False
@@ -808,7 +871,7 @@ class CheckpointManager(Configurable):
         states = self._states_to_load(model_only)
         self.dcp_load(
             states,
-            checkpoint_id=checkpoint_id,
+            checkpoint_id=[checkpoint_id] + self.additional_load_paths,
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
@@ -947,7 +1010,7 @@ class CheckpointManager(Configurable):
         # is not the same as the export dtype at the end of the training.
 
         if self.last_save_model_only:
-            states = self.states[MODEL].state_dict()
+            states = self.states[MODEL].state_dict_to_save()
 
             if self.export_dtype != torch.float32:
                 states = {k: v.to(self.export_dtype) for k, v in states.items()}
