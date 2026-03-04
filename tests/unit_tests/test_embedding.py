@@ -43,13 +43,16 @@ class TestEmbedding(unittest.TestCase):
 
     def test_custom_init_std(self):
         """Embedding respects custom init_mean and init_std."""
-        config = Embedding.Config(init_mean=0.0, init_std=0.02)
-        emb = config.build(num_embeddings=1000, embedding_dim=64)
+        config = Embedding.Config(init_mean=0.1, init_std=0.02)
+        emb = config.build(num_embeddings=1000, embedding_dim=160)
 
         torch.manual_seed(42)
         emb.init_weights()
-        # Deterministic check: std must be within 2x of the requested init_std
-        self.assertLess(emb.weight.std().item(), config.init_std * 2)
+        # With large amount of samples (160 * 1000) the sample statistics should
+        # be close to the requested values. places=3 checks within 0.0005, which
+        # is well within statistical tolerance for this sample size.
+        self.assertAlmostEqual(emb.weight.mean().item(), 0.1, places=3)
+        self.assertAlmostEqual(emb.weight.std().item(), 0.02, places=3)
 
     def test_config_pre_specified_build(self):
         """Embedding.Config with both fields pre-specified builds with no kwargs."""

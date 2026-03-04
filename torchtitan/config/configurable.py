@@ -8,6 +8,8 @@ import dataclasses
 from dataclasses import dataclass, fields, replace
 from typing import ClassVar
 
+import torch
+
 
 class Configurable:
     """Base class for all configurable components.
@@ -17,20 +19,20 @@ class Configurable:
     - Defines a nested Config(Configurable.Config) with @dataclass(kw_only=True, slots=True)
     - Gets build() auto-wired via __init_subclass__ (no manual override needed)
     - Accepts __init__(self, config: Config) or __init__(self, config: Config, **runtime_kwargs)
-      We will deprecate the later usage once we migrate all components to make
-      all required fields in config.
+      We will deprecate the later usage once we migrate all components to make all
+      required fields in config.
 
     build() auto-detects kwargs mode:
-    - All kwargs are config fields -> absorbed into a cloned config, __init__ gets only
-      config.
-    - All kwargs are NOT config fields -> forwarded to __init__ as keyword arguments.
-    - Mixed → raises TypeError.
+    - All kwargs are config fields -> absorbed into a cloned config, __init__() only gets
+      config arg.
+    - All kwargs are NOT config fields -> forwarded to __init__() as keyword arguments.
+      This is the legacy style.
+    - Mixed -> raises TypeError.
 
-    Fields that are supplied at ``build()`` time should use
-    ``field(init=False)`` so they are excluded from ``Config.__init__``.
-    Pre-set values (via attribute assignment or inheritance) that conflict
-    with a ``build()`` kwarg raise ``ValueError``; matching values are
-    accepted.
+    Fields that are supplied at ``build()`` time should use ``field(init=False)`` so they
+    are excluded from ``Config.__init__()``.
+    Pre-set values (via attribute assignment or inheritance) that conflict with a
+    ``build()`` kwarg raise ``ValueError``; matching values are accepted.
 
     Enforcement: Configurable.__init_subclass__ checks that every Config uses
     @dataclass(kw_only=True, slots=True). This check runs on the OUTER class
@@ -45,9 +47,9 @@ class Configurable:
         .. warning::
 
             Do **not** use ``dataclasses.asdict()`` on ``Config`` instances.
-            Configs may contain ``field(init=False)`` slots that are only
-            populated at ``build()`` time; ``asdict()`` will raise
-            ``AttributeError`` for those fields.  Use :meth:`to_dict` instead.
+            Configs may contain ``field(init=False)`` slots that are only populated at
+            ``build()`` time; ``asdict()`` will raise ``AttributeError`` for those fields.
+            Use :meth:`to_dict` instead.
         """
 
         _owner: ClassVar[type | None] = None
@@ -59,7 +61,8 @@ class Configurable:
                 try:
                     val = getattr(self, f.name)
                 except AttributeError:
-                    continue  # field(init=False) not yet set
+                    # field(init=False) not yet set, ignore this field.
+                    continue
                 if hasattr(val, "to_dict"):
                     result[f.name] = val.to_dict()
                 elif dataclasses.is_dataclass(val):
@@ -69,8 +72,9 @@ class Configurable:
             return result
 
         def _replace(self, **overrides):
-            """Copy this config via ``replace()``, apply *overrides*, and
-            validate that every ``field(init=False)`` slot has been set.
+            """Copy this config via ``replace()``, apply *overrides* to every
+            ``field(init=False)`` slot, and validate that every
+            ``field(init=False)`` slot has been set.
 
             Raises ``TypeError`` if any ``init=False`` field is neither
             pre-set on *self* nor supplied in *overrides*.
@@ -116,12 +120,18 @@ class Configurable:
             if kwargs_in_config:
                 # All kwargs are config fields: validate and absorb into clone.
                 for key, value in kwargs.items():
-                    if hasattr(self, key) and getattr(self, key) != value:
-                        raise ValueError(
-                            f"{type(self).__name__}.build() conflict for "
-                            f"'{key}': config has {getattr(self, key)!r} "
-                            f"but got {value!r}"
-                        )
+                    if hasattr(self, key):
+                        existing = getattr(self, key)
+                        if isinstance(existing, torch.Tensor):
+                            mismatch = not torch.equal(existing, value)
+                        else:
+                            mismatch = existing != value
+                        if mismatch:
+                            raise ValueError(
+                                f"{type(self).__name__}.build() conflict for "
+                                f"'{key}': config has {existing!r} "
+                                f"but got {value!r}"
+                            )
                 return self._owner(config=self._replace(**kwargs))
 
             # TODO: Old style, will be deprecated.

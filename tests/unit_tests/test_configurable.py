@@ -159,6 +159,47 @@ class TestConfigurable(unittest.TestCase):
         obj.config.x = 999
         self.assertEqual(cfg.x, 42)
 
+    def test_to_dict_two_layer(self):
+        """to_dict serializes nested configs (two layers deep)."""
+
+        class Inner(Configurable):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Configurable.Config):
+                a: int = 1
+                b: int = field(init=False)
+
+            def __init__(self, config: Config):
+                self.config = config
+
+        class Outer(Configurable):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Configurable.Config):
+                x: int = 10
+                inner: Inner.Config = field(default_factory=Inner.Config)
+                dim: int = field(init=False)
+
+            def __init__(self, config: Config):
+                self.config = config
+
+        # Before build: unset field(init=False) slots are skipped
+        cfg = Outer.Config(x=42)
+        d = cfg.to_dict()
+        self.assertEqual(d["x"], 42)
+        self.assertNotIn("dim", d)
+        # Inner config is serialised via its own to_dict
+        self.assertIn("inner", d)
+        self.assertEqual(d["inner"]["a"], 1)
+        self.assertNotIn("b", d["inner"])
+
+        # After build: all fields present
+        obj = cfg.build(dim=128)
+        obj.config.inner.b = 256
+        d2 = obj.config.to_dict()
+        self.assertEqual(d2["x"], 42)
+        self.assertEqual(d2["dim"], 128)
+        self.assertEqual(d2["inner"]["a"], 1)
+        self.assertEqual(d2["inner"]["b"], 256)
+
     def test_init_false_with_inheritance(self):
         """Child config can redeclare field with default."""
 

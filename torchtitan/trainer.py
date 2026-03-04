@@ -128,11 +128,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "flavor": self.model_spec.flavor,
                     }
                 else:
-                    d[f.name] = (
-                        asdict(getattr(self, f.name))
-                        if dataclasses.is_dataclass(getattr(self, f.name))
-                        else getattr(self, f.name)
-                    )
+                    val = getattr(self, f.name)
+                    if hasattr(val, "to_dict"):
+                        d[f.name] = val.to_dict()
+                    elif dataclasses.is_dataclass(val):
+                        d[f.name] = asdict(val)
+                    else:
+                        d[f.name] = val
             return d
 
         def maybe_log(self) -> None:

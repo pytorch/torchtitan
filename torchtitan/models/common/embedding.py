@@ -23,7 +23,7 @@ class Embedding(nn.Embedding, Module):
       ``Configurable.Config``.
 
     ``num_embeddings`` and ``embedding_dim`` use ``field(init=False)`` so
-    they are excluded from ``Config.__init__``.  They are typically supplied
+    they are excluded from ``Config.__init__()``.  They are typically supplied
     via ``build()`` kwargs from the parent model.
     """
 
