@@ -44,7 +44,11 @@ def parallelize_flux(
         apply_ac(model, ac_config)
 
     if parallel_dims.cp_enabled:
-        apply_cp(model, parallel_dims.get_mesh("cp"))
+        apply_cp(
+            model,
+            parallel_dims.get_mesh("cp"),
+            tensor_mesh=parallel_dims.get_optional_mesh("tp"),
+        )
 
     if parallel_dims.fsdp_enabled:
         names = (
@@ -145,7 +149,9 @@ def apply_ac(model: nn.Module, ac_config):
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")
 
 
-def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
+def apply_cp(
+    model: nn.Module, cp_mesh: DeviceMesh, tensor_mesh: DeviceMesh | None = None
+) -> None:
     """
     Apply context parallelism to the Flux model.
 
@@ -176,7 +182,9 @@ def apply_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
         attention_modules.append(single_block.inner_attention)
 
     # Apply CP using the shared implementation (always uses SDPA for Flux)
-    apply_cp_to_attention_module(attention_modules, cp_mesh, "sdpa")
+    apply_cp_to_attention_module(
+        attention_modules, cp_mesh, "sdpa", tensor_mesh=tensor_mesh
+    )
 
     logger.info("Applied Context Parallel to the Flux model")
 
