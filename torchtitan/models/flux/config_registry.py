@@ -15,6 +15,7 @@ from torchtitan.config import (
 )
 from torchtitan.models.flux.configs import Encoder, Inference, Validation
 from torchtitan.models.flux.flux_datasets import FluxDataLoader
+from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.models.flux.validate import FluxValidator
 
@@ -31,6 +32,12 @@ def flux_debugmodel() -> FluxTrainer.Config:
     hf_assets_path = "tests/assets/tokenizer"
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
+        tokenizer=FluxTokenizerContainer.Config(
+            t5_encoder=encoder.t5_encoder,
+            clip_encoder=encoder.clip_encoder,
+            max_t5_encoding_len=encoder.max_t5_encoding_len,
+            test_mode=encoder.test_mode,
+        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("flux-debug"),
         optimizer=OptimizersContainer.Config(lr=8e-4),
@@ -90,6 +97,12 @@ def flux_dev() -> FluxTrainer.Config:
         autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
     )
     return FluxTrainer.Config(
+        tokenizer=FluxTokenizerContainer.Config(
+            t5_encoder=encoder.t5_encoder,
+            clip_encoder=encoder.clip_encoder,
+            max_t5_encoding_len=encoder.max_t5_encoding_len,
+            test_mode=encoder.test_mode,
+        ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model_spec=model_registry("flux-dev"),
         optimizer=OptimizersContainer.Config(lr=1e-4),
@@ -139,6 +152,12 @@ def flux_schnell() -> FluxTrainer.Config:
         autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
     )
     return FluxTrainer.Config(
+        tokenizer=FluxTokenizerContainer.Config(
+            t5_encoder=encoder.t5_encoder,
+            clip_encoder=encoder.clip_encoder,
+            max_t5_encoding_len=encoder.max_t5_encoding_len,
+            test_mode=encoder.test_mode,
+        ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model_spec=model_registry("flux-schnell"),
         optimizer=OptimizersContainer.Config(lr=1e-4),

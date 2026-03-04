@@ -8,12 +8,61 @@
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
 
+from dataclasses import dataclass
+
 import torch
 from transformers import CLIPTokenizer, T5Tokenizer
 
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 
 from .configs import Encoder
+
+
+class FluxTokenizerContainer(BaseTokenizer):
+    """Container holding both T5 and CLIP tokenizers for Flux.
+
+    This plugs into Trainer.Config.tokenizer so that tokenizers are built
+    by the trainer (via Configurable.Config.build) rather than inside the
+    dataloader.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseTokenizer.Config):
+        t5_encoder: str = "google/t5-v1_1-small"
+        clip_encoder: str = "openai/clip-vit-large-patch14"
+        max_t5_encoding_len: int = 256
+        test_mode: bool = False
+
+    def __init__(self, config: Config, *, tokenizer_path: str = "", **kwargs):
+        super().__init__()
+        # tokenizer_path maps to hf_assets_path (used in test mode)
+        if config.test_mode:
+            tokenizer_class = FluxTestTokenizer
+            t5_path = clip_path = tokenizer_path
+        else:
+            tokenizer_class = FluxTokenizer
+            t5_path = config.t5_encoder
+            clip_path = config.clip_encoder
+
+        self.t5_tokenizer: BaseTokenizer = tokenizer_class(
+            t5_path, max_length=config.max_t5_encoding_len
+        )
+        self.clip_tokenizer: BaseTokenizer = tokenizer_class(
+            clip_path, max_length=77
+        )
+
+    def encode(self, *args, **kwargs) -> list[int]:
+        raise NotImplementedError(
+            "Use t5_tokenizer.encode() or clip_tokenizer.encode() directly"
+        )
+
+    def decode(self, *args, **kwargs) -> str:
+        raise NotImplementedError(
+            "Use t5_tokenizer.decode() or clip_tokenizer.decode() directly"
+        )
+
+    def get_vocab_size(self) -> int:
+        return self.t5_tokenizer.get_vocab_size()
 
 
 class FluxTestTokenizer(BaseTokenizer):

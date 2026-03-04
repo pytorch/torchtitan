@@ -21,7 +21,11 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.models.flux.tokenizer import build_flux_tokenizer, FluxTokenizer
+from torchtitan.models.flux.tokenizer import (
+    build_flux_tokenizer,
+    FluxTokenizer,
+    FluxTokenizerContainer,
+)
 from torchtitan.tools.logging import logger
 
 from .configs import Encoder
@@ -407,13 +411,20 @@ class FluxDataLoader(ParallelAwareDataloader):
         dp_world_size: int,
         dp_rank: int,
         local_batch_size: int,
+        tokenizer: BaseTokenizer | None = None,
         **kwargs,
     ):
 
-        t5_tokenizer, clip_tokenizer = build_flux_tokenizer(
-            encoder_config=config.encoder,
-            hf_assets_path=config.hf_assets_path,
-        )
+        # Use tokenizer from trainer if provided (FluxTokenizerContainer)
+        if tokenizer is not None and isinstance(tokenizer, FluxTokenizerContainer):
+            t5_tokenizer = tokenizer.t5_tokenizer
+            clip_tokenizer = tokenizer.clip_tokenizer
+        else:
+            # Fallback to existing build logic for backward compatibility
+            t5_tokenizer, clip_tokenizer = build_flux_tokenizer(
+                encoder_config=config.encoder,
+                hf_assets_path=config.hf_assets_path,
+            )
 
         if config.generate_timesteps:
             ds = FluxValidationDataset(
