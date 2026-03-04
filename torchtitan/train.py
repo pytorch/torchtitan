@@ -40,7 +40,6 @@ def main() -> None:
         # pyrefly: ignore [missing-attribute]
         trainer = config.build()
 
-
         # pyrefly: ignore [missing-attribute]
         if config.checkpoint.create_seed_checkpoint:
             assert (
