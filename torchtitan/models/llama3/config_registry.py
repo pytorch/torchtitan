@@ -5,13 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lora import LoRAConverter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
-from torchtitan.components.lora import LoRAConverter
 from torchtitan.components.quantization.float8 import Float8LinearConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
