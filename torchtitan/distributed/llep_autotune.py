@@ -413,9 +413,22 @@ def autotune_llep(
     first_moe = moe_modules[0][1]
     num_experts = first_moe.experts.num_experts
 
-    # Get EP info from the first MoE module
+    # Get EP info from the first MoE module's DTensor device mesh
     if ep_group is None:
-        ep_group = first_moe._ep_group
+        from torch.distributed.tensor import DTensor
+
+        w1 = first_moe.experts.w1
+        if isinstance(w1, DTensor):
+            mesh = w1.device_mesh
+            if mesh.ndim == 1:
+                ep_group = mesh.get_group()
+            elif "ep" in (mesh.mesh_dim_names or ()):
+                ep_group = mesh.get_group("ep")
+            else:
+                # Fallback: use first dimension group
+                ep_group = mesh.get_group(0)
+        elif hasattr(first_moe, "_ep_group"):
+            ep_group = first_moe._ep_group
 
     if ep_group is None:
         logger.warning("[LLEP autotune] No EP group found, skipping")
@@ -468,15 +481,15 @@ def autotune_llep(
 
     # Step 3: Apply to all MoE modules
     for name, moe_module in moe_modules:
-        moe_module._llep_max_tokens_factor = result.max_tokens_factor
-        moe_module._llep_min_tokens_per_gemm = result.min_tokens_per_gemm
-        moe_module._llep_adaptive_threshold = result.adaptive_threshold
-        if result.should_enable_llep and not moe_module._llep_enabled:
-            if not moe_module.use_llep:
-                logger.info(
-                    f"[LLEP autotune] Recommending LLEP for {name} "
-                    f"but use_llep=False in config. Set [llep] enabled=true to use."
-                )
+        if moe_module._llep_config is not None:
+            moe_module._llep_config.max_tokens_factor = result.max_tokens_factor
+            moe_module._llep_config.min_tokens_per_gemm = result.min_tokens_per_gemm
+            moe_module._llep_config.adaptive_threshold = result.adaptive_threshold
+        if result.should_enable_llep and not moe_module.use_llep:
+            logger.info(
+                f"[LLEP autotune] Recommending LLEP for {name} "
+                f"but use_llep=False in config. Set [llep] enabled=true to use."
+            )
 
     # Compute speedup: before (standard EP) vs after (LLEP with tuned params)
     before_imbalance = result.imbalance_p90
