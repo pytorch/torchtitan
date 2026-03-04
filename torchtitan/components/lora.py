@@ -76,6 +76,7 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
         LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
         _lora_class_cache[parent_cls] = LoRALinear
 
+    # pyrefly: ignore [missing-attribute]
     return _lora_class_cache[parent_cls].from_linear(linear, rank, alpha)
 
 
