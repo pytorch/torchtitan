@@ -78,6 +78,7 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
 
     return _lora_class_cache[parent_cls].from_linear(linear, rank, alpha)
 
+
 class LoRAConverter(Configurable):
     """Apply LoRA adapters to all Linear layers in a model."""
 

@@ -653,11 +653,11 @@ class CheckpointManager(Configurable):
         checkpoint_ids = (
             [checkpoint_id] if isinstance(checkpoint_id, str) else checkpoint_id
         )
-        #planner = (
+        # planner = (
         #    DefaultLoadPlanner(allow_partial_load=True)
         #    if len(checkpoint_ids) > 1
         #    else DefaultLoadPlanner()
-        #)
+        # )
         planner = DefaultLoadPlanner(allow_partial_load=True)
 
         for i, cid in enumerate(checkpoint_ids):
@@ -666,9 +666,9 @@ class CheckpointManager(Configurable):
             if is_primary:
                 if from_hf:
                     # HF format: model only, training states from additional checkpoints
-                    assert self.sd_adapter is not None, (
-                        "Trying to load HF safetensors but sd_adapter is not provided."
-                    )
+                    assert (
+                        self.sd_adapter is not None
+                    ), "Trying to load HF safetensors but sd_adapter is not provided."
                     hf_state_dict = self.sd_adapter.to_hf(
                         self.states[MODEL].base_state_dict()
                     )
