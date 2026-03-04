@@ -27,7 +27,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B."""
     return RLTrainer.Config(
         model_spec=model_registry("0.6B"),
-        hf_assets_path="/data/users/jianiw/model/qwen3-0.6b",
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
@@ -44,7 +44,6 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
             ),
-            hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
