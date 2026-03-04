@@ -829,10 +829,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             import datetime
             import time as _time
 
-            # Log step start with timestamp for correlation
-            if self.device.index == 0:
-                _ts = datetime.datetime.now().strftime("%H:%M:%S")
-                logger.info(f"[STEP {self.step}] optimizer.step() START @ {_ts}")
+            # # Log step start with timestamp for correlation
+            # if self.device.index == 0:
+            #     _ts = datetime.datetime.now().strftime("%H:%M:%S")
+            #     logger.info(f"[STEP {self.step}] optimizer.step() START @ {_ts}")
 
             _optim_start = _time.time()
             self.optimizers.step()
@@ -842,12 +842,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             if self.aggressive_mem_manager is not None:
                 self.aggressive_mem_manager.post_optimizer()
 
-            # Log step end with timing
-            if self.device.index == 0:
-                _ts = datetime.datetime.now().strftime("%H:%M:%S")
-                logger.info(
-                    f"[STEP {self.step}] optimizer.step() END @ {_ts} | Duration: {_optim_elapsed:.2f}s"
-                )
+            # # Log step end with timing
+            # if self.device.index == 0:
+            #     _ts = datetime.datetime.now().strftime("%H:%M:%S")
+            #     logger.info(
+            #         f"[STEP {self.step}] optimizer.step() END @ {_ts} | Duration: {_optim_elapsed:.2f}s"
+            #     )
 
             self.lr_schedulers.step()
         else:
