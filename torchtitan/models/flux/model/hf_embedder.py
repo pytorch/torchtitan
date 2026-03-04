@@ -7,8 +7,6 @@
 import os
 
 from torch import nn, Tensor
-
-# pyrefly: ignore[import-error]
 from transformers import CLIPTextModel, T5EncoderModel
 
 

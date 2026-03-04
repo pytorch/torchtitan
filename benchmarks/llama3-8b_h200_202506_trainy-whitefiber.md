@@ -16,8 +16,7 @@ Each host has
 
 Runs were invoked with the following, where `NUM_NODES` was `4` and `8`.
 
-**Warning**: the command here has been updated to use the latest version of torchtitan, which has had API changes since this benchmark was ran.
-To reproduce the results using the original torchtitan commit, change all instances of `quantize.linear.float8` to `float8` in the command below.
+**Warning**: the command below reflects the original invocation at the time of this benchmark. The torchtitan CLI has since changed to use `--module` and `--config` flags instead of `--job.config-file`. See the current [README](/README.md) for up-to-date usage.
 ```
   torchrun \
     --nnodes $NUM_NODES  \

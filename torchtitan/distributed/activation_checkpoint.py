@@ -17,7 +17,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
 
-from torchtitan.config.job_config import ActivationCheckpoint as ACConfig
+from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.tools.logging import logger
 
 
@@ -235,8 +235,8 @@ def apply_ac(
         torch._functorch.config.activation_memory_budget = ac_config.memory_budget
         logger.info(f"Selected {ac_config.memory_budget} budget option")
     else:
-        # pyrefly: ignore [missing-attribute]
-        for layer_id, transformer_block in model.layers.named_children():
+        layers = model.get_submodule("layers")
+        for layer_id, transformer_block in layers.named_children():
             transformer_block = _apply_ac_to_transformer_block(
                 transformer_block,
                 ac_config,
@@ -244,7 +244,6 @@ def apply_ac(
                 model_compile_enabled=model_compile_enabled,
                 op_sac_save_list=op_sac_save_list,
             )
-            # pyrefly: ignore [missing-attribute]
-            model.layers.register_module(layer_id, transformer_block)
+            layers.register_module(layer_id, transformer_block)
 
     logger.info(f"Applied {ac_config.mode} activation checkpointing to the model")

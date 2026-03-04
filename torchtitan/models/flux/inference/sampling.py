@@ -6,17 +6,13 @@
 
 import math
 import os
-from typing import Callable
+from collections.abc import Callable
 
 import torch
 from einops import rearrange
 from PIL import ExifTags, Image
-
 from torch import Tensor
-
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import JobConfig
-
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.models.flux.model.model import FluxModel
@@ -29,6 +25,8 @@ from torchtitan.models.flux.utils import (
 )
 from torchtitan.tools.logging import logger
 
+from ..trainer import FluxTrainer
+
 
 # ----------------------------------------
 #       Util functions for Sampling
@@ -36,7 +34,6 @@ from torchtitan.tools.logging import logger
 
 
 def time_shift(mu: float, sigma: float, t: Tensor):
-    # pyrefly: ignore[unsupported-operation]
     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 
@@ -75,7 +72,7 @@ def get_schedule(
 def generate_image(
     device: torch.device,
     dtype: torch.dtype,
-    job_config: JobConfig,
+    job_config: FluxTrainer.Config,
     model: FluxModel,
     prompt: str | list[str],
     autoencoder: AutoEncoder,
@@ -95,9 +92,9 @@ def generate_image(
 
     # allow for packing and conversion to latent space. Use the same resolution as training time.
     # pyrefly: ignore [missing-attribute]
-    img_height = 16 * (job_config.training.img_size // 16)
+    img_height = 16 * (job_config.validator.dataloader.img_size // 16)
     # pyrefly: ignore [missing-attribute]
-    img_width = 16 * (job_config.training.img_size // 16)
+    img_width = 16 * (job_config.validator.dataloader.img_size // 16)
 
     enable_classifier_free_guidance = (
         # pyrefly: ignore [missing-attribute]
