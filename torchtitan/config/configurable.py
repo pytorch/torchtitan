@@ -4,8 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from dataclasses import dataclass, fields, replace
 from typing import ClassVar
+
+import torch
 
 
 class Configurable:
@@ -16,18 +19,20 @@ class Configurable:
     - Defines a nested Config(Configurable.Config) with @dataclass(kw_only=True, slots=True)
     - Gets build() auto-wired via __init_subclass__ (no manual override needed)
     - Accepts __init__(self, config: Config) or __init__(self, config: Config, **runtime_kwargs)
-      We will deprecate the later usage once we migrate all components to make
-      all required fields in config.
+      We will deprecate the later usage once we migrate all components to make all
+      required fields in config.
 
     build() auto-detects kwargs mode:
-    - All kwargs are config fields → absorbed into a cloned config, __init__ gets only config.
-    - All kwargs are NOT config fields → forwarded to __init__ as keyword arguments.
-    - Mixed → raises TypeError.
+    - All kwargs are config fields -> absorbed into a cloned config, __init__() only gets
+      config arg.
+    - All kwargs are NOT config fields -> forwarded to __init__() as keyword arguments.
+      This is the legacy style.
+    - Mixed -> raises TypeError.
 
-    Config uses ``None`` as a sentinel for "not yet specified".  Fields that
-    should be overridable at ``build()`` time must default to ``None``.  Any
-    non-``None`` value is treated as pre-specified and will conflict if a
-    different value is passed via ``build()``.
+    Fields that are supplied at ``build()`` time should use ``field(init=False)`` so they
+    are excluded from ``Config.__init__()``.
+    Pre-set values (via attribute assignment or inheritance) that conflict with a
+    ``build()`` kwarg raise ``ValueError``; matching values are accepted.
 
     Enforcement: Configurable.__init_subclass__ checks that every Config uses
     @dataclass(kw_only=True, slots=True). This check runs on the OUTER class
@@ -37,7 +42,58 @@ class Configurable:
 
     @dataclass(kw_only=True, slots=True)
     class Config:
+        """Base config class for all configurable components.
+
+        .. warning::
+
+            Do **not** use ``dataclasses.asdict()`` on ``Config`` instances.
+            Configs may contain ``field(init=False)`` slots that are only populated at
+            ``build()`` time; ``asdict()`` will raise ``AttributeError`` for those fields.
+            Use :meth:`to_dict` instead.
+        """
+
         _owner: ClassVar[type | None] = None
+
+        def to_dict(self) -> dict:
+            """Serialize to a dict, safely handling unset ``field(init=False)`` slots."""
+            result = {}
+            for f in fields(self):
+                try:
+                    val = getattr(self, f.name)
+                except AttributeError:
+                    # field(init=False) not yet set, ignore this field.
+                    continue
+                if hasattr(val, "to_dict"):
+                    result[f.name] = val.to_dict()
+                elif dataclasses.is_dataclass(val):
+                    result[f.name] = dataclasses.asdict(val)
+                else:
+                    result[f.name] = val
+            return result
+
+        def _replace(self, **overrides):
+            """Copy this config via ``replace()``, apply *overrides* to every
+            ``field(init=False)`` slot, and validate that every
+            ``field(init=False)`` slot has been set.
+
+            Raises ``TypeError`` if any ``init=False`` field is neither
+            pre-set on *self* nor supplied in *overrides*.
+            """
+            clone = replace(self)
+            for f in fields(self):
+                if f.init:
+                    continue
+
+                if f.name in overrides:
+                    setattr(clone, f.name, overrides[f.name])
+                elif hasattr(self, f.name):
+                    setattr(clone, f.name, getattr(self, f.name))
+                else:
+                    raise TypeError(
+                        f"{type(self).__name__} field '{f.name}' "
+                        f"(init=False) was not provided via build()"
+                    )
+            return clone
 
         def build(self, **kwargs):
             """Construct the owning class. Auto-wired by __init_subclass__."""
@@ -47,7 +103,7 @@ class Configurable:
                     "Define Config inside a Configurable subclass."
                 )
             if not kwargs:
-                return self._owner(config=replace(self))
+                return self._owner(config=self._replace())
 
             config_field_names = {f.name for f in fields(self)}
             kwargs_in_config = set(kwargs) & config_field_names
@@ -62,18 +118,24 @@ class Configurable:
                 )
 
             if kwargs_in_config:
-                # All kwargs are config fields: validate & absorb into clone.
+                # All kwargs are config fields: validate and absorb into clone.
                 for key, value in kwargs.items():
-                    current = getattr(self, key)
-                    if current is not None and current != value:
-                        raise ValueError(
-                            f"{type(self).__name__}.build() conflict for "
-                            f"'{key}': config has {current!r} but got {value!r}"
-                        )
-                return self._owner(config=replace(self, **kwargs))
+                    if hasattr(self, key):
+                        existing = getattr(self, key)
+                        if isinstance(existing, torch.Tensor):
+                            mismatch = not torch.equal(existing, value)
+                        else:
+                            mismatch = existing != value
+                        if mismatch:
+                            raise ValueError(
+                                f"{type(self).__name__}.build() conflict for "
+                                f"'{key}': config has {existing!r} "
+                                f"but got {value!r}"
+                            )
+                return self._owner(config=self._replace(**kwargs))
 
             # TODO: Old style, will be deprecated.
-            return self._owner(config=replace(self), **kwargs)
+            return self._owner(config=self._replace(), **kwargs)
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -87,7 +149,7 @@ class Configurable:
                         "@dataclass(kw_only=True, slots=True)"
                     )
                 for f in fields(config_cls):
-                    if not f.kw_only:
+                    if f.init and not f.kw_only:
                         raise TypeError(
                             f"{cls.__name__}.Config field '{f.name}' "
                             "must be keyword-only"

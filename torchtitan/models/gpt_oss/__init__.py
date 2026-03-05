@@ -21,16 +21,20 @@ __all__ = [
 ]
 
 
+# Safe to share: build() clones the config, so each module gets its own instance.
+default_norm_config = RMSNorm.Config()
+default_embedding_config = Embedding.Config()
+
 gptoss_configs = {
     "debugmodel": GptOssModel.Config(
         vocab_size=2048,
         dim=256,
         n_layers=4,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
+        tok_embeddings=default_embedding_config,
+        norm=default_norm_config,
         layer=GptOssTransformerBlock.Config(
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=default_norm_config,
+            ffn_norm=default_norm_config,
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=8,
@@ -60,11 +64,11 @@ gptoss_configs = {
     ),
     "20b": GptOssModel.Config(
         n_layers=24,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
+        tok_embeddings=default_embedding_config,
+        norm=default_norm_config,
         layer=GptOssTransformerBlock.Config(
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=default_norm_config,
+            ffn_norm=default_norm_config,
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=32,
@@ -94,11 +98,11 @@ gptoss_configs = {
     ),
     "120b": GptOssModel.Config(
         n_layers=36,
-        tok_embeddings=Embedding.Config(),
-        norm=RMSNorm.Config(),
+        tok_embeddings=default_embedding_config,
+        norm=default_norm_config,
         layer=GptOssTransformerBlock.Config(
-            attention_norm=RMSNorm.Config(),
-            ffn_norm=RMSNorm.Config(),
+            attention_norm=default_norm_config,
+            ffn_norm=default_norm_config,
             moe=GptOssMoE.Config(
                 hidden_dim=2880,
                 num_experts=128,

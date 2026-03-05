@@ -61,18 +61,30 @@ class TestRMSNorm(unittest.TestCase):
         out = norm(x)
         self.assertEqual(out.shape, torch.Size([2, 10, 32]))
 
+    def test_normalized_shape_excluded_from_config_init(self):
+        """normalized_shape uses field(init=False), so it cannot be passed to Config()."""
+        with self.assertRaises(TypeError):
+            RMSNorm.Config(normalized_shape=32)
+
     def test_shared_config(self):
-        """A single RMSNorm.Config can build multiple independent norms."""
+        """A single RMSNorm.Config can build multiple independent norms.
+
+        This verifies that sharing a config instance across model variants
+        is safe because build() clones the config internally.
+        """
         config = RMSNorm.Config(eps=1e-6)
         norm1 = config.build(normalized_shape=16)
-        norm2 = config.build(normalized_shape=16)
+        norm2 = config.build(normalized_shape=32)
 
         # They are separate module instances
         self.assertIsNot(norm1, norm2)
 
-        # But share the same configuration
+        # Each gets its own normalized_shape
+        self.assertEqual(norm1.weight.shape, torch.Size([16]))
+        self.assertEqual(norm2.weight.shape, torch.Size([32]))
+
+        # But share the same eps configuration
         self.assertEqual(norm1.eps, norm2.eps)
-        self.assertEqual(norm1.weight.shape, norm2.weight.shape)
 
         # Modifying one doesn't affect the other
         nn.init.zeros_(norm1.weight)

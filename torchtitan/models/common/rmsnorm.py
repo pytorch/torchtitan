@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch.nn as nn
 
@@ -20,26 +20,19 @@ class RMSNorm(nn.RMSNorm, Module):
     - The Module protocol is satisfied and ``build()`` is inherited from
       ``Configurable.Config``.
 
-    ``normalized_shape`` lives in ``Config`` (defaulting to ``None``).
-    It is typically supplied via ``build()`` kwargs from the parent model
-    and passed into a cloned config.
+    ``normalized_shape`` uses ``field(init=False)`` so it is excluded from
+    ``Config.__init__``.  It is typically supplied via ``build()`` kwargs
+    from the parent model. See ``Configurable`` docstring to understand
+    the design pattern.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        # ``normalized_shape`` are usually passed by the parent modules
-        # through build(). So the default values are None to fit
-        # ``Configurable.Config`` convention.
-        normalized_shape: int | None = None
+        normalized_shape: int = field(init=False)
         eps: float = 1e-5
         elementwise_affine: bool = True
 
     def __init__(self, config: Config):
-        if config.normalized_shape is None:
-            raise TypeError(
-                "RMSNorm requires normalized_shape. "
-                "Either set it in Config or pass it to build()."
-            )
         super().__init__(
             config.normalized_shape,
             eps=config.eps,
@@ -47,6 +40,5 @@ class RMSNorm(nn.RMSNorm, Module):
         )
         self.config = config
 
-    def init_weights(self, **kwargs) -> None:
-        if self.weight is not None:
-            self.reset_parameters()
+    def init_weights(self) -> None:
+        self.reset_parameters()

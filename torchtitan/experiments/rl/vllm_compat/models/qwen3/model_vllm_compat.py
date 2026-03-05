@@ -156,13 +156,9 @@ class Attention(nn.Module):
         self.head_dim = model_args.head_dim
         self.scaling = self.head_dim**-0.5
 
-        # QK norm (Qwen3 specific) - use vLLM's RMSNorm
-        if model_args.qk_norm:
-            self.q_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm.eps)
-            self.k_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm.eps)
-        else:
-            self.q_norm = None
-            self.k_norm = None
+        # QK norm (Qwen3 always uses QK norm) - use vLLM's RMSNorm
+        self.q_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm.eps)
+        self.k_norm = VLLMRMSNorm(self.head_dim, eps=model_args.norm.eps)
 
         # QKV projections
         self.wq = nn.Linear(

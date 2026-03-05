@@ -5,12 +5,45 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from torchtitan.config.configurable import Configurable
 
 
 class TestConfigurable(unittest.TestCase):
+    class OldStyleComponent(Configurable):
+        """__init__ takes extra kwargs (not config fields). To be deprecated."""
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(Configurable.Config):
+            x: int = 5
+
+        def __init__(self, config: Config, *, dim: int):
+            self.config = config
+            self.dim = dim
+
+    class NewStyleComponent(Configurable):
+        """Config fields filled via build() using field(init=False)."""
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(Configurable.Config):
+            x: int = 5
+            dim: int = field(init=False)
+            hidden: int = field(init=False)
+
+        def __init__(self, config: Config):
+            self.config = config
+
+    class NoKwargsComponent(Configurable):
+        """Takes only config, no extra kwargs."""
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(Configurable.Config):
+            x: int = 5
+
+        def __init__(self, config: Config):
+            self.config = config
+
     def test_valid_config(self):
         """Config with kw_only=True and slots=True should work."""
 
@@ -60,43 +93,6 @@ class TestConfigurable(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             cfg.build()
 
-
-class TestBuildAutoDetection(unittest.TestCase):
-    """Tests for the auto-detection logic in Config.build()."""
-
-    class OldStyleComponent(Configurable):
-        """Component whose __init__ takes extra kwargs (not config fields)."""
-
-        @dataclass(kw_only=True, slots=True)
-        class Config(Configurable.Config):
-            x: int = 5
-
-        def __init__(self, config: Config, *, dim: int):
-            self.config = config
-            self.dim = dim
-
-    class NewStyleComponent(Configurable):
-        """Component whose optional config fields are filled via build()."""
-
-        @dataclass(kw_only=True, slots=True)
-        class Config(Configurable.Config):
-            x: int = 5
-            dim: int | None = None
-            hidden: int | None = None
-
-        def __init__(self, config: Config):
-            self.config = config
-
-    class NoKwargsComponent(Configurable):
-        """Component that takes only config, no extra kwargs."""
-
-        @dataclass(kw_only=True, slots=True)
-        class Config(Configurable.Config):
-            x: int = 5
-
-        def __init__(self, config: Config):
-            self.config = config
-
     def test_old_style_forwarding(self):
         """kwargs not in config fields are forwarded to __init__."""
         cfg = self.OldStyleComponent.Config(x=10)
@@ -124,7 +120,6 @@ class TestBuildAutoDetection(unittest.TestCase):
         """Original config is not mutated in old-style path."""
         cfg = self.OldStyleComponent.Config(x=10)
         obj = cfg.build(dim=64)
-        # Mutating the built object's config doesn't affect original
         obj.config.x = 999
         self.assertEqual(cfg.x, 10)
 
@@ -133,17 +128,19 @@ class TestBuildAutoDetection(unittest.TestCase):
         cfg = self.NewStyleComponent.Config(x=10)
         obj = cfg.build(dim=64, hidden=128)
         obj.config.dim = 999
-        self.assertIsNone(cfg.dim)
+        self.assertFalse(hasattr(cfg, "dim"))
 
     def test_mismatch_raises(self):
         """Pre-specified field value != kwarg value raises ValueError."""
-        cfg = self.NewStyleComponent.Config(dim=32)
+        cfg = self.NewStyleComponent.Config()
+        cfg.dim = 32
         with self.assertRaises(ValueError):
             cfg.build(dim=64)
 
     def test_matching_pre_specified_value(self):
         """Pre-specified field value == kwarg value is accepted."""
-        cfg = self.NewStyleComponent.Config(dim=64)
+        cfg = self.NewStyleComponent.Config()
+        cfg.dim = 64
         obj = cfg.build(dim=64, hidden=128)
         self.assertEqual(obj.config.dim, 64)
         self.assertEqual(obj.config.hidden, 128)
@@ -161,6 +158,70 @@ class TestBuildAutoDetection(unittest.TestCase):
         obj = cfg.build()
         obj.config.x = 999
         self.assertEqual(cfg.x, 42)
+
+    def test_to_dict_two_layer(self):
+        """to_dict serializes nested configs (two layers deep)."""
+
+        class Inner(Configurable):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Configurable.Config):
+                a: int = 1
+                b: int = field(init=False)
+
+            def __init__(self, config: Config):
+                self.config = config
+
+        class Outer(Configurable):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Configurable.Config):
+                x: int = 10
+                inner: Inner.Config = field(default_factory=Inner.Config)
+                dim: int = field(init=False)
+
+            def __init__(self, config: Config):
+                self.config = config
+
+        # Before build: unset field(init=False) slots are skipped
+        cfg = Outer.Config(x=42)
+        d = cfg.to_dict()
+        self.assertEqual(d["x"], 42)
+        self.assertNotIn("dim", d)
+        # Inner config is serialised via its own to_dict
+        self.assertIn("inner", d)
+        self.assertEqual(d["inner"]["a"], 1)
+        self.assertNotIn("b", d["inner"])
+
+        # After build: all fields present
+        obj = cfg.build(dim=128)
+        obj.config.inner.b = 256
+        d2 = obj.config.to_dict()
+        self.assertEqual(d2["x"], 42)
+        self.assertEqual(d2["dim"], 128)
+        self.assertEqual(d2["inner"]["a"], 1)
+        self.assertEqual(d2["inner"]["b"], 256)
+
+    def test_init_false_with_inheritance(self):
+        """Child config can redeclare field with default."""
+
+        class ChildComponent(self.NewStyleComponent):
+            @dataclass(kw_only=True, slots=True)
+            class Config(TestConfigurable.NewStyleComponent.Config):
+                dim: int = 64
+                hidden: int = 128
+
+            def __init__(self, config: Config):
+                self.config = config
+
+        cfg = ChildComponent.Config()
+        obj = cfg.build()
+        self.assertEqual(obj.config.dim, 64)
+        self.assertEqual(obj.config.hidden, 128)
+
+        # Can also override via __init__
+        cfg2 = ChildComponent.Config(dim=256, hidden=512)
+        obj2 = cfg2.build()
+        self.assertEqual(obj2.config.dim, 256)
+        self.assertEqual(obj2.config.hidden, 512)
 
 
 if __name__ == "__main__":
