@@ -27,6 +27,7 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     OptimizersInBackwardContainer,
 )
+from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -127,11 +128,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "flavor": self.model_spec.flavor,
                     }
                 else:
-                    d[f.name] = (
-                        asdict(getattr(self, f.name))
-                        if dataclasses.is_dataclass(getattr(self, f.name))
-                        else getattr(self, f.name)
-                    )
+                    val = getattr(self, f.name)
+                    if hasattr(val, "to_dict"):
+                        d[f.name] = val.to_dict()
+                    elif dataclasses.is_dataclass(val):
+                        d[f.name] = asdict(val)
+                    else:
+                        d[f.name] = val
             return d
 
         def maybe_log(self) -> None:
@@ -254,7 +257,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         logger.info(
             f"Building {model_spec.name} {model_spec.flavor} "
-            f"with {json.dumps(dataclasses.asdict(model_config), indent=2, ensure_ascii=False)}"
+            f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
         )
         with (
             torch.device("meta"),
@@ -272,12 +275,19 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
         model_converters.convert(model)
 
+        # Check if any converter uses quantization (FP8, MX, etc.)
+        has_quantization = any(
+            isinstance(cc, QuantizationConverter.Config)
+            for cc in config.model_converters.converters
+        )
+
         # metrics logging
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             config_dict=config.to_dict(),
+            has_quantization=has_quantization,
         )
         color = self.metrics_processor.color
 

@@ -46,6 +46,7 @@ from torchtitan.tools.logging import logger
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
+    torch.ops.aten.linear.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,

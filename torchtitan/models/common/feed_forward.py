@@ -14,6 +14,8 @@ from torchtitan.protocols.module import Module
 
 from .utils import trunc_normal_
 
+__all__ = ["FeedForward", "compute_ffn_hidden_dim"]
+
 
 def compute_ffn_hidden_dim(
     dim: int,
@@ -55,5 +57,9 @@ class FeedForward(Module):
 
     def init_weights(self, init_std: float = 0.02, **kwargs):
         trunc_normal_(self.w1.weight, mean=0.0, std=0.02)
+        if self.w1.bias is not None:
+            nn.init.zeros_(self.w1.bias)
         for linear in (self.w2, self.w3):
             trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            if linear.bias is not None:
+                nn.init.zeros_(linear.bias)

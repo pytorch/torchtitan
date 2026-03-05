@@ -31,7 +31,7 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import (
@@ -46,7 +46,11 @@ from torchtitan.distributed.expert_parallel import (
     ReordererSequenceParallel,
     TensorParallel,
 )
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.distributed.tensor_parallel import (
+    ColwiseParallelWithGradPlacement,
+    maybe_enable_async_tp,
+    NoParallel,
+)
 from torchtitan.models.common.moe import moe as moe_module
 from torchtitan.models.llama3.parallelize import (
     apply_replicate,
@@ -59,6 +63,7 @@ from torchtitan.tools.logging import logger
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
+    torch.ops.aten.linear.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
@@ -538,12 +543,15 @@ def apply_moe_ep_tp(
                 "moe": PrepareModuleInputOutput(
                     input_layouts=(Shard(1),),
                     desired_input_layouts=(Replicate(),),
-                    use_local_input=True,
+                    # Keep input as a DTensor from SequenceParallel, do not wrap with to_local.
+                    use_local_input=False,
                     output_layouts=(Partial(),),
                     desired_output_layouts=(Shard(1),),
                 ),
                 # replicate computation for the router
-                "moe.router.gate": NoParallel(),
+                "moe.router.gate": NoParallel(
+                    local_output_grad_placements=(Partial(),),
+                ),
             }
             if ep_mesh is not None and etp_mesh is None:
                 # If TP is borrowed for EP, then split the tokens across TP ranks so that
@@ -553,15 +561,24 @@ def apply_moe_ep_tp(
                 moe_layer_plan.update({"moe.reorderer": ReordererSequenceParallel()})
             # pyrefly: ignore [missing-attribute]
             if transformer_block.moe.shared_experts is not None:
-                # input Replicate, output Partial
+                # Use ColwiseParallelWithGradPlacement to keep d_x as Partial in
+                # backward (avoids the all-reduce that from_local(Replicate)
+                # would otherwise trigger). For w2, output_layouts=Partial()
+                # skips the Partial→Replicate all-reduce in forward. The
+                # reduction happens once at the MoE output boundary
+                # (PrepareModuleInputOutput).
                 # pyrefly: ignore [no-matching-overload]
                 moe_layer_plan.update(
                     {
-                        "moe.shared_experts.w1": ColwiseParallel(),
-                        "moe.shared_experts.w2": RowwiseParallel(
-                            output_layouts=Partial()
+                        "moe.shared_experts.w1": ColwiseParallelWithGradPlacement(
+                            local_input_grad_placements=(Partial(),)
                         ),
-                        "moe.shared_experts.w3": ColwiseParallel(),
+                        "moe.shared_experts.w2": RowwiseParallel(
+                            output_layouts=Partial(),
+                        ),
+                        "moe.shared_experts.w3": ColwiseParallelWithGradPlacement(
+                            local_input_grad_placements=(Partial(),)
+                        ),
                     }
                 )
             parallelize_module(

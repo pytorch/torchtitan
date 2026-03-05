@@ -16,7 +16,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -25,9 +24,9 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.llama3.parallelize import (
     apply_compile,
     apply_replicate,
@@ -153,7 +152,9 @@ def apply_non_moe_tp(
 
     if hasattr(model, "tok_embeddings"):
         if isinstance(model.tok_embeddings, nn.Identity):
-            root_plan["tok_embeddings"] = NoParallel()
+            root_plan["tok_embeddings"] = NoParallel(
+                local_output_grad_placements=(Replicate(),),
+            )
         else:
             root_plan["tok_embeddings"] = RowwiseParallel(
                 input_layouts=Replicate(),
@@ -162,13 +163,17 @@ def apply_non_moe_tp(
 
     if hasattr(model, "norm"):
         if isinstance(model.norm, nn.Identity):
-            root_plan["norm"] = NoParallel()
+            root_plan["norm"] = NoParallel(
+                local_output_grad_placements=(Replicate(),),
+            )
         else:
             root_plan["norm"] = SequenceParallel()
 
     if hasattr(model, "output"):
         if isinstance(model.output, nn.Identity):
-            root_plan["output"] = NoParallel()
+            root_plan["output"] = NoParallel(
+                local_output_grad_placements=(Replicate(),),
+            )
         else:
             root_plan["output"] = ColwiseParallel(
                 input_layouts=Shard(1),
@@ -222,11 +227,19 @@ def apply_non_moe_tp(
         else:
             layer_plan.update(
                 {
-                    "self_attn.q_a_proj": NoParallel(),
-                    "self_attn.q_a_layernorm": NoParallel(),
+                    "self_attn.q_a_proj": NoParallel(
+                        local_output_grad_placements=(Replicate(),),
+                    ),
+                    "self_attn.q_a_layernorm": NoParallel(
+                        local_output_grad_placements=(Replicate(),),
+                    ),
                     "self_attn.q_b_proj": colwise_parallel(),
-                    "self_attn.kv_a_proj_with_mqa": NoParallel(),
-                    "self_attn.kv_a_layernorm": NoParallel(),
+                    "self_attn.kv_a_proj_with_mqa": NoParallel(
+                        local_output_grad_placements=(Replicate(),),
+                    ),
+                    "self_attn.kv_a_layernorm": NoParallel(
+                        local_output_grad_placements=(Replicate(),),
+                    ),
                     "self_attn.kv_b_proj": colwise_parallel(),
                 }
             )
