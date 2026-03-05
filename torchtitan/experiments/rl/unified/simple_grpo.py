@@ -245,9 +245,7 @@ class RLTrainer(Configurable):
             # Fully sync RL loop with separate scoring step
             # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
             # TODO: Create a queue to use all episode from all GPUs
-            episodes = (
-                self.generator.generate.call(train_prompts).get().item(gpus=0)
-            )
+            episodes = self.generator.generate.call(train_prompts).get().item(gpus=0)
 
             # Attach expected answers to each episode
             for episode, answer in zip(episodes, train_answers):
