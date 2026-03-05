@@ -10,9 +10,10 @@ from typing import ClassVar, Literal
 import torch
 import torch._inductor.config
 import torch.nn as nn
-from torchtitan.components.quantization import FP8_GROUP_ALIGNMENT_SIZE
-
-from torchtitan.config import Configurable
+from torchtitan.components.quantization import (
+    FP8_GROUP_ALIGNMENT_SIZE,
+    QuantizationConverter,
+)
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
 from torchtitan.tools.logging import logger
@@ -23,9 +24,9 @@ from .utils import module_filter_fn
 AUTO_FILTER_SMALL_KN_FLAG = "auto_filter_small_kn"
 
 
-class Float8LinearConverter(Configurable):
+class Float8LinearConverter(QuantizationConverter):
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(QuantizationConverter.Config):
         _quantization_type: ClassVar[str] = "float8"
 
         enable_fsdp_float8_all_gather: bool = False
@@ -202,9 +203,9 @@ class Float8LinearConverter(Configurable):
             precompute_float8_dynamic_scale_for_fsdp(m)
 
 
-class Float8GroupedMMConverter(Configurable):
+class Float8GroupedMMConverter(QuantizationConverter):
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(QuantizationConverter.Config):
         _quantization_type: ClassVar[str] = "float8"
 
         fqns: list[str] | str = field(default_factory=list)
@@ -253,9 +254,7 @@ class Float8GroupedMMConverter(Configurable):
         from torchao.quantization.quant_api import quantize_
 
         try:
-            from torchao.prototype.moe_training.conversion_utils import (
-                MoETrainingConfig,
-            )
+            from torchao.prototype.moe_training.config import FP8GroupedMMConfig
         except ImportError as e:
             raise ImportError(
                 "torchao installation does not have MoE training support. Please install torchao nightly build."
@@ -267,7 +266,7 @@ class Float8GroupedMMConverter(Configurable):
                     return True
             return False
 
-        config = MoETrainingConfig()
+        config = FP8GroupedMMConfig()
         quantize_(model, config=config, filter_fn=moe_module_filter_fn)
         logger.info(
             f"Converted MoE layers matching FQNS {self.fqns} "
