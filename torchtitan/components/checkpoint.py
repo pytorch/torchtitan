@@ -66,7 +66,6 @@ class AsyncMode(str, enum.Enum):
 class ModelWrapper(Stateful):
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
-        self.cache_state_dict = self._get_state_dict()
 
     def _get_state_dict(self) -> dict[str, Any]:
         state_dict = {
@@ -81,6 +80,13 @@ class ModelWrapper(Stateful):
             if fn is not None and fn(key):
                 return True
         return False
+
+    def has_converter_keys(self) -> bool:
+        """Check if any model part has converter-added keys (e.g. LoRA adapters)."""
+        return any(
+            getattr(part, "converter_key_filter", None) is not None
+            for part in self.model
+        )
 
     def _save_converter_keys_only(self) -> bool:
         """Check if any model part requests saving only converter-added weights."""
@@ -109,9 +115,6 @@ class ModelWrapper(Stateful):
             options=StateDictOptions(strict=False),
         )
         list(map(func, self.model))
-        # `set_model_state_dict()` does change the keys of the input state_dict,
-        # we will need to reinitialize the cache_state_dict.
-        self.cache_state_dict = self._get_state_dict()
 
 
 class Terminate:
@@ -653,12 +656,11 @@ class CheckpointManager(Configurable):
         checkpoint_ids = (
             [checkpoint_id] if isinstance(checkpoint_id, str) else checkpoint_id
         )
-        # planner = (
-        #    DefaultLoadPlanner(allow_partial_load=True)
-        #    if len(checkpoint_ids) > 1
-        #    else DefaultLoadPlanner()
-        # )
-        planner = DefaultLoadPlanner(allow_partial_load=True)
+        needs_partial = (
+            len(checkpoint_ids) > 1
+            or self.states[MODEL].has_converter_keys()
+        )
+        planner = DefaultLoadPlanner(allow_partial_load=needs_partial)
 
         for i, cid in enumerate(checkpoint_ids):
             is_primary = i == 0
