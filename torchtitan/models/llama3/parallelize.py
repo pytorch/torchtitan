@@ -123,7 +123,7 @@ def parallelize_llama(
         compile_config.enable and "model" in compile_config.components
     )
 
-    if ac_config.mode != "none":
+    if ac_config.mode != "none" or ac_config.cpu_offload:
         apply_ac(
             model,
             ac_config,
