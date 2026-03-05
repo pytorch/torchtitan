@@ -5,12 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Multiprocess RL training loop using Monarch Actors.
+RL training loop using Monarch Actors.
 
 This demonstrates:
-1. Distributed actor architecture with VLLMGenerator (vLLM) and PolicyTrainer (TorchTitan) components
-2. Weight synchronization between trainer and generator by unwrapping and
-    rewrap DTensor. We have strong assumption that trainer and generator has same parallelism
+1. Distributed actor architecture with VLLMGenerator (vLLM) and PolicyTrainer (TorchTitan)
+   running on separate GPU meshes
+2. Weight synchronization across meshes: trainer gathers full (unsharded) weights,
+   generator reshards to match its own parallelism layout via distribute_tensor
 3. Separate scoring component for reward and advantage computation
 
 The architecture mirrors monarch's grpo_actor.py but adapted for vLLM rollouts + TorchTitan training.
@@ -23,7 +24,9 @@ python3 torchtitan/experiments/rl/unified/simple_grpo.py \
 
 import asyncio
 import logging
+import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
@@ -38,6 +41,40 @@ from torchtitan.experiments.rl.unified.sum_digits import extract_answer, SumDigi
 from torchtitan.protocols.model_spec import ModelSpec
 
 logger = logging.getLogger(__name__)
+
+
+class Provisioner:
+    """Allocates non-overlapping GPU ranges for Monarch proc meshes.
+
+    In non-colocated mode, the trainer and generator run on separate GPU
+    meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
+    call to ``allocate(n)`` reserves the next *n* GPUs and returns a
+    bootstrap callable that sets ``CUDA_VISIBLE_DEVICES`` before CUDA
+    initializes in the spawned process, ensuring each mesh only sees its
+    own devices.
+    """
+
+    def __init__(self, total_gpus: int = 8):
+        self.total_gpus = total_gpus
+        self.next_gpu = 0
+
+    @property
+    def available(self) -> int:
+        return self.total_gpus - self.next_gpu
+
+    def allocate(self, num_gpus: int) -> Callable[[], None]:
+        if num_gpus > self.available:
+            raise RuntimeError(
+                f"Requested {num_gpus} GPUs but only {self.available} "
+                f"available (total={self.total_gpus}, allocated={self.next_gpu})"
+            )
+        gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
+        self.next_gpu += num_gpus
+
+        def _bootstrap():
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
+
+        return _bootstrap
 
 
 class RLTrainer(Configurable):
@@ -89,45 +126,59 @@ class RLTrainer(Configurable):
 
         self.task = SumDigitsTask(seed=42)
 
-    async def setup(self):
-        """Spawn Monarch actors and initialize weights.
+    @staticmethod
+    def _compute_world_size(p: "ParallelismConfig") -> int:
+        """Compute world size from all parallel dimensions."""
+        dp_shard = max(p.data_parallel_shard_degree, 1)
+        return (
+            p.data_parallel_replicate_degree
+            * dp_shard
+            * p.tensor_parallel_degree
+            * p.pipeline_parallel_degree
+            * p.context_parallel_degree
+        )
 
-        Creates the process mesh, spawns trainer/generator/grader actors,
-        and synchronizes initial weights from trainer to generator.
+    async def setup(self):
+        """Spawn Monarch actors on separate meshes and initialize weights.
+
+        Creates separate GPU meshes for trainer and generator, a CPU mesh for
+        the grader, and synchronizes initial weights from trainer to generator.
         Must be called before :meth:`train`.
         """
         config = self.config
 
-        # Validate that trainer and generator have the same parallel plan
-        # since they are collocated on the same mesh (our strong assumption now)
-        assert config.trainer.parallelism == config.generator.parallelism, (
-            f"Trainer and generator must use the same parallel plan.\n"
-            f"  Trainer:   {config.trainer.parallelism}\n"
-            f"  VLLMGenerator: {config.generator.vllm_engine.parallelism}"
+        self.trainer_world_size = self._compute_world_size(config.trainer.parallelism)
+        self.generator_world_size = self._compute_world_size(
+            config.generator.parallelism
         )
 
-        self.trainer_world_size = (
-            config.trainer.parallelism.data_parallel_replicate_degree
-            * config.trainer.parallelism.tensor_parallel_degree
+        total_gpus = self.trainer_world_size + self.generator_world_size
+        logger.info(
+            f"{self.generator_world_size} generator GPUs + "
+            f"{self.trainer_world_size} trainer GPUs = {total_gpus} total"
         )
 
         self.system_prompt = self.task.get_system_prompt()
 
-        # Create process mesh for trainer (generator is collocated on same mesh)
-        # TODO: Make the world size according to parallel degrees
+        # Allocate non-overlapping GPU ranges for each mesh
+        provisioner = Provisioner(total_gpus=total_gpus)
+
+        # Spawn separate meshes for trainer, generator, and grader
         trainer_mesh = this_host().spawn_procs(
-            per_host={"gpus": self.trainer_world_size}
+            per_host={"gpus": self.trainer_world_size},
+            bootstrap=provisioner.allocate(self.trainer_world_size),
         )
-
-        # Set up distributed env vars so that actors are connected via c10d
-        await setup_env_for_distributed(
-            trainer_mesh,
-            master_addr="localhost",  # TODO: figure out what to set
-            master_port=29501,  # TODO: figure out what to set
+        generator_mesh = this_host().spawn_procs(
+            per_host={"gpus": self.generator_world_size},
+            bootstrap=provisioner.allocate(self.generator_world_size),
         )
+        grader_mesh = this_host().spawn_procs()
 
-        # Spawn trainer first
-        self.trainer_actor = trainer_mesh.spawn(
+        await setup_env_for_distributed(trainer_mesh)
+        await setup_env_for_distributed(generator_mesh)
+
+        # Spawn actors on their respective meshes
+        self.trainer = trainer_mesh.spawn(
             "trainer",
             PolicyTrainer,
             config.trainer,
@@ -135,22 +186,7 @@ class RLTrainer(Configurable):
             batch_invariant_mode=config.batch_invariant_mode,
             hf_assets_path=config.hf_assets_path,
         )
-
-        # Spawn grader on trainer mesh
-        self.grader = trainer_mesh.spawn(
-            "grader",
-            Grader,
-            self.task.reward_function,
-        )
-
-        # Wait for trainer to be fully initialized on all ranks then collect weights
-        initial_weight_mesh = self.trainer_actor.get_weights.call().get()
-        initial_weights = {
-            gpu: initial_weight_mesh.item(gpus=gpu)
-            for gpu in range(self.trainer_world_size)
-        }
-
-        self.generator = trainer_mesh.spawn(
+        self.generator = generator_mesh.spawn(
             "generator",
             VLLMGenerator,
             config.generator,
@@ -158,8 +194,17 @@ class RLTrainer(Configurable):
             model_path=config.hf_assets_path,
             batch_invariant_mode=config.batch_invariant_mode,
         )
+        self.grader = grader_mesh.spawn(
+            "grader",
+            Grader,
+            self.task.reward_function,
+        )
 
-        # Initialize generator with trainer weights.
+        # Trainer gathers full (unsharded) weights on every rank. We only
+        # need to collect from one rank since they're all identical.
+        initial_weights = self.trainer.get_weights.call().get().item(gpus=0)
+
+        # Initialize generator with trainer weights
         self.generator.update.call(0, initial_weights).get()
 
     async def evaluate(self, num_samples: int = 20) -> dict:
@@ -252,7 +297,7 @@ class RLTrainer(Configurable):
                 episode.expected_answer = answer
 
             # 2. Grader computes rewards per episode
-            scored_episodes = self.grader.score.call(episodes).get().item(gpus=0)
+            scored_episodes = self.grader.score.call(episodes).get().item()
 
             if self.config.log_samples:
                 for ep, question, answer in zip(
@@ -272,14 +317,9 @@ class RLTrainer(Configurable):
                     )
 
             # 3. Trainer computes advantages and updates policy
-            metrics = self.trainer_actor.step.call(scored_episodes).get().item(gpus=0)
-
-            # 4. Sync weights back to generator (all TP ranks)
-            weight_mesh = self.trainer_actor.get_weights.call().get()
-            weights = {
-                gpu: weight_mesh.item(gpus=gpu)
-                for gpu in range(self.trainer_world_size)
-            }
+            metrics = self.trainer.step.call(scored_episodes).get().item(gpus=0)
+            # 4. Sync full weights to generator (each rank reshards locally)
+            weights = self.trainer.get_weights.call().get().item(gpus=0)
             self.generator.update.call(metrics["policy_version"], weights).get()
 
             all_token_lens = [
