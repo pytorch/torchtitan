@@ -119,6 +119,14 @@ def llama3_debugmodel_lora() -> Trainer.Config:
             ),
         ],
     )
+    # For LoRA finetuning, set initial_load_in_hf=True to enable proper
+    # checkpoint resumption (load base model from HF, then load LoRA adapters)
+    config.checkpoint = CheckpointManager.Config(
+        interval=500,
+        initial_load_in_hf=True,
+        initial_load_model_only=True,
+        last_save_model_only=False,
+    )
     return config
 
 

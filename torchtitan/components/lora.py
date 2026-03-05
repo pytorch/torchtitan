@@ -10,7 +10,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-
 from torchtitan.config import Configurable
 from torchtitan.tools.logging import logger
 
@@ -91,9 +90,15 @@ class LoRAConverter(Configurable):
         alpha: float = 16.0
         """Scaling factor. Output is scaled by alpha/rank."""
 
+        save_adapter_only: bool = True
+        """If True, only save LoRA adapter weights in checkpoints.
+        Requires base model to be loaded from HF/initial_load_path on resume.
+        Set to False to save full model weights for debugging without pretrained base."""
+
     def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
+        self.save_adapter_only = config.save_adapter_only
         logger.info(f"LoRA training active with rank={self.rank}, alpha={self.alpha}")
 
     def convert(self, model: nn.Module) -> None:
@@ -118,6 +123,15 @@ class LoRAConverter(Configurable):
                     _init_weight()
 
         object.__setattr__(module, "init_weights", new_model_init_weights)
+
+        # Expose a key filter and flag on the module so ModelWrapper can
+        # partition the state dict without knowing about LoRA internals.
+        def converter_key_filter(key: str) -> bool:
+            """Return True if key was added by this converter (LoRA adapter weights)."""
+            return ".lora_a." in key or ".lora_b." in key
+
+        object.__setattr__(module, "converter_key_filter", converter_key_filter)
+        object.__setattr__(module, "save_converter_keys_only", self.save_adapter_only)
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]) -> None:
         pass
