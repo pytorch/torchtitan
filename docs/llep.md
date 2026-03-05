@@ -143,10 +143,19 @@ A ready-made config for inspecting LLEP distribution on 8 GPUs:
 ```bash
 torchrun --nproc_per_node=8 -m torchtitan.train \
   --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
+  --training.steps 3
+```
+
+Or with verbose per-step distribution logging:
+
+```bash
+LLEP_DEBUG=1 torchrun --nproc_per_node=8 -m torchtitan.train \
+  --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
+  --training.steps 3 \
   2>&1 | tee /tmp/llep_distribution_logs.txt
 ```
 
-This config uses `debugmodel_ep8_llep` (64 experts, top_k=8, EP=8) with `min_tokens_per_gemm=1` and `adaptive_threshold=0.0` so LLEP always triggers, even at small debug scale. See `train_configs/debug_model_ep8_llep.toml`.
+This config uses `debugmodel_ep8_llep` (64 experts, top_k=8, EP=8) with `min_tokens_per_gemm=1` and `adaptive_threshold=0.0` so LLEP always triggers. See `train_configs/debug_model_ep8_llep.toml`.
 
 ## Benchmark: LLEP vs Standard EP
 
@@ -156,9 +165,7 @@ The `debugmodel_ep8_llep` flavor is a 9.5B-parameter MoE model designed for sing
 
 | Parameter | Value |
 |-----------|-------|
-| Total params | 9.5B (8.9 GB bf16) |
-| MoE expert params | 9.1B (96%) |
-| Active params/token | 1.6B (top_k=8 of 64 experts) |
+| Total params | 9.5B |
 | dim | 2048 |
 | inter_dim | 8192 |
 | moe_inter_dim | 1536 |
@@ -167,7 +174,7 @@ The `debugmodel_ep8_llep` flavor is a 9.5B-parameter MoE model designed for sing
 | top_k | 8 |
 | EP | 8 (8 local experts/GPU) |
 
-Training config: `lbs=6, seq_len=4096, AdamW, no compile, no activation checkpointing`.
+Training config: `lbs=8, seq_len=4096, AdamW, no compile, no activation checkpointing`.
 
 ### Reproducing
 
@@ -177,26 +184,16 @@ cd torchtitan
 # WITH LLEP (20 steps)
 torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
   -m torchtitan.train \
-  --job.config-file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
-  --training.steps 20 --compile.no-enable \
+  --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
+  --training.steps 20 \
   2>&1 | tee llep_with_llep.txt
 
 # WITHOUT LLEP (20 steps, same model)
 torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
   -m torchtitan.train \
-  --job.config-file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
-  --training.steps 20 --compile.no-enable --llep.enabled=False \
+  --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
+  --training.steps 20 --llep.enabled=False \
   2>&1 | tee llep_no_llep.txt
-```
-
-To enable verbose per-step distribution logging (shows BEFORE/AFTER imbalance, send matrix, weight transfers):
-
-```bash
-torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
-  -m torchtitan.train \
-  --job.config-file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
-  --training.steps 3 --compile.no-enable --llep.verbose=True \
-  2>&1 | tee llep_verbose_logs.txt
 ```
 
 ### Results (8xB200, 20 steps)
@@ -205,57 +202,56 @@ torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
 
 | | With LLEP | Without LLEP | Delta |
 |---|---|---|---|
-| Mean TPS | ~16,270 | ~15,120 | **+7.6%** |
-| Mean MFU | 8.2% | 7.6% | +7.9% |
+| Mean TPS | ~26,370 | ~23,780 | **+10.9%** |
+| Mean MFU | 11.4% | 10.3% | +10.7% |
 
 **Memory** (per-GPU at step 20):
 
 | | With LLEP | Without LLEP |
 |---|---|---|
-| Active range | 105-107 GiB (59-60%) | 93-124 GiB (52-**69%**) |
-| Reserved range | 116-120 GiB (65-67%) | 143-173 GiB (80-**97%**) |
-| Max reserved | 120 GiB | **173 GiB** (near OOM) |
-| Spread (reserved) | ~4 GiB | **30 GiB** |
+| Memory range | 140-147 GiB (78-82%) | 132-173 GiB (74-**97%**) |
+| Max memory | 147 GiB | **173 GiB** (near OOM) |
+| Spread | ~7 GiB | **42 GiB** |
 
-Without LLEP, the most-loaded GPU hits 97% reserved memory (near OOM) while the least-loaded sits at 80%. LLEP keeps all GPUs in a tight 65-67% band. LLEP is both faster (less straggler waiting from load imbalance) and safer (no GPU near OOM).
+Without LLEP, the most-loaded GPU hits 97% memory (near OOM on 178 GiB B200) while the least-loaded sits at 74%. LLEP keeps all GPUs in a tight 78-82% band. LLEP is both faster (less straggler waiting from load imbalance) and safer (no GPU near OOM).
 
 ### Per-GPU Memory Breakdown (step 5)
 
 Detailed per-GPU view showing the memory imbalance that LLEP eliminates:
 
-**With LLEP** — all GPUs balanced within a 3 GiB band:
+**With LLEP** — all GPUs balanced within a 7 GiB band:
 
-| GPU | Active (GiB) | Active % | Reserved (GiB) | Reserved % | TPS |
-|-----|-------------|----------|----------------|------------|-----|
-| 0 | 104.29 | 58.5% | 115.74 | 64.9% | 16,088 |
-| 1 | 104.40 | 58.5% | 120.20 | 67.4% | 16,078 |
-| 2 | 104.98 | 58.9% | 116.29 | 65.2% | 16,087 |
-| 3 | 105.24 | 59.0% | 115.59 | 64.8% | 15,978 |
-| 4 | 105.48 | 59.1% | 116.83 | 65.5% | 16,082 |
-| 5 | 105.64 | 59.2% | 118.05 | 66.2% | 15,975 |
-| 6 | 107.10 | 60.1% | 116.87 | 65.5% | 16,082 |
-| 7 | 107.45 | 60.2% | 118.10 | 66.2% | 15,955 |
-| **Spread** | **3.2** | | **4.6** | | |
+| GPU | Memory (GiB) | Memory % | TPS |
+|-----|-------------|----------|-----|
+| 0 | 144.62 | 81.1% | 25,400 |
+| 1 | 144.37 | 80.9% | 25,464 |
+| 2 | 143.46 | 80.4% | 25,491 |
+| 3 | 144.57 | 81.1% | 25,398 |
+| 4 | 143.00 | 80.2% | 25,458 |
+| 5 | 141.26 | 79.2% | 25,349 |
+| 6 | 139.89 | 78.4% | 25,510 |
+| 7 | 146.60 | 82.2% | 25,477 |
+| **Spread** | **6.7** | | |
 
-**Without LLEP** — wildly imbalanced, one GPU near OOM:
+**Without LLEP** — wildly imbalanced, two GPUs near OOM:
 
-| GPU | Active (GiB) | Active % | Reserved (GiB) | Reserved % | TPS |
-|-----|-------------|----------|----------------|------------|-----|
-| 0 | 100.20 | 56.2% | 131.74 | 73.9% | 15,636 |
-| 1 | 104.78 | 58.7% | 148.46 | 83.2% | 15,655 |
-| 2 | 110.80 | 62.1% | 147.52 | 82.7% | 15,655 |
-| 3 | 118.87 | **66.6%** | 165.93 | **93.0%** | 15,640 |
-| 4 | 123.88 | **69.5%** | 137.88 | 77.3% | 15,633 |
-| 5 | 91.15 | **51.1%** | 132.84 | 74.5% | 15,616 |
-| 6 | 93.18 | 52.2% | 152.99 | 85.8% | 15,600 |
-| 7 | 99.20 | 55.6% | 149.78 | 84.0% | 15,583 |
-| **Spread** | **32.7** | | **33.2** | | |
+| GPU | Memory (GiB) | Memory % | TPS |
+|-----|-------------|----------|-----|
+| 0 | 159.46 | 89.4% | 18,936 |
+| 1 | 144.33 | 80.9% | 18,908 |
+| 2 | 172.27 | **96.6%** | 18,945 |
+| 3 | 172.73 | **96.8%** | 18,955 |
+| 4 | 166.89 | 93.6% | 18,953 |
+| 5 | 165.37 | 92.7% | 18,907 |
+| 6 | 155.88 | 87.4% | 18,949 |
+| 7 | 145.89 | 81.8% | 18,878 |
+| **Spread** | **28.4** | | |
 
 Key observations:
-- Without LLEP, GPU 3 reserves **165.9 GiB (93.0%)** of 178 GiB — one more imbalanced step away from OOM.
-- GPU 5 is nearly idle at 51.1% active while GPU 4 is at 69.5% — an **18.4 percentage point** gap.
-- LLEP compresses the active memory spread from **32.7 GiB to 3.2 GiB** (10x reduction).
-- With LLEP every GPU runs at ~16,000+ TPS vs ~15,600 without — the straggler GPU drags everyone down.
+- Without LLEP, GPU 2-3 hit **96.6-96.8%** of 178 GiB — one more imbalanced step away from OOM. At `lbs=10` this config OOMs without LLEP.
+- GPU 7 is at 81.8% while GPU 3 is at 96.8% — a **15 percentage point** gap.
+- LLEP compresses the memory spread from **28.4 GiB to 6.7 GiB** (4x reduction).
+- With LLEP every GPU runs at ~25,400+ TPS vs ~18,900 without — **+34% faster** at step 5 when imbalance is worst.
 
 To reproduce this comparison:
 
@@ -265,66 +261,60 @@ cd torchtitan
 # 5-step memory comparison with LLEP
 torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
   -m torchtitan.train \
-  --job.config-file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
-  --training.steps 5 --compile.no-enable \
+  --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
+  --training.steps 5 \
   2>&1 | tee llep_memory_with_llep.txt
 
 # 5-step memory comparison without LLEP
 torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
   -m torchtitan.train \
-  --job.config-file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
-  --training.steps 5 --compile.no-enable --llep.enabled=False \
+  --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
+  --training.steps 5 --llep.enabled=False \
   2>&1 | tee llep_memory_no_llep.txt
 
 # Extract per-GPU memory at step 5
-grep "step:  5" llep_memory_with_llep.txt
-grep "step:  5" llep_memory_no_llep.txt
+grep "step: 5" llep_memory_with_llep.txt
+grep "step: 5" llep_memory_no_llep.txt
 ```
 
 ### Loss Correctness (LLEP vs Standard EP)
 
-LLEP produces identical training loss to standard EP, confirming numerical correctness. Both runs use the same seed, weights, and data — only the dispatch/combine path differs.
-
-**WandB**: [nous_research/llep_loss_comparison](https://wandb.ai/nous_research/llep_loss_comparison) — overlay both runs to see matching loss curves.
+LLEP produces matching training loss to standard EP, confirming numerical correctness. Both runs use the same seed, weights, and data — only the dispatch/combine path differs.
 
 | Step | With LLEP | Without LLEP | Diff |
 |------|-----------|-------------|------|
-| 10 | 4.4471 | 4.4062 | 0.041 |
-| 30 | 3.1145 | 3.1137 | 0.001 |
-| 50 | 2.9153 | 2.8987 | 0.017 |
-| 80 | 2.7933 | 2.7947 | 0.001 |
-| 100 | 2.7529 | 2.7575 | 0.005 |
-| 130 | 2.7769 | 2.7873 | 0.010 |
+| 10 | 4.2333 | 4.3096 | 0.076 |
+| 30 | 3.0474 | 3.0273 | 0.020 |
+| 50 | 2.8995 | 2.8876 | 0.012 |
+| 80 | 2.7699 | 2.7721 | 0.002 |
+| 100 | 2.7737 | 2.7767 | 0.003 |
+| 130 | 2.7993 | 2.7989 | 0.000 |
 
-To reproduce (8 GPUs, ~3 min each, logs to wandb):
+To reproduce (8 GPUs, ~10 min each):
 
 ```bash
 cd torchtitan
 
-# WITH LLEP (130 steps, seed=42, wandb)
-WANDB_PROJECT=llep_loss_comparison \
+# WITH LLEP (130 steps, seed=42)
 torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
   -m torchtitan.train \
   --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
-  --training.steps 130 --debug.seed 42 --compile.no-enable \
-  --llep.enabled True --metrics.log_freq 1 --metrics.enable_wandb
+  --training.steps 130 --debug.seed=42 --metrics.log_freq=1
 
 # WITHOUT LLEP (130 steps, same seed/config)
-WANDB_PROJECT=llep_loss_comparison \
 torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29501 \
   -m torchtitan.train \
   --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
-  --training.steps 130 --debug.seed 42 --compile.no-enable \
-  --llep.enabled False --metrics.log_freq 1 --metrics.enable_wandb
+  --training.steps 130 --debug.seed=42 --metrics.log_freq=1 --llep.enabled=False
 ```
 
 ### Unit Tests
 
 ```bash
-# LPT planning + SwiGLU FFN (5 tests, no GPU required)
+# LPT planning + SwiGLU FFN (3 tests, no GPU required)
 python -m pytest tests/unit_tests/test_llep.py -v
 
-# Grouped MM, Triton kernels, numerical correctness (17 tests, 1 GPU)
+# Triton kernels, numerical correctness (5 tests, 1 GPU)
 python -m pytest tests/unit_tests/test_llep_correctness.py -v
 
 # Hook-based flow (59 tests, requires >= 2 GPUs)

@@ -1,20 +1,20 @@
-# DeepSeek-V3 debug model: ~3B params, 64 experts, EP=8, top_k=8, LLEP
-# 12 layers (1 dense + 11 MoE), dim=1024, moe_inter_dim=768
-# Sized to fit on 8xB200 with lbs=6, seq_len=4096 on new upstream
+# DeepSeek-V3 debug model: ~9.5B params, 64 experts, EP=8, top_k=8, LLEP
+# 16 layers (1 dense + 15 MoE), dim=2048, moe_inter_dim=1536
+# Sized to stress 8xB200 memory with lbs=6, seq_len=4096
 #
 # Run with LLEP:
 #   torchrun --nproc_per_node=8 -m torchtitan.train \
-#     --job.config-file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep_3b.toml \
-#     --training.steps 20 --compile.no-enable
+#     --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
+#     --training.steps 20
 #
 # Run without LLEP (baseline):
 #   torchrun --nproc_per_node=8 -m torchtitan.train \
-#     --job.config-file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep_3b.toml \
-#     --training.steps 20 --compile.no-enable --llep.enabled=False
+#     --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
+#     --training.steps 20 --llep.enabled=False
 
 [job]
 dump_folder = "./outputs"
-description = "DeepSeek-V3 3B debug EP=8 LLEP benchmark"
+description = "DeepSeek-V3 9.5B debug EP=8 LLEP benchmark"
 print_config = false
 
 [profiling]
@@ -33,7 +33,7 @@ enable_wandb = false
 
 [model]
 name = "deepseek_v3"
-flavor = "debugmodel_ep8_llep_3b"
+flavor = "debugmodel_ep8_llep"
 # test tokenizer, for debug purpose only
 hf_assets_path = "./tests/assets/tokenizer"
 
@@ -49,7 +49,7 @@ decay_type = "linear"
 min_lr_factor = 0.0
 
 [training]
-local_batch_size = 6
+local_batch_size = 8
 seq_len = 4096
 max_norm = 1.0
 steps = 5

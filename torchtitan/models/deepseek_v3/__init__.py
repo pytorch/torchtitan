@@ -52,13 +52,14 @@ deepseekv3_args = {
         v_head_dim=128,
         mscale=0.70,
     ),
-    # ~1.75B model with 64 experts EP=8 for LLEP benchmarking
-    "debugmodel_ep8_llep_3b": DeepSeekV3ModelArgs(
+    # ~9.5B model with 64 experts EP=8 for LLEP benchmarking
+    # dim=2048, moe_inter_dim=1536, 16 layers (1 dense + 15 MoE)
+    "debugmodel_ep8_llep": DeepSeekV3ModelArgs(
         vocab_size=2048,
-        dim=1024,
-        inter_dim=4096,
-        moe_inter_dim=768,
-        n_layers=12,
+        dim=2048,
+        inter_dim=8192,
+        moe_inter_dim=1536,
+        n_layers=16,
         n_dense_layers=1,
         n_heads=16,
         moe_args=MoEArgs(
