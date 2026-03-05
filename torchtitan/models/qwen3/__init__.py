@@ -8,7 +8,7 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.models.common import FeedForward, GQAttention, RoPE
+from torchtitan.models.common import Embedding, FeedForward, GQAttention, RoPE
 from torchtitan.models.common.moe import MoE
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -30,6 +30,7 @@ qwen3_configs = {
         dim=256,
         n_layers=8,
         enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             norm_eps=1e-6,
             feed_forward=FeedForward.Config(hidden_dim=3072),
@@ -55,6 +56,7 @@ qwen3_configs = {
         dim=1024,
         n_layers=28,
         enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             norm_eps=1e-6,
             feed_forward=FeedForward.Config(hidden_dim=3072),
@@ -80,6 +82,7 @@ qwen3_configs = {
         dim=2048,
         n_layers=28,
         enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             norm_eps=1e-6,
             feed_forward=FeedForward.Config(hidden_dim=6144),
@@ -105,6 +108,7 @@ qwen3_configs = {
         dim=2560,
         n_layers=36,
         enable_weight_tying=True,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             norm_eps=1e-6,
             feed_forward=FeedForward.Config(hidden_dim=9728),
@@ -129,6 +133,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=4096,
         n_layers=36,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             norm_eps=1e-6,
             feed_forward=FeedForward.Config(hidden_dim=12288),
@@ -153,6 +158,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=5120,
         n_layers=40,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             norm_eps=1e-6,
             feed_forward=FeedForward.Config(hidden_dim=17408),
@@ -177,6 +183,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=5120,
         n_layers=64,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             norm_eps=1e-6,
             feed_forward=FeedForward.Config(hidden_dim=25600),
@@ -202,6 +209,7 @@ qwen3_configs = {
         vocab_size=2048,
         dim=256,
         n_layers=8,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             norm_eps=1e-6,
             moe_enabled=True,
@@ -237,6 +245,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=2048,
         n_layers=48,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             norm_eps=1e-6,
             moe_enabled=True,
@@ -272,6 +281,7 @@ qwen3_configs = {
         vocab_size=151936,
         dim=4096,
         n_layers=94,
+        tok_embeddings=Embedding.Config(),
         layer=Qwen3TransformerBlock.Config(
             norm_eps=1e-6,
             moe_enabled=True,
