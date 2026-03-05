@@ -6,13 +6,18 @@
 
 from __future__ import annotations
 
+import logging
 import random
 import re
 
 import torch
 
+logger = logging.getLogger(__name__)
 
-def extract_answer(text: str) -> int | None:
+from torchtitan.experiments.rl.unified.task_spec import Task
+
+
+def _extract_answer(text: str) -> int | None:
     """Extract a numeric answer from model output.
 
     Tries in order:
@@ -55,23 +60,36 @@ Sum all digits: 1 + 2 + 3 + 4 + 5 + 6 + 7 = 28
 [ANSWER] 28"""
 
 
-class SumDigitsTask:
+class SumDigitsTaskSpec:
     """Generates sum-of-digits tasks with sequences of 2-4 integers (10-99)."""
 
-    def __init__(self, seed: int = 42):
+    def __init__(self, seed: int = 42, log_samples: bool = False):
         self.seed = seed
+        self.log_samples = log_samples
         self._rng = random.Random(seed)
 
-    def create_question(self) -> tuple[str, str]:
-        """Return a (question, answer) pair."""
+    def generate_task(self) -> Task:
         n = self._rng.randint(2, 4)
         numbers = [self._rng.randint(10, 99) for _ in range(n)]
         answer = sum(int(d) for num in numbers for d in str(num))
         question = f"What is the total digit sum of {numbers}?"
-        return question, str(answer)
+        return Task(question=question, correct_answer=str(answer))
 
     def get_system_prompt(self) -> str:
         return _SYSTEM_PROMPT
+
+    def compute_step_metrics(self, scored_episodes: list) -> dict[str, str]:
+        """Compute task-specific metrics from scored episodes."""
+        all_rewards = [c.reward for ep in scored_episodes for c in ep.completions]
+        correct_count = sum(1 for r in all_rewards if r > 0)
+        total_count = len(all_rewards)
+        return {
+            "Correct": f"{correct_count:>2}/{total_count}",
+        }
+
+    def create_eval_instance(self) -> SumDigitsTaskSpec:
+        """Return a new instance with a different seed for evaluation."""
+        return SumDigitsTaskSpec(seed=self.seed + 57)
 
     def reward_function(
         self,
@@ -90,7 +108,7 @@ class SumDigitsTask:
         expected = int(expected_answer) if expected_answer else 0
         rewards = []
         for completion in completions:
-            extracted = extract_answer(completion)
+            extracted = _extract_answer(completion)
             is_correct = extracted == expected
             reward = 1.0 if is_correct else -1.0
             # Format bonus: only if correct, exactly one [ANSWER] tag, and generation stops after it
@@ -103,4 +121,27 @@ class SumDigitsTask:
                 reward += 0.2
             rewards.append(reward)
 
+        if self.log_samples:
+            mark = "+" if rewards[0] > 0 else "-"
+            logger.info(
+                f"  [{mark}] expected={expected_answer} reward={rewards[0]:+.1f}"
+            )
+            logger.info(f"       {completions[0][:200].replace(chr(10), ' ')}")
+
         return torch.tensor(rewards, dtype=torch.float32)
+
+    def evaluate_completion(self, text: str, task: Task) -> dict[str, bool]:
+        """Evaluate a single completion against a task."""
+        extracted = _extract_answer(text)
+        is_correct = extracted == int(task.correct_answer)
+
+        if self.log_samples:
+            mark = "+" if is_correct else "-"
+            logger.info(f"  [{mark}] Q: {task.question}")
+            logger.info(f"       A: {text[:200]}")
+            logger.info(f"       expected={task.correct_answer}")
+
+        return {
+            "correct": is_correct,
+            "format_ok": bool(re.search(r"\[ANSWER\]", text)),
+        }

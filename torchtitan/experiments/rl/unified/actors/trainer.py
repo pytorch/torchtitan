@@ -31,7 +31,10 @@ from torchtitan.experiments.rl.unified.actors.utils import (
 from torchtitan.experiments.rl.unified.models.attention import (
     replace_with_vllm_compatible_flash_attention,
 )
+from torch.distributed.tensor import Shard
+from torchtitan.experiments.rl.unified.remote_tensor import RemoteTensor
 from torchtitan.experiments.rl.unified.types import Episode
+from torchtitan.experiments.rl.unified.weight_transfer import TransferChunk
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
@@ -218,19 +221,84 @@ class PolicyTrainer(Actor, Configurable):
         return model
 
     @endpoint
-    async def get_weights(self) -> dict:
-        """Get model weights for generator.
+    async def get_shard_info(self) -> dict[str, tuple[tuple[int, ...], int | None]]:
+        """Return per-param shard metadata: {name: (global_shape, shard_dim)}.
+
+        shard_dim is None for replicated params.
+        """
+        info = {}
+        for name, param in self.model.state_dict().items():
+            if isinstance(param, DTensor):
+                placement = param.placements[0]
+                shard_dim = placement.dim if isinstance(placement, Shard) else None
+                info[name] = (tuple(param.shape), shard_dim)
+            else:
+                info[name] = (tuple(param.shape), None)
+        return info
+
+    @endpoint
+    async def prepare_weight_chunks(
+        self, sender_plan: dict[int, list[TransferChunk]]
+    ) -> list[tuple[TransferChunk, RemoteTensor]]:
+        """Pre-slice params into chunks and create RemoteTensor handles.
+
+        Each rank extracts its own chunks from the sender plan, slices
+        the local param, makes it contiguous, and creates an RDMA handle.
+        Stores chunk buffers for later refresh.
+
+        Args:
+            sender_plan: Full sender plan keyed by rank.
 
         Returns:
-            model state dict with plain local tensors (DTensors unwrapped
-            to avoid cross-mesh issues when transferring through Monarch).
+            List of (chunk, handle) pairs for this rank.
         """
-        titan_state = self.model.state_dict()
+        rank = int(os.environ.get("LOCAL_RANK", 0))
+        chunks = sender_plan.get(rank, [])
+        state_dict = dict(self.model.state_dict())
 
-        return {
-            k: v.full_tensor() if isinstance(v, DTensor) else v
-            for k, v in titan_state.items()
-        }
+        self._chunk_buffers: list[tuple[TransferChunk, torch.Tensor, torch.Tensor]] = (
+            []
+        )
+        result = []
+
+        for chunk in chunks:
+            param = state_dict[chunk.param_name]
+            local = param.to_local() if isinstance(param, DTensor) else param
+
+            # Slice the local param according to sender_offset and lengths
+            slices = tuple(
+                slice(off, off + length)
+                for off, length in zip(chunk.sender_offset, chunk.lengths)
+            )
+            chunk_data = local[slices].contiguous()
+
+            # Store (chunk, buffer, source_param) for refresh
+            self._chunk_buffers.append((chunk, chunk_data, local))
+
+            handle = RemoteTensor(chunk_data, owner=f"trainer_{rank}")
+            result.append((chunk, handle))
+
+        logger.info(
+            f"Prepared {len(result)} weight chunks for routed transfer"
+        )
+        return result
+
+    @endpoint
+    async def refresh_weight_chunks(self) -> None:
+        """Copy latest param data into chunk buffers.
+
+        Must be called before generator.sync_weights() each step to ensure
+        RDMA buffers contain up-to-date weights.
+        """
+        state_dict = dict(self.model.state_dict())
+        for chunk, buffer, _old_local in self._chunk_buffers:
+            param = state_dict[chunk.param_name]
+            local = param.to_local() if isinstance(param, DTensor) else param
+            slices = tuple(
+                slice(off, off + length)
+                for off, length in zip(chunk.sender_offset, chunk.lengths)
+            )
+            buffer.copy_(local[slices])
 
     @endpoint
     async def step(self, episodes: list[Episode]) -> dict:

@@ -10,9 +10,11 @@ from dataclasses import dataclass, field
 
 import torch
 from monarch.actor import Actor, endpoint
-from torch.distributed.tensor import distribute_tensor, DTensor
+from torch.distributed.tensor import DTensor, Shard
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
+from torchtitan.experiments.rl.unified.remote_tensor import RemoteTensor
+from torchtitan.experiments.rl.unified.weight_transfer import TransferChunk
 from torchtitan.experiments.rl.unified.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
@@ -227,33 +229,82 @@ class VLLMGenerator(Actor, Configurable):
         return episodes
 
     @endpoint
-    async def update(self, version: int, state_dict: dict) -> None:
-        """Update generator weights.
-        Called by the orchestrator (simple_grpo.py).
+    async def get_shard_info(self) -> dict[str, tuple[tuple[int, ...], int | None]]:
+        """Return per-param shard metadata: {name: (global_shape, shard_dim)}.
+
+        shard_dim is None for replicated params.
+        """
+        info = {}
+        for name, param in self._get_model().model.state_dict().items():
+            if isinstance(param, DTensor):
+                placement = param.placements[0]
+                shard_dim = placement.dim if isinstance(placement, Shard) else None
+                info[name] = (tuple(param.shape), shard_dim)
+            else:
+                info[name] = (tuple(param.shape), None)
+        return info
+
+    @endpoint
+    async def setup_weight_sync(
+        self,
+        chunk_handles: list[tuple[TransferChunk, RemoteTensor]],
+    ) -> None:
+        """Store chunk handles and pre-allocate receive buffers.
+
+        Called once during setup. Each chunk describes a sub-region of a
+        parameter to receive from a specific trainer rank.
 
         Args:
-            version: New policy version number
-            state_dict: Full (unsharded) state dict with plain tensors.
+            chunk_handles: List of (TransferChunk, RemoteTensor) pairs for
+                this generator rank.
         """
-        # Reshard full tensors to match this generator's DTensor layout
-        model_state_dict = dict(self._get_model().model.state_dict())
-        for name, tensor in state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                if isinstance(tensor, DTensor):
-                    continue
-                target_dtensor = model_state_dict[name]
-                state_dict[name] = distribute_tensor(
-                    tensor.to(target_dtensor.device_mesh.device_type),
-                    device_mesh=target_dtensor.device_mesh,
-                    placements=target_dtensor.placements,
-                )
+        rank = int(os.environ.get("LOCAL_RANK", 0))
+        my_chunks = [(c, h) for c, h in chunk_handles if c.receiver_rank == rank]
 
-        load_weights = self._get_model().load_weights_from_state_dict(state_dict)
+        model_state = dict(self._get_model().model.state_dict())
+
+        # Pre-allocate receive buffers and build the sync plan
+        self._sync_plan: list[tuple[RemoteTensor, torch.Tensor, torch.Tensor, tuple[slice, ...]]] = []
+
+        for chunk, handle in my_chunks:
+            target = model_state[chunk.param_name]
+            local = target.to_local() if isinstance(target, DTensor) else target
+
+            # Compute receiver slice
+            recv_slices = tuple(
+                slice(off, off + length)
+                for off, length in zip(chunk.receiver_offset, chunk.lengths)
+            )
+
+            # Pre-allocate receive buffer matching chunk shape
+            recv_buffer = torch.empty(
+                chunk.lengths, dtype=local.dtype, device=local.device
+            )
+
+            self._sync_plan.append((handle, recv_buffer, local, recv_slices))
+
+        logger.info(
+            f"Set up {len(self._sync_plan)} chunk handles for routed weight sync"
+        )
+
+    @endpoint
+    async def sync_weights(self, version: int) -> None:
+        """Pull latest weights from trainer via RemoteTensor.
+
+        Reads each chunk via RDMA into a pre-allocated buffer, then copies
+        into the correct slice of the local parameter.
+
+        Args:
+            version: New policy version number.
+        """
+        for handle, recv_buffer, local_param, recv_slices in self._sync_plan:
+            handle.read_into(recv_buffer)
+            local_param[recv_slices].copy_(recv_buffer)
+
         self.policy_version = version
         logger.debug(
-            f"Updated weights into vLLM engine model. "
-            f"Number of parameters: {len(load_weights)}. "
-            f"{os.getpid()=} Generator updating weights to policy v{version}..."
+            f"Synced {len(self._sync_plan)} chunks via RemoteTensor "
+            f"to policy v{version}"
         )
 
     def __del__(self):
