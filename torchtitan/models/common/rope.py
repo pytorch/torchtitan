@@ -12,6 +12,13 @@ import torch
 
 from torchtitan.protocols.module import Module
 
+__all__ = [
+    "RoPE",
+    "apply_rotary_emb_complex",
+    "apply_rotary_emb_cos_sin",
+    "apply_rotary_emb_single_complex",
+]
+
 
 class RoPE(Module):
     """Shared Rotary Position Embedding module.
