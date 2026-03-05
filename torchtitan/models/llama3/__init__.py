@@ -8,6 +8,7 @@ from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     compute_ffn_hidden_dim,
+    Embedding,
     FeedForward,
     GQAttention,
     RoPE,
@@ -30,6 +31,7 @@ llama3_configs = {
         dim=256,
         n_layers=6,
         vocab_size=2048,
+        tok_embeddings=Embedding.Config(),
         layer=Llama3TransformerBlock.Config(
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
@@ -51,6 +53,7 @@ llama3_configs = {
         dim=256,
         n_layers=6,
         vocab_size=2048,
+        tok_embeddings=Embedding.Config(),
         layer=Llama3TransformerBlock.Config(
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
@@ -74,6 +77,7 @@ llama3_configs = {
         dim=256,
         n_layers=6,
         vocab_size=2048,
+        tok_embeddings=Embedding.Config(),
         layer=Llama3TransformerBlock.Config(
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
@@ -96,6 +100,7 @@ llama3_configs = {
     "8B": Llama3Model.Config(
         dim=4096,
         n_layers=32,
+        tok_embeddings=Embedding.Config(),
         layer=Llama3TransformerBlock.Config(
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
@@ -117,6 +122,7 @@ llama3_configs = {
     "8B_flex": Llama3Model.Config(
         dim=4096,
         n_layers=32,
+        tok_embeddings=Embedding.Config(),
         layer=Llama3TransformerBlock.Config(
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
@@ -142,6 +148,7 @@ llama3_configs = {
     "8B_varlen": Llama3Model.Config(
         dim=4096,
         n_layers=32,
+        tok_embeddings=Embedding.Config(),
         layer=Llama3TransformerBlock.Config(
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
@@ -167,6 +174,7 @@ llama3_configs = {
     "70B": Llama3Model.Config(
         dim=8192,
         n_layers=80,
+        tok_embeddings=Embedding.Config(),
         layer=Llama3TransformerBlock.Config(
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
@@ -188,6 +196,7 @@ llama3_configs = {
     "405B": Llama3Model.Config(
         dim=16384,
         n_layers=126,
+        tok_embeddings=Embedding.Config(),
         layer=Llama3TransformerBlock.Config(
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(
