@@ -420,9 +420,7 @@ class GQAttention(BaseAttention):
         def __post_init__(self):
             BaseAttention.Config.__post_init__(self)
             if (self.q_norm is None) != (self.k_norm is None):
-                raise ValueError(
-                    "q_norm and k_norm must be both None or both set"
-                )
+                raise ValueError("q_norm and k_norm must be both None or both set")
 
     def __init__(self, config: Config, *, dim: int):
         super().__init__()
@@ -440,7 +438,7 @@ class GQAttention(BaseAttention):
         # Optional QK normalization (Qwen3-style)
         self.q_norm: RMSNorm | None = None
         self.k_norm: RMSNorm | None = None
-        if config.q_norm is not None:
+        if config.q_norm is not None and config.k_norm is not None:
             self.q_norm = config.q_norm.build(normalized_shape=self.head_dim)
             self.k_norm = config.k_norm.build(normalized_shape=self.head_dim)
 

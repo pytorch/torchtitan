@@ -40,5 +40,5 @@ class RMSNorm(nn.RMSNorm, Module):
         )
         self.config = config
 
-    def init_weights(self) -> None:
+    def init_weights(self, **kwargs) -> None:
         self.reset_parameters()
