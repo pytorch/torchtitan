@@ -118,7 +118,14 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             self.moe_args.llep.verbose = True
 
         # Configure expert parallel communication backend from config (defaults to "standard")
-        self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
+        # When both DeepEP and LLEP are enabled, use adaptive switching
+        if (
+            job_config.parallelism.expert_parallel_comm_backend == "deepep"
+            and self.moe_args.use_llep
+        ):
+            self.moe_impl = "deepep_llep"
+        else:
+            self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(

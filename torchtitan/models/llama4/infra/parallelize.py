@@ -48,6 +48,7 @@ from torchtitan.distributed.dual_pipe_v import (
 from torchtitan.distributed.expert_parallel import (
     BaseExpertParallel,
     DeepEPExpertParallel,
+    DeepEPLLEPExpertParallel,
     ExpertParallel,
     ExpertParallelLLEP,
     ExpertTensorParallel,
@@ -664,7 +665,26 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
-            if use_llep:
+            if use_llep and use_deepep:
+                # Adaptive: DeepEP when balanced, LLEP when imbalanced
+                # pyrefly: ignore [missing-attribute]
+                llep_config = transformer_block.moe._llep_config
+                # pyrefly: ignore [missing-attribute]
+                score_before_experts = transformer_block.moe.score_before_experts
+                experts_plan = DeepEPLLEPExpertParallel(
+                    score_before_experts=score_before_experts,
+                    max_tokens_factor=llep_config.max_tokens_factor,
+                    min_tokens_per_gemm=llep_config.min_tokens_per_gemm,
+                    adaptive_threshold=llep_config.adaptive_threshold,
+                    verbose=llep_config.verbose,
+                )
+                logger.info(
+                    f"Enabling DeepEP+LLEP adaptive switching "
+                    f"(α={llep_config.max_tokens_factor}, "
+                    f"m={llep_config.min_tokens_per_gemm}, "
+                    f"λ={llep_config.adaptive_threshold})"
+                )
+            elif use_llep:
                 # LLEP: dispatch/combine hooks with LPT-based routing
                 # pyrefly: ignore [missing-attribute]
                 llep_config = transformer_block.moe._llep_config
