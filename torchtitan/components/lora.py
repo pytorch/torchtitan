@@ -175,7 +175,9 @@ class LoRAConverter(Configurable):
                     f"(e.g., 64, 32, or 1)."
                 )
 
-                nf4_local = to_nf4(local_weight, scaler_block_size=nf4_scaler_block_size)
+                nf4_local = to_nf4(
+                    local_weight, scaler_block_size=nf4_scaler_block_size
+                )
 
                 if is_dtensor:
                     return DTensor.from_local(
