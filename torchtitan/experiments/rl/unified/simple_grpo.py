@@ -24,6 +24,7 @@ python3 torchtitan/experiments/rl/unified/simple_grpo.py \
 import asyncio
 import logging
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -35,7 +36,7 @@ from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
 from torchtitan.experiments.rl.unified.actors.grader import Grader
 from torchtitan.experiments.rl.unified.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.unified.task_spec import Task, TaskSpec
+from torchtitan.experiments.rl.unified.sum_digits import extract_answer, SumDigitsTask
 from torchtitan.experiments.rl.unified.weight_transfer import compute_transfer_plans
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -87,10 +88,6 @@ class RLTrainer(Configurable):
         """Model specification shared by trainer and generator.
         Set programmatically via config_registry (not from CLI)."""
 
-        task: TaskSpec | None = None
-        """Task specification for generating prompts and scoring.
-        Set programmatically via config_registry (not from CLI)."""
-
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
 
@@ -105,7 +102,10 @@ class RLTrainer(Configurable):
         operations and bitwise-reproducible forward/backward passes."""
 
         num_episodes_per_step: int = 5
-        """Number of prompts to generate per training step."""
+        """Number of episodes to create before every training step."""
+
+        log_samples: bool = False
+        """Log first completion per episode during training and eval."""
 
         trainer: PolicyTrainer.Config = field(default_factory=PolicyTrainer.Config)
         """PolicyTrainer config. Controls optimizer, training, parallelism"""
@@ -123,6 +123,8 @@ class RLTrainer(Configurable):
         )
 
         config.model_spec.parallelize_fn = parallelize_qwen3
+
+        self.task = SumDigitsTask(seed=42)
 
     @staticmethod
     def _compute_world_size(p: "ParallelismConfig") -> int:
@@ -156,9 +158,7 @@ class RLTrainer(Configurable):
             f"{self.trainer_world_size} trainer GPUs = {total_gpus} total"
         )
 
-        # Task specification for generating prompts
-        self.task_spec = config.task
-        self.system_prompt = self.task_spec.get_system_prompt()
+        self.system_prompt = self.task.get_system_prompt()
 
         # Allocate non-overlapping GPU ranges for each mesh
         provisioner = Provisioner(total_gpus=total_gpus)
@@ -197,7 +197,7 @@ class RLTrainer(Configurable):
         self.grader = grader_mesh.spawn(
             "grader",
             Grader,
-            self.task_spec.reward_function,
+            self.task.reward_function,
         )
 
         # Set up routed weight sync (supports different TP degrees)
@@ -234,16 +234,6 @@ class RLTrainer(Configurable):
         self.trainer.refresh_weight_chunks.call().get()
         self.generator.sync_weights.call(0).get()
 
-    def _generate_prompts(self) -> tuple[list[str], list[str]]:
-        """Generate a batch of prompts and expected answers from the task spec."""
-        prompt_texts = []
-        expected_answers = []
-        for _ in range(self.config.num_episodes_per_step):
-            task: Task = self.task_spec.generate_task()
-            prompt_texts.append(self.system_prompt + "\n\n" + task.question)
-            expected_answers.append(str(task.correct_answer))
-        return prompt_texts, expected_answers
-
     async def evaluate(self, num_samples: int = 20) -> dict:
         """Run evaluation on held-out prompts.
 
@@ -255,13 +245,15 @@ class RLTrainer(Configurable):
         Returns:
             Dict with accuracy, correct, total, format_rate
         """
-        eval_spec = self.task_spec.create_eval_instance()
+        eval_task = SumDigitsTask(seed=99)
         eval_prompts = []
-        eval_tasks = []
+        eval_answers = []
+        eval_questions = []
         for _ in range(num_samples):
-            task = eval_spec.generate_task()
-            eval_prompts.append(self.system_prompt + "\n\n" + task.question)
-            eval_tasks.append(task)
+            question, answer = eval_task.create_question()
+            eval_prompts.append(self.system_prompt + "\n\n" + question)
+            eval_answers.append(answer)
+            eval_questions.append(question)
 
         # Generate on eval prompts
         episodes = self.generator.generate.call(eval_prompts).get().item(gpus=0)
@@ -269,11 +261,19 @@ class RLTrainer(Configurable):
         # Score: check first completion per episode
         correct = 0
         format_ok = 0
-        for episode, task in zip(episodes, eval_tasks):
+        for episode, question, answer in zip(episodes, eval_questions, eval_answers):
             text = episode.completions[0].text
-            result = self.task_spec.evaluate_completion(text, task)
-            correct += int(result["correct"])
-            format_ok += int(result["format_ok"])
+            extracted = extract_answer(text)
+            is_correct = extracted == int(answer)
+            has_tag = bool(re.search(r"\[ANSWER\]", text))
+            correct += int(is_correct)
+            format_ok += int(has_tag)
+
+            if self.config.log_samples:
+                mark = "+" if is_correct else "-"
+                logger.info(f"  [{mark}] expected={answer} extracted={extracted}")
+                logger.info(f"       Q: {question}")
+                logger.info(f"       A: {text[:300].replace(chr(10), ' ').strip()}")
 
         result = {
             "accuracy": correct / num_samples,
@@ -304,22 +304,44 @@ class RLTrainer(Configurable):
         logger.info("=" * 80)
 
         for step in range(num_steps):
-            # Generate new prompts each step
-            prompt_texts, expected_answers = self._generate_prompts()
+            # Generate prompts for this step
+            train_prompts = []
+            train_answers = []
+            train_questions = []
+            for _ in range(self.config.num_episodes_per_step):
+                question, answer = self.task.create_question()
+                train_prompts.append(self.system_prompt + "\n\n" + question)
+                train_answers.append(answer)
+                train_questions.append(question)
 
             # Fully sync RL loop with separate scoring step
             # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
             # TODO: Create a queue to use all episode from all GPUs
-            episodes = (
-                self.generator.generate.call(prompt_texts).get().item(gpus=0)
-            )
+            episodes = self.generator.generate.call(train_prompts).get().item(gpus=0)
 
             # Attach expected answers to each episode
-            for episode, answer in zip(episodes, expected_answers):
+            for episode, answer in zip(episodes, train_answers):
                 episode.expected_answer = answer
 
             # 2. Grader computes rewards per episode
             scored_episodes = self.grader.score.call(episodes).get().item()
+
+            if self.config.log_samples:
+                for ep, question, answer in zip(
+                    scored_episodes, train_questions, train_answers
+                ):
+                    # Log first completion per prompt
+                    comp = ep.completions[0]
+                    extracted = extract_answer(comp.text)
+                    mark = "+" if comp.reward > 0 else "-"
+                    logger.info(
+                        f"  [{mark}] expected={answer} extracted={extracted} "
+                        f"reward={comp.reward:+.1f}"
+                    )
+                    logger.info(f"       Q: {question}")
+                    logger.info(
+                        f"       A: {comp.text[:300].replace(chr(10), ' ').strip()}"
+                    )
 
             # 3. Trainer computes advantages and updates policy
             metrics = self.trainer.step.call(scored_episodes).get().item(gpus=0)
@@ -333,13 +355,14 @@ class RLTrainer(Configurable):
             ]
             avg_len = sum(all_token_lens) / len(all_token_lens)
 
-            task_metrics = self.task_spec.compute_step_metrics(scored_episodes)
-            task_metrics_str = " | ".join(f"{k}: {v}" for k, v in task_metrics.items())
+            all_rewards = [c.reward for ep in scored_episodes for c in ep.completions]
+            correct_count = sum(1 for r in all_rewards if r > 0)
+            total_count = len(all_rewards)
 
             logger.info(
                 f"Step {step:2d} | Loss: {metrics['loss']:+.4f} | "
                 f"Reward: {metrics['reward_mean']:+.3f} | "
-                f"{task_metrics_str} | "
+                f"Correct: {correct_count:>2}/{total_count} | "
                 f"Avg tokens: {avg_len:>3.0f} | "
                 f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
                 f"max={metrics['logprob_diff_max']:.4e}"

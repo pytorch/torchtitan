@@ -28,7 +28,6 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train)."""
     return RLTrainer.Config(
         model_spec=model_registry("0.6B"),
-        task=SumDigitsTaskSpec(seed=42),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_steps=10,
         batch_invariant_mode=True,
@@ -68,7 +67,6 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     """Debug config for quick iteration -- small model, few steps (2 GPUs: 1 gen + 1 train)."""
     return RLTrainer.Config(
         model_spec=model_registry("debugmodel"),
-        task=SumDigitsTaskSpec(seed=42),
         num_steps=5,
         batch_invariant_mode=False,
         trainer=PolicyTrainer.Config(
