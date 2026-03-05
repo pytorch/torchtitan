@@ -60,24 +60,6 @@ from torchtitan.models.llama4.model import Llama4Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
-# for selective op activation checkpointing
-_op_sac_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten._scaled_dot_product_efficient_attention.default,
-    torch.ops.aten._scaled_dot_product_flash_attention.default,
-    torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-    torch.ops.aten._scaled_dot_product_attention_math.default,
-    torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-    torch.ops._c10d_functional.reduce_scatter_tensor.default,
-    torch.ops._c10d_functional.all_to_all_single.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
-    torch.ops.aten.max.default,
-    torch._higher_order_ops.flex_attention,
-    torch._higher_order_ops.inductor_compiled_code,
-}
-
 
 def parallelize_llama(
     model: Llama4Model,
@@ -148,9 +130,6 @@ def parallelize_llama(
 
         # Import deepep module to register custom ops before accessing them
         import torchtitan.distributed.deepep  # noqa: F401 - registers torch.ops.deepep
-
-        _op_sac_save_list.add(torch.ops.deepep.dispatch.default)
-        _op_sac_save_list.add(torch.ops.deepep.combine.default)
     else:
         use_deepep = False
 
@@ -182,17 +161,10 @@ def parallelize_llama(
         compile_config.enable and "model" in compile_config.components
     )
     if ac_config.mode != "none":
-        if ac_config.selective_ac_option == "op":
-            logger.info(
-                f"SAC save list contains {len(_op_sac_save_list)} ops: "
-                f"{sorted([str(op) for op in _op_sac_save_list])}"
-            )
         apply_ac(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
-            # pyrefly: ignore [bad-argument-type]
-            op_sac_save_list=_op_sac_save_list,
             base_folder=dump_folder,
         )
 
