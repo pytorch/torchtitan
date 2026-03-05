@@ -63,8 +63,6 @@ class PolicyTrainer(Actor, Configurable):
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         """Communication configuration for distributed initialization."""
-        hf_assets_path: str = ""
-        """Path to the HF model checkpoint for initial weight loading."""
 
     def __init__(
         self,

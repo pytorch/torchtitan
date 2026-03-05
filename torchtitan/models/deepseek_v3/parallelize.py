@@ -24,11 +24,11 @@ from torchtitan.config import (
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
-from torchtitan.distributed import NoParallel, ParallelDims
+from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.context_parallel import apply_cp_to_attention_module
 from torchtitan.distributed.dual_pipe_v import get_dual_pipe_v_flag
-from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama3.parallelize import apply_ddp
 from torchtitan.models.llama4.parallelize import (
@@ -42,6 +42,7 @@ from torchtitan.tools.logging import logger
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
+    torch.ops.aten.linear.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
@@ -284,12 +285,12 @@ def apply_non_moe_tp(
                     positions_sharding,
                 ),
             ),
-            # NOTE: use_local_output=False make the output to be a DTensor instead of a plain Tensor
-            # so that the intermedidate results k is generated as a DTensor and its gradient is
-            # correctly handled by the autograd engine.
-            "attention.wkv_a": NoParallel(use_local_output=False),
+            # NOTE: NoParallel() without local_output_grad_placements keeps the output as a
+            # DTensor so that the intermediate results k is generated as a DTensor and its
+            # gradient is correctly handled by the autograd engine.
+            "attention.wkv_a": NoParallel(),
             "attention.wkv_b": colwise_parallel(use_local_output=False),
-            "attention.kv_norm": NoParallel(use_local_output=False),
+            "attention.kv_norm": NoParallel(),
             # NOTE: use_local_output=True so that the inputs to FlexAttention are plain Tensors
             "attention.inner_attention": attention_kernel_plan,
             "attention.wo": rowwise_parallel(output_layouts=Shard(1)),
@@ -308,9 +309,9 @@ def apply_non_moe_tp(
         else:
             layer_plan.update(
                 {
-                    "attention.wq_a": NoParallel(use_local_output=False),
+                    "attention.wq_a": NoParallel(),
                     "attention.wq_b": colwise_parallel(use_local_output=False),
-                    "attention.q_norm": NoParallel(use_local_output=False),
+                    "attention.q_norm": NoParallel(),
                 }
             )
 
