@@ -243,19 +243,19 @@ def get_train_context(enable_loss_parallel: bool) -> TrainContext:
 def maybe_enable_amp(
     parallel_dims: ParallelDims, mixed_precision_param: str, device_type: str
 ) -> contextlib.AbstractContextManager[None] | torch.autocast:
-    if parallel_dims.fsdp_enabled:
+    if parallel_dims.fsdp_enabled or parallel_dims.dp_replicate_enabled:
         # FSDP handles mixed precision internally
-        logger.info("Mixed precision training is handled by fully_shard")
+        logger.info("Mixed precision training is handled by fully_shard or replicate")
         return contextlib.nullcontext()
     else:
         if parallel_dims.tp_enabled or parallel_dims.pp_enabled:
             logger.warning(
-                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP is enabled."
+                "Mixed precision training with TP or PP is only supported when FSDP/HSDP/CP/DDP is enabled."
             )
             logger.info("Mixed precision training is disabled")
             return contextlib.nullcontext()
         else:
-            # the following code will only be executed for DDP or single-device training
+            # the following code will only be executed for single-device training
             logger.info("Mixed precision training is handled by AMP")
             return torch.autocast(
                 device_type,

@@ -9,10 +9,8 @@
 
 import torch
 import torch.nn as nn
-
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
-
 from torchtitan.config import (
     ActivationCheckpointConfig,
     CompileConfig,
@@ -22,11 +20,10 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import apply_ac
-
 from torchtitan.models.llama3.parallelize import (
     _op_sac_save_list,
     apply_compile,
-    apply_ddp,
+    apply_replicate,
     disable_fsdp_gradient_division,
 )
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -112,13 +109,11 @@ def parallelize_vlm(
         if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_mesh = parallel_dims.get_mesh("dp_replicate")
-        if dp_mesh is not None and dp_mesh.ndim > 1:
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_mesh,
-            enable_compile=compile_config.enable,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
     return model
