@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import torch
 from monarch.actor import Actor, endpoint
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import distribute_tensor, DTensor
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.experiments.rl.unified.plugin import (
@@ -76,7 +76,7 @@ class VLLMGenerator(Actor, Configurable):
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
 
-        gpu_memory_limit: float = 0.5
+        gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
         enforce_eager: bool = True
@@ -233,29 +233,22 @@ class VLLMGenerator(Actor, Configurable):
 
         Args:
             version: New policy version number
-            state_dict: Per-rank state dicts keyed by GPU index,
-                e.g. {0: state_dict_gpu0, 1: state_dict_gpu1}
+            state_dict: Full (unsharded) state dict with plain tensors.
         """
-        # Extract this rank's state dict from the per-rank dict
-        rank = int(os.environ.get("LOCAL_RANK", 0))
-        local_state_dict = state_dict[rank]
-
-        # Convert plain local tensors (TP shards from trainer) to DTensors
-        # matching the vLLM model's sharding layout. The trainer exports
-        # weights via to_local() which strips DTensor metadata.
+        # Reshard full tensors to match this generator's DTensor layout
         model_state_dict = dict(self._get_model().model.state_dict())
-        for name, tensor in local_state_dict.items():
+        for name, tensor in state_dict.items():
             if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
                 if isinstance(tensor, DTensor):
                     continue
                 target_dtensor = model_state_dict[name]
-                local_state_dict[name] = DTensor.from_local(
+                state_dict[name] = distribute_tensor(
                     tensor.to(target_dtensor.device_mesh.device_type),
                     device_mesh=target_dtensor.device_mesh,
                     placements=target_dtensor.placements,
                 )
 
-        load_weights = self._get_model().load_weights_from_state_dict(local_state_dict)
+        load_weights = self._get_model().load_weights_from_state_dict(state_dict)
         self.policy_version = version
         logger.debug(
             f"Updated weights into vLLM engine model. "

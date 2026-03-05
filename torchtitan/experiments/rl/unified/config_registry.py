@@ -24,7 +24,7 @@ from torchtitan.models.qwen3 import model_registry
 
 
 def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
-    """GRPO training config for Qwen3-0.6B."""
+    """GRPO training config for Qwen3-0.6B (4 GPUs: 2 gen + 2 train)."""
     return RLTrainer.Config(
         model_spec=model_registry("0.6B"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
@@ -42,15 +42,14 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
             ),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            gpu_memory_limit=0.5,
             enforce_eager=True,
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
+                data_parallel_replicate_degree=1,
             ),
             num_samples_per_prompt=8,
             sampling=SamplingConfig(
@@ -64,7 +63,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
 
 
 def rl_grpo_qwen3_debug() -> RLTrainer.Config:
-    """Debug config for quick iteration — small model, few steps."""
+    """Debug config for quick iteration -- small model, few steps (2 GPUs: 1 gen + 1 train)."""
     return RLTrainer.Config(
         model_spec=model_registry("debugmodel"),
         num_steps=5,
@@ -85,10 +84,10 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
             ),
         ),
         generator=VLLMGenerator.Config(
-            gpu_memory_limit=0.3,
             enforce_eager=True,
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
+                data_parallel_replicate_degree=1,
             ),
             num_samples_per_prompt=4,
             sampling=SamplingConfig(
