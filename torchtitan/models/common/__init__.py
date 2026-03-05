@@ -18,6 +18,7 @@ from .attention import (
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
+from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .moe import MoE
 from .rope import (
@@ -32,6 +33,7 @@ __all__ = [
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
+    "Embedding",
     "FeedForward",
     "FlexAttentionWrapper",
     "get_causal_mask_mod",
