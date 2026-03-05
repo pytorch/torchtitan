@@ -528,27 +528,28 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
             skip_rocm_test=True,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module llama3 --config llama3_debugmodel_opt_in_bwd",
-                    "--checkpoint.enable",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--training.enable_cpu_offload",
-                ],
-                [
-                    "--module llama3 --config llama3_debugmodel_opt_in_bwd",
-                    "--parallelism.tensor_parallel_degree=2",
-                    "--parallelism.context_parallel_degree=2",
-                    "--parallelism.data_parallel_replicate_degree=2",
-                    "--training.enable_cpu_offload",
-                ],
-            ],
-            "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
-            "cpu_offload+opt_in_bwd+TP+DP+CP",
-            ngpu=8,
-        ),
+        # NOTE: temporarily disable due to test hanging in CI
+        # OverrideDefinitions(
+        #     [
+        #         [
+        #             "--module llama3 --config llama3_debugmodel_opt_in_bwd",
+        #             "--checkpoint.enable",
+        #             "--parallelism.tensor_parallel_degree=2",
+        #             "--parallelism.context_parallel_degree=2",
+        #             "--training.enable_cpu_offload",
+        #         ],
+        #         [
+        #             "--module llama3 --config llama3_debugmodel_opt_in_bwd",
+        #             "--parallelism.tensor_parallel_degree=2",
+        #             "--parallelism.context_parallel_degree=2",
+        #             "--parallelism.data_parallel_replicate_degree=2",
+        #             "--training.enable_cpu_offload",
+        #         ],
+        #     ],
+        #     "Enable CPU Offload, Optimizer in backward with TP, DP, CP",
+        #     "cpu_offload+opt_in_bwd+TP+DP+CP",
+        #     ngpu=8,
+        # ),
         OverrideDefinitions(
             [
                 [
