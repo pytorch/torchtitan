@@ -84,7 +84,7 @@ class LoRAConverter(Configurable):
     """Apply LoRA adapters to all Linear layers in a model."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class LoRAConfig(Configurable.Config):
         rank: int = 8
         """Rank of the LoRA matrices (lora_a: in_features x rank, lora_b: rank x out_features)."""
 
@@ -104,7 +104,10 @@ class LoRAConverter(Configurable):
         """Scaler block size for NF4 quantization. Default 128 works with debugmodel on 8 GPUs.
         The default torchao value (256) may be too large for sharded tensors."""
 
-    def __init__(self, config: Config, **kwargs):
+    # Alias for backwards compatibility
+    Config = LoRAConfig
+
+    def __init__(self, config: LoRAConfig, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
         self.save_adapter_only = config.save_adapter_only
