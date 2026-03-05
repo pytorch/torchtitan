@@ -26,6 +26,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -202,10 +203,15 @@ class RLTrainer(Configurable):
 
         # Trainer gathers full (unsharded) weights on every rank. We only
         # need to collect from one rank since they're all identical.
+        t0 = time.perf_counter()
         initial_weights = self.trainer.get_weights.call().get().item(gpus=0)
 
         # Initialize generator with trainer weights
         self.generator.update.call(0, initial_weights).get()
+        self.generator_init_time = time.perf_counter() - t0
+        logger.info(
+            f"Generator init + weight sync took {self.generator_init_time:.2f}s"
+        )
 
     async def evaluate(self, num_samples: int = 20) -> dict:
         """Run evaluation on held-out prompts.
@@ -276,6 +282,11 @@ class RLTrainer(Configurable):
         logger.info(f"Starting RL training for {num_steps} steps")
         logger.info("=" * 80)
 
+        total_generate = 0.0
+        total_grade = 0.0
+        total_train = 0.0
+        total_sync = 0.0
+
         for step in range(num_steps):
             # Generate prompts for this step
             train_prompts = []
@@ -287,17 +298,23 @@ class RLTrainer(Configurable):
                 train_answers.append(answer)
                 train_questions.append(question)
 
+            step_start = time.perf_counter()
+
             # Fully sync RL loop with separate scoring step
             # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
             # TODO: Create a queue to use all episode from all GPUs
+            t0 = time.perf_counter()
             episodes = self.generator.generate.call(train_prompts).get().item(gpus=0)
+            t_generate = time.perf_counter() - t0
 
             # Attach expected answers to each episode
             for episode, answer in zip(episodes, train_answers):
                 episode.expected_answer = answer
 
             # 2. Grader computes rewards per episode
+            t0 = time.perf_counter()
             scored_episodes = self.grader.score.call(episodes).get().item()
+            t_grade = time.perf_counter() - t0
 
             if self.config.log_samples:
                 for ep, question, answer in zip(
@@ -317,10 +334,21 @@ class RLTrainer(Configurable):
                     )
 
             # 3. Trainer computes advantages and updates policy
+            t0 = time.perf_counter()
             metrics = self.trainer.step.call(scored_episodes).get().item(gpus=0)
+            t_train = time.perf_counter() - t0
+
             # 4. Sync full weights to generator (each rank reshards locally)
+            t0 = time.perf_counter()
             weights = self.trainer.get_weights.call().get().item(gpus=0)
             self.generator.update.call(metrics["policy_version"], weights).get()
+            t_sync = time.perf_counter() - t0
+
+            t_step = time.perf_counter() - step_start
+            total_generate += t_generate
+            total_grade += t_grade
+            total_train += t_train
+            total_sync += t_sync
 
             all_token_lens = [
                 len(c.token_ids) for ep in scored_episodes for c in ep.completions
@@ -339,6 +367,10 @@ class RLTrainer(Configurable):
                 f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
                 f"max={metrics['logprob_diff_max']:.4e}"
             )
+            logger.info(
+                f"  Timing: generate={t_generate:.2f}s grade={t_grade:.2f}s "
+                f"train={t_train:.2f}s sync={t_sync:.2f}s total={t_step:.2f}s"
+            )
 
             # Check for divergence
             if not torch.isfinite(torch.tensor(metrics["loss"])):
@@ -346,6 +378,18 @@ class RLTrainer(Configurable):
                 logger.info("ERROR: Loss is NaN/Inf! Training diverged.")
                 logger.info("!" * 80)
                 break
+
+        # Timing summary
+        total_loop = total_generate + total_grade + total_train + total_sync
+        logger.info("=" * 80)
+        logger.info("Timing Summary")
+        logger.info(f"  Generator init + weight sync: {self.generator_init_time:.2f}s")
+        logger.info(f"  Generate (total): {total_generate:.2f}s")
+        logger.info(f"  Grade    (total): {total_grade:.2f}s")
+        logger.info(f"  Train    (total): {total_train:.2f}s")
+        logger.info(f"  Sync     (total): {total_sync:.2f}s")
+        logger.info(f"  Loop     (total): {total_loop:.2f}s")
+        logger.info("=" * 80)
 
         # Post-training evaluation
         logger.info("RL Training complete")
@@ -370,7 +414,9 @@ async def main():
     """Run the distributed RL training loop using Monarch."""
     config = ConfigManager().parse_args()
     rl_trainer = RLTrainer(config)
+    t_setup_start = time.perf_counter()
     await rl_trainer.setup()
+    logger.info(f"Total setup time: {time.perf_counter() - t_setup_start:.2f}s")
     await rl_trainer.train()
 
 
