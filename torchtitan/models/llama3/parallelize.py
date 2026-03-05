@@ -21,7 +21,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -359,7 +358,7 @@ def apply_fsdp(
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
         )
-    # As an optimization, do not reshard_after_forward the last layers by default
+    # As an optimization, do not reshard_after_forward te last layers by default
     # since FSDP would prefetch them immediately after the forward pass
     if model.norm is not None and model.output is not None:
         # pyrefly: ignore [no-matching-overload]
