@@ -13,6 +13,7 @@ from torchtitan.components.optimizer import (
     OptimizersInBackwardContainer,
 )
 from torchtitan.components.quantization.float8 import Float8LinearConverter
+from torchtitan.components.quantization.qat import QATConverter
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -131,13 +132,39 @@ def llama3_debugmodel_lora() -> Trainer.Config:
 
 
 def llama3_debugmodel_qlora() -> Trainer.Config:
-    config = llama3_debugmodel_lora()
+    config = llama3_debugmodel()
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             LoRAConverter.Config(
                 rank=8,
                 alpha=16.0,
                 quantize_base="nf4",
+            ),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_qat() -> Trainer.Config:
+    config = llama3_debugmodel()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            QATConverter.Config(),
+        ],
+    )
+    return config
+
+
+def llama3_debugmodel_qat_lora() -> Trainer.Config:
+    config = llama3_debugmodel()
+    # QATConverter must come before LoRAConverter so that LoRA inherits from
+    # FakeQuantizedLinear, giving fake-quantized base weights + full-precision adapters.
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            QATConverter.Config(),
+            LoRAConverter.Config(
+                rank=8,
+                alpha=16.0,
             ),
         ],
     )
