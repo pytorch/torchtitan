@@ -27,6 +27,8 @@ from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module
 
+__all__ = ["Decoder", "TransformerBlock"]
+
 
 # TODO: we can unify the TransformerBlock impl across all models when
 # there is no special logic for each model, including
