@@ -129,7 +129,7 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Use TorchTitan model config directly (no HF config mapping)
         self.config = model_spec.model
-        logger.debug(f"Creating model with config: {self.config}")
+        logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # TODO: Check if it's possible to apply meta init
         self.model = self.config.build()

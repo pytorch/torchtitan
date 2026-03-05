@@ -46,7 +46,7 @@ class Grader(Actor):
         Returns:
             Episodes with computed rewards
         """
-        logger.info(
+        logger.debug(
             f"Grader scoring {len(episodes)} episodes "
             f"(policy v{episodes[0].policy_version})..."
         )
@@ -63,7 +63,7 @@ class Grader(Actor):
         reward_mean = all_rewards_cat.mean()
         reward_std = all_rewards_cat.std()
 
-        logger.info(
+        logger.debug(
             f"Grader finished scoring: "
             f"reward_mean={reward_mean.item():.4f}, reward_std={reward_std.item():.4f}"
         )
