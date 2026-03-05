@@ -657,8 +657,7 @@ class CheckpointManager(Configurable):
             [checkpoint_id] if isinstance(checkpoint_id, str) else checkpoint_id
         )
         needs_partial = (
-            len(checkpoint_ids) > 1
-            or self.states[MODEL].has_converter_keys()
+            len(checkpoint_ids) > 1 or self.states[MODEL].has_converter_keys()
         )
         planner = DefaultLoadPlanner(allow_partial_load=needs_partial)
 
