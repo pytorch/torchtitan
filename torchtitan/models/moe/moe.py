@@ -1131,22 +1131,14 @@ def build_moe(
     moe_impl: str = "standard",
 ) -> nn.Module:
     """Factory for MoE with different backends: 'standard', 'deepep', or 'deepep_llep'."""
-    if moe_impl == "deepep":
+    if moe_impl in ("deepep", "deepep_llep"):
         from .moe_deepep import DeepEPMoE
 
         logger.info(
-            f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
+            f"{'DeepEP+LLEP' if moe_impl == 'deepep_llep' else 'DeepEP'} MoE: "
+            f"num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
         )
         return DeepEPMoE(moe_args=args, dim=dim, hidden_dim=hidden_dim)
-
-    if moe_impl == "deepep_llep":
-        from .moe_deepep_llep import DeepEPLLEPMoE
-
-        logger.info(
-            f"DeepEP+LLEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, "
-            f"dim={dim}, hidden_dim={hidden_dim}"
-        )
-        return DeepEPLLEPMoE(moe_args=args, dim=dim, hidden_dim=hidden_dim)
 
     logger.info(
         f"Standard MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
