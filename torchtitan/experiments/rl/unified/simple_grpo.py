@@ -162,18 +162,6 @@ class RLTrainer(Configurable):
         # Initialize generator with trainer weights.
         self.generator.update.call(0, initial_weights).get()
 
-    def _load_prompts(self) -> tuple[list[str], list[str], list[str]]:
-        """Load a batch of prompts and expected answers."""
-        prompt_texts = []
-        expected_answers = []
-        questions = []
-        for _ in range(self.config.num_episodes_per_step):
-            question, answer = self.task.create_question()
-            prompt_texts.append(self.system_prompt + "\n\n" + question)
-            expected_answers.append(answer)
-            questions.append(question)
-        return prompt_texts, expected_answers, questions
-
     async def evaluate(self, num_samples: int = 20) -> dict:
         """Run evaluation on held-out prompts.
 
@@ -244,21 +232,25 @@ class RLTrainer(Configurable):
         logger.info("=" * 80)
 
         for step in range(num_steps):
-            (
-                self.prompt_texts,
-                self.expected_answers,
-                self.questions,
-            ) = self._load_prompts()
+            # Generate prompts for this step
+            train_prompts = []
+            train_answers = []
+            train_questions = []
+            for _ in range(self.config.num_episodes_per_step):
+                question, answer = self.task.create_question()
+                train_prompts.append(self.system_prompt + "\n\n" + question)
+                train_answers.append(answer)
+                train_questions.append(question)
 
             # Fully sync RL loop with separate scoring step
             # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
             # TODO: Create a queue to use all episode from all GPUs
             episodes = (
-                self.generator.generate.call(self.prompt_texts).get().item(gpus=0)
+                self.generator.generate.call(train_prompts).get().item(gpus=0)
             )
 
             # Attach expected answers to each episode
-            for episode, answer in zip(episodes, self.expected_answers):
+            for episode, answer in zip(episodes, train_answers):
                 episode.expected_answer = answer
 
             # 2. Grader computes rewards per episode
@@ -266,7 +258,7 @@ class RLTrainer(Configurable):
 
             if self.config.log_samples:
                 for ep, question, answer in zip(
-                    scored_episodes, self.questions, self.expected_answers
+                    scored_episodes, train_questions, train_answers
                 ):
                     # Log first completion per prompt
                     comp = ep.completions[0]

@@ -88,6 +88,16 @@ class VLLMGenerator(Actor, Configurable):
         seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
 
+        def __post_init__(self):
+            assert self.parallelism.data_parallel_shard_degree in (1, -1), (
+                f"Generator does not support data parallel sharding, "
+                f"got dp_shard={self.parallelism.data_parallel_shard_degree}"
+            )
+            assert self.parallelism.data_parallel_replicate_degree == 1, (
+                f"Generator does not support data parallel replication, "
+                f"got dp_replicate={self.parallelism.data_parallel_replicate_degree}"
+            )
+
     def __init__(
         self,
         config: Config,
