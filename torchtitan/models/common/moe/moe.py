@@ -255,13 +255,16 @@ class TokenChoiceTopKRouter(nn.Module):
                     Number of tokens assigned to each expert with shape ``(num_experts,)``.
         """
         # scores shape (bs*slen, num_experts)
-        scores = self.gate(x)
+        # Compute gate in float32 to help stability of expert load balancing.
+        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
+            scores = self.gate(x)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion
+        # scored is already float32 from the autocast above.
         if self.score_func == "sigmoid":
-            scores = torch.sigmoid(scores.to(torch.float32))
+            scores = torch.sigmoid(scores)
         elif self.score_func == "softmax":
-            scores = F.softmax(scores.to(torch.float32), dim=1)
+            scores = F.softmax(scores, dim=1)
         else:
             raise NotImplementedError(f"Unknown score function {self.score_func}")
 

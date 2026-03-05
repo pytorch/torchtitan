@@ -93,7 +93,7 @@ def download_hf_assets(
                 total_patterns.extend(ASSET_PATTERNS[asset_type])
             else:
                 raise ValueError(
-                    "Unknown asset type {}. Available uses: --asset {} \n".format(
+                    "Unknown asset type {}. Available uses: --assets {} \n".format(
                         asset_type, " ".join(ASSET_PATTERNS.keys())
                     ),
                     "Or specify exact patterns to download. Example: --additional_patterns '*.safetensors' README.md '*.json' \n",

@@ -7,6 +7,8 @@
 import torch
 import torch.nn as nn
 
+__all__ = ["trunc_normal_"]
+
 
 def trunc_normal_(
     tensor: torch.Tensor,
