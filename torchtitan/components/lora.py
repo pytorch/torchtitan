@@ -61,7 +61,6 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                     device=device,
                     dtype=dtype,
                 )
-                self._init_weight()
 
             def _init_weight(self) -> None:
                 nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
@@ -136,10 +135,3 @@ class LoRAConverter(Configurable):
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]) -> None:
         pass
-
-
-def find_lora_config(converters: list) -> "LoRAConverter.Config | None":
-    return next(
-        (c for c in converters if isinstance(c, LoRAConverter.Config)),
-        None,
-    )
