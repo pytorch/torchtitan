@@ -36,10 +36,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(
-                local_batch_size=4,
-                seq_len=4096,
-            ),
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
@@ -74,10 +71,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 warmup_steps=2,
                 decay_type="linear",
             ),
-            training=TrainingConfig(
-                local_batch_size=2,
-                seq_len=2048,
-            ),
+            training=TrainingConfig(),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
