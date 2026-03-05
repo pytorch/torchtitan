@@ -127,7 +127,9 @@ class FlexAttentionWrapper(torch.nn.Module):
         flex_attention,
         # This options also encapsulate max-autotune-no-cudagraphs.
         options={
-            "wrap_inductor_compiled_regions": True,
+            # TODO: turn on this after PyTorch fix is landed again
+            # https://github.com/pytorch/pytorch/pull/175733.
+            "wrap_inductor_compiled_regions": False,
             "max_autotune": True,
             "coordinate_descent_tuning": True,
             "triton.cudagraphs": False,

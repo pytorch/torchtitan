@@ -312,6 +312,7 @@ class MetricsProcessor(Configurable):
     time_last_log: float
 
     num_flops_per_token: int
+    has_quantization: bool
     optimizers: OptimizersContainer | None
     lr_schedulers: LRSchedulersContainer | None
     model_parts: list[torch.nn.Module] | None
@@ -327,6 +328,7 @@ class MetricsProcessor(Configurable):
         ft_replica_id: int = 0,
         config_dict: dict[str, Any] | None = None,
         tag: str | None = None,
+        has_quantization: bool = False,
     ):
         self.logger = self._build_metric_logger(
             config=config,
@@ -351,6 +353,8 @@ class MetricsProcessor(Configurable):
         self.data_loading_times = []
         self.time_last_log = time.perf_counter()
         self.device_memory_monitor.reset_peak_stats()
+
+        self.has_quantization = has_quantization
 
         # These variables have to be set later as they depend on other components or model.
         self.num_flops_per_token = -1
@@ -479,8 +483,13 @@ class MetricsProcessor(Configurable):
         # model FLOPS utilization
         # For its definition and calculation, please refer to the PaLM paper:
         # https://arxiv.org/abs/2204.02311
-        mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
+        # MFU is based on BF16 peak FLOPS which is misleading when quantization
+        # (FP8/MX) is active, so we skip it in that case.
         tflops = self.num_flops_per_token * tps / 1e12
+        if self.has_quantization:
+            mfu = None
+        else:
+            mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
 
         time_end_to_end = time_delta / self.config.log_freq
         time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
@@ -494,7 +503,6 @@ class MetricsProcessor(Configurable):
             "grad_norm": grad_norm,
             "throughput(tps)": tps,
             "tflops": tflops,
-            "mfu(%)": mfu,
             "time_metrics/end_to_end(s)": time_end_to_end,
             "time_metrics/data_loading(s)": time_data_loading,
             "time_metrics/data_loading(%)": time_data_loading_pct,
@@ -505,6 +513,8 @@ class MetricsProcessor(Configurable):
             "memory/num_alloc_retries": device_mem_stats.num_alloc_retries,
             "memory/num_ooms": device_mem_stats.num_ooms,
         }
+        if mfu is not None:
+            metrics["mfu(%)"] = mfu
 
         if extra_metrics:
             metrics.update(extra_metrics)
@@ -512,6 +522,7 @@ class MetricsProcessor(Configurable):
         self.logger.log(metrics, step)
 
         color = self.color
+        mfu_str = f"{mfu:.2f}%" if mfu is not None else "N/A"
         logger.info(
             f"{color.red}step: {step:2}  "
             f"{color.green}loss: {global_avg_loss:8.5f}  "
@@ -520,7 +531,7 @@ class MetricsProcessor(Configurable):
             f"({device_mem_stats.max_reserved_pct:.2f}%)  "
             f"{color.blue}tps: {round(tps):,}  "
             f"{color.cyan}tflops: {tflops:,.2f}  "
-            f"{color.magenta}mfu: {mfu:.2f}%{color.reset}"
+            f"{color.magenta}mfu: {mfu_str}{color.reset}"
         )
 
         self.ntokens_since_last_log = 0

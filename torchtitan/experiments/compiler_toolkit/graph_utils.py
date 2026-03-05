@@ -254,7 +254,7 @@ class CompiledModule(torch.nn.Module):
 
         # calling the line below returns control to torchtitan's runner
         # letting it call the backward, and optimizer.
-        return self.joint_graph_module(args, kwargs)
+        return self.joint_graph_module(dt_args, dt_kwargs)
 
 
 # Default compiler pass configuration - no passes by default

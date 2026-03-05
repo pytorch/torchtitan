@@ -101,6 +101,38 @@ def qwen3_1_7b() -> Trainer.Config:
     )
 
 
+def qwen3_14b() -> Trainer.Config:
+    return Trainer.Config(
+        hf_assets_path="./assets/hf/Qwen3-14B",
+        model_spec=model_registry("14B"),
+        dataloader=HuggingFaceTextDataLoader.Config(
+            dataset="c4",
+        ),
+        optimizer=OptimizersContainer.Config(lr=8e-4),
+        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        training=TrainingConfig(
+            local_batch_size=4,
+            seq_len=4096,
+            steps=3000,
+        ),
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=-1,
+            tensor_parallel_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
+        ),
+        checkpoint=CheckpointManager.Config(
+            interval=500,
+            last_save_model_only=False,
+            export_dtype="float16",
+        ),
+        activation_checkpoint=ActivationCheckpointConfig(
+            mode="full",
+            selective_ac_option="op",
+        ),
+    )
+
+
 def qwen3_32b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Qwen3-32B",
@@ -114,6 +146,12 @@ def qwen3_32b() -> Trainer.Config:
             local_batch_size=2,
             seq_len=4096,
             steps=3000,
+        ),
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=-1,
+            tensor_parallel_degree=1,
+            context_parallel_degree=1,
+            pipeline_parallel_degree=1,
         ),
         checkpoint=CheckpointManager.Config(
             interval=500,
