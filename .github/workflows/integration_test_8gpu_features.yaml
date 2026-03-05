@@ -45,7 +45,7 @@ jobs:
       docker-image: ${{ matrix.docker-image }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
-      timeout: 60
+      timeout: 45
       script: |
         set -eux
 
