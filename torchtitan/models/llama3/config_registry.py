@@ -132,7 +132,7 @@ def llama3_debugmodel_lora() -> Trainer.Config:
 
 
 def llama3_debugmodel_qlora() -> Trainer.Config:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel_lora()
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             LoRAConverter.Config(

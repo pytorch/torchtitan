@@ -61,7 +61,6 @@ def apply_lora(linear: nn.Linear, rank: int, alpha: float) -> nn.Linear:
                     device=device,
                     dtype=dtype,
                 )
-                self._init_weight()
 
             def _init_weight(self) -> None:
                 nn.init.kaiming_uniform_(self.lora_a.weight, a=math.sqrt(5))
@@ -84,7 +83,7 @@ class LoRAConverter(Configurable):
     """Apply LoRA adapters to all Linear layers in a model."""
 
     @dataclass(kw_only=True, slots=True)
-    class LoRAConfig(Configurable.Config):
+    class Config(Configurable.Config):
         rank: int = 8
         """Rank of the LoRA matrices (lora_a: in_features x rank, lora_b: rank x out_features)."""
 
@@ -104,10 +103,7 @@ class LoRAConverter(Configurable):
         """Scaler block size for NF4 quantization. Default 128 works with debugmodel on 8 GPUs.
         The default torchao value (256) may be too large for sharded tensors."""
 
-    # Alias for backwards compatibility
-    Config = LoRAConfig
-
-    def __init__(self, config: LoRAConfig, **kwargs):
+    def __init__(self, config: Config, **kwargs):
         self.rank = config.rank
         self.alpha = config.alpha
         self.save_adapter_only = config.save_adapter_only
@@ -159,7 +155,13 @@ class LoRAConverter(Configurable):
         # checkpoint load but before the first forward pass (QLoRA).
         if self.quantize_base == "nf4":
             from torch.distributed.tensor import DTensor
-            from torchao.dtypes.nf4tensor import to_nf4
+
+            try:
+                from torchao.dtypes.nf4tensor import to_nf4
+            except ImportError:
+                raise ImportError(
+                    "QLoRA requires torchao. Install with: pip install torchao"
+                )
 
             lora_classes = tuple(_lora_class_cache.values())
             nf4_scaler_block_size = self.nf4_scaler_block_size
@@ -171,12 +173,13 @@ class LoRAConverter(Configurable):
                 local_weight = weight.to_local() if is_dtensor else weight
 
                 num_scalers = local_weight.numel() // nf4_block_size
-                assert num_scalers % nf4_scaler_block_size == 0, (
-                    f"NF4 quantization failed: num_scalers ({num_scalers}) is not "
-                    f"divisible by nf4_scaler_block_size ({nf4_scaler_block_size}). "
-                    f"Try a smaller nf4_scaler_block_size in LoRAConverter.Config "
-                    f"(e.g., 64, 32, or 1)."
-                )
+                if num_scalers % nf4_scaler_block_size != 0:
+                    raise ValueError(
+                        f"NF4 quantization failed: num_scalers ({num_scalers}) is not "
+                        f"divisible by nf4_scaler_block_size ({nf4_scaler_block_size}). "
+                        f"Try a smaller nf4_scaler_block_size in LoRAConverter.Config "
+                        f"(e.g., 64, 32, or 1)."
+                    )
 
                 nf4_local = to_nf4(
                     local_weight, scaler_block_size=nf4_scaler_block_size
@@ -209,10 +212,3 @@ class LoRAConverter(Configurable):
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]) -> None:
         pass
-
-
-def find_lora_config(converters: list) -> "LoRAConverter.Config | None":
-    return next(
-        (c for c in converters if isinstance(c, LoRAConverter.Config)),
-        None,
-    )

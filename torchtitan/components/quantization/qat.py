@@ -26,7 +26,7 @@ class QATConverter(Configurable):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class QATConfig(Configurable.Config):
+    class Config(Configurable.Config):
         dtype: Literal["int4", "int8"] = "int4"
         """Data type for fake quantization. Supported: 'int4', 'int8'."""
 
@@ -34,10 +34,7 @@ class QATConverter(Configurable):
         """Group size for per-group weight quantization.
         Must divide in_features of all Linear layers in the model."""
 
-    # Alias for backwards compatibility
-    Config = QATConfig
-
-    def __init__(self, config: QATConfig, **kwargs):
+    def __init__(self, config: Config, **kwargs):
         self.dtype = config.dtype
         self.group_size = config.group_size
         logger.info(
