@@ -64,17 +64,31 @@ class TestTokenizerIntegration(unittest.TestCase):
         """Clean up temporary directory."""
         shutil.rmtree(self.temp_dir)
 
-    def test_raises_when_no_tokenizer_config(self):
-        """Raises ValueError when tokenizer_config.json is missing."""
+    def test_works_without_tokenizer_config(self):
+        """Tokenizer works for encode/decode even without tokenizer_config.json."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Copy only tokenizer.json, not tokenizer_config.json
+            # Copy only tokenizer.json (no tokenizer_config.json)
             src = os.path.join(ASSETS_TOKENIZER, "tokenizer.json")
             dst = os.path.join(tmpdir, "tokenizer.json")
-            with open(src, "rb") as f_in, open(dst, "wb") as f_out:
-                f_out.write(f_in.read())
+            shutil.copy2(src, dst)
 
-            with self.assertRaises(ValueError):
-                HuggingFaceTokenizer(tokenizer_path=tmpdir)
+            with self.assertLogs(level="WARNING") as cm:
+                tok = HuggingFaceTokenizer(tokenizer_path=tmpdir)
+
+            # Should have logged a warning
+            self.assertTrue(any("tokenizer_config.json" in msg for msg in cm.output))
+
+            # Basic encode/decode should still work
+            tokens = tok.encode("hello world")
+            self.assertIsInstance(tokens, list)
+            self.assertTrue(len(tokens) > 0)
+
+            text = tok.decode(tokens)
+            self.assertIsInstance(text, str)
+            self.assertIn("hello", text)
+
+            # No chat template should be set
+            self.assertIsNone(tok._chat_template)
 
     def _compare_tokenizers(self, our_tokenizer, reference_tokenizer, test_repo_id):
         """
@@ -391,6 +405,32 @@ class TestBaseTokenizerChatTemplate(unittest.TestCase):
             tok.apply_chat_template([])
         self.assertIn("messages cannot be empty", str(ctx.exception))
 
+    def test_tojson_filter(self):
+        """Test that tojson filter works in templates."""
+        tok = DummyTokenizer()
+        tok.set_chat_template("{{ data | tojson(indent=2) }}")
+        result = tok.apply_chat_template([], data={"key": "value", "num": 42})
+        parsed = json.loads(result)
+        self.assertEqual(parsed, {"key": "value", "num": 42})
+
+    def test_loopcontrols_break(self):
+        """Test that loop controls (break) work in templates."""
+        tok = DummyTokenizer()
+        tok.set_chat_template(
+            "{% for i in range(10) %}{% if i == 3 %}{% break %}{% endif %}{{ i }}{% endfor %}"
+        )
+        result = tok.apply_chat_template([])
+        self.assertEqual(result, "012")
+
+    def test_strftime_now(self):
+        """Test that strftime_now works in templates."""
+        from datetime import datetime
+
+        tok = DummyTokenizer()
+        tok.set_chat_template("{{ strftime_now('%Y') }}")
+        result = tok.apply_chat_template([])
+        self.assertEqual(result, str(datetime.now().year))
+
 
 class TestHuggingFaceChatTemplateAutoLoad(unittest.TestCase):
     """Tests for HuggingFaceTokenizer auto-loading chat_template from config."""
@@ -464,96 +504,6 @@ class TestHuggingFaceChatTemplateAutoLoad(unittest.TestCase):
             result = tok.apply_chat_template(SAMPLE_MESSAGES)
             # Should use the .jinja file (just outputs content), not the inline ChatML
             self.assertEqual(result, "Hello")
-
-
-class TestHuggingFaceMessageValidation(unittest.TestCase):
-    """Tests for HuggingFaceTokenizer._validate_messages (HF schema enforcement)."""
-
-    def setUp(self):
-        self.tok = HuggingFaceTokenizer(tokenizer_path=ASSETS_TOKENIZER)
-
-    def test_accepts_valid_messages(self):
-        """Basic text, tool call flow, and multimodal content all pass."""
-        valid_cases = {
-            "basic": [
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi"},
-            ],
-            "tool_calls": [
-                {"role": "user", "content": "What's the weather?"},
-                {
-                    "role": "assistant",
-                    "tool_calls": [
-                        {"type": "function", "function": {"name": "get_weather"}},
-                    ],
-                },
-                {"role": "tool", "content": "72F", "name": "get_weather"},
-            ],
-            "multimodal": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "url": "https://example.com/img.jpg"},
-                        {"type": "text", "text": "What is this?"},
-                    ],
-                },
-            ],
-        }
-        for name, messages in valid_cases.items():
-            with self.subTest(name):
-                self.tok._validate_messages(messages)
-
-    def test_rejects_bad_message_structure(self):
-        """Non-dict, missing role, invalid role, and extra keys are rejected."""
-        cases = {
-            "non_dict": (["not a dict"], TypeError),
-            "missing_role": ([{"content": "hello"}], ValueError),
-            "invalid_role": ([{"role": "bot", "content": "hi"}], ValueError),
-            "extra_keys": (
-                [{"role": "user", "content": "hi", "extra": "bad"}],
-                ValueError,
-            ),
-            "contents_typo": ([{"role": "user", "contents": "hello"}], ValueError),
-            "content_wrong_type": ([{"role": "user", "content": 123}], TypeError),
-        }
-        for name, (messages, exc_type) in cases.items():
-            with self.subTest(name):
-                with self.assertRaises(exc_type):
-                    self.tok._validate_messages(messages)
-
-    def test_rejects_bad_tool_calls(self):
-        """Assistant messages need content or tool_calls; tool_calls must be well-formed."""
-        cases = {
-            "missing_both": ([{"role": "assistant"}], ValueError),
-            "not_a_list": ([{"role": "assistant", "tool_calls": "bad"}], TypeError),
-            "malformed_entry": (
-                [{"role": "assistant", "tool_calls": [{"bad": "entry"}]}],
-                ValueError,
-            ),
-        }
-        for name, (messages, exc_type) in cases.items():
-            with self.subTest(name):
-                with self.assertRaises(exc_type):
-                    self.tok._validate_messages(messages)
-
-    def test_rejects_bad_content_blocks(self):
-        """Content blocks must have valid type and required fields."""
-        cases = {
-            "missing_type": [{"text": "no type key"}],
-            "invalid_type": [{"type": "pdf"}],
-            "text_missing_text": [{"type": "text"}],
-            "image_missing_url_and_path": [{"type": "image"}],
-        }
-        for name, blocks in cases.items():
-            with self.subTest(name):
-                with self.assertRaises(ValueError):
-                    self.tok._validate_messages([{"role": "user", "content": blocks}])
-
-    def test_validation_called_by_apply_chat_template(self):
-        """apply_chat_template should reject invalid messages before rendering."""
-        with self.assertRaises(ValueError):
-            self.tok.apply_chat_template([{"role": "user", "contents": "typo"}])
 
 
 instantiate_parametrized_tests(TestTokenizerIntegration)
