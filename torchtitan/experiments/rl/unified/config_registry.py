@@ -64,6 +64,50 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
     )
 
 
+def rl_grpo_qwen3_0_6b_native() -> RLTrainer.Config:
+    """GRPO training config for Qwen3-0.6B using vLLM's native model."""
+    return RLTrainer.Config(
+        model_spec=model_registry("0.6B"),
+        hf_assets_path="/data/users/jianiw/model/qwen3-0.6b",
+        num_steps=10,
+        batch_invariant_mode=True,
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(
+                local_batch_size=4,
+                seq_len=4096,
+            ),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+                data_parallel_replicate_degree=1,
+            ),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            gpu_memory_limit=0.5,
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+            ),
+            num_samples_per_prompt=8,
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
+            ),
+            attention_backend="FLASH_ATTN",
+            use_native_vllm_model=True,
+        ),
+    )
+
+
 def rl_grpo_qwen3_debug() -> RLTrainer.Config:
     """Debug config for quick iteration -- small model, few steps (2 GPUs: 1 gen + 1 train)."""
     return RLTrainer.Config(

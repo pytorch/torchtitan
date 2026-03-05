@@ -137,6 +137,12 @@ class VLLMGenerator(Actor, Configurable):
         seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
 
+        use_native_vllm_model: bool = False
+        """When True, use vLLM's own native model (e.g. Qwen3ForCausalLM) instead
+        of wrapping the torchtitan model. Weight sync reconstructs full tensors
+        from the trainer's TP shards and converts names to HF format so that
+        vLLM's ``load_weights()`` can re-shard them natively."""
+
         def __post_init__(self):
             assert self.parallelism.data_parallel_shard_degree in (1, -1), (
                 f"Generator does not support data parallel sharding, "
@@ -157,9 +163,11 @@ class VLLMGenerator(Actor, Configurable):
     ):
         self.config = config
         self.model_spec = model_spec
+        self.use_native_vllm_model = config.use_native_vllm_model
 
-        # Register TorchTitan model with vLLM before any engine creation
-        register_model_to_vllm_model_registry(model_spec)
+        if not self.use_native_vllm_model:
+            # Register TorchTitan model with vLLM before any engine creation
+            register_model_to_vllm_model_registry(model_spec)
 
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = config.attention_backend
@@ -185,12 +193,14 @@ class VLLMGenerator(Actor, Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=config.compile.is_eager,
-            hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum[config.attention_backend],
             ),
             disable_log_stats=True,
         )
+        if not self.use_native_vllm_model:
+            # Override architecture so vLLM loads our TorchTitan wrapper model
+            engine_kwargs["hf_overrides"] = {"architectures": [VLLM_MODEL_NAME]}
         vllm_compilation_config = config.compile.get_vllm_compilation_config()
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config
@@ -286,7 +296,41 @@ class VLLMGenerator(Actor, Configurable):
             version: New policy version number
             state_dict: Full (unsharded) state dict with plain tensors.
         """
-        # Reshard full tensors to match this generator's DTensor layout
+        if self.use_native_vllm_model:
+            self._update_native(version, state_dict)
+        else:
+            self._update_wrapper(version, state_dict)
+
+    def _update_native(self, version: int, state_dict: dict) -> None:
+        """Weight update path for native vLLM model.
+
+        Converts torchtitan parameter names to HF format and calls vLLM's
+        ``load_weights()`` which handles sharding internally.  The incoming
+        ``state_dict`` already contains full (unsharded) tensors produced by
+        ``get_weights()`` in the trainer.
+        """
+        from torchtitan.experiments.rl.unified.models.native_vllm_weights import (
+            convert_to_hf,
+        )
+
+        hf_weights = convert_to_hf(state_dict)
+        self._get_model().load_weights(hf_weights)
+        self.policy_version = version
+        logger.debug(
+            f"Updated native vLLM model weights. "
+            f"Number of weight entries: {len(hf_weights)}. "
+            f"{os.getpid()=} Generator updating weights to policy v{version}..."
+        )
+
+    def _update_wrapper(self, version: int, state_dict: dict) -> None:
+        """Weight update path for TorchTitan wrapper model.
+
+        Re-wraps plain tensors as DTensors matching the wrapper model's
+        sharding layout, and loads them directly.
+        """
+        # Convert plain local tensors (TP shards from trainer) to DTensors
+        # matching the vLLM model's sharding layout. The trainer exports
+        # weights via to_local() which strips DTensor metadata.
         model_state_dict = dict(self._get_model().model.state_dict())
         for name, tensor in state_dict.items():
             if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
