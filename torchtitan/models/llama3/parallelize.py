@@ -385,24 +385,26 @@ def apply_replicate(
     replicate_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
 
     if model.tok_embeddings is not None:
-        # pyrefly: ignore [no-matching-overload]
+        # pyrefly: ignore [no-matching-overload, invalid-param-spec]
         replicate(
             model.tok_embeddings,
             **replicate_config,
         )
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
+        # pyrefly: ignore [invalid-param-spec]
         replicate(
             transformer_block,
             **replicate_config,
         )
 
     if model.norm is not None and model.output is not None:
-        # pyrefly: ignore [no-matching-overload]
+        # pyrefly: ignore [no-matching-overload, invalid-param-spec]
         replicate(
             [model.norm, model.output],
             **replicate_config,
         )
+    # pyrefly: ignore [invalid-param-spec]
     replicate(model, **replicate_config)
 
     # Disable Replicate's automatic gradient division (ReplicateModule inherits from FSDPModule)
