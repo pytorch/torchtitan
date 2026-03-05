@@ -154,3 +154,36 @@ def test_lora_trains_base_frozen():
         if name in lora_before
     )
     assert any_lora_changed, "No LoRA param changed after 5 training steps"
+
+
+def test_qlora_base_weights_quantized_adapters_full_precision():
+    """After first forward: base weights are NF4, LoRA adapters remain full precision."""
+    torchao = pytest.importorskip("torchao")
+    from torchao.dtypes.nf4tensor import NF4Tensor
+
+    model = SimpleModel()
+    converter = LoRAConverter(
+        LoRAConverter.Config(
+            rank=4, alpha=8.0, quantize_base="nf4", nf4_scaler_block_size=1
+        )
+    )
+    converter.convert(model)
+
+    # Before first forward: base weights are regular tensors
+    assert not isinstance(model.fc1.weight.data, NF4Tensor)
+
+    # Trigger first forward to fire the quantization hook
+    model(torch.randn(2, 64))
+
+    # After first forward: base weights should be NF4, adapters stay float32
+    for name in ("fc1", "fc2"):
+        layer = getattr(model, name)
+        assert isinstance(
+            layer.weight.data, NF4Tensor
+        ), f"{name}.weight should be NF4 after first forward"
+        assert (
+            layer.lora_a.weight.dtype == torch.float32
+        ), f"{name}.lora_a.weight should be float32"
+        assert (
+            layer.lora_b.weight.dtype == torch.float32
+        ), f"{name}.lora_b.weight should be float32"

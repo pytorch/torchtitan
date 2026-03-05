@@ -130,6 +130,20 @@ def llama3_debugmodel_lora() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_qlora() -> Trainer.Config:
+    config = llama3_debugmodel_lora()
+    config.model_converters = ModelConvertersContainer.Config(
+        converters=[
+            LoRAConverter.Config(
+                rank=8,
+                alpha=16.0,
+                quantize_base="nf4",
+            ),
+        ],
+    )
+    return config
+
+
 def llama3_8b() -> Trainer.Config:
     return Trainer.Config(
         hf_assets_path="./assets/hf/Llama-3.1-8B",
