@@ -74,12 +74,7 @@ jobs:
           "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
 
         if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
-          export HIPBLASLT_TENSILE_LIBPATH="$(python - <<'PY'
-import os
-import torch
-print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))
-PY
-)"
+          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
           echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
         fi
 
