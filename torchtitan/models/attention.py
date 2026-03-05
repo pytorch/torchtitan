@@ -25,6 +25,7 @@ from torch.types import Number
 
 
 __all__ = [
+    "FlashAttention4Wrapper",
     "FlexAttentionWrapper",
     "ScaledDotProductAttentionWrapper",
     "VarlenAttentionWrapper",
@@ -49,6 +50,49 @@ class VarlenMetadata(NamedTuple):
     cu_seq_k: torch.Tensor
     max_q: Number
     max_k: Number
+
+
+class FlashAttention4Wrapper(torch.nn.Module):
+    """Wrapper around FlashAttention-4 (fa4) to make it compatible with torchtitan.
+
+    FA4 expects tensors in (batch, seqlen, nheads, headdim) layout, while
+    torchtitan models produce (batch, nheads, seqlen, headdim) after the
+    standard transpose. This wrapper handles the layout conversion.
+
+    Install FA4 with: pip install fa4
+    """
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        *,
+        scale: float | None = None,
+        enable_gqa: bool = False,
+        is_casual: bool = True,
+        deterministic: bool = False,
+    ) -> torch.Tensor:
+        from flash_attn.cute import flash_attn_func
+
+        # Convert from (bs, n_heads, seqlen, head_dim) to (bs, seqlen, n_heads, head_dim)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        out = flash_attn_func(
+            q,
+            k,
+            v,
+            softmax_scale=scale,
+            causal=is_casual,
+            deterministic=deterministic,
+        )
+        if isinstance(out, tuple):
+            out = out[0]
+
+        # Convert back to (bs, n_heads, seqlen, head_dim)
+        return out.transpose(1, 2)
 
 
 class VarlenAttentionWrapper(torch.nn.Module):

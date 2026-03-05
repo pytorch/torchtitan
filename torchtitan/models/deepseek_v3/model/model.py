@@ -16,6 +16,7 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config.job_config import PEFT
 from torchtitan.models.attention import (
     create_attention_mask,
+    FlashAttention4Wrapper,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -289,6 +290,8 @@ class Attention(nn.Module):
                 self.inner_attention = FlexAttentionWrapper()
             case "sdpa":
                 self.inner_attention = ScaledDotProductAttentionWrapper()
+            case "fa4":
+                self.inner_attention = FlashAttention4Wrapper()
             case "varlen":
                 raise ValueError("Varlen attention is not supported with Deepseek V3.")
             case _:

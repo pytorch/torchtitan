@@ -64,12 +64,11 @@ class TransformerModelArgs(BaseModelArgs):
 
         if (
             job_config.parallelism.context_parallel_degree > 1
-            and self.attn_type == "varlen"
+            and self.attn_type not in ("sdpa", "flex")
         ):
             raise NotImplementedError(
-                f"Context Parallel only supports SDPA and FlexAttention."
-                f"Got attn_type='{self.attn_type}'. "
-                f"Varlen attention is not supported with CP."
+                f"Context Parallel only supports SDPA and FlexAttention. "
+                f"Got attn_type='{self.attn_type}'."
             )
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:

@@ -20,6 +20,7 @@ from torchtitan.models.attention import (
     create_attention_mask,
     create_varlen_metadata_for_document,
     create_varlen_metadata_from_sequence_lengths,
+    FlashAttention4Wrapper,
     FlexAttentionWrapper,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -221,6 +222,8 @@ class Attention(nn.Module):
                 self.inner_attention = VarlenAttentionWrapper()
             case "sdpa":
                 self.inner_attention = ScaledDotProductAttentionWrapper()
+            case "fa4":
+                self.inner_attention = FlashAttention4Wrapper()
             case _:
                 raise ValueError(f"Unknown attention type: {self.attn_type}")
 
@@ -302,7 +305,7 @@ class Attention(nn.Module):
                     attention_masks,
                     scale=self.scaling,
                 )
-            case "sdpa":
+            case "sdpa" | "fa4":
                 assert attention_masks is None
                 output = (
                     self.inner_attention(
