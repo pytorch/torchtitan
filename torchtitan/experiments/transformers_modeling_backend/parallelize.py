@@ -16,7 +16,6 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
     SequenceParallel,
 )
-
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
     ActivationCheckpointConfig,
@@ -26,9 +25,7 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
-
 from torchtitan.distributed.activation_checkpoint import apply_ac
-
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp, NoParallel
 from torchtitan.models.llama3.parallelize import (
     apply_compile,
@@ -57,7 +54,7 @@ def parallelize_hf_transformers(
     NOTE: The passed-in model preferably should be on meta device. Otherwise,
     the model must fit on GPU or CPU memory.
     """
-    # TODO: TP currently cannot handle uneven seq_len because we set
+    # TODO: TP currently cannot handle unevn seq_len because we set
     #       `use_local_output=True` to use plain Tensors for legacy reasons.
     #       Need to revisit this.
     assert (
