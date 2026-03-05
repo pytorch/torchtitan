@@ -122,17 +122,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "Checkpoint Integration Test - save load model only checkpoint in HF definition and format",
             "model_only_hf_checkpoint",
         ),
-        # NOTE: temporarily disable to bypass CI timeout issue
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--checkpoint.enable",
-        #             "--checkpoint.last_save_model_only",
-        #         ],
-        #     ],
-        #     "Checkpoint Integration Test - Save Model Only fp32",
-        #     "last_save_model_only_fp32",
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--checkpoint.enable",
+                    "--checkpoint.last_save_model_only",
+                ],
+            ],
+            "Checkpoint Integration Test - Save Model Only fp32",
+            "last_save_model_only_fp32",
+        ),
         OverrideDefinitions(
             [
                 [
@@ -207,18 +206,17 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "PP+DP 1F1B 2D test",
             "pp_dp_1f1b",
         ),
-        # NOTE: temporarily disable to bypass CI timeout issue
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.pgipeline_parallel_degree 2",
-        #             "--parallelism.pipeline_parallel_schedule GPipe",
-        #             "--parallelism.data_parallel_shard_degree 2",
-        #         ],
-        #     ],
-        #     "PP+DP GPipe 2D test",
-        #     "pp_dp_gpipe",
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_schedule GPipe",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
+            ],
+            "PP+DP GPipe 2D test",
+            "pp_dp_gpipe",
+        ),
         OverrideDefinitions(
             [
                 [
@@ -344,19 +342,18 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "cp_alltoall",
             ngpu=4,
         ),
-        # NOTE: temporarily disable to bypass CI timeout issue
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.data_parallel_shard_degree=2",
-        #             "--parallelism.data_parallel_replicate_degree=2",
-        #             "--parallelism.tensor_parallel_degree=2",
-        #         ]
-        #     ],
-        #     "HSDP+TP",
-        #     "hsdp+tp",
-        #     ngpu=8,
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=2",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.tensor_parallel_degree=2",
+                ]
+            ],
+            "HSDP+TP",
+            "hsdp+tp",
+            ngpu=8,
+        ),
         OverrideDefinitions(
             [
                 [
@@ -368,19 +365,18 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             "fsdp+cp",
             ngpu=4,
         ),
-        # NOTE: temporarily disable to bypass CI timeout issue
-        # OverrideDefinitions(
-        #     [
-        #         [
-        #             "--parallelism.data_parallel_shard_degree=1",
-        #             "--parallelism.data_parallel_replicate_degree=2",
-        #             "--parallelism.context_parallel_degree=2",
-        #         ]
-        #     ],
-        #     "HSDP+CP (without dp_shard)",
-        #     "hsdp+cp_without_dp_shard",
-        #     ngpu=4,
-        # ),
+        OverrideDefinitions(
+            [
+                [
+                    "--parallelism.data_parallel_shard_degree=1",
+                    "--parallelism.data_parallel_replicate_degree=2",
+                    "--parallelism.context_parallel_degree=2",
+                ]
+            ],
+            "HSDP+CP (without dp_shard)",
+            "hsdp+cp_without_dp_shard",
+            ngpu=4,
+        ),
         OverrideDefinitions(
             [
                 [
