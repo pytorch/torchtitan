@@ -203,7 +203,6 @@ torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
 | | With LLEP | Without LLEP | Delta |
 |---|---|---|---|
 | Mean TPS | ~26,370 | ~23,780 | **+10.9%** |
-| Mean MFU | 11.4% | 10.3% | +10.7% |
 
 **Memory** (per-GPU at step 20):
 
@@ -306,6 +305,46 @@ torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29501 \
   -m torchtitan.train \
   --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
   --training.steps 130 --debug.seed=42 --metrics.log_freq=1 --llep.enabled=False
+```
+
+### With DeepEP Backend
+
+LLEP also works with the DeepEP communication backend (`expert_parallel_comm_backend = "deepep"`). When both are enabled, `DeepEPLLEPExpertParallel` adaptively switches per step: DeepEP for balanced steps, LLEP for imbalanced steps (controlled by `adaptive_threshold`).
+
+On single-node NVLink, DeepEP adds overhead vs standard NCCL all-to-all (buffer management, extra all_gather for imbalance check). DeepEP's advantage is primarily on **multi-node RDMA** where its custom transport is significantly faster than NCCL.
+
+**All 4 configurations** (8xB200, 9.5B model, steps 5-20 average):
+
+| Config | Mean TPS | vs Standard EP | Memory Range | Spread |
+|---|---|---|---|---|
+| **LLEP** (standard backend) | **26,250** | **+19.6%** | 140-146 GiB | **6 GiB** |
+| **DeepEP + LLEP** (threshold=1.3) | **25,820** | **+17.7%** | 147-154 GiB | **7 GiB** |
+| Standard EP (no LLEP) | 21,940 | baseline | 132-173 GiB | 41 GiB |
+| DeepEP only (no LLEP) | 19,640 | -10.5% | 124-176 GiB | 52 GiB |
+
+LLEP vs DeepEP comparisons:
+- LLEP vs LLEP+DeepEP: **+1.7%** (26,250 vs 25,820) — DeepEP adds slight overhead on single-node NVLink
+- LLEP vs DeepEP only: **+33.7%** (26,250 vs 19,640) — LLEP's load balancing dominates
+- LLEP+DeepEP vs DeepEP only: **+31.5%** (25,820 vs 19,640) — adaptive switching recovers most of LLEP's benefit
+
+To reproduce the DeepEP runs:
+
+```bash
+cd torchtitan
+
+# DeepEP + LLEP adaptive (20 steps)
+torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
+  -m torchtitan.train \
+  --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
+  --training.steps 20 --parallelism.expert_parallel_comm_backend=deepep \
+  --llep.adaptive_threshold=1.3
+
+# DeepEP only, no LLEP (20 steps)
+torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
+  -m torchtitan.train \
+  --job.config_file torchtitan/models/deepseek_v3/train_configs/debug_model_ep8_llep.toml \
+  --training.steps 20 --parallelism.expert_parallel_comm_backend=deepep \
+  --llep.enabled=False
 ```
 
 ### Unit Tests
