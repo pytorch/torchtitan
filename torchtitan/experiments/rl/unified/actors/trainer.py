@@ -162,7 +162,7 @@ class PolicyTrainer(Actor, Configurable):
         set_model_state_dict(
             model=model,
             model_state_dict=torchtitan_state_dict,
-            options=StateDictOptions(strict=False),
+            options=StateDictOptions(strict=True),
         )
         logger.info(
             f"Loaded initial weights from {checkpoint_path} "
