@@ -14,10 +14,10 @@ from unittest import mock
 
 import torch
 import torch.nn as nn
+from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
-from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
-from torchtitan.components.checkpoint import CheckpointManager, ModelWrapper
+from torchtitan.components.checkpoint import CheckpointManager
 
 
 class FakeOptimizersContainer:

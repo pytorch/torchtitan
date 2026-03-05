@@ -158,10 +158,10 @@ class LoRAConverter(Configurable):
 
             try:
                 from torchao.dtypes.nf4tensor import to_nf4
-            except ImportError:
+            except ImportError as err:
                 raise ImportError(
                     "QLoRA requires torchao. Install with: pip install torchao"
-                )
+                ) from err
 
             lora_classes = tuple(_lora_class_cache.values())
             nf4_scaler_block_size = self.nf4_scaler_block_size

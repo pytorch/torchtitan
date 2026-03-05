@@ -195,9 +195,7 @@ def test_qat_preserves_weight_dtype():
     pytest.importorskip("torchao")
 
     model = SimpleModel()
-    original_dtypes = {
-        name: param.dtype for name, param in model.named_parameters()
-    }
+    original_dtypes = {name: param.dtype for name, param in model.named_parameters()}
 
     converter = QATConverter(QATConverter.Config(group_size=64))
     converter.convert(model)
