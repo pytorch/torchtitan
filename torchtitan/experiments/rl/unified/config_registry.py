@@ -31,7 +31,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         num_steps=10,
         batch_invariant_mode=True,
         trainer=PolicyTrainer.Config(
-            optimizer=OptimizersContainer.Config(lr=1e-6),
+            optimizer=OptimizersContainer.Config(lr=2e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_type="linear",
