@@ -65,7 +65,7 @@ class RLTrainer(Configurable):
         operations and bitwise-reproducible forward/backward passes."""
 
         num_episodes_per_step: int = 5
-        """Number of prompts to generate per training step."""
+        """Number of episodes to create before every training step."""
 
         log_samples: bool = False
         """Log first completion per episode during training and eval."""
