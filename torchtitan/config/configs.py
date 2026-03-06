@@ -374,9 +374,7 @@ class CommConfig:
     """
 
     use_torchcomms: bool = field(
-        default_factory=lambda: os.environ.get(
-            "TORCH_DISTRIBUTED_USE_TORCHCOMMS", "0"
-        )
+        default_factory=lambda: os.environ.get("TORCH_DISTRIBUTED_USE_TORCHCOMMS", "0")
         == "1"
     )
     """
