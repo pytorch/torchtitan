@@ -28,22 +28,18 @@ __all__ = [
 ]
 
 
-# Safe to share: build() clones the config, so each module gets its own instance.
-default_norm_config = RMSNorm.Config()
-default_embedding_config = Embedding.Config()
-
 llama4_configs = {
     "debugmodel": Llama4Model.Config(
         dim=256,
         n_layers=6,
         vocab_size=2048,
-        tok_embeddings=default_embedding_config,
-        norm=default_norm_config,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
             fixed_attn_block_size=256,
-            attention_norm=default_norm_config,
-            ffn_norm=default_norm_config,
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
             feed_forward=FeedForward.Config(
                 hidden_dim=compute_ffn_hidden_dim(256, multiple_of=256)
             ),
@@ -68,13 +64,13 @@ llama4_configs = {
     "17bx16e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
-        tok_embeddings=default_embedding_config,
-        norm=default_norm_config,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
-            attention_norm=default_norm_config,
-            ffn_norm=default_norm_config,
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
             moe=MoE.Config(
                 num_experts=16,
                 hidden_dim=compute_moe_hidden_dim(
@@ -111,12 +107,12 @@ llama4_configs = {
     "17bx128e": Llama4Model.Config(
         dim=5120,
         n_layers=48,
-        tok_embeddings=default_embedding_config,
-        norm=default_norm_config,
+        tok_embeddings=Embedding.Config(),
+        norm=RMSNorm.Config(),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
-            attention_norm=default_norm_config,
-            ffn_norm=default_norm_config,
+            attention_norm=RMSNorm.Config(),
+            ffn_norm=RMSNorm.Config(),
             moe=MoE.Config(
                 num_experts=128,
                 hidden_dim=compute_moe_hidden_dim(

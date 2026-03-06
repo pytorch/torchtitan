@@ -119,9 +119,8 @@ class MLPEmbedder(Module):
 class QKNorm(torch.nn.Module):
     def __init__(self, dim: int):
         super().__init__()
-        norm_config = RMSNorm.Config()
-        self.query_norm = norm_config.build(normalized_shape=dim)
-        self.key_norm = norm_config.build(normalized_shape=dim)
+        self.query_norm = RMSNorm.Config().build(normalized_shape=dim)
+        self.key_norm = RMSNorm.Config().build(normalized_shape=dim)
 
     def init_weights(self):
         self.query_norm.init_weights()
