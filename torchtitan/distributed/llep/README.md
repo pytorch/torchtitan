@@ -361,8 +361,8 @@ torchrun --nproc_per_node=2 tests/unit_tests/test_llep_hooks.py
 
 | File | Description |
 |------|-------------|
-| `torchtitan/distributed/llep.py` | Main LLEP implementation (planning, dispatch, compute, combine) |
-| `torchtitan/distributed/llep_kernels.py` | Triton kernels (imbalance_ratio, pad/unpad, assign_tokens, send_matrix) |
+| `torchtitan/distributed/llep/` | Main LLEP implementation (planning, dispatch, compute, combine) |
+| `torchtitan/distributed/llep/kernels.py` | Triton kernels (imbalance_ratio, pad/unpad, assign_tokens, send_matrix) |
 | `torchtitan/models/moe/moe.py` | MoE module with `LLEPConfig` and hook integration points |
 
 ## Performance Optimizations

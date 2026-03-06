@@ -377,7 +377,7 @@ def compute_gpu_imbalance_ratio(
     global _triton_imbalance_fn
     if _triton_imbalance_fn is None:
         try:
-            from torchtitan.distributed.llep_kernels import triton_imbalance_ratio
+            from torchtitan.distributed.llep.kernels import triton_imbalance_ratio
 
             _triton_imbalance_fn = triton_imbalance_ratio
         except (ImportError, RuntimeError):
@@ -905,7 +905,7 @@ def _pad_for_grouped_mm(
         global _triton_pad_fn
         if _triton_pad_fn is None:
             try:
-                from torchtitan.distributed.llep_kernels import (
+                from torchtitan.distributed.llep.kernels import (
                     triton_pad_for_grouped_mm,
                 )
 
@@ -977,7 +977,7 @@ def _unpad_output(
         global _triton_unpad_fn
         if _triton_unpad_fn is None:
             try:
-                from torchtitan.distributed.llep_kernels import triton_unpad_output
+                from torchtitan.distributed.llep.kernels import triton_unpad_output
 
                 _triton_unpad_fn = triton_unpad_output
             except (ImportError, RuntimeError):
@@ -1194,7 +1194,7 @@ def llep_dispatch_tokens(
     global _send_matrix_fn
     if _send_matrix_fn is None:
         try:
-            from torchtitan.distributed.llep_kernels import (
+            from torchtitan.distributed.llep.kernels import (
                 compute_send_matrix_vectorized,
             )
 
@@ -1271,7 +1271,7 @@ def llep_dispatch_tokens(
         _use_triton = expert_ids.is_cuda
         if _use_triton:
             try:
-                from torchtitan.distributed.llep_kernels import triton_assign_tokens
+                from torchtitan.distributed.llep.kernels import triton_assign_tokens
 
                 global_offsets_gpu = torch.from_numpy(global_offsets_np).to(
                     device, non_blocking=True

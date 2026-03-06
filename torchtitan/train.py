@@ -928,7 +928,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # LLEP autotune: find optimal hyperparameters from real routing stats
         if hasattr(job_config, "llep") and job_config.llep.autotune:
-            from torchtitan.distributed.llep_autotune import autotune_llep
+            from torchtitan.distributed.llep.autotune import autotune_llep
 
             autotune_llep(
                 model=self.model_parts[0],
