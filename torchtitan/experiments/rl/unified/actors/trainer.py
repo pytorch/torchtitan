@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from monarch.actor import Actor, endpoint
 from torch.distributed._tensor import DTensor
@@ -131,7 +132,14 @@ class PolicyTrainer(Actor, Configurable):
         self.policy_version = 0
         self.generator: Any | None = None
 
-        logger.debug("PolicyTrainer initialized")
+        # Data parallelism: determine this rank's shard of the batch.
+        self.dp_size = self.parallel_dims.dp_replicate * self.parallel_dims.dp_shard
+        self.dp_rank = dist.get_rank() // self.parallel_dims.non_data_parallel_size
+        self.dp_enabled = self.parallel_dims.dp_enabled
+
+        logger.debug(
+            f"PolicyTrainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
+        )
 
     def _load_initial_hf_weights(self, model, checkpoint_path: str) -> None:
         """Load model weights from HF checkpoint using DCP and state_dict_adapter.
@@ -154,7 +162,7 @@ class PolicyTrainer(Actor, Configurable):
         set_model_state_dict(
             model=model,
             model_state_dict=torchtitan_state_dict,
-            options=StateDictOptions(strict=False),
+            options=StateDictOptions(strict=True),
         )
         logger.info(
             f"Loaded initial weights from {checkpoint_path} "
@@ -219,13 +227,8 @@ class PolicyTrainer(Actor, Configurable):
         """
         titan_state = self.model.state_dict()
 
-        # Unwrap DTensors to plain local tensors and clone to break shared storage.
-        # Without clone, to_local() returns a view of the trainer's parameter data.
-        # Since trainer and generator are collocated (same process), Monarch passes
-        # by reference, so the generator's set_model_state_dict can corrupt the
-        # trainer's Replicate params (norm weights) via in-place redistribution.
         return {
-            k: v.to_local().clone() if isinstance(v, DTensor) else v.clone()
+            k: v.full_tensor() if isinstance(v, DTensor) else v
             for k, v in titan_state.items()
         }
 
@@ -233,7 +236,9 @@ class PolicyTrainer(Actor, Configurable):
     async def step(self, episodes: list[Episode]) -> dict:
         """Perform one training step.
 
-        Computes advantages from rewards, then updates the policy.
+        Computes advantages from rewards on the full batch (GRPO normalizes
+        within each prompt group), then shards completions across DP ranks
+        so each rank processes a unique slice of the data.
 
         Args:
             episodes: List of Episode data (one per prompt) with rewards filled by Grader
@@ -242,10 +247,11 @@ class PolicyTrainer(Actor, Configurable):
             Training metrics
         """
         logger.debug(
-            f"{os.getpid()=} PolicyTrainer starts to train {self.policy_version} "
+            f"{os.getpid()=} PolicyTrainer starting step {self.policy_version} "
         )
 
-        # Compute advantages.
+        # Compute GRPO advantages on the full batch (group normalization
+        # requires seeing all completions per prompt).
         all_token_ids: list[list[int]] = []
         all_prompt_token_ids: list[list[int]] = []
         all_token_log_probs: list[list[float]] = []
@@ -253,7 +259,6 @@ class PolicyTrainer(Actor, Configurable):
         all_rewards: list[float] = []
         for episode in episodes:
             rewards = torch.tensor([c.reward for c in episode.completions])
-            # GRPO advantage: computed relative to the mean reward within the group
             advantages = rewards - rewards.mean()
             all_advantages.append(advantages)
             all_rewards.extend(c.reward for c in episode.completions)
@@ -265,34 +270,41 @@ class PolicyTrainer(Actor, Configurable):
         advantages = torch.cat(all_advantages)
         all_rewards_tensor = torch.tensor(all_rewards)
 
-        # Compute reference log probs using frozen ref_model
+        # Shard flattened completions across DP ranks so each rank processes
+        # a unique subset of the data.
+        total_samples = len(all_token_ids)
+        my_indices = list(range(self.dp_rank, total_samples, self.dp_size))
+        my_token_ids = [all_token_ids[i] for i in my_indices]
+        my_prompt_token_ids = [all_prompt_token_ids[i] for i in my_indices]
+        my_token_log_probs = [all_token_log_probs[i] for i in my_indices]
+        my_advantages = advantages[my_indices]
+
+        # Compute reference log probs using frozen ref_model (local shard only)
         ref_token_log_probs = []
         device = next(self.model.parameters()).device
         with torch.no_grad():
-            for prompt_toks, gen_toks in zip(all_prompt_token_ids, all_token_ids):
+            for prompt_toks, gen_toks in zip(my_prompt_token_ids, my_token_ids):
                 token_lps = compute_token_log_probs(
                     self.ref_model, prompt_toks, gen_toks, device
                 )
                 ref_token_log_probs.append(token_lps)
 
-        # Compute loss.
-        # TODO: compute the forward_backward first and then pass this to the loss to
-        # keep the loss function only computing the loss itself
+        # Compute loss on this rank's shard
         loss, loss_metrics, batch_token_log_probs = compute_policy_gradient_loss(
             self.model,
-            all_token_ids,
-            all_prompt_token_ids,
-            advantages,
+            my_token_ids,
+            my_prompt_token_ids,
+            my_advantages,
             ref_token_log_probs,
             kl_coef=0.1,
         )
 
-        # Verify logprob identity and compute log ratio (train/generator)
+        # Verify logprob identity (local shard)
         verification_result = verify_logprob_identity(
-            all_token_log_probs,
+            my_token_log_probs,
             batch_token_log_probs,
         )
-        logger.info(
+        logger.debug(
             f"Logprob verification: bitwise_identical={verification_result['logprob_bitwise_identical']}, "
             f"max_delta={verification_result['logprob_max_delta']:.6e}, "
             f"diff_mean={verification_result['logprob_diff_mean']:.6e}, "
@@ -300,9 +312,16 @@ class PolicyTrainer(Actor, Configurable):
             f"tokens_checked={verification_result['total_tokens_checked']}"
         )
 
-        # Update weights using torchtitan optimizers
+        # Update weights
         self.optimizers.zero_grad()
         loss.backward()
+
+        # All-reduce gradients across DP ranks so all ranks have consistent
+        # weight updates despite processing different data shards.
+        if self.dp_enabled:
+            for param in self.model.parameters():
+                if param.grad is not None:
+                    dist.all_reduce(param.grad, op=dist.ReduceOp.AVG)
 
         # Gradient clipping
         grad_norm = dist_utils.clip_grad_norm_(
@@ -336,5 +355,7 @@ class PolicyTrainer(Actor, Configurable):
             ],
             **loss_metrics,
         }
-        logger.debug(f"{os.getpid()=} PolicyTrainer finish step {self.policy_version}")
+        logger.debug(
+            f"{os.getpid()=} PolicyTrainer finished step {self.policy_version}"
+        )
         return metrics
