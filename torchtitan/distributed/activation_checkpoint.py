@@ -7,6 +7,7 @@
 # This file provides the util functions to apply activation checkpointing to the model.
 
 import os
+from collections import defaultdict
 from contextlib import contextmanager
 
 import torch
@@ -15,7 +16,10 @@ import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+from torch.overrides import TorchFunctionMode
+from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils.module_tracker import ModuleTracker
+from torch.utils.weak import WeakTensorKeyDictionary
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.tools.logging import logger
@@ -27,6 +31,46 @@ from torchtitan.tools.logging import logger
 _MM_OPS = frozenset(
     {torch.ops.aten.mm.default, torch.ops.aten.linear.default}
 )
+
+
+class _AutoNamingMode(TorchDispatchMode):
+    """Names output tensors as (fqn, op_name, count, output_idx).
+
+    Push this mode BEFORE entering the SAC context so it runs as an inner mode.
+    When the SAC policy inspects ``ctx.op_output``, the tensor already has a
+    name entry in ``self.names`` that the policy can look up.
+    """
+
+    def __init__(self):
+        self._tracker = ModuleTracker()
+        self._func_counter: dict = defaultdict(int)
+        self.names: WeakTensorKeyDictionary = WeakTensorKeyDictionary()
+
+    def __enter__(self):
+        self._tracker.__enter__()
+        return super().__enter__()
+
+    def __exit__(self, *args):
+        self._tracker.__exit__(*args)
+        return super().__exit__(*args)
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        out = func(*args, **(kwargs or {}))
+        parents = self._tracker.parents - {"Global"}
+        fqn = max(parents, key=len) if parents else "Global"
+        op_name = (
+            func.__name__.split(".")[0] if hasattr(func, "__name__") else str(func)
+        )
+        key = (fqn, func)
+        count = self._func_counter[key]
+        self._func_counter[key] += 1
+        if isinstance(out, torch.Tensor):
+            self.names[out] = (fqn, op_name, count, 0)
+        elif isinstance(out, (tuple, list)):
+            for i, o in enumerate(out):
+                if isinstance(o, torch.Tensor):
+                    self.names[o] = (fqn, op_name, count, i)
+        return out
 
 
 _layer_sac_count = 0
@@ -55,11 +99,12 @@ def _apply_op_sac(
     always_save_ops: set[torch._ops.OpOverload],
     save_mm_modules: set[str],
 ) -> nn.Module:
-    """Apply op-level selective activation checkpointing using ModuleTracker.
+    """Apply op-level selective activation checkpointing using AutoNamingMode.
 
-    Instead of the legacy "save every other mm" counter, this uses ModuleTracker
-    to identify which nn.Module produced each mm/linear op and makes explicit
-    save/recompute decisions based on module names.
+    Uses ``_AutoNamingMode`` (a ``TorchDispatchMode`` backed by
+    ``ModuleTracker``) to automatically name every tensor by its origin
+    module. The SAC policy then inspects ``ctx.op_output`` to look up the
+    tensor's name and decide whether to save or recompute.
 
     Args:
         module: The transformer block to wrap.
@@ -81,39 +126,23 @@ def _apply_op_sac(
     # linears in different parts of the model.
     force_recompute_fqns = set(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns)
 
-    tracker = ModuleTracker()
+    naming = _AutoNamingMode()
 
-    def _get_leaf_module_name() -> str:
-        parents = tracker.parents - {"Global"}
-        if not parents:
-            return ""
-        fqn = max(parents, key=len)
-        return fqn.rsplit(".", 1)[-1]
-
-    def _fqn_matches_force_recompute() -> bool:
-        if not force_recompute_fqns:
-            return False
-        parents = tracker.parents - {"Global"}
-        if not parents:
-            return False
-        fqn = max(parents, key=len)
-        return any(pattern in fqn for pattern in force_recompute_fqns)
-
-    # During the recompute pass, the SAC infrastructure retrieves cached
-    # tensors by (func, index) pair. The policy return value only matters
-    # for non-cached ops during recompute (must be PREFER_RECOMPUTE to
-    # avoid a RuntimeError). We use separate counters for forward and
-    # recompute to maintain correct alignment with the old behavior.
-    mm_fwd_decisions: list[CheckpointPolicy] = []
-    mm_recompute_idx = [0]
+    def _get_name(ctx):
+        """Look up the AutoNamingMode name for ctx.op_output."""
+        out = ctx.op_output
+        if isinstance(out, torch.Tensor):
+            return naming.names.get(out)
+        if isinstance(out, (tuple, list)):
+            for o in out:
+                if isinstance(o, torch.Tensor):
+                    name = naming.names.get(o)
+                    if name is not None:
+                        return name
+        return None
 
     def _custom_policy(ctx, func, *args, **kwargs):
         if ctx.is_recompute:
-            if func in _MM_OPS:
-                if mm_recompute_idx[0] < len(mm_fwd_decisions):
-                    decision = mm_fwd_decisions[mm_recompute_idx[0]]
-                    mm_recompute_idx[0] += 1
-                    return decision
             return CheckpointPolicy.PREFER_RECOMPUTE
 
         # CPU-to-device copies: always save (for offloading scenarios)
@@ -125,16 +154,17 @@ def _apply_op_sac(
         ):
             return CheckpointPolicy.MUST_SAVE
 
-        # mm/linear ops: decide based on which module produced them
+        # mm/linear ops: decide based on the tensor's origin module name
         if func in _MM_OPS:
-            if _fqn_matches_force_recompute():
-                mm_fwd_decisions.append(CheckpointPolicy.PREFER_RECOMPUTE)
-                return CheckpointPolicy.PREFER_RECOMPUTE
-            leaf = _get_leaf_module_name()
-            if leaf in save_mm_modules:
-                mm_fwd_decisions.append(CheckpointPolicy.MUST_SAVE)
-                return CheckpointPolicy.MUST_SAVE
-            mm_fwd_decisions.append(CheckpointPolicy.PREFER_RECOMPUTE)
+            name = _get_name(ctx)
+            if name is not None:
+                fqn, _op_name, _count, _idx = name
+                # Force recompute for specific modules (e.g. moe.router.gate)
+                if force_recompute_fqns and any(p in fqn for p in force_recompute_fqns):
+                    return CheckpointPolicy.PREFER_RECOMPUTE
+                leaf = fqn.rsplit(".", 1)[-1]
+                if leaf in save_mm_modules:
+                    return CheckpointPolicy.MUST_SAVE
             return CheckpointPolicy.PREFER_RECOMPUTE
 
         # Non-mm ops in always_save_ops
@@ -144,13 +174,14 @@ def _apply_op_sac(
         return CheckpointPolicy.PREFER_RECOMPUTE
 
     def selective_checkpointing_context_fn():
-        mm_fwd_decisions.clear()
-        mm_recompute_idx[0] = 0
         fwd_ctx, bwd_ctx = create_selective_checkpoint_contexts(_custom_policy)
 
+        # Push naming BEFORE fwd_ctx so it runs as an inner mode: naming
+        # annotates the tensor, then fwd_ctx's policy can inspect it via
+        # ctx.op_output.
         @contextmanager
         def combined_fwd():
-            with tracker, fwd_ctx:
+            with naming, fwd_ctx:
                 yield
 
         return combined_fwd(), bwd_ctx
