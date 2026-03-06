@@ -47,10 +47,8 @@ from torchtitan.tools.logging import logger
 from .expert_parallel import GptossExpertTensorParallel, GptossTensorParallel
 
 
-# for selective op activation checkpointing
-_op_sac_save_list = {
-    torch.ops.aten.mm.default,
-    torch.ops.aten.linear.default,
+# Non-mm ops whose outputs are always saved during op-level SAC.
+_always_save_ops = {
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
@@ -58,13 +56,12 @@ _op_sac_save_list = {
     torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
     torch.ops._c10d_functional.all_to_all_single.default,
-    # for low precision training, it's useful to always save
-    # the result of max, since the absolute maximum is
-    # used to compute the scaling factor for quantization.
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
     torch._higher_order_ops.inductor_compiled_code,
 }
+
+_save_mm_modules = {"wq", "wv", "w1", "w2"}
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -134,7 +131,8 @@ def parallelize_gptoss(
             ac_config,
             model_compile_enabled=model_compile_enabled,
             # pyrefly: ignore [bad-argument-type]
-            op_sac_save_list=_op_sac_save_list,
+            always_save_ops=_always_save_ops,
+            save_mm_modules=_save_mm_modules,
         )
 
     dp_mesh: DeviceMesh | None = None

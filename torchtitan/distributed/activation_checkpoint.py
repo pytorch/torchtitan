@@ -5,10 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 # This file provides the util functions to apply activation checkpointing to the model.
-# Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import os
-from collections import defaultdict
+from contextlib import contextmanager
 
 import torch
 import torch._functorch.config
@@ -16,24 +15,24 @@ import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+from torch.utils.module_tracker import ModuleTracker
 
 from torchtitan.config import ActivationCheckpointConfig as ACConfig
 from torchtitan.tools.logging import logger
+
+
+# Ops representing matrix multiplications from linear layers.
+# Some backends (e.g. PrivateUse1) register aten.linear as a leaf op instead of
+# decomposing it into aten.mm, so we handle both.
+_MM_OPS = frozenset(
+    {torch.ops.aten.mm.default, torch.ops.aten.linear.default}
+)
 
 
 _layer_sac_count = 0
 
 
 def _apply_layer_sac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
-    """Apply layer selective activation checkpointing to the module.
-
-    Args:
-        module (nn.Module): The module to apply layer selective activation checkpointing to.
-        ac_config (ACConfig): The activation checkpointing config.
-
-    Returns:
-        nn.Module: The module with layer selective activation checkpointing applied.
-    """
     global _layer_sac_count
     _layer_sac_count += 1
     ac_freq = int(ac_config.selective_ac_option)
@@ -53,90 +52,108 @@ def _apply_op_sac(
     module: nn.Module,
     ac_config: ACConfig,
     *,
-    base_fqn: str | None = None,
-    op_sac_save_list: set[torch._ops.OpOverload],
+    always_save_ops: set[torch._ops.OpOverload],
+    save_mm_modules: set[str],
 ) -> nn.Module:
-    """Apply selective activation checkpointing to the module.
+    """Apply op-level selective activation checkpointing using ModuleTracker.
+
+    Instead of the legacy "save every other mm" counter, this uses ModuleTracker
+    to identify which nn.Module produced each mm/linear op and makes explicit
+    save/recompute decisions based on module names.
 
     Args:
-        module (nn.Module): The module to apply selective activation checkpointing to.
-        ac_config (ACConfig): The activation checkpointing config.
-        base_fqn (str, optional): The base fqn of the module. Defaults to None.
-        op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
-            of recomputing.
-
-    Returns:
-        nn.Module: The module with selective activation checkpointing applied.
+        module: The transformer block to wrap.
+        ac_config: Activation checkpointing config.
+        always_save_ops: Non-mm ops whose outputs are always saved (e.g. SDPA,
+            collectives, flex_attention).
+        save_mm_modules: Set of leaf module names whose mm/linear outputs should
+            be saved. E.g. {"wq", "wv", "w1", "w2"} for Llama3.
     """
     from torch.utils.checkpoint import (
         CheckpointPolicy,
         create_selective_checkpoint_contexts,
     )
 
-    # Collect weight shapes to force-recompute, stored as mm RHS shape
-    # (in_f, out_f). For aten.linear we transpose args[1].shape at lookup
-    # time to match, since linear's weight is (out_f, in_f).
-    mm_recompute_shapes = set()
-    if len(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns) > 0:
-        for module_fqn, submod in module.named_modules():
-            fqn = module_fqn
-            if base_fqn is not None:
-                fqn = f"{base_fqn}.{module_fqn}"
-            if not any(
-                filter_fqn in fqn
-                for filter_fqn in ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
-            ):
-                continue
-            if not isinstance(submod, nn.Linear):
-                raise ValueError(
-                    "per_op_sac_force_recompute_mm_shapes_by_fqns expected to match "
-                    f"a nn.Linear, but got: {submod}"
-                )
-            out_f, in_f = submod.weight.shape
-            mm_recompute_shapes.add((in_f, out_f))
-        logger.debug(
-            f"Selective op AC force recomputing mms with rhs shapes {mm_recompute_shapes}"
-        )
+    # Interpret per_op_sac_force_recompute_mm_shapes_by_fqns as direct FQN
+    # patterns for force-recomputing mm ops from specific modules (e.g.
+    # "moe.router.gate"). Unlike the legacy shape-based matching, this matches
+    # the module FQN component directly, avoiding collisions from same-shape
+    # linears in different parts of the model.
+    force_recompute_fqns = set(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns)
 
-    # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
-    # instead of decomposing it into aten.mm, so we must handle both.
-    mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
+    tracker = ModuleTracker()
 
-    def _get_custom_policy(meta):
-        def _custom_policy(ctx, func, *args, **kwargs):
-            if (
-                func == torch.ops.aten._to_copy.default
-                and "cuda" in str(args[0].device)
-                and "device" in kwargs
-                and str(kwargs["device"]) == "cpu"
-            ):
+    def _get_leaf_module_name() -> str:
+        parents = tracker.parents - {"Global"}
+        if not parents:
+            return ""
+        fqn = max(parents, key=len)
+        return fqn.rsplit(".", 1)[-1]
+
+    def _fqn_matches_force_recompute() -> bool:
+        if not force_recompute_fqns:
+            return False
+        parents = tracker.parents - {"Global"}
+        if not parents:
+            return False
+        fqn = max(parents, key=len)
+        return any(pattern in fqn for pattern in force_recompute_fqns)
+
+    # During the recompute pass, the SAC infrastructure retrieves cached
+    # tensors by (func, index) pair. The policy return value only matters
+    # for non-cached ops during recompute (must be PREFER_RECOMPUTE to
+    # avoid a RuntimeError). We use separate counters for forward and
+    # recompute to maintain correct alignment with the old behavior.
+    mm_fwd_decisions: list[CheckpointPolicy] = []
+    mm_recompute_idx = [0]
+
+    def _custom_policy(ctx, func, *args, **kwargs):
+        if ctx.is_recompute:
+            if func in _MM_OPS:
+                if mm_recompute_idx[0] < len(mm_fwd_decisions):
+                    decision = mm_fwd_decisions[mm_recompute_idx[0]]
+                    mm_recompute_idx[0] += 1
+                    return decision
+            return CheckpointPolicy.PREFER_RECOMPUTE
+
+        # CPU-to-device copies: always save (for offloading scenarios)
+        if (
+            func == torch.ops.aten._to_copy.default
+            and "cuda" in str(args[0].device)
+            and "device" in kwargs
+            and str(kwargs["device"]) == "cpu"
+        ):
+            return CheckpointPolicy.MUST_SAVE
+
+        # mm/linear ops: decide based on which module produced them
+        if func in _MM_OPS:
+            if _fqn_matches_force_recompute():
+                mm_fwd_decisions.append(CheckpointPolicy.PREFER_RECOMPUTE)
+                return CheckpointPolicy.PREFER_RECOMPUTE
+            leaf = _get_leaf_module_name()
+            if leaf in save_mm_modules:
+                mm_fwd_decisions.append(CheckpointPolicy.MUST_SAVE)
                 return CheckpointPolicy.MUST_SAVE
+            mm_fwd_decisions.append(CheckpointPolicy.PREFER_RECOMPUTE)
+            return CheckpointPolicy.PREFER_RECOMPUTE
 
-            mode = "recompute" if ctx.is_recompute else "forward"
-            mm_count_key = f"{mode}_mm_count"
-            if func in mm_ops:
-                weight_shape = args[1].shape
-                # linear weight is (out, in); normalize to (in, out) to match mm
-                if func == torch.ops.aten.linear.default:
-                    weight_shape = torch.Size((weight_shape[1], weight_shape[0]))
-                if weight_shape in mm_recompute_shapes:
-                    return CheckpointPolicy.PREFER_RECOMPUTE
-                meta[mm_count_key] += 1
-            # Saves output of all compute ops, except every second mm/linear
-            to_save = func in op_sac_save_list and not (
-                func in mm_ops and meta[mm_count_key] % 2 == 0
-            )
-            return (
-                CheckpointPolicy.MUST_SAVE
-                if to_save
-                else CheckpointPolicy.PREFER_RECOMPUTE
-            )
+        # Non-mm ops in always_save_ops
+        if func in always_save_ops:
+            return CheckpointPolicy.MUST_SAVE
 
-        return _custom_policy
+        return CheckpointPolicy.PREFER_RECOMPUTE
 
     def selective_checkpointing_context_fn():
-        meta = defaultdict(int)
-        return create_selective_checkpoint_contexts(_get_custom_policy(meta))
+        mm_fwd_decisions.clear()
+        mm_recompute_idx[0] = 0
+        fwd_ctx, bwd_ctx = create_selective_checkpoint_contexts(_custom_policy)
+
+        @contextmanager
+        def combined_fwd():
+            with tracker, fwd_ctx:
+                yield
+
+        return combined_fwd(), bwd_ctx
 
     return ptd_checkpoint_wrapper(
         module,
@@ -149,15 +166,6 @@ def _apply_op_sac(
 
 
 def _apply_full_ac(module: nn.Module, ac_config: ACConfig) -> nn.Module:
-    """Apply full activation checkpointing to the module.
-
-    Args:
-        module (nn.Module): The module to apply full activation checkpointing to.
-        ac_config (ACConfig): The activation checkpointing config.
-
-    Returns:
-        nn.Module: The module with full activation checkpointing applied.
-    """
     return ptd_checkpoint_wrapper(
         module,
         preserve_rng_state=ac_config.preserve_rng_state,
@@ -171,9 +179,9 @@ def _apply_ac_to_transformer_block(
     module: nn.Module,
     ac_config: ACConfig,
     *,
-    base_fqn: str | None = None,
     model_compile_enabled: bool = False,
-    op_sac_save_list: set[torch._ops.OpOverload] | None = None,
+    always_save_ops: set[torch._ops.OpOverload] | None = None,
+    save_mm_modules: set[str] | None = None,
 ) -> nn.Module:
     valid_ac_modes = ("full", "selective")
     if ac_config.mode not in valid_ac_modes:
@@ -194,9 +202,11 @@ def _apply_ac_to_transformer_block(
         )
 
     if use_op_sac:
-        op_sac_save_list = op_sac_save_list or set()
         return _apply_op_sac(
-            module, ac_config, base_fqn=base_fqn, op_sac_save_list=op_sac_save_list
+            module,
+            ac_config,
+            always_save_ops=always_save_ops or set(),
+            save_mm_modules=save_mm_modules or set(),
         )
 
     return _apply_layer_sac(module, ac_config)
@@ -207,30 +217,24 @@ def apply_ac(
     ac_config: ACConfig,
     *,
     model_compile_enabled: bool = False,
-    op_sac_save_list: set[torch._ops.OpOverload] | None = None,
+    always_save_ops: set[torch._ops.OpOverload] | None = None,
+    save_mm_modules: set[str] | None = None,
     base_folder: str = "",
 ) -> None:
     """Apply activation checkpointing to the model.
 
     Args:
-        model (nn.Module): The model to apply activation checkpointing to.
-        ac_config (ACConfig): The activation checkpointing config.
-        model_compile_enabled (bool): Whether torch.compile is enabled for the model.
-        op_sac_save_list (set[torch._ops.OpOverload]): The list of ops to save instead
-            of recomputing.
-    Returns:
-        None
+        model: The model to apply activation checkpointing to.
+        ac_config: Activation checkpointing config.
+        model_compile_enabled: Whether torch.compile is enabled for the model.
+        always_save_ops: Non-mm ops whose outputs are always saved during
+            op-level SAC (e.g. SDPA variants, collectives).
+        save_mm_modules: Leaf module names whose mm/linear outputs should be
+            saved during op-level SAC. E.g. {"wq", "wv", "w1", "w2"}.
+        base_folder: Dump folder for memory budget pareto visualization.
     """
-    # Disable dynamo LRU cache to workaround an interaction between SAC, PP, and Flex:
-    #
-    # When forward runs with a second PP microbatch, it triggers recompilation with dynamic
-    # shapes enabled. Now there are two valid compiled graphs. By default, dynamo selects
-    # the latest one (the dynamic shapes version), so the runtime wrapper expects an extra
-    # symint output. When SAC caches the inductor HOP output from the static graph for
-    # batch_idx=0, it would miss that symint and cause an assertion failure. The workaround
-    # here is to disable the LRU cache, and select graphs in insertion order instead.
-    #
-    # Also see: https://github.com/pytorch/pytorch/issues/166926
+    # Disable dynamo LRU cache to workaround an interaction between SAC, PP,
+    # and Flex. See: https://github.com/pytorch/pytorch/issues/166926
     # pyrefly: ignore [missing-attribute]
     torch._C._dynamo.eval_frame._set_lru_cache(False)
 
@@ -251,9 +255,9 @@ def apply_ac(
             transformer_block = _apply_ac_to_transformer_block(
                 transformer_block,
                 ac_config,
-                base_fqn=f"layers.{layer_id}",
                 model_compile_enabled=model_compile_enabled,
-                op_sac_save_list=op_sac_save_list,
+                always_save_ops=always_save_ops,
+                save_mm_modules=save_mm_modules,
             )
             layers.register_module(layer_id, transformer_block)
 
