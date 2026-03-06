@@ -75,8 +75,7 @@ _always_save_ops = {
 }
 
 # Llama4 attention: wq, wk, wv, wo. MoE shared experts: w1, w3, w2.
-# Same as Llama3 — save wq, wv, w1, w2.
-_save_mm_modules = {"wq", "wv", "w1", "w2"}
+_sac_save_list = ["attention.wq", "attention.wv", "w1", "w2"]
 
 
 def parallelize_llama(
@@ -184,7 +183,7 @@ def parallelize_llama(
     if ac_config.mode != "none":
         if ac_config.selective_ac_option == "op":
             logger.info(
-                f"SAC save_mm_modules: {sorted(_save_mm_modules)}, "
+                f"SAC save_list: {_sac_save_list}, "
                 f"always_save_ops: {len(_always_save_ops)} ops"
             )
         apply_ac(
@@ -193,7 +192,7 @@ def parallelize_llama(
             model_compile_enabled=model_compile_enabled,
             # pyrefly: ignore [bad-argument-type]
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
             base_folder=dump_folder,
         )
 

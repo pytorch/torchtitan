@@ -56,7 +56,7 @@ _always_save_ops = {
 # Leaf module names whose mm/linear outputs are saved. For Llama3, a
 # TransformerBlock executes: wq, wk, wv, sdpa, wo, w1, w3, w2. Saving wq,
 # wv, w1, w2 keeps one saved mm for each recomputed mm.
-_save_mm_modules = {"wq", "wv", "w1", "w2"}
+_sac_save_list = ["attention.wq", "attention.wv", "feed_forward.w1", "feed_forward.w2"]
 
 
 def parallelize_llama(
@@ -130,7 +130,7 @@ def parallelize_llama(
             model_compile_enabled=model_compile_enabled,
             # pyrefly: ignore [bad-argument-type]
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
             base_folder=dump_folder,
         )
 

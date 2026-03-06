@@ -61,7 +61,7 @@ _always_save_ops = {
     torch._higher_order_ops.inductor_compiled_code,
 }
 
-_save_mm_modules = {"wq", "wv", "w1", "w2"}
+_sac_save_list = ["attention.wq", "attention.wv", "feed_forward.w1", "feed_forward.w2"]
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -132,7 +132,7 @@ def parallelize_gptoss(
             model_compile_enabled=model_compile_enabled,
             # pyrefly: ignore [bad-argument-type]
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
 
     dp_mesh: DeviceMesh | None = None

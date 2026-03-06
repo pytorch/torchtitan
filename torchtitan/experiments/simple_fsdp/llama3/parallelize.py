@@ -39,7 +39,7 @@ _always_save_ops = {
     torch._higher_order_ops.inductor_compiled_code,
 }
 
-_save_mm_modules = {"wq", "wv", "w1", "w2"}
+_sac_save_list = ["attention.wq", "attention.wv", "feed_forward.w1", "feed_forward.w2"]
 
 
 def get_transformer_block_buckets(model) -> list[list[str] | str]:
@@ -126,7 +126,7 @@ def parallelize_llama(
             ac_config,
             model_compile_enabled=model_compile_enabled,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
             base_folder=dump_folder,
         )
 

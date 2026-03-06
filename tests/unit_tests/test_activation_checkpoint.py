@@ -32,7 +32,7 @@ _always_save_ops = {
 # The ToyModule's forward runs: gate → wq → output. The "save every other mm"
 # counter saves gate(#1) and output(#3), recomputes wq(#2). The FQN-based
 # equivalent saves the same modules by name.
-_save_mm_modules = {"gate", "output"}
+_sac_save_list = ["moe.router.gate", "output"]
 
 
 class ToyModule(nn.Module):
@@ -91,7 +91,7 @@ class TestApplyAC(unittest.TestCase):
             ac_config_no_force,
             model_compile_enabled=False,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
         flops_selective_ac = get_bw_flops(model_selective_ac)
 
@@ -109,7 +109,7 @@ class TestApplyAC(unittest.TestCase):
             ac_config_with_force_first,
             model_compile_enabled=False,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
         flops_with_force_first = get_bw_flops(model_with_force_first)
 
@@ -126,7 +126,7 @@ class TestApplyAC(unittest.TestCase):
             ac_config_with_force_last,
             model_compile_enabled=False,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
         flops_with_force_last = get_bw_flops(model_with_force_last)
 
@@ -181,7 +181,7 @@ class TestApplyAC(unittest.TestCase):
             ac_config_no_force,
             model_compile_enabled=False,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
         mem_selective_ac = get_act_mem(model_selective_ac)
 
@@ -197,7 +197,7 @@ class TestApplyAC(unittest.TestCase):
             ac_config_with_force_first,
             model_compile_enabled=False,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
         mem_with_force_first = get_act_mem(model_with_force_first)
 
@@ -213,7 +213,7 @@ class TestApplyAC(unittest.TestCase):
             ac_config_with_force_last,
             model_compile_enabled=False,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
         mem_with_force_last = get_act_mem(model_with_force_last)
 
@@ -252,7 +252,7 @@ class TestApplyAC(unittest.TestCase):
             ),
             model_compile_enabled=False,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
         model_force_first = ToyModule()
         model_force_first.load_state_dict(model_no_ac.state_dict())
@@ -265,7 +265,7 @@ class TestApplyAC(unittest.TestCase):
             ),
             model_compile_enabled=False,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
 
         model_force_last = ToyModule()
@@ -279,7 +279,7 @@ class TestApplyAC(unittest.TestCase):
             ),
             model_compile_enabled=False,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
 
         def run_fwd_bwd(model, batch):

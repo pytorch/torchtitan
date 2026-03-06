@@ -99,7 +99,7 @@ _ALWAYS_SAVE_OPS = {
     torch._higher_order_ops.inductor_compiled_code,
 }
 
-_SAVE_MM_MODULES = {"wq", "wv", "w1", "w2"}
+_SAC_SAVE_LIST = ["attention.wq", "attention.wv", "feed_forward.w1", "feed_forward.w2"]
 
 
 def apply_old_sac(model):
@@ -146,7 +146,7 @@ def apply_new_sac(model):
         model,
         ac_config,
         always_save_ops=_ALWAYS_SAVE_OPS,
-        save_mm_modules=_SAVE_MM_MODULES,
+        sac_save_list=_SAC_SAVE_LIST,
     )
 
 

@@ -54,11 +54,15 @@ _always_save_ops = {
 }
 
 # DSV3 MLA attention has two variants depending on q_lora_rank.
-# q_lora_rank=0 mm order: wq, wkv_a, wkv_b, wo  →  save wq, wkv_b
-# q_lora_rank>0 mm order: wq_a, wq_b, wkv_a, wkv_b, wo  →  save wq_a, wkv_a, wo
-# Dense FFN / shared experts: w1, w3, w2  →  save w1, w2
-_save_mm_modules_q_lora_0 = {"wq", "wkv_b", "w1", "w2"}
-_save_mm_modules_q_lora_pos = {"wq_a", "wkv_a", "wo", "w3"}
+# q_lora_rank=0: wq, wkv_a, wkv_b, wo → save wq, wkv_b
+# q_lora_rank>0: wq_a, wq_b, wkv_a, wkv_b, wo → save wq_a, wkv_a, wo
+# Dense FFN / shared experts: w1, w3, w2
+_sac_save_list_q_lora_0 = [
+    "attention.wq", "attention.wkv_b", "w1", "w2",
+]
+_sac_save_list_q_lora_pos = [
+    "attention.wq_a", "attention.wkv_a", "attention.wo", "w3",
+]
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -169,14 +173,14 @@ def parallelize_deepseekv3(
 
     if ac_config.mode != "none":
         q_lora_rank = model.config.layer.attention.q_lora_rank
-        save_mm = _save_mm_modules_q_lora_pos if q_lora_rank > 0 else _save_mm_modules_q_lora_0
+        save_list = _sac_save_list_q_lora_pos if q_lora_rank > 0 else _sac_save_list_q_lora_0
         apply_ac(
             model,
             ac_config,
             model_compile_enabled=model_compile_enabled,
             # pyrefly: ignore [bad-argument-type]
             always_save_ops=_always_save_ops,
-            save_mm_modules=save_mm,
+            sac_save_list=save_list,
             base_folder=dump_folder,
         )
 

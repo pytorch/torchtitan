@@ -58,7 +58,7 @@ _always_save_ops = {
 }
 
 # Qwen3 attention: wq, wk, wv, wo. FFN: w1, w3, w2 (same as Llama3).
-_save_mm_modules = {"wq", "wv", "w1", "w2"}
+_sac_save_list = ["attention.wq", "attention.wv", "feed_forward.w1", "feed_forward.w2"]
 
 
 def parallelize_qwen3(
@@ -145,7 +145,7 @@ def parallelize_qwen3(
             model_compile_enabled=model_compile_enabled,
             # pyrefly: ignore [bad-argument-type]
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
             base_folder=dump_folder,
         )
 

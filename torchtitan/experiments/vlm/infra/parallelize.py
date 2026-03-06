@@ -25,7 +25,7 @@ from torchtitan.distributed.activation_checkpoint import apply_ac
 
 from torchtitan.models.llama3.parallelize import (
     _always_save_ops,
-    _save_mm_modules,
+    _sac_save_list,
     apply_compile,
     apply_ddp,
     disable_fsdp_gradient_division,
@@ -78,7 +78,7 @@ def parallelize_vlm(
             ac_config,
             model_compile_enabled=model_compile_enabled,
             always_save_ops=_always_save_ops,
-            save_mm_modules=_save_mm_modules,
+            sac_save_list=_sac_save_list,
         )
         apply_ac(model.encoder, ac_config)
 
