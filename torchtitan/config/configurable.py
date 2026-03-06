@@ -4,9 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import copy
 import dataclasses
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import ClassVar
 
 import torch
@@ -73,14 +72,14 @@ class Configurable:
             return result
 
         def _replace(self, **overrides):
-            """Copy this config via ``copy.copy()``, apply *overrides* to every
+            """Copy this config via ``replace()``, apply *overrides* to every
             ``field(init=False)`` slot, and validate that every
             ``field(init=False)`` slot has been set.
 
             Raises ``TypeError`` if any ``init=False`` field is neither
             pre-set on *self* nor supplied in *overrides*.
             """
-            clone = copy.copy(self)
+            clone = replace(self)
             for f in fields(self):
                 if f.init:
                     continue
