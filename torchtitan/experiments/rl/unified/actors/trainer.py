@@ -12,6 +12,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+import torchstore as ts
 from monarch.actor import Actor, endpoint
 from torch.distributed._tensor import DTensor
 from torch.distributed.checkpoint.state_dict import (
@@ -218,19 +219,22 @@ class PolicyTrainer(Actor, Configurable):
         return model
 
     @endpoint
-    async def get_weights(self) -> dict:
-        """Get model weights for generator.
+    async def push_weights(self) -> None:
+        """Push model weights to TorchStore for generator to pull.
 
-        Returns:
-            model state dict with plain local tensors (DTensors unwrapped
-            to avoid cross-mesh issues when transferring through Monarch).
+        Stores each DTensor parameter natively with shard metadata,
+        avoiding the expensive full_tensor() all-gather.
         """
-        titan_state = self.model.state_dict()
+        await ts.put_state_dict(self.model.state_dict(), key="policy")
 
-        return {
-            k: v.full_tensor() if isinstance(v, DTensor) else v
-            for k, v in titan_state.items()
-        }
+    @endpoint
+    async def get_weight_checksums(self) -> dict[str, float]:
+        """Return per-param checksums for weight sync verification."""
+        checksums = {}
+        for name, param in self.model.state_dict().items():
+            t = param.full_tensor() if isinstance(param, DTensor) else param
+            checksums[name] = t.to(torch.float64).sum().item()
+        return checksums
 
     @endpoint
     async def step(self, episodes: list[Episode]) -> dict:

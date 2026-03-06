@@ -26,10 +26,12 @@ import asyncio
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
+import torchstore as ts
 from monarch.actor import this_host
 from monarch.utils import setup_env_for_distributed
 from torchtitan.config import Configurable
@@ -200,12 +202,12 @@ class RLTrainer(Configurable):
             self.task.reward_function,
         )
 
-        # Trainer gathers full (unsharded) weights on every rank. We only
-        # need to collect from one rank since they're all identical.
-        initial_weights = self.trainer.get_weights.call().get().item(gpus=0)
+        # Initialize TorchStore for weight sync between trainer and generator
+        await ts.initialize()
 
-        # Initialize generator with trainer weights
-        self.generator.update.call(0, initial_weights).get()
+        # Initial weight sync: trainer pushes to store, generator pulls
+        self.trainer.push_weights.call().get()
+        self.generator.pull_weights.call(0).get()
 
     async def evaluate(self, num_samples: int = 20) -> dict:
         """Run evaluation on held-out prompts.
@@ -318,9 +320,39 @@ class RLTrainer(Configurable):
 
             # 3. Trainer computes advantages and updates policy
             metrics = self.trainer.step.call(scored_episodes).get().item(gpus=0)
-            # 4. Sync full weights to generator (each rank reshards locally)
-            weights = self.trainer.get_weights.call().get().item(gpus=0)
-            self.generator.update.call(metrics["policy_version"], weights).get()
+            # 4. Sync weights via TorchStore
+            t0 = time.perf_counter()
+            self.trainer.push_weights.call().get()
+            t_push = time.perf_counter() - t0
+            self.generator.pull_weights.call(metrics["policy_version"]).get()
+            t_total = time.perf_counter() - t0
+            logger.info(
+                f"Weight sync: push={t_push:.3f}s, total={t_total:.3f}s"
+            )
+
+            # Verify weight sync after first training step
+            if step == 0:
+                trainer_checksums = self.trainer.get_weight_checksums.call().get().item(gpus=0)
+                gen_checksums = self.generator.get_weight_checksums.call().get().item(gpus=0)
+                mismatches = []
+                for name in trainer_checksums:
+                    if name not in gen_checksums:
+                        mismatches.append(f"  {name}: MISSING in generator")
+                    elif abs(trainer_checksums[name] - gen_checksums[name]) > 1e-4:
+                        mismatches.append(
+                            f"  {name}: trainer={trainer_checksums[name]:.6f}, "
+                            f"gen={gen_checksums[name]:.6f}, "
+                            f"diff={abs(trainer_checksums[name] - gen_checksums[name]):.6e}"
+                        )
+                if mismatches:
+                    logger.warning(
+                        f"Post-step weight sync mismatch ({len(mismatches)} params):\n"
+                        + "\n".join(mismatches[:20])
+                    )
+                else:
+                    logger.info(
+                        f"Post-step weight sync verified: all {len(trainer_checksums)} params match"
+                    )
 
             all_token_lens = [
                 len(c.token_ids) for ep in scored_episodes for c in ep.completions

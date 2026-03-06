@@ -9,8 +9,9 @@ import os
 from dataclasses import dataclass, field
 
 import torch
+import torchstore as ts
 from monarch.actor import Actor, endpoint
-from torch.distributed.tensor import distribute_tensor, DTensor
+from torch.distributed.tensor import DTensor
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.experiments.rl.unified.plugin import (
@@ -227,33 +228,33 @@ class VLLMGenerator(Actor, Configurable):
         return episodes
 
     @endpoint
-    async def update(self, version: int, state_dict: dict) -> None:
-        """Update generator weights.
-        Called by the orchestrator (simple_grpo.py).
+    async def get_weight_checksums(self) -> dict[str, float]:
+        """Return per-param checksums for weight sync verification."""
+        checksums = {}
+        for name, param in self._get_model().model.state_dict().items():
+            if isinstance(param, DTensor):
+                t = param.full_tensor()
+            else:
+                t = param
+            checksums[name] = t.to(torch.float64).sum().item()
+        return checksums
+
+    @endpoint
+    async def pull_weights(self, version: int) -> None:
+        """Pull latest weights from TorchStore into the vLLM model.
+
+        TorchStore handles DTensor resharding automatically — it computes
+        slice intersections between the trainer's sharding and ours, and
+        copies data in-place into our model's parameter tensors.
 
         Args:
-            version: New policy version number
-            state_dict: Full (unsharded) state dict with plain tensors.
+            version: New policy version number.
         """
-        # Reshard full tensors to match this generator's DTensor layout
-        model_state_dict = dict(self._get_model().model.state_dict())
-        for name, tensor in state_dict.items():
-            if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
-                if isinstance(tensor, DTensor):
-                    continue
-                target_dtensor = model_state_dict[name]
-                state_dict[name] = distribute_tensor(
-                    tensor.to(target_dtensor.device_mesh.device_type),
-                    device_mesh=target_dtensor.device_mesh,
-                    placements=target_dtensor.placements,
-                )
-
-        load_weights = self._get_model().load_weights_from_state_dict(state_dict)
+        model_sd = self._get_model().model.state_dict()
+        await ts.get_state_dict(key="policy", user_state_dict=model_sd, strict=False)
         self.policy_version = version
         logger.debug(
-            f"Updated weights into vLLM engine model. "
-            f"Number of parameters: {len(load_weights)}. "
-            f"{os.getpid()=} Generator updating weights to policy v{version}..."
+            f"{os.getpid()=} Generator pulled weights for policy v{version}"
         )
 
     def __del__(self):
