@@ -353,9 +353,6 @@ torchrun --nproc_per_node=8 --rdzv-endpoint=localhost:29500 \
 # LPT planning + SwiGLU FFN (3 tests, no GPU required)
 python -m pytest tests/unit_tests/test_llep.py -v
 
-# Triton kernels, numerical correctness (5 tests, 1 GPU)
-python -m pytest tests/unit_tests/test_llep_correctness.py -v
-
 # Hook-based flow (59 tests, requires >= 2 GPUs)
 torchrun --nproc_per_node=2 tests/unit_tests/test_llep_hooks.py
 ```
@@ -365,7 +362,7 @@ torchrun --nproc_per_node=2 tests/unit_tests/test_llep_hooks.py
 | File | Description |
 |------|-------------|
 | `torchtitan/distributed/llep.py` | Main LLEP implementation (planning, dispatch, compute, combine) |
-| `torchtitan/distributed/llep_kernels.py` | Triton kernels (fused_silu_gate, pad/unpad, assign_tokens, send_matrix) |
+| `torchtitan/distributed/llep_kernels.py` | Triton kernels (imbalance_ratio, pad/unpad, assign_tokens, send_matrix) |
 | `torchtitan/models/moe/moe.py` | MoE module with `LLEPConfig` and hook integration points |
 
 ## Performance Optimizations
@@ -375,7 +372,6 @@ The implementation includes several optimizations over the initial port (see `do
 | Optimization | Speedup | Technique |
 |-------------|---------|-----------|
 | Triton pad/unpad | 4.6x / 6.5x | Row-parallel kernels (1 program per row) |
-| Triton fused_silu_gate | 1.9x | Fused `silu(x1) * x3` in single pass |
 | Triton assign_tokens | 3.6x | Numpy plan encoding + GPU kernel |
 | Vectorized send_matrix | 1.9x | Numpy `add.at` + per-expert vectorized overlap |
 | Selective weight packing | - | Avoids `torch.where` double-materialization |
@@ -389,9 +385,6 @@ All tests run via `torchrun` and require at least 2 GPUs:
 ```bash
 # Unit tests (LPT planning, FFN, no GPU required)
 python tests/unit_tests/test_llep.py
-
-# Optimization correctness (grouped MM, Triton kernels, numerical, 17 tests)
-torchrun --nproc_per_node=1 tests/unit_tests/test_llep_correctness.py
 
 # Hook-based flow comprehensive tests (59 tests, requires >= 2 GPUs)
 torchrun --nproc_per_node=2 tests/unit_tests/test_llep_hooks.py
@@ -407,7 +400,6 @@ torchrun --nproc_per_node=2 tests/unit_tests/test_llep_hooks.py --list
 
 | Test File | Tests | What It Covers |
 |-----------|-------|----------------|
-| `test_llep.py` | 5 | LPT planning, SwiGLU FFN (single-process) |
-| `test_llep_correctness.py` | 17 | Grouped MM vs for-loop, Triton fused_silu_gate, numerical stability, benchmarks |
+| `test_llep.py` | 3 | LPT planning, GPU imbalance ratio (single-process) |
 | `test_llep_hooks.py` | 59 | Hook-based flow (`dispatch` -> `compute` -> `combine`) across top_k, hyperparams, dimensions, backward, edge cases |
 | `test_moe_ep_e2e.py` | 32 | Real MoE.forward() E2E: single-GPU ref vs EP vs LLEP (forward + backward, pytest parametrize) |
