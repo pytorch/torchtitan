@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from torchtitan.components.lora import LoRAConverter
 from torchtitan.components.quantization.float8 import Float8LinearConverter
+from torchtitan.components.quantization.qat import QATConverter
 from torchtitan.config import ConfigManager
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import ModelConvertersContainer
@@ -187,3 +188,19 @@ def test_qlora_base_weights_quantized_adapters_full_precision():
         assert (
             layer.lora_b.weight.dtype == torch.float32
         ), f"{name}.lora_b.weight should be float32"
+
+
+def test_qat_preserves_weight_dtype():
+    """QAT converter should not change weight dtype (fake quantization happens in forward)."""
+    pytest.importorskip("torchao")
+
+    model = SimpleModel()
+    original_dtypes = {name: param.dtype for name, param in model.named_parameters()}
+
+    converter = QATConverter(QATConverter.Config(group_size=64))
+    converter.convert(model)
+
+    for name, param in model.named_parameters():
+        assert (
+            param.dtype == original_dtypes[name]
+        ), f"'{name}' dtype changed from {original_dtypes[name]} to {param.dtype}"
