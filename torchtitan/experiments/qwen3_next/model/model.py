@@ -7,6 +7,8 @@
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
 import math
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -222,7 +224,6 @@ class Attention(nn.Module):
                     .contiguous()
                 )
             case "varlen":
-                assert isinstance(attention_masks, dict)
                 output = self.inner_attention(
                     xq,
                     xk,
@@ -391,20 +392,18 @@ class GatedDeltaNet(nn.Module):
         else:
             mixed_qkv, z, b, a = self._project_fused(hidden_states)
 
-        mixed_qkv = mixed_qkv.transpose(1, 2)
+        # fla's causal_conv1d expects [B, T, D] layout (not [B, D, T] like nn.Conv1d)
         mixed_qkv, _ = causal_conv1d_fn(
             x=mixed_qkv,
             weight=self.conv1d.weight.squeeze(1),
             bias=self.conv1d.bias,
             activation=self.activation,
-            seq_idx=(
-                attention_masks.get("seq_idx", None)
+            cu_seqlens=(
+                attention_masks.get("cu_seqlens", None)
                 if isinstance(attention_masks, dict)
                 else None
             ),
         )
-
-        mixed_qkv = mixed_qkv.transpose(1, 2)
         query, key, value = torch.split(
             mixed_qkv,
             [self.key_dim, self.key_dim, self.value_dim],
@@ -905,12 +904,46 @@ class Qwen3NextModel(ModelProtocol):
                 )
         return ret
 
+    def _build_simple_attention_masks(
+        self, tokens: torch.Tensor
+    ) -> AttentionMasksType:
+        """Build attention masks for unpacked sequences (e.g. inference).
+
+        Assumes each batch element is a single contiguous sequence with no
+        internal document boundaries.
+        """
+        B, T = tokens.shape
+        device = tokens.device
+        # cu_seqlens: [0, T, 2T, ..., BT]
+        cu_seqlens = torch.arange(
+            0, (B + 1) * T, T, dtype=torch.int32, device=device
+        )
+        ret: dict[str, Any] = {"cu_seqlens": cu_seqlens}
+        match self.model_args.attn_type:
+            case "varlen":
+                ret["varlen_metadata"] = VarlenMetadata(
+                    cu_seq_q=cu_seqlens,
+                    cu_seq_k=cu_seqlens,
+                    max_q=T,
+                    max_k=T,
+                )
+            case "flex":
+                mask_mods = [get_causal_mask_mod()]
+                ret["flex_attn"] = create_attention_mask(
+                    and_masks(*mask_mods), B, None, T, T
+                )
+            case "sdpa":
+                pass
+        return ret
+
     def forward(
         self,
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
     ):
+        if attention_masks is None:
+            attention_masks = self._build_simple_attention_masks(tokens)
         h = self.tok_embeddings(tokens)
         for layer in self.layers.values():
             h = layer(

@@ -67,6 +67,20 @@ class Qwen3NextModelArgs(BaseModelArgs):
     linear_conv_kernel_dim: int = 4
     linear_split_projections: bool = False  # False=fused (qwen3-next), True=split (qwen3.5)
 
+    def __post_init__(self):
+        if not self.layer_types:
+            self._build_layer_types()
+
+    def _build_layer_types(self):
+        self.layer_types = [
+            (
+                "linear_attention"
+                if bool((i + 1) % self.full_attention_interval)
+                else "full_attention"
+            )
+            for i in range(self.n_layers)
+        ]
+
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
         if seq_len > self.max_seq_len:
@@ -82,16 +96,6 @@ class Qwen3NextModelArgs(BaseModelArgs):
         # Pass DeepEP config to MoE layer and validate
         self.moe_args.deepep_config = job_config.deepep
         self.moe_args.validate_deepep_config()
-
-        if self.layer_types == []:
-            self.layer_types = [
-                (
-                    "linear_attention"
-                    if bool((i + 1) % self.full_attention_interval)
-                    else "full_attention"
-                )
-                for i in range(self.n_layers)
-            ]
 
         if self.full_attention_interval > 1 and (self.attn_type != "flex" and self.attn_type != "varlen"):
             raise ValueError(f"Qwen3-Next with linear attention requires `attn_type` be 'flex' or 'varlen' but got {self.attn_type}")
