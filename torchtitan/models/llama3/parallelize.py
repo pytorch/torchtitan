@@ -161,13 +161,11 @@ def parallelize_llama(
         if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
     elif parallel_dims.dp_replicate_enabled:
-        dp_replicate_mesh = parallel_dims.get_mesh("dp_replicate")
-        if parallel_dims.world_size != dp_replicate_mesh.size():
-            raise RuntimeError("DDP has not supported > 1D parallelism")
-        apply_ddp(
+        apply_replicate(
             model,
-            dp_replicate_mesh,
-            enable_compile=model_compile_enabled,
+            parallel_dims.get_mesh("dp_replicate"),
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
 
     return model
@@ -292,8 +290,10 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
     Set gradient_divide_factor=1.0 to disable FSDP's automatic gradient division.
     We handle gradient scaling ourselves in the training loop with global token count.
 
+    Note: This also works for ReplicateModule since it inherits from FSDPModule.
+
     Args:
-        model: The model containing FSDP-wrapped modules
+        model: The model containing FSDP-wrapped or Replicate-wrapped modules
     """
     for module in model.modules():
         if isinstance(module, FSDPModule):
@@ -376,15 +376,39 @@ def apply_fsdp(
     disable_fsdp_gradient_division(model)
 
 
-def apply_ddp(
+def apply_replicate(
     model: nn.Module,
     dp_mesh: DeviceMesh,
-    enable_compile: bool,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
 ):
-    if enable_compile:
-        torch._dynamo.config.optimize_ddp = "ddp_optimizer"
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    replicate_config = {"mesh": dp_mesh, "mp_policy": mp_policy}
 
+    if model.tok_embeddings is not None:
+        # pyrefly: ignore [no-matching-overload, invalid-param-spec]
+        replicate(
+            model.tok_embeddings,
+            **replicate_config,
+        )
+    # pyrefly: ignore [missing-attribute]
+    for layer_id, transformer_block in model.layers.items():
+        # pyrefly: ignore [invalid-param-spec]
+        replicate(
+            transformer_block,
+            **replicate_config,
+        )
+
+    if model.norm is not None and model.output is not None:
+        # pyrefly: ignore [no-matching-overload, invalid-param-spec]
+        replicate(
+            [model.norm, model.output],
+            **replicate_config,
+        )
     # pyrefly: ignore [invalid-param-spec]
-    replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
+    replicate(model, **replicate_config)
 
-    logger.info("Applied DDP to the model")
+    # Disable Replicate's automatic gradient division (ReplicateModule inherits from FSDPModule)
+    disable_fsdp_gradient_division(model)
+
+    logger.info("Applied replicate to the model")
