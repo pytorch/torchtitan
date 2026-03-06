@@ -7,6 +7,7 @@
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 from monarch.actor import Actor, endpoint
@@ -20,12 +21,60 @@ from torchtitan.experiments.rl.unified.plugin import (
 from torchtitan.experiments.rl.unified.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config import AttentionConfig
+from vllm.config import AttentionConfig, CompilationConfig
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(kw_only=True, slots=True)
+class GeneratorCompileConfig:
+    """Compilation and CUDA graph settings for the vLLM generator."""
+
+    backend: Literal["none", "eager", "inductor"] = "eager"
+    """torch.compile backend for vLLM
+    When set to a value other than "none", enables compilation with the specified backend.
+    See https://docs.vllm.ai/en/stable/api/vllm/config/#vllm.config.CompilationConfig.backend
+    NOTE: "eager" means compile with dynamo backend (like torch.compile(backend="eager"))
+    NOTE: inductor will offer the best performance, but will impact numerics - use eager for
+    bitwise identical results."""
+
+    cudagraph_mode: Literal[
+        "none", "piecewise", "full", "full_and_piecewise"
+    ] = "piecewise"
+    """CUDA graph capture mode for vLLM.
+    NOTE: Piecewise graph capture requires torch.compile for graph capture and splitting
+    See https://docs.vllm.ai/en/latest/design/v1/torch_compile.html#cuda-graph for more details."""
+
+    def __post_init__(self) -> None:
+        if self.backend == "none" and self.cudagraph_mode in (
+            "piecewise",
+            "full_and_piecewise",
+        ):
+            raise ValueError(
+                f"cudagraph_mode='{self.cudagraph_mode}' requires piecewise graph "
+                "capture which depends on torch.compile. Set backend "
+                "to 'eager' or 'inductor'."
+            )
+
+    @property
+    def is_eager(self) -> bool:
+        """Inferred from backend and cudagraph_mode."""
+        return self.backend == "none" and self.cudagraph_mode == "none"
+
+    def get_vllm_compilation_config(self) -> CompilationConfig | None:
+        """Build a vLLM ``CompilationConfig``, or return ``None`` when both
+        compilation and CUDA graphs are disabled.
+        """
+        if self.is_eager:
+            return None
+
+        return CompilationConfig(
+            backend=self.backend,
+            cudagraph_mode=self.cudagraph_mode,
+        )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -79,14 +128,20 @@ class VLLMGenerator(Actor, Configurable):
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
-        enforce_eager: bool = True
-        """Disable CUDA graphs in vLLM (use eager execution)."""
+        compile: GeneratorCompileConfig = field(default_factory=GeneratorCompileConfig)
+        """Compilation and CUDA graph settings for the vLLM engine."""
 
         num_samples_per_prompt: int = 8
         """Number of completions to generate per prompt."""
 
         seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
+
+        use_native_vllm_model: bool = False
+        """When True, use vLLM's own native model (e.g. Qwen3ForCausalLM) instead
+        of wrapping the torchtitan model. Weight sync reconstructs full tensors
+        from the trainer's TP shards and converts names to HF format so that
+        vLLM's ``load_weights()`` can re-shard them natively."""
 
         def __post_init__(self):
             assert self.parallelism.data_parallel_shard_degree in (1, -1), (
@@ -108,9 +163,11 @@ class VLLMGenerator(Actor, Configurable):
     ):
         self.config = config
         self.model_spec = model_spec
+        self.use_native_vllm_model = config.use_native_vllm_model
 
-        # Register TorchTitan model with vLLM before any engine creation
-        register_model_to_vllm_model_registry(model_spec)
+        if not self.use_native_vllm_model:
+            # Register TorchTitan model with vLLM before any engine creation
+            register_model_to_vllm_model_registry(model_spec)
 
         # Set vLLM environment variables from config before any vLLM initialization
         os.environ["VLLM_ATTENTION_BACKEND"] = config.attention_backend
@@ -135,14 +192,18 @@ class VLLMGenerator(Actor, Configurable):
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
-            enforce_eager=config.enforce_eager,
-            # Disable vLLM logging to avoid noisy logs on every step
-            disable_log_stats=True,
-            hf_overrides={"architectures": [VLLM_MODEL_NAME]},
+            enforce_eager=config.compile.is_eager,
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum[config.attention_backend],
             ),
+            disable_log_stats=True,
         )
+        if not self.use_native_vllm_model:
+            # Override architecture so vLLM loads our TorchTitan wrapper model
+            engine_kwargs["hf_overrides"] = {"architectures": [VLLM_MODEL_NAME]}
+        vllm_compilation_config = config.compile.get_vllm_compilation_config()
+        if vllm_compilation_config is not None:
+            engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.seed is not None:
             engine_kwargs["seed"] = config.seed
         engine_args = EngineArgs(**engine_kwargs)
@@ -235,7 +296,41 @@ class VLLMGenerator(Actor, Configurable):
             version: New policy version number
             state_dict: Full (unsharded) state dict with plain tensors.
         """
-        # Reshard full tensors to match this generator's DTensor layout
+        if self.use_native_vllm_model:
+            self._update_native(version, state_dict)
+        else:
+            self._update_wrapper(version, state_dict)
+
+    def _update_native(self, version: int, state_dict: dict) -> None:
+        """Weight update path for native vLLM model.
+
+        Converts torchtitan parameter names to HF format and calls vLLM's
+        ``load_weights()`` which handles sharding internally.  The incoming
+        ``state_dict`` already contains full (unsharded) tensors produced by
+        ``get_weights()`` in the trainer.
+        """
+        from torchtitan.experiments.rl.unified.models.native_vllm_weights import (
+            convert_to_hf,
+        )
+
+        hf_weights = convert_to_hf(state_dict)
+        self._get_model().load_weights(hf_weights)
+        self.policy_version = version
+        logger.debug(
+            f"Updated native vLLM model weights. "
+            f"Number of weight entries: {len(hf_weights)}. "
+            f"{os.getpid()=} Generator updating weights to policy v{version}..."
+        )
+
+    def _update_wrapper(self, version: int, state_dict: dict) -> None:
+        """Weight update path for TorchTitan wrapper model.
+
+        Re-wraps plain tensors as DTensors matching the wrapper model's
+        sharding layout, and loads them directly.
+        """
+        # Convert plain local tensors (TP shards from trainer) to DTensors
+        # matching the vLLM model's sharding layout. The trainer exports
+        # weights via to_local() which strips DTensor metadata.
         model_state_dict = dict(self._get_model().model.state_dict())
         for name, tensor in state_dict.items():
             if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
