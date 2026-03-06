@@ -48,7 +48,9 @@ from torchtitan.distributed.dual_pipe_v import (
 from torchtitan.distributed.expert_parallel import (
     BaseExpertParallel,
     DeepEPExpertParallel,
+    DeepEPLLEPExpertParallel,
     ExpertParallel,
+    ExpertParallelLLEP,
     ExpertTensorParallel,
     ReordererSequenceParallel,
     TensorParallel,
@@ -359,7 +361,7 @@ def apply_fsdp(
         reduce_dtype (torch.dtype): The data type to use for reduction operations.
         pp_enabled (bool): Whether pipeline parallelism is enabled.
         cpu_offload (bool, optional): Whether to offload model parameters to CPU. Defaults to False.
-        reshard_after_forward_policy (str | int, optional): The policy to use for resharding after forward pass. Defaults to "default".
+        reshard_after_forward_policy (str | int, optional): The policy to use for resharding after forward pass. Defaults to "default".  # noqa: B950
             String options: "never", "always", "default".
             - "default" applies default resharding behavior, implementing "smart defaults" for known optimal scenarios.
             - "always" will enable `reshard_after_forward` for all forward passes.
@@ -650,6 +652,10 @@ def apply_moe_ep_tp(
                 parallelize_plan=moe_layer_plan,
             )
 
+        # Check if LLEP is enabled on this MoE layer
+        # pyrefly: ignore [missing-attribute]
+        use_llep = getattr(transformer_block.moe, "use_llep", False)
+
         experts_mesh, experts_plan = None, None
         if ep_mesh is None:
             assert ep_etp_mesh is None
@@ -659,7 +665,42 @@ def apply_moe_ep_tp(
         elif tp_mesh is None or etp_mesh is None:
             assert ep_etp_mesh is None
             experts_mesh = ep_mesh
-            if use_deepep:
+            if use_llep and use_deepep:
+                # Adaptive: DeepEP when balanced, LLEP when imbalanced
+                # pyrefly: ignore [missing-attribute]
+                llep_config = transformer_block.moe._llep_config
+                # pyrefly: ignore [missing-attribute]
+                score_before_experts = transformer_block.moe.score_before_experts
+                experts_plan = DeepEPLLEPExpertParallel(
+                    score_before_experts=score_before_experts,
+                    max_tokens_factor=llep_config.max_tokens_factor,
+                    min_tokens_per_gemm=llep_config.min_tokens_per_gemm,
+                    adaptive_threshold=llep_config.adaptive_threshold,
+                    verbose=llep_config.verbose,
+                )
+                logger.info(
+                    f"Enabling DeepEP+LLEP adaptive switching "
+                    f"(α={llep_config.max_tokens_factor}, "
+                    f"m={llep_config.min_tokens_per_gemm}, "
+                    f"λ={llep_config.adaptive_threshold})"
+                )
+            elif use_llep:
+                # LLEP: dispatch/combine hooks with LPT-based routing
+                # pyrefly: ignore [missing-attribute]
+                llep_config = transformer_block.moe._llep_config
+                experts_plan = ExpertParallelLLEP(
+                    max_tokens_factor=llep_config.max_tokens_factor,
+                    min_tokens_per_gemm=llep_config.min_tokens_per_gemm,
+                    adaptive_threshold=llep_config.adaptive_threshold,
+                    verbose=llep_config.verbose,
+                )
+                logger.info(
+                    f"Enabling LLEP for expert parallelism "
+                    f"(α={llep_config.max_tokens_factor}, "
+                    f"m={llep_config.min_tokens_per_gemm}, "
+                    f"λ={llep_config.adaptive_threshold})"
+                )
+            elif use_deepep:
                 # pyrefly: ignore [missing-attribute]
                 score_before_experts = transformer_block.moe.score_before_experts
 
@@ -767,7 +808,9 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                             moe,
                             attr_name,
                             torch.compile(
-                                submod, backend=compile_config.backend, fullgraph=compile_config.fullgraph
+                                submod,
+                                backend=compile_config.backend,
+                                fullgraph=compile_config.fullgraph,
                             ),
                         )
                 else:
@@ -775,7 +818,9 @@ def apply_compile(model: nn.Module, compile_config: CompileConfig, ep_enabled: b
                         block,
                         attr_name,
                         torch.compile(
-                            submod, backend=compile_config.backend, fullgraph=compile_config.fullgraph
+                            submod,
+                            backend=compile_config.backend,
+                            fullgraph=compile_config.fullgraph,
                         ),
                     )
 

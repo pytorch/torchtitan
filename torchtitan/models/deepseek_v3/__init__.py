@@ -27,6 +27,57 @@ __all__ = [
 
 
 deepseekv3_args = {
+    # Mini debug model with LLEP enabled for testing load balancing
+    "debugmodel_llep": DeepSeekV3ModelArgs(
+        vocab_size=2048,
+        dim=256,
+        inter_dim=1024,
+        moe_inter_dim=256,
+        n_layers=4,
+        n_dense_layers=1,
+        n_heads=16,
+        moe_args=MoEArgs(
+            num_experts=8,
+            num_shared_experts=1,
+            top_k=2,
+            score_func="sigmoid",
+            route_norm=True,
+            route_scale=2.0,
+            score_before_experts=False,
+        ),
+        q_lora_rank=0,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        mscale=0.70,
+    ),
+    # ~9.5B model with 64 experts EP=8 for LLEP benchmarking
+    # dim=2048, moe_inter_dim=1536, 16 layers (1 dense + 15 MoE)
+    "debugmodel_ep8_llep": DeepSeekV3ModelArgs(
+        vocab_size=2048,
+        dim=2048,
+        inter_dim=8192,
+        moe_inter_dim=1536,
+        n_layers=16,
+        n_dense_layers=1,
+        n_heads=16,
+        moe_args=MoEArgs(
+            num_experts=64,
+            num_shared_experts=1,
+            top_k=8,
+            score_func="sigmoid",
+            route_norm=True,
+            route_scale=2.0,
+            score_before_experts=False,
+        ),
+        q_lora_rank=0,
+        kv_lora_rank=512,
+        qk_nope_head_dim=64,
+        qk_rope_head_dim=32,
+        v_head_dim=64,
+        mscale=0.70,
+    ),
     "debugmodel": DeepSeekV3ModelArgs(
         vocab_size=2048,
         dim=256,
@@ -215,7 +266,7 @@ deepseekv3_args = {
         beta_fast=1,
     ),
     "GLM47_30B_A3B": DeepSeekV3ModelArgs(
-        vocab_size=151936, # qwen3 tokenizer
+        vocab_size=151936,  # qwen3 tokenizer
         dim=2048,
         inter_dim=10240,
         moe_inter_dim=1536,
@@ -241,7 +292,7 @@ deepseekv3_args = {
         rope_factor=1.0,
     ),
     "GLM5_744B_A40B": DeepSeekV3ModelArgs(
-        vocab_size=151936, # qwen3 tokenizer
+        vocab_size=151936,  # qwen3 tokenizer
         dim=6144,
         inter_dim=12288,
         moe_inter_dim=2048,
@@ -278,7 +329,7 @@ def get_train_spec() -> TrainSpec:
         build_optimizers_fn=build_optimizers_with_moe_load_balancing,
         build_lr_schedulers_fn=build_lr_schedulers,
         build_dataloader_fn=build_dataloader,
-        build_tokenizer_fn=build_kimi_tokenizer, # falls back to hf tokenizer if tiktoken.model not found
+        build_tokenizer_fn=build_kimi_tokenizer,  # falls back to hf tokenizer if tiktoken.model not found
         build_loss_fn=build_cross_entropy_loss,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )

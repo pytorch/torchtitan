@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 import torch
@@ -14,7 +14,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.components.peft.lora import lora_or_linear
 from torchtitan.config.job_config import PEFT
-from torchtitan.models.utils import trunc_normal_, normal_
+from torchtitan.models.utils import normal_, trunc_normal_
 
 from torchtitan.tools.logging import logger
 from .utils import indices_padding_wrapper, indices_padding_wrapper_lora
@@ -29,6 +29,36 @@ class ExpertRoutingHistogram:
 def moe_init_std(dim_in: int, n_layers: int) -> float:
     return (2 / (dim_in * n_layers)) ** 0.5
 
+
+
+@dataclass
+class LLEPConfig:
+    """Least-Loaded Expert Parallelism (LLEP) configuration.
+
+    Default values from the paper (Section 5.1):
+        "For LLEP, we use λ=1.3, α=1, m=1024."
+    Reference: "Least-Loaded Expert Parallelism: Load Balancing An Imbalanced
+    Mixture-of-Experts" (Nguyen et al., Salesforce AI Research)
+
+    These apply automatically when use_llep=True without explicit config.
+    Override via [llep] TOML section or per-flavor LLEPConfig(...).
+    """
+
+    max_tokens_factor: float = 1.1
+    """α (alpha): GPU capacity factor. max_tokens_per_gpu = α × (total_tokens / num_gpus).
+    1.1 = allow 10% overload before spilling. Paper recommends 1.0 (Section 5.1)."""
+
+    min_tokens_per_gemm: int = 1024
+    """m: minimum tokens per GEMM to justify spilling to a helper GPU.
+    Below this threshold, the GEMM is too small to be efficient. Paper default: 1024 (Section 5.1)."""
+
+    adaptive_threshold: float = 0.0
+    """λ (lambda): imbalance ratio (max_gpu_load / mean_gpu_load) to trigger LLEP.
+    Below this ratio, standard EP is used instead. 0 = always use LLEP. Paper recommends 1.3 (Section 5.1)."""
+
+    verbose: bool = False
+    """Enable per-step distribution logging: before/after GPU loads, imbalance ratios,
+    weight transfers, send matrix, and received token counts. Also enabled by LLEP_DEBUG=1 env var."""
 
 
 @dataclass
@@ -59,6 +89,10 @@ class MoEArgs:
     # DeepEP configuration (set from job_config.deepep)
     # Type is Any to avoid import cycle, runtime type is DeepEP | None
     deepep_config: Any = None
+
+    # Least-Loaded Expert Parallelism (LLEP)
+    use_llep: bool = False
+    llep: "LLEPConfig" = field(default_factory=lambda: LLEPConfig())
 
     def validate_deepep_config(self) -> None:
         """Validate DeepEP configuration consistency.
@@ -353,6 +387,7 @@ class GroupedExperts(nn.Module):
         self,
         x: torch.Tensor,
         num_tokens_per_expert: torch.Tensor,
+        llep_state=None,
     ) -> torch.Tensor:
         if isinstance(self.w1, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
@@ -367,21 +402,45 @@ class GroupedExperts(nn.Module):
             w2 = self.w2
             w3 = self.w3
 
-        if self.use_grouped_mm:
-            # NOTE: If EP is not used, we need to pad the indices
-            #       to prepare for grouped_mm;
-            #       otherwise, EP will handle the padding.
-            if (
+        # LLEP: P2P weight transfer + pack (only extra step vs standard EP)
+        gradient_anchor = None
+        if llep_state is not None:
+            from torchtitan.distributed.llep import llep_prepare_weights
+
+            w1, w2, w3, llep_state.valid_mask, gradient_anchor = llep_prepare_weights(
+                w1, w2, w3, llep_state
+            )
+            llep_state.padded_counts = num_tokens_per_expert
+            llep_state.gradient_anchor = gradient_anchor
+
+        # UNIFIED compute — same path for both standard EP and LLEP
+        # When w1 is None (LLEP with no tokens received), skip compute
+        # and produce an empty output; the gradient anchor still gets added.
+        if w1 is None:
+            # No tokens received on this rank (LLEP edge case)
+            output = torch.empty(
+                0, llep_state.dim, device=x.device, dtype=llep_state.dtype
+            )
+        elif self.use_grouped_mm:
+            if llep_state is None and (
                 not isinstance(self.w1, DTensor)
                 # pyrefly: ignore[not-iterable]
                 or "ep" not in self.w1.device_mesh.mesh_dim_names
             ):
+                # No EP: need padding wrapper
                 run_experts_fn = indices_padding_wrapper(_run_experts_grouped_mm)
             else:
+                # EP or LLEP: padding already handled by dispatch hooks
                 run_experts_fn = _run_experts_grouped_mm
-            return run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
+            output = run_experts_fn(w1, w2, w3, x, num_tokens_per_expert)
         else:
-            return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+            output = _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
+
+        # LLEP: gradient anchor for backward P2P
+        if gradient_anchor is not None:
+            output = output + gradient_anchor
+
+        return output
 
     def init_weights(self, init_std: float, n_layers: int):
         std_in = moe_init_std(self.w1.shape[-1], n_layers)
@@ -817,6 +876,11 @@ class MoE(nn.Module):
         super().__init__()
 
         num_experts = moe_args.num_experts
+
+        # LLEP flag (read by parallelize.py to select ExpertParallelLLEP)
+        self.use_llep = moe_args.use_llep
+        self._llep_config = moe_args.llep if moe_args.use_llep else None
+
         if peft_config is not None and peft_config.enable_peft:
             # TODO:
             # Update to deepep here
@@ -1022,14 +1086,19 @@ class MoE(nn.Module):
 
 
 def build_moe(
-    args: MoEArgs, dim: int, hidden_dim: int, peft_config: PEFT, moe_impl: str = "standard",
+    args: MoEArgs,
+    dim: int,
+    hidden_dim: int,
+    peft_config: PEFT,
+    moe_impl: str = "standard",
 ) -> nn.Module:
-    """Factory for MoE with different backends: 'standard' (all-to-all) or 'deepep' (DeepEP)."""
-    if moe_impl == "deepep":
+    """Factory for MoE with different backends: 'standard', 'deepep', or 'deepep_llep'."""
+    if moe_impl in ("deepep", "deepep_llep"):
         from .moe_deepep import DeepEPMoE
 
         logger.info(
-            f"DeepEP MoE: num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
+            f"{'DeepEP+LLEP' if moe_impl == 'deepep_llep' else 'DeepEP'} MoE: "
+            f"num_experts={args.num_experts}, top_k={args.top_k}, dim={dim}, hidden_dim={hidden_dim}"
         )
         return DeepEPMoE(moe_args=args, dim=dim, hidden_dim=hidden_dim)
 

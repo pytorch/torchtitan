@@ -17,13 +17,13 @@ from torchtitan.config.job_config import PEFT
 from torchtitan.models.attention import (
     create_attention_mask,
     FlexAttentionWrapper,
+    get_block_causal_mask_mod_by_seq_lens,
     get_causal_mask_mod,
     get_document_mask_mod,
-    get_block_causal_mask_mod_by_seq_lens,
     ScaledDotProductAttentionWrapper,
 )
 from torchtitan.models.moe import build_moe, FeedForward, MoE
-from torchtitan.models.utils import trunc_normal_, normal_
+from torchtitan.models.utils import normal_, trunc_normal_
 from torchtitan.protocols.model import AttentionMasksType
 from torchtitan.protocols.train_spec import ModelProtocol
 
@@ -458,7 +458,9 @@ class TransformerBlock(nn.Module):
             norm.reset_parameters()
         self.attention.init_weights(self.weight_init_std)
         if self.moe_enabled:
-            cast(MoE, self.moe).init_weights(self.weight_init_std, buffer_device, self.n_layers)
+            cast(MoE, self.moe).init_weights(
+                self.weight_init_std, buffer_device, self.n_layers
+            )
         else:
             self.feed_forward.init_weights(self.weight_init_std)
 

@@ -83,7 +83,9 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.0
-    mscale_all_dim: float = 1.0  # When mscale == mscale_all_dim, effective mscale is 1.0
+    mscale_all_dim: float = (
+        1.0  # When mscale == mscale_all_dim, effective mscale is 1.0
+    )
 
     def update_from_config(self, job_config: JobConfig, **kwargs) -> None:
         seq_len = job_config.training.seq_len
@@ -103,8 +105,27 @@ class DeepSeekV3ModelArgs(BaseModelArgs):
             job_config.debug.moe_force_load_balance
         )
 
+        # LLEP config overrides from [llep] TOML section
+        if job_config.llep.enabled is not None:
+            self.moe_args.use_llep = job_config.llep.enabled
+        if job_config.llep.max_tokens_factor is not None:
+            self.moe_args.llep.max_tokens_factor = job_config.llep.max_tokens_factor
+        if job_config.llep.min_tokens_per_gemm is not None:
+            self.moe_args.llep.min_tokens_per_gemm = job_config.llep.min_tokens_per_gemm
+        if job_config.llep.adaptive_threshold is not None:
+            self.moe_args.llep.adaptive_threshold = job_config.llep.adaptive_threshold
+        if job_config.llep.verbose:
+            self.moe_args.llep.verbose = True
+
         # Configure expert parallel communication backend from config (defaults to "standard")
-        self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
+        # When both DeepEP and LLEP are enabled, use adaptive switching
+        if (
+            job_config.parallelism.expert_parallel_comm_backend == "deepep"
+            and self.moe_args.use_llep
+        ):
+            self.moe_impl = "deepep_llep"
+        else:
+            self.moe_impl = job_config.parallelism.expert_parallel_comm_backend
 
     def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
         return get_moe_model_nparams_and_flops(

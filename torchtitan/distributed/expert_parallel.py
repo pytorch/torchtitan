@@ -420,3 +420,289 @@ class DeepEPExpertParallel(BaseExpertParallel):
             input_fn=self._token_dispatch,  # pyrefly: ignore [bad-argument-type]
             output_fn=self._token_combine,  # pyrefly: ignore [bad-argument-type]
         )
+
+
+class DeepEPLLEPExpertParallel(BaseExpertParallel):
+    """Adaptive Expert Parallel: DeepEP when balanced, LLEP when imbalanced.
+
+    Expects DeepEP-style 5-tuple inputs:
+        (hidden_states, num_tokens_per_expert, selected_experts_indices, top_scores, num_experts)
+
+    Each step:
+    1. All-gather expert counts → compute imbalance ratio
+    2. If balanced (imbalance < threshold): use DeepEP dispatch/combine
+    3. If imbalanced (imbalance >= threshold): reorder tokens inline, use LLEP dispatch/combine
+
+    Both paths produce (bs*slen, dim) output for uniform MoE post-processing.
+
+    Args:
+        score_before_experts: If True, apply routing scores before expert computation.
+        max_tokens_factor: LLEP alpha parameter.
+        min_tokens_per_gemm: LLEP minimum tokens per GEMM.
+        adaptive_threshold: Imbalance ratio threshold to switch to LLEP.
+        verbose: Enable per-step logging.
+    """
+
+    def __init__(
+        self,
+        score_before_experts: bool = True,
+        max_tokens_factor: float = 1.1,
+        min_tokens_per_gemm: int = 1024,
+        adaptive_threshold: float = 1.3,
+        verbose: bool = False,
+    ):
+        super().__init__()
+        self.score_before_experts = score_before_experts
+        self._max_tokens_factor = max_tokens_factor
+        self._min_tokens_per_gemm = min_tokens_per_gemm
+        self._adaptive_threshold = adaptive_threshold
+        self._verbose = verbose
+
+        # Per-step state
+        self._use_llep_path = False
+        self._deepep_state = None  # DispatchState when DeepEP path
+        self._llep_state = None  # LLEPState when LLEP path
+        # Saved for LLEP combine → unsort + top_k reduction
+        self._token_indices_sorted = None
+        self._num_src_tokens = 0
+        self._top_k = 0
+        self._top_scores = None  # saved for score_before_experts=False
+
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        for param_name, param in mod.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            mod.register_parameter(param_name, dist_param)
+
+    def _token_dispatch(self, mod, inputs, device_mesh):
+        """Dispatch tokens: DeepEP if balanced, LLEP if imbalanced."""
+        hidden_states, _, selected_experts_indices, top_scores, num_experts = inputs
+
+        if isinstance(mod.w1, DTensor):
+            num_local_experts = mod.w1.to_local().shape[0]
+        else:
+            num_local_experts = mod.w1.shape[0]
+        ep_group = device_mesh.get_group()
+        ep_size = device_mesh.shape[0]
+
+        # Compute imbalance ratio from expert counts
+        num_tokens_per_expert = torch.histc(
+            selected_experts_indices.float(),
+            bins=num_experts,
+            min=0,
+            max=num_experts,
+        )
+        # All-gather counts across EP ranks for global view
+        from torchtitan.distributed.llep import compute_gpu_imbalance_ratio
+
+        with torch.no_grad():
+            local_counts = num_tokens_per_expert.to(torch.int64)
+            all_counts = [torch.zeros_like(local_counts) for _ in range(ep_size)]
+            torch.distributed.all_gather(all_counts, local_counts, group=ep_group)
+            global_counts = torch.stack(all_counts).sum(dim=0)
+            imbalance = compute_gpu_imbalance_ratio(
+                global_counts, ep_size, num_local_experts
+            )
+
+        use_llep = (
+            self._adaptive_threshold > 0 and imbalance >= self._adaptive_threshold
+        )
+        self._use_llep_path = use_llep
+
+        if not use_llep:
+            # === DeepEP path (balanced) ===
+            from torchtitan.distributed.deepep import dispatch_tokens
+
+            hidden_states, tokens_per_expert, self._deepep_state = dispatch_tokens(
+                hidden_states,
+                selected_experts_indices,
+                top_scores,
+                num_local_experts,
+                num_experts,
+                ep_group,
+                score_before_experts=self.score_before_experts,
+            )
+            self._llep_state = None
+            return hidden_states, tokens_per_expert
+        else:
+            # === LLEP path (imbalanced) ===
+            from torchtitan.distributed.llep import llep_dispatch_tokens
+
+            num_src_tokens = hidden_states.shape[0]
+            top_k = selected_experts_indices.shape[1]
+            self._num_src_tokens = num_src_tokens
+            self._top_k = top_k
+
+            # Inline reorder: sort tokens by expert (mimics TokenReorderer)
+            token_indices_sorted = torch.argsort(
+                selected_experts_indices.view(-1), stable=True
+            )
+            self._token_indices_sorted = token_indices_sorted
+
+            num_tokens_per_expert_local = torch.histc(
+                selected_experts_indices.view(-1).float(),
+                bins=num_experts,
+                min=0,
+                max=num_experts,
+            )
+
+            routed_input = hidden_states[token_indices_sorted // top_k]
+
+            if self.score_before_experts:
+                scores_sorted = top_scores.view(-1)[token_indices_sorted]
+                routed_input = (
+                    routed_input.to(torch.float32) * scores_sorted.reshape(-1, 1)
+                ).to(hidden_states.dtype)
+
+            # Save scores for post-combine weighting if needed
+            if not self.score_before_experts:
+                self._top_scores = top_scores
+
+            dispatched_tokens, padded_counts, llep_state = llep_dispatch_tokens(
+                routed_input,
+                num_tokens_per_expert_local,
+                ep_group,
+                max_tokens_factor=self._max_tokens_factor,
+                min_tokens_per_gemm=self._min_tokens_per_gemm,
+                adaptive_threshold=0.0,  # Already decided to use LLEP
+                verbose=self._verbose,
+            )
+            self._llep_state = llep_state
+            self._deepep_state = None
+
+            return dispatched_tokens, padded_counts, llep_state
+
+    def _token_combine(self, mod, routed_output, device_mesh):
+        """Combine tokens: DeepEP or LLEP depending on dispatch path."""
+        if not self._use_llep_path:
+            # === DeepEP path ===
+            from torchtitan.distributed.deepep import combine_tokens
+
+            routed_output = combine_tokens(routed_output, self._deepep_state)
+            self._deepep_state = None
+            return routed_output
+        else:
+            # === LLEP path: combine + unsort + top_k reduction ===
+            from torchtitan.distributed.llep import llep_combine_output
+
+            # llep_combine_output returns tokens in original routed_input order
+            routed_output = llep_combine_output(routed_output, self._llep_state)
+
+            # Unsort: scatter back to (bs*slen*top_k, dim) then reduce
+            num_src_tokens = self._num_src_tokens
+            top_k = self._top_k
+            dim = routed_output.shape[1]
+
+            unsorted = torch.zeros(
+                (num_src_tokens * top_k, dim),
+                dtype=routed_output.dtype,
+                device=routed_output.device,
+            )
+            unsorted[self._token_indices_sorted] = routed_output
+
+            unsorted = unsorted.reshape(num_src_tokens, top_k, dim)
+            if self.score_before_experts:
+                # Scores already applied: sum across top_k
+                result = unsorted.sum(dim=1)
+            else:
+                # Apply scores via bmm: (N, 1, top_k) @ (N, top_k, dim) → (N, 1, dim)
+                result = (
+                    torch.bmm(
+                        self._top_scores.float().reshape(-1, 1, top_k),
+                        unsorted.float(),
+                    )
+                    .to(unsorted.dtype)
+                    .squeeze(1)
+                )
+
+            self._llep_state = None
+            self._token_indices_sorted = None
+            self._top_scores = None
+            return result
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=self._partition_fn,
+            input_fn=self._token_dispatch,  # pyrefly: ignore [bad-argument-type]
+            output_fn=self._token_combine,  # pyrefly: ignore [bad-argument-type]
+        )
+
+
+class ExpertParallelLLEP(BaseExpertParallel):
+    """Expert Parallelism with Least-Loaded Expert Parallelism (LLEP).
+
+    Shards expert weights across EP ranks (Shard(0)) and installs
+    dispatch/combine hooks that use LPT-based routing instead of
+    naive EP routing.
+
+    The dispatch hook handles:
+    - all_gather expert counts → imbalance check → LPT plan
+    - token assignment to GPUs → AllToAll dispatch → sort/pad
+
+    The combine hook handles:
+    - AllToAll combine → unsort to original token order
+
+    Weight transfer (P2P) happens inside GroupedExperts.forward() after
+    FSDP has unsharded the weights, via llep_prepare_weights().
+    """
+
+    def __init__(
+        self,
+        max_tokens_factor: float = 1.1,
+        min_tokens_per_gemm: int = 1024,
+        adaptive_threshold: float = 0.0,
+        verbose: bool = False,
+    ):
+        super().__init__()
+        self._max_tokens_factor = max_tokens_factor
+        self._min_tokens_per_gemm = min_tokens_per_gemm
+        self._adaptive_threshold = adaptive_threshold
+        self._verbose = verbose
+        self._llep_state = None
+
+    def _partition_fn(self, name: str, mod: nn.Module, device_mesh: DeviceMesh) -> None:
+        for param_name, param in mod.named_parameters(recurse=False):
+            dist_param = nn.Parameter(distribute_tensor(param, device_mesh, [Shard(0)]))
+            mod.register_parameter(param_name, dist_param)
+
+    def _token_dispatch(
+        self, mod: nn.Module, inputs: tuple, device_mesh: DeviceMesh
+    ) -> tuple[Tensor, Tensor]:
+        from torchtitan.distributed.llep import llep_dispatch_tokens
+
+        routed_input, num_tokens_per_expert = inputs
+
+        dispatched_tokens, padded_counts, llep_state = llep_dispatch_tokens(
+            routed_input,
+            num_tokens_per_expert,
+            device_mesh.get_group(),
+            max_tokens_factor=self._max_tokens_factor,
+            min_tokens_per_gemm=self._min_tokens_per_gemm,
+            adaptive_threshold=self._adaptive_threshold,
+            verbose=self._verbose,
+        )
+        self._llep_state = llep_state
+
+        # Return 3-tuple: GroupedExperts.forward() gets llep_state as 3rd arg
+        return dispatched_tokens, padded_counts, llep_state
+
+    def _token_combine(
+        self, mod: nn.Module, routed_output: Tensor, device_mesh: DeviceMesh
+    ) -> Tensor:
+        from torchtitan.distributed.llep import llep_combine_output
+
+        result = llep_combine_output(routed_output, self._llep_state)
+        self._llep_state = None
+        return result
+
+    def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
+        return distribute_module(
+            module,
+            device_mesh,
+            partition_fn=self._partition_fn,
+            # pyrefly: ignore [bad-argument-type]
+            input_fn=self._token_dispatch,
+            # pyrefly: ignore [bad-argument-type]
+            output_fn=self._token_combine,
+        )
