@@ -35,7 +35,7 @@ _always_save_ops = {
 #   layers.0.attention.mm_0_0   (wq)
 #   layers.0.mm_0_0             (output, direct child of TransformerBlock)
 # Save gate and output, recompute wq.
-_sac_save_list = ["layers.*.moe.router.mm_0_0", "layers.*.mm_0_0"]
+_sac_save_list = ["layers.*.moe.router.mm_0", "layers.*.mm_0"]
 
 
 class ToyModule(nn.Module):

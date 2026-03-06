@@ -57,22 +57,22 @@ _always_save_ops = {
 #   attention: mm_0 (wq), mm_1 (wkv_a), mm_2 (wkv_b), mm_3 (wo)
 #   feed_forward/shared_experts: mm_0 (w1), mm_1 (w3), mm_2 (w2)
 _sac_save_list_q_lora_0 = [
-    "layers.*.attention.mm_0_0",       # wq
-    "layers.*.attention.mm_2_0",       # wkv_b
-    "layers.*.feed_forward.mm_0_0",    # w1 (dense)
-    "layers.*.feed_forward.mm_2_0",    # w2 (dense)
-    "layers.*.shared_experts.mm_0_0",  # w1 (MoE)
-    "layers.*.shared_experts.mm_2_0",  # w2 (MoE)
+    "layers.*.attention.mm_0",       # wq
+    "layers.*.attention.mm_2",       # wkv_b
+    "layers.*.feed_forward.mm_0",    # w1 (dense)
+    "layers.*.feed_forward.mm_2",    # w2 (dense)
+    "layers.*.shared_experts.mm_0",  # w1 (MoE)
+    "layers.*.shared_experts.mm_2",  # w2 (MoE)
 ]
 # DSV3 MLA attention mm ops (q_lora_rank>0):
 #   attention: mm_0 (wq_a), mm_1 (wq_b), mm_2 (wkv_a), mm_3 (wkv_b), mm_4 (wo)
 #   feed_forward/shared_experts: mm_0 (w1), mm_1 (w3), mm_2 (w2)
 _sac_save_list_q_lora_pos = [
-    "layers.*.attention.mm_0_0",       # wq_a
-    "layers.*.attention.mm_2_0",       # wkv_a
-    "layers.*.attention.mm_4_0",       # wo
-    "layers.*.feed_forward.mm_2_0",    # w2 (dense)
-    "layers.*.shared_experts.mm_2_0",  # w2 (MoE)
+    "layers.*.attention.mm_0",       # wq_a
+    "layers.*.attention.mm_2",       # wkv_a
+    "layers.*.attention.mm_4",       # wo
+    "layers.*.feed_forward.mm_2",    # w2 (dense)
+    "layers.*.shared_experts.mm_2",  # w2 (MoE)
 ]
 
 

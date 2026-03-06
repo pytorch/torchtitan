@@ -58,10 +58,10 @@ _always_save_ops = {
 #   feed_forward: mm_0 (w1), mm_1 (w3), mm_2 (w2)
 # Save roughly half for memory/compute balance.
 _sac_save_list = [
-    "layers.*.attention.mm_0_0",       # wq
-    "layers.*.attention.mm_2_0",       # wv
-    "layers.*.feed_forward.mm_0_0",    # w1
-    "layers.*.feed_forward.mm_2_0",    # w2
+    "layers.*.attention.mm_0",       # wq
+    "layers.*.attention.mm_2",       # wv
+    "layers.*.feed_forward.mm_0",    # w1
+    "layers.*.feed_forward.mm_2",    # w2
 ]
 
 

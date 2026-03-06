@@ -78,12 +78,12 @@ _always_save_ops = {
 #   attention: mm_0 (wq), mm_1 (wk), mm_2 (wv), mm_3 (wo)
 # MoE shared experts / dense FFN: mm_0 (w1), mm_1 (w3), mm_2 (w2)
 _sac_save_list = [
-    "layers.*.attention.mm_0_0",       # wq
-    "layers.*.attention.mm_2_0",       # wv
-    "layers.*.feed_forward.mm_0_0",    # w1 (dense layers)
-    "layers.*.feed_forward.mm_2_0",    # w2 (dense layers)
-    "layers.*.shared_experts.mm_0_0",  # w1 (MoE shared experts)
-    "layers.*.shared_experts.mm_2_0",  # w2 (MoE shared experts)
+    "layers.*.attention.mm_0",       # wq
+    "layers.*.attention.mm_2",       # wv
+    "layers.*.feed_forward.mm_0",    # w1 (dense layers)
+    "layers.*.feed_forward.mm_2",    # w2 (dense layers)
+    "layers.*.shared_experts.mm_0",  # w1 (MoE shared experts)
+    "layers.*.shared_experts.mm_2",  # w2 (MoE shared experts)
 ]
 
 

@@ -94,16 +94,30 @@ class _AutoNamingMode(TorchDispatchMode):
 def _name_matches(name: str, pattern: str) -> bool:
     """Match *name* against *pattern* with ``*`` wildcard support.
 
-    Matching is done on dot-separated components so ``*`` matches a single
-    path segment::
+    ``*`` matches a single path segment.  If the pattern omits the output
+    index suffix, it matches all outputs of that op invocation::
 
         _name_matches("layers.0.attention.mm_0_0", "layers.*.attention.mm_0_0")  # True
-        _name_matches("layers.0.attention.mm_0_0", "attention.mm_0_0")           # True (suffix)
-        _name_matches("layers.0.attention.mm_0_0", "layers.*.mm_0_0")            # False
+        _name_matches("layers.0.attention.mm_0_0", "layers.*.attention.mm_0")    # True (any output)
+        _name_matches("layers.0.attention.mm_0_0", "attention.mm_0")             # True (suffix)
+        _name_matches("layers.0.attention.mm_0_0", "layers.*.mm_0")             # False
     """
     if name == pattern:
         return True
-    # Suffix match: pattern matches the tail of name on component boundaries
+    # Allow omitting the output index: "mm_0" matches "mm_0_0", "mm_0_1", …
+    # Detect by checking if pattern's last component has fewer underscores
+    # than name's (name always has op_count_idx, pattern may have op_count).
+    if "_" in pattern.rsplit(".", 1)[-1] and "_" in name.rsplit(".", 1)[-1]:
+        pat_tail = pattern.rsplit(".", 1)[-1]
+        name_tail = name.rsplit(".", 1)[-1]
+        if pat_tail.count("_") == 1 and name_tail.count("_") == 2:
+            # Pattern has "mm_0", name has "mm_0_0" — strip output idx from name
+            name_without_idx = name.rsplit("_", 1)[0]
+            if name_without_idx == pattern or name_without_idx.endswith("." + pattern):
+                return True
+            if "*" in pattern and fnmatch(name_without_idx, pattern):
+                return True
+    # Exact or suffix match
     if "*" not in pattern:
         return name.endswith("." + pattern)
     return fnmatch(name, pattern)

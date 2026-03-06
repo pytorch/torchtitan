@@ -62,10 +62,10 @@ _always_save_ops = {
 }
 
 _sac_save_list = [
-    "layers.*.attention.mm_0_0",
-    "layers.*.attention.mm_2_0",
-    "layers.*.feed_forward.mm_0_0",
-    "layers.*.feed_forward.mm_2_0",
+    "layers.*.attention.mm_0",
+    "layers.*.attention.mm_2",
+    "layers.*.feed_forward.mm_0",
+    "layers.*.feed_forward.mm_2",
 ]
 
 
