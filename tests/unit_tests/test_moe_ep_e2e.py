@@ -93,7 +93,8 @@ def _create_moe(moe_args, dim, hidden_dim, device, seed, dtype=torch.bfloat16):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     moe = MoE(moe_args, dim, hidden_dim).to(device)
-    moe.init_weights(0.02, device, n_layers=1)
+    with torch.no_grad():
+        moe.init_weights(0.02, device, n_layers=1)
     return moe.to(dtype)
 
 

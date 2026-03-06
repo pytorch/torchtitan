@@ -7,8 +7,6 @@
 from .moe import (
     build_moe,
     ExpertRoutingHistogram,
-    fast_init_normal_,
-    fast_init_trunc_normal_,
     FeedForward,
     LLEPConfig,
     MoE,
@@ -22,6 +20,4 @@ __all__ = [
     "MoEArgs",
     "build_moe",
     "ExpertRoutingHistogram",
-    "fast_init_trunc_normal_",
-    "fast_init_normal_",
 ]
