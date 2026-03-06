@@ -99,7 +99,12 @@ _ALWAYS_SAVE_OPS = {
     torch._higher_order_ops.inductor_compiled_code,
 }
 
-_SAC_SAVE_LIST = ["attention.wq", "attention.wv", "feed_forward.w1", "feed_forward.w2"]
+_SAC_SAVE_LIST = [
+    "layers.*.attention.mm_0_0",       # wq
+    "layers.*.attention.mm_2_0",       # wv
+    "layers.*.feed_forward.mm_0_0",    # w1
+    "layers.*.feed_forward.mm_2_0",    # w2
+]
 
 
 def apply_old_sac(model):

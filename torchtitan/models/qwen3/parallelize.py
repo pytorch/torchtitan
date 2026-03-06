@@ -57,8 +57,14 @@ _always_save_ops = {
     torch._higher_order_ops.inductor_compiled_code,
 }
 
-# Qwen3 attention: wq, wk, wv, wo. FFN: w1, w3, w2 (same as Llama3).
-_sac_save_list = ["attention.wq", "attention.wv", "feed_forward.w1", "feed_forward.w2"]
+# Qwen3 attention: mm_0 (wq), mm_1 (wk), mm_2 (wv), mm_3 (wo)
+# FFN: mm_0 (w1), mm_1 (w3), mm_2 (w2). Same as Llama3.
+_sac_save_list = [
+    "layers.*.attention.mm_0_0",
+    "layers.*.attention.mm_2_0",
+    "layers.*.feed_forward.mm_0_0",
+    "layers.*.feed_forward.mm_2_0",
+]
 
 
 def parallelize_qwen3(

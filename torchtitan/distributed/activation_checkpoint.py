@@ -8,7 +8,7 @@
 
 import os
 from collections import defaultdict
-from contextlib import contextmanager
+from fnmatch import fnmatch
 
 import torch
 import torch._functorch.config
@@ -25,26 +25,23 @@ from torchtitan.tools.logging import logger
 
 
 class _AutoNamingMode(TorchDispatchMode):
-    """Names output tensors with two FQN-like identifiers.
+    """Names output tensors as ``"{scope}.{op}_{count}_{output_idx}"``.
 
-    Each tensor gets two names so save lists can use either convention:
+    Must be activated at the **model** level (not per-layer) so that the
+    full module hierarchy is visible.  For example::
 
-    1. **Module FQN** – the leaf nn.Module that produced the op, e.g.
-       ``"attention.wq"``.  Readable when the module structure is known.
+        layers.0.attention.mm_0_0   # 1st mm inside layers.0.attention
+        layers.0.attention.mm_1_0   # 2nd mm (e.g. wk)
+        layers.0.feed_forward.mm_0_0
+        layers.1.attention.mm_0_0   # same position, next layer
 
-    2. **Op counter** – parent module + op + counter, e.g.
-       ``"attention.mm_0_0"`` (0th output of the 0th ``mm`` inside
-       ``attention``).  Mechanical, doesn't require knowing sub-module
-       names.
-
-    Push this mode **before** the SAC CachingTorchDispatchMode so it runs
-    as an inner mode.  The SAC policy then inspects ``ctx.op_output`` and
-    looks up the tensor's name here.
+    The *scope* is the parent of the deepest active ``nn.Module``.
+    Counters are per ``(scope, op)`` and reset each forward pass.
     """
 
     def __init__(self):
         self._tracker = ModuleTracker()
-        self._parent_op_counter: dict = defaultdict(int)
+        self._scope_op_counter: dict = defaultdict(int)
         self.names: WeakTensorKeyDictionary = WeakTensorKeyDictionary()
 
     def __enter__(self):
@@ -57,9 +54,8 @@ class _AutoNamingMode(TorchDispatchMode):
 
     @staticmethod
     def _clean_fqn(fqn: str) -> str:
-        """Strip checkpoint wrapper prefix and root class name."""
+        """Strip checkpoint wrapper internals and root class name."""
         fqn = fqn.replace("._checkpoint_wrapped_module", "")
-        # "TransformerBlock.attention.wq" → "attention.wq"
         return fqn.split(".", 1)[1] if "." in fqn else fqn
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
@@ -71,20 +67,20 @@ class _AutoNamingMode(TorchDispatchMode):
         raw_fqn = max(parents, key=len)
         module_fqn = self._clean_fqn(raw_fqn)
 
-        parent_fqn = module_fqn.rsplit(".", 1)[0] if "." in module_fqn else ""
+        scope = module_fqn.rsplit(".", 1)[0] if "." in module_fqn else ""
         op_name = (
             func.__name__.split(".")[0] if hasattr(func, "__name__") else str(func)
         )
-        counter_key = (parent_fqn, op_name)
-        count = self._parent_op_counter[counter_key]
-        self._parent_op_counter[counter_key] += 1
+        key = (scope, op_name)
+        count = self._scope_op_counter[key]
+        self._scope_op_counter[key] += 1
 
         def _assign(tensor, output_idx):
-            if parent_fqn:
-                counter_name = f"{parent_fqn}.{op_name}_{count}_{output_idx}"
+            if scope:
+                name = f"{scope}.{op_name}_{count}_{output_idx}"
             else:
-                counter_name = f"{op_name}_{count}_{output_idx}"
-            self.names[tensor] = (module_fqn, counter_name)
+                name = f"{op_name}_{count}_{output_idx}"
+            self.names[tensor] = name
 
         if isinstance(out, torch.Tensor):
             _assign(out, 0)
@@ -95,13 +91,22 @@ class _AutoNamingMode(TorchDispatchMode):
         return out
 
 
-def _fqn_match(fqn: str, pattern: str) -> bool:
-    """Match pattern against fqn on component boundaries.
+def _name_matches(name: str, pattern: str) -> bool:
+    """Match *name* against *pattern* with ``*`` wildcard support.
 
-    ``"attention.wq"`` matches ``"attention.wq"`` and
-    ``"layers.0.attention.wq"`` but NOT ``"xattention.wq"``.
+    Matching is done on dot-separated components so ``*`` matches a single
+    path segment::
+
+        _name_matches("layers.0.attention.mm_0_0", "layers.*.attention.mm_0_0")  # True
+        _name_matches("layers.0.attention.mm_0_0", "attention.mm_0_0")           # True (suffix)
+        _name_matches("layers.0.attention.mm_0_0", "layers.*.mm_0_0")            # False
     """
-    return fqn == pattern or fqn.endswith("." + pattern)
+    if name == pattern:
+        return True
+    # Suffix match: pattern matches the tail of name on component boundaries
+    if "*" not in pattern:
+        return name.endswith("." + pattern)
+    return fnmatch(name, pattern)
 
 
 _layer_sac_count = 0
@@ -127,47 +132,34 @@ def _apply_op_sac(
     module: nn.Module,
     ac_config: ACConfig,
     *,
+    naming: _AutoNamingMode,
     always_save_ops: set[torch._ops.OpOverload],
     sac_save_list: list[str],
 ) -> nn.Module:
-    """Apply op-level selective activation checkpointing.
+    """Apply op-level SAC to a single transformer block.
 
-    Uses ``_AutoNamingMode`` to name every tensor by its module FQN and by
-    an automatic op counter.  The SAC policy inspects ``ctx.op_output`` to
-    look up the tensor name and matches it against ``sac_save_list``.
-
-    The save list can use either naming convention (suffix-matched):
-
-    * **Module FQN**: ``"attention.wq"`` — matches the leaf module.
-    * **Op counter**: ``"attention.mm_0_0"`` — matches the 0th mm inside
-      ``attention``, 0th output.
-
-    Args:
-        module: Transformer block to wrap.
-        ac_config: Activation checkpointing config.
-        always_save_ops: Op-type-based saves (SDPA, collectives, …).
-        sac_save_list: FQN patterns whose matching tensors are saved.
+    The *naming* mode is shared across all layers and entered at the model
+    level (not here).  This function only sets up the per-layer SAC context.
     """
     from torch.utils.checkpoint import (
         CheckpointPolicy,
         create_selective_checkpoint_contexts,
     )
 
-    force_recompute_fqns = set(ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns)
+    force_recompute_patterns = set(
+        ac_config.per_op_sac_force_recompute_mm_shapes_by_fqns
+    )
 
-    naming = _AutoNamingMode()
-
-    def _lookup(ctx):
-        """Return (module_fqn, counter_name) for ctx.op_output, or None."""
+    def _lookup_name(ctx):
         out = ctx.op_output
         if isinstance(out, torch.Tensor):
             return naming.names.get(out)
         if isinstance(out, (tuple, list)):
             for o in out:
                 if isinstance(o, torch.Tensor):
-                    info = naming.names.get(o)
-                    if info is not None:
-                        return info
+                    n = naming.names.get(o)
+                    if n is not None:
+                        return n
         return None
 
     def _custom_policy(ctx, func, *args, **kwargs):
@@ -187,34 +179,27 @@ def _apply_op_sac(
         if func in always_save_ops:
             return CheckpointPolicy.MUST_SAVE
 
-        # Look up the tensor's name and match against save list
-        info = _lookup(ctx)
-        if info is not None:
-            module_fqn, counter_name = info
-
-            # Force-recompute takes priority
-            if any(_fqn_match(module_fqn, p) for p in force_recompute_fqns):
-                return CheckpointPolicy.PREFER_RECOMPUTE
-
-            # Check save list against both naming conventions
+        # Explicit naming via checkpoint_name()
+        if hasattr(ctx, "tensor_name") and ctx.tensor_name is not None:
             for pattern in sac_save_list:
-                if _fqn_match(module_fqn, pattern) or _fqn_match(counter_name, pattern):
+                if ctx.tensor_name == pattern:
+                    return CheckpointPolicy.MUST_SAVE
+
+        # Automatic naming via _AutoNamingMode
+        name = _lookup_name(ctx)
+        if name is not None:
+            if any(_name_matches(name, p) for p in force_recompute_patterns):
+                return CheckpointPolicy.PREFER_RECOMPUTE
+            for pattern in sac_save_list:
+                if _name_matches(name, pattern):
                     return CheckpointPolicy.MUST_SAVE
 
         return CheckpointPolicy.PREFER_RECOMPUTE
 
     def selective_checkpointing_context_fn():
-        # Reset per-invocation state
-        naming._parent_op_counter.clear()
-
-        fwd_ctx, bwd_ctx = create_selective_checkpoint_contexts(_custom_policy)
-
-        @contextmanager
-        def combined_fwd():
-            with naming, fwd_ctx:
-                yield
-
-        return combined_fwd(), bwd_ctx
+        # The naming mode is already active (entered at model level).
+        # Only enter the SAC caching context here.
+        return create_selective_checkpoint_contexts(_custom_policy)
 
     return ptd_checkpoint_wrapper(
         module,
@@ -240,6 +225,7 @@ def _apply_ac_to_transformer_block(
     module: nn.Module,
     ac_config: ACConfig,
     *,
+    naming: _AutoNamingMode | None = None,
     model_compile_enabled: bool = False,
     always_save_ops: set[torch._ops.OpOverload] | None = None,
     sac_save_list: list[str] | None = None,
@@ -263,9 +249,11 @@ def _apply_ac_to_transformer_block(
         )
 
     if use_op_sac:
+        assert naming is not None
         return _apply_op_sac(
             module,
             ac_config,
+            naming=naming,
             always_save_ops=always_save_ops or set(),
             sac_save_list=sac_save_list or [],
         )
@@ -284,17 +272,23 @@ def apply_ac(
 ) -> None:
     """Apply activation checkpointing to the model.
 
+    For op-level SAC, an ``_AutoNamingMode`` is installed at the **model**
+    level so tensor names include the full hierarchy (with layer indices).
+
     Args:
         model: The model to apply activation checkpointing to.
         ac_config: Activation checkpointing config.
         model_compile_enabled: Whether torch.compile is enabled.
         always_save_ops: Non-mm ops whose outputs are always saved during
             op-level SAC (SDPA variants, collectives, …).
-        sac_save_list: FQN patterns for tensors to save during op-level SAC.
-            Supports two naming conventions (suffix-matched):
+        sac_save_list: Tensors to save during op-level SAC.  Names come
+            from two sources:
 
-            * Module FQN: ``["attention.wq", "feed_forward.w1"]``
-            * Op counter: ``["attention.mm_0_0", "feed_forward.mm_0_0"]``
+            * **Automatic** (``_AutoNamingMode``): full-path counter names
+              like ``"layers.0.attention.mm_0_0"``.  Use ``*`` for layer
+              wildcards: ``"layers.*.attention.mm_0_0"``.
+            * **Explicit** (``checkpoint_name()``): arbitrary strings set
+              in model code via ``checkpoint_name(tensor, name)``.
         base_folder: Dump folder for memory budget pareto.
     """
     # pyrefly: ignore [missing-attribute]
@@ -312,11 +306,29 @@ def apply_ac(
         torch._functorch.config.activation_memory_budget = ac_config.memory_budget
         logger.info(f"Selected {ac_config.memory_budget} budget option")
     else:
+        # For op-level SAC, install a model-level naming mode so tensor
+        # names include the full path (layers.N.attention.mm_K_I).
+        naming = None
+        if ac_config.mode == "selective" and ac_config.selective_ac_option == "op":
+            naming = _AutoNamingMode()
+
+            def _enter_naming(module, args):
+                naming._scope_op_counter.clear()
+                naming.__enter__()
+
+            def _exit_naming(module, args, output):
+                naming.__exit__(None, None, None)
+                return output
+
+            model.register_forward_pre_hook(_enter_naming)
+            model.register_forward_hook(_exit_naming)
+
         layers = model.get_submodule("layers")
         for layer_id, transformer_block in layers.named_children():
             transformer_block = _apply_ac_to_transformer_block(
                 transformer_block,
                 ac_config,
+                naming=naming,
                 model_compile_enabled=model_compile_enabled,
                 always_save_ops=always_save_ops,
                 sac_save_list=sac_save_list,

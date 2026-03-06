@@ -39,7 +39,12 @@ _always_save_ops = {
     torch._higher_order_ops.inductor_compiled_code,
 }
 
-_sac_save_list = ["attention.wq", "attention.wv", "feed_forward.w1", "feed_forward.w2"]
+_sac_save_list = [
+    "layers.*.attention.mm_0_0",
+    "layers.*.attention.mm_2_0",
+    "layers.*.feed_forward.mm_0_0",
+    "layers.*.feed_forward.mm_2_0",
+]
 
 
 def get_transformer_block_buckets(model) -> list[list[str] | str]:

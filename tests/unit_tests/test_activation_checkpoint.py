@@ -29,10 +29,13 @@ _always_save_ops = {
     torch.ops.torch_attn._varlen_attn.default,
 }
 
-# The ToyModule's forward runs: gate → wq → output. The "save every other mm"
-# counter saves gate(#1) and output(#3), recomputes wq(#2). The FQN-based
-# equivalent saves the same modules by name.
-_sac_save_list = ["moe.router.gate", "output"]
+# The ToyModule's forward runs: gate → wq → output.
+# With model-level naming, the full FQNs are:
+#   layers.0.moe.router.mm_0_0  (gate)
+#   layers.0.attention.mm_0_0   (wq)
+#   layers.0.mm_0_0             (output, direct child of TransformerBlock)
+# Save gate and output, recompute wq.
+_sac_save_list = ["layers.*.moe.router.mm_0_0", "layers.*.mm_0_0"]
 
 
 class ToyModule(nn.Module):

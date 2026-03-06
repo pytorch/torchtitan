@@ -53,10 +53,16 @@ _always_save_ops = {
     torch._higher_order_ops.inductor_compiled_code,
 }
 
-# Leaf module names whose mm/linear outputs are saved. For Llama3, a
-# TransformerBlock executes: wq, wk, wv, sdpa, wo, w1, w3, w2. Saving wq,
-# wv, w1, w2 keeps one saved mm for each recomputed mm.
-_sac_save_list = ["attention.wq", "attention.wv", "feed_forward.w1", "feed_forward.w2"]
+# Llama3 mm ops per transformer block scope:
+#   attention: mm_0 (wq), mm_1 (wk), mm_2 (wv), mm_3 (wo)
+#   feed_forward: mm_0 (w1), mm_1 (w3), mm_2 (w2)
+# Save roughly half for memory/compute balance.
+_sac_save_list = [
+    "layers.*.attention.mm_0_0",       # wq
+    "layers.*.attention.mm_2_0",       # wv
+    "layers.*.feed_forward.mm_0_0",    # w1
+    "layers.*.feed_forward.mm_2_0",    # w2
+]
 
 
 def parallelize_llama(
