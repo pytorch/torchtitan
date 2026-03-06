@@ -167,8 +167,8 @@ class GptOssTransformerBlock(TransformerBlock):
         super().__init__()
         self.use_sliding_attention = layer_id % 2 == 0
         self.attention = config.attention.build(dim=dim)
-        self.attention_norm = nn.RMSNorm(dim, eps=config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(dim, eps=config.norm_eps)
+        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
+        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
 
         assert config.moe is not None
         self.moe = config.moe.build(dim=dim)
@@ -212,7 +212,7 @@ class GptOssTransformerBlock(TransformerBlock):
     def init_weights(self, **kwargs):
         buffer_device = kwargs.get("buffer_device")
         for norm in (self.attention_norm, self.ffn_norm):
-            norm.reset_parameters()
+            norm.init_weights()
         self.attention.init_weights(init_std=self.weight_init_std)
         self.moe.init_weights(
             init_std=self.weight_init_std, buffer_device=buffer_device
