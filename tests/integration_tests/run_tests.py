@@ -161,7 +161,11 @@ def main():
         args.test_suite in _TEST_SUITES_FUNCTION
     ), f"Unknown test suite {args.test_suite}"
 
-    test_list = _TEST_SUITES_FUNCTION[args.test_suite]()
+    build_fn = _TEST_SUITES_FUNCTION[args.test_suite]
+    if args.test_suite == "features":
+        test_list = build_fn(output_dir=args.output_dir)
+    else:
+        test_list = build_fn()
     run_tests(args, test_list)
 
 

@@ -9,25 +9,29 @@ import os
 
 from tests.integration_tests import OverrideDefinitions
 
-# Use RUNNER_TEMP if defined (GitHub Actions variable), else fallback to old path
-runner_temp = os.getenv("RUNNER_TEMP")
-if runner_temp:
-    checkpoint_path = os.path.join(
-        runner_temp,
-        "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
-    )
-else:
-    checkpoint_path = (
-        "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/"
-    )
-
-
-def build_features_test_list() -> list[OverrideDefinitions]:
+def build_features_test_list(output_dir=None) -> list[OverrideDefinitions]:
     """
     key is the config file name and value is a list of OverrideDefinitions
     that is used to generate variations of integration tests based on the
     same root config file.
     """
+    # Construct checkpoint path for HF checkpoint test based on output_dir
+    runner_temp = os.getenv("RUNNER_TEMP")
+    if runner_temp:
+        checkpoint_path = os.path.join(
+            runner_temp,
+            "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/",
+        )
+    elif output_dir:
+        checkpoint_path = os.path.join(
+            output_dir,
+            "model_only_hf_checkpoint/hf_checkpoint/step-10/",
+        )
+    else:
+        checkpoint_path = (
+            "artifacts-to-be-uploaded/model_only_hf_checkpoint/hf_checkpoint/step-10/"
+        )
+
     integration_tests_flavors = [
         OverrideDefinitions(
             [

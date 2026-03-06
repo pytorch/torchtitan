@@ -304,7 +304,23 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
             )
 
         # Step 6: Compare with transformers tokenizer if available
+        # NOTE(phuc): DeepSeek-V3 ships two tokenizer files with different implementations:
+        #   - tokenizer.json: tokenizers lib BPE (used by HuggingFaceTokenizer)
+        #   - tokenizer.model: SentencePiece (used by transformers LlamaTokenizer)
+        # These produce different merge results for the same text, e.g. "Hello world!":
+        #   tokenizers lib: [19923, 2058, 3]
+        #   SentencePiece:  [42, 6629, 10030, 3]
+        # Same vocab, different BPE merge algorithms. Llama/Qwen pass because their
+        # two files happen to agree. This is an upstream tokenizer packaging issue,
+        # not a bug in HuggingFaceTokenizer. Step 5 already validates correctness
+        # against the official tokenizers lib.
         if transformers_tokenizer:
+            if "deepseek" in test_repo_id.lower():
+                self.skipTest(
+                    f"Skipping transformers comparison for {test_repo_id}: "
+                    f"tokenizer.json (BPE) and tokenizer.model (SentencePiece) "
+                    f"use different merge implementations that produce different token IDs"
+                )
             self._compare_tokenizers(
                 our_tokenizer, transformers_tokenizer, test_repo_id
             )

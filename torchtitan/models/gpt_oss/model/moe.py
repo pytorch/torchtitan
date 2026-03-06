@@ -261,7 +261,7 @@ class GptOssGroupedExperts(nn.Module):
                 tp_degree,
             )
 
-    def init_weights(self, init_std: float):
+    def init_weights(self, init_std: float, n_layers: int):
         trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
         trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
         trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
