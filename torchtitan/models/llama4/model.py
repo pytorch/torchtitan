@@ -190,6 +190,11 @@ class Llama4Model(Decoder):
 
             self.layer.moe._debug_force_load_balance = debug.moe_force_load_balance
 
+            if parallelism.expert_parallel_comm_backend == "deepep":
+                from torchtitan.models.common.moe.moe_deepep import DeepEPMoE
+
+                self.layer.moe = DeepEPMoE.Config(**dataclasses.asdict(self.layer.moe))
+
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
