@@ -43,9 +43,10 @@ class QATConverter(Configurable):
 
     def convert(self, model: nn.Module) -> None:
         from torchao.quantization.qat import FakeQuantizedLinear, IntxFakeQuantizeConfig
+        from torchao.quantization.quant_primitives import TorchAODType
 
         dtype_map = {
-            "int4": torch.int4,  # pyre-ignore[16]
+            "int4": TorchAODType.INT4,
             "int8": torch.int8,
         }
         torch_dtype = dtype_map[self.dtype]
