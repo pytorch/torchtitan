@@ -505,6 +505,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     def init_distributed(self) -> ParallelDims:
         config = self.config
+
+        if config.comm.use_torchcomms:
+            os.environ["TORCH_DISTRIBUTED_USE_TORCHCOMMS"] = "1"
+            # torch.distributed.config reads the env var at import time, so
+            # setting os.environ alone is too late. We must also set the
+            # runtime config directly (user_override takes precedence).
+            import torch.distributed.config as dist_config
+
+            dist_config.use_torchcomms = True
+
         world_size = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
