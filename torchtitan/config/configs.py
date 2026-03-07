@@ -19,6 +19,7 @@ Configs without a clear single owner (or with circular-import constraints)
 live here.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -370,6 +371,20 @@ class CommConfig:
       parallelisms within a single node to reduce the combinations we need to use in integration tests.
 
     NOTE: local_tensor is an experimental feature and automatically uses fake_backend internally.
+    """
+
+    use_torchcomms: bool = field(
+        default_factory=lambda: os.environ.get("TORCH_DISTRIBUTED_USE_TORCHCOMMS", "0")
+        == "1"
+    )
+    """
+    Whether to use torchcomms for communication. Can be enabled via the
+    TORCH_DISTRIBUTED_USE_TORCHCOMMS=1 environment variable or the
+    --comm.use_torchcomms CLI flag. When enabled, the environment variable
+    TORCH_DISTRIBUTED_USE_TORCHCOMMS=1 is set before distributed initialization
+    so that PyTorch uses torchcomms-based communicators.
+
+    NOTE: This requires the torchcomms package to be installed.
     """
 
 
