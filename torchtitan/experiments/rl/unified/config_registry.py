@@ -58,7 +58,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
                 top_p=0.95,
                 max_tokens=100,
             ),
-            attention_backend="FLASH_ATTN",
+            attention_backend="CUSTOM",
         ),
     )
 
