@@ -393,13 +393,28 @@ def apply_fsdp(
                 f"Invalid reshard_after_forward_policy: {reshard_after_forward_policy}."
             )
 
-    if model.tok_embeddings is not None:
-        # pyrefly: ignore [no-matching-overload]
+    if model.enable_weight_tying:
+        modules = [m for m in (model.tok_embeddings, model.norm, model.output) if m is not None]
         fully_shard(
-            model.tok_embeddings,
+            modules,
             **fsdp_config,
-            reshard_after_forward=reshard_after_forward,
+            reshard_after_forward=reshard_after_forward_policy == "always",
         )
+    else:
+        if model.tok_embeddings is not None:
+            fully_shard(
+                model.tok_embeddings,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+            )
+        if model.output is not None and model.norm is not None:
+            fully_shard(
+                model.output,
+                **fsdp_config,
+                # As an optimization, do not reshard_after_forward the last layers by default
+                # since FSDP would prefetch them immediately after the forward pass
+                reshard_after_forward=reshard_after_forward_policy == "always",
+            )
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.items():
@@ -436,16 +451,6 @@ def apply_fsdp(
             transformer_block,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward,
-        )
-
-    # As an optimization, do not reshard_after_forward the last layers by default
-    # since FSDP would prefetch them immediately after the forward pass
-    if model.norm is not None and model.output is not None:
-        # pyrefly: ignore [no-matching-overload]
-        fully_shard(
-            [model.norm, model.output],
-            **fsdp_config,
-            reshard_after_forward=reshard_after_forward_policy == "always",
         )
 
     fully_shard(model, **fsdp_config)
