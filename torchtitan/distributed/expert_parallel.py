@@ -286,24 +286,35 @@ class ReordererSequenceParallel(ParallelStyle):
 
 
 class DeepEPExpertParallel(BaseExpertParallel):
-    """Expert Parallel using DeepEP for efficient token dispatch/combine.
+    """Expert Parallel using DeepEP/HybridEP for efficient token dispatch/combine.
 
     Expects inputs as:
         (hidden_states, num_tokens_per_expert, selected_experts_indices, top_scores, num_experts)
 
     Args:
         score_before_experts: If True, apply routing scores before expert computation.
+        comm_backend: "deepep" for H100/NVLink Switch, "hybridep" for GB200/NVLink72.
+        hybridep_non_blocking_expert_capacity_factor: None = blocking mode (default).
+            float in (0, 1] = non-blocking mode; controls the fused-permute
+            output tensor size (num_permuted_tokens). Only used with hybridep.
     """
 
-    def __init__(self, score_before_experts: bool = True):
+    def __init__(
+        self,
+        score_before_experts: bool = True,
+        comm_backend: str = "deepep",
+        hybridep_non_blocking_expert_capacity_factor: float | None = None,
+    ):
         super().__init__()
         self._state = None  # State preserved between dispatch and combine
         self.score_before_experts = score_before_experts
+        self.comm_backend = comm_backend
+        self.hybridep_non_blocking_expert_capacity_factor = (
+            hybridep_non_blocking_expert_capacity_factor
+        )
 
     def _token_dispatch(self, mod, inputs, device_mesh):
-        """Dispatch tokens via DeepEP."""
-        from torchtitan.distributed.deepep import dispatch_tokens
-
+        """Dispatch tokens via DeepEP or HybridEP based on configured backend."""
         hidden_states, _, selected_experts_indices, top_scores, num_experts = inputs
         if isinstance(mod.w1, DTensor):
             num_local_experts = mod.w1.to_local().shape[0]
@@ -311,15 +322,31 @@ class DeepEPExpertParallel(BaseExpertParallel):
             num_local_experts = mod.w1.shape[0]
         ep_group = device_mesh.get_group()
 
-        hidden_states, tokens_per_expert, self._state = dispatch_tokens(
-            hidden_states,
-            selected_experts_indices,
-            top_scores,
-            num_local_experts,
-            num_experts,
-            ep_group,
-            score_before_experts=self.score_before_experts,
-        )
+        if self.comm_backend == "hybridep":
+            from torchtitan.distributed.deepep import hybridep
+
+            hidden_states, tokens_per_expert, self._state = hybridep.dispatch_tokens(
+                hidden_states,
+                selected_experts_indices,
+                top_scores,
+                num_local_experts,
+                num_experts,
+                ep_group,
+                score_before_experts=self.score_before_experts,
+                non_blocking_expert_capacity_factor=self.hybridep_non_blocking_expert_capacity_factor,
+            )
+        else:
+            from torchtitan.distributed.deepep import dispatch_tokens
+
+            hidden_states, tokens_per_expert, self._state = dispatch_tokens(
+                hidden_states,
+                selected_experts_indices,
+                top_scores,
+                num_local_experts,
+                num_experts,
+                ep_group,
+                score_before_experts=self.score_before_experts,
+            )
 
         return hidden_states, tokens_per_expert
 
@@ -333,16 +360,23 @@ class DeepEPExpertParallel(BaseExpertParallel):
             )
 
     def _token_combine(self, mod, routed_output, device_mesh):
-        """Combine tokens via DeepEP."""
-        from torchtitan.distributed.deepep import combine_tokens
+        """Combine tokens via DeepEP or HybridEP based on configured backend."""
+        if self.comm_backend == "hybridep":
+            from torchtitan.distributed.deepep import hybridep
 
-        # pyrefly: ignore [bad-argument-type]
-        routed_output = combine_tokens(routed_output, self._state)
+            # pyrefly: ignore [bad-argument-type]
+            routed_output = hybridep.combine_tokens(routed_output, self._state)
+        else:
+            from torchtitan.distributed.deepep import combine_tokens
+
+            # pyrefly: ignore [bad-argument-type]
+            routed_output = combine_tokens(routed_output, self._state)
+
         self._state = None
         return routed_output
 
     def _apply(self, module: nn.Module, device_mesh: DeviceMesh) -> nn.Module:
-        """Apply DeepEP parallelization."""
+        """Apply DeepEP/HybridEP parallelization."""
         return distribute_module(
             module,
             device_mesh,
