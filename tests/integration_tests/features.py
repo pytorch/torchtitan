@@ -573,25 +573,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                 [
                     "--comm.use_torchcomms",
                     "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.context_parallel_degree 2",
                     "--compile.enable",
                 ],
             ],
             "FSDP+TP+PP+compile with torchcomms",
-            "torchcomms_3d_dp+tp+pp+compile",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--comm.use_torchcomms",
-                    "--parallelism.context_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--compile.enable",
-                ],
-            ],
-            "DP+CP+PP+compile with torchcomms",
-            "torchcomms_3d_dp+cp+pp+compile",
+            "torchcomms_3d_dp+tp+cp+compile",
             ngpu=8,
         ),
     ]
