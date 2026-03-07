@@ -34,7 +34,7 @@ def generate():
 
     config = rl_grpo_qwen3_0_6b()
     gen_config = config.generator
-    model_path = config.trainer.hf_assets_path
+    model_path = config.hf_assets_path
 
     # Patch model_spec to use the RL-specific parallelize function.
     # TODO: Switch to canonical Qwen3 parallel plan
