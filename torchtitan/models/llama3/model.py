@@ -37,8 +37,8 @@ class Llama3TransformerBlock(TransformerBlock):
         self.attention = config.attention.build(dim=dim)
         assert config.feed_forward is not None
         self.feed_forward = config.feed_forward.build(dim=dim)
-        self.attention_norm = nn.RMSNorm(dim, eps=config.norm_eps)
-        self.ffn_norm = nn.RMSNorm(dim, eps=config.norm_eps)
+        self.attention_norm = config.attention_norm.build(normalized_shape=dim)
+        self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
 
         if config.depth_init:
             self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
@@ -60,7 +60,7 @@ class Llama3TransformerBlock(TransformerBlock):
 
     def init_weights(self, **kwargs):
         for norm in (self.attention_norm, self.ffn_norm):
-            norm.reset_parameters()
+            norm.init_weights()
         self.attention.init_weights(self.weight_init_std)
         self.feed_forward.init_weights(self.weight_init_std)
 
