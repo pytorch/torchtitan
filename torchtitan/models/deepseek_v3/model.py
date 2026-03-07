@@ -12,7 +12,6 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -163,8 +162,8 @@ class Attention(BaseAttention):
             linear_list.append(self.wq)
 
         for linear in linear_list:
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
 
         self.kv_norm.init_weights()
         if self.q_lora_rank > 0:
