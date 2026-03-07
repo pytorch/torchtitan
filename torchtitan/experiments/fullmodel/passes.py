@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Compiler passes for the compiler toolkit.
+Compiler passes for fullmodel training.
 
 This module provides various compiler passes that can be applied to graph modules
 during compilation. Passes can be selected and configured via job config.
@@ -20,7 +20,6 @@ from typing import Any
 
 import torch
 from torch._functorch.aot_autograd import JointWithDescriptors
-from torch._guards import TracingContext
 from torch._inductor.compile_fx import compile_fx_inner
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
@@ -29,11 +28,8 @@ from torch._inductor.fx_passes.overlap_manual_scheduling import manual_overlap_b
 from torch._inductor.fx_passes.overlap_scheduling import schedule_overlap_bucketing
 from torch.fx.passes.regional_inductor import regional_inductor
 from torch.utils.checkpoint import CheckpointPolicy
-from torchtitan.experiments.compiler_toolkit.cudagraph import (
-    CUDAGraphWrapper,
-    get_static_input_indices,
-)
-from torchtitan.experiments.simple_fsdp.reshard_after_forward import (
+
+from torchtitan.experiments.fullmodel.reshard_after_forward import (
     annotate_fsdp_all_gather,
 )
 from torchtitan.tools.logging import logger
@@ -87,6 +83,13 @@ def cudagraph_pass(
     - For the second run, it will record cudagraph and replay cudagraph.
     - For the following runs, it will replay cudagraph.
     """
+    # Lazy import: cudagraph.py runs init_global_graph_pool() at import time,
+    # which must happen after torch.cuda.set_device(local_rank).
+    from torchtitan.experiments.fullmodel.cudagraph import (
+        CUDAGraphWrapper,
+        get_static_input_indices,
+    )
+
     static_input_indices = get_static_input_indices(gm, is_forward)
     gm.forward = CUDAGraphWrapper(gm.forward, example_inputs, static_input_indices)
     return gm
@@ -118,7 +121,6 @@ DEFAULT_SAC_SAVE_OPS = {
     torch.ops._c10d_functional.reduce_scatter_tensor.default,
     torch.ops.aten.max.default,
     torch._higher_order_ops.flex_attention,
-    torch.ops.torch_attn._varlen_attn,
     torch._higher_order_ops.inductor_compiled_code,
 }
 
@@ -209,7 +211,6 @@ def inductor_decomposition_pass(
     model: torch.nn.Module,
     joint_with_descriptors: JointWithDescriptors,
     forward_inputs: tuple,
-    tracing_context: TracingContext,
 ) -> torch.fx.GraphModule:
     """
     Apply Inductor decompositions to the joint graph.
@@ -223,7 +224,6 @@ def inductor_decomposition_pass(
         model: The parallelized model
         joint_with_descriptors: The joint graph with descriptors
         forward_inputs: Forward input arguments (may be DTensors)
-        tracing_context: The tracing context from original joint graph capture
 
     Returns:
         The joint graph with decompositions applied
@@ -391,16 +391,16 @@ def reassign_to_pg_pass(
     return gm
 
 
-# Registry mapping pass names to pass functions
+# Registry mapping pass names to pass functions (for AOT mode fwd/bwd passes)
 AVAILABLE_COMPILER_PASSES = {
-    "autobucketing_reordering": autobucketing_reordering_pass,
+    "auto_bucketing": autobucketing_reordering_pass,
     "transformer_block_bucketing": transformer_block_bucketing_reordering_pass,
     "regional_inductor": regional_inductor_pass,
     "cudagraph": cudagraph_pass,
     "full_inductor_compilation": full_inductor_compilation_pass,
 }
 
-# Registry for joint custom passes (applied before partitioning)
+# Registry for joint custom passes (applied before partitioning, AOT mode only)
 AVAILABLE_JOINT_PASSES = {
     "inductor_decomposition": inductor_decomposition_pass,
     "fsdp_reshard_after_fwd": fsdp_reshard_after_fwd_pass,

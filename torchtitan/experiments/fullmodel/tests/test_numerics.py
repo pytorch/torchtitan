@@ -3,7 +3,11 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+
 import copy
+import subprocess
+import sys
+import unittest
 
 import torch
 from torch.distributed._composable.fsdp import fully_shard
@@ -11,7 +15,172 @@ from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.distributed import ParallelDims
-from torchtitan.experiments.simple_fsdp.simple_fsdp import data_parallel
+from torchtitan.experiments.fullmodel.simple_fsdp import data_parallel
+
+
+STEPS = 20
+
+
+def run_loss_compare(
+    baseline_module: str,
+    baseline_config: str,
+    test_module: str,
+    test_config: str,
+    baseline_options: str = "",
+    test_options: str = "",
+) -> bool:
+    """Run loss_compare.py comparing a baseline module against a fullmodel module.
+
+    Args:
+        baseline_module: Module name for baseline (e.g., "llama3").
+        baseline_config: Config name for baseline (e.g., "llama3_debugmodel").
+        test_module: Module name for test (e.g., "fullmodel.llama3").
+        test_config: Config name for test (e.g., "fullmodel_llama3_debugmodel").
+        baseline_options: Additional CLI options for the baseline run.
+        test_options: Additional CLI options for the test run.
+
+    Returns:
+        True if the assertion passed, False otherwise.
+    """
+    cmd = [
+        sys.executable,
+        "scripts/loss_compare.py",
+        ".",
+        ".",
+        f"--baseline-module={baseline_module}",
+        f"--baseline-config={baseline_config}",
+        f"--test-module={test_module}",
+        f"--test-config={test_config}",
+        "--assert-equal",
+        f"--steps={STEPS}",
+    ]
+    if baseline_options:
+        cmd.append(f"--baseline-options={baseline_options}")
+    if test_options:
+        cmd.append(f"--test-options={test_options}")
+
+    print(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, text=True)
+    if result.returncode != 0:
+        print("loss_compare.py failed")
+    return result.returncode == 0
+
+
+LLAMA3_PARALLELISM = (
+    "--parallelism.tensor_parallel_degree=2"
+    " --parallelism.data_parallel_shard_degree=4"
+)
+
+
+def _run_llama3_loss_compare(test_options_extra: str = "") -> bool:
+    """Run loss_compare for llama3 vs fullmodel.llama3 with FSDP+TP."""
+    test_options = LLAMA3_PARALLELISM
+    if test_options_extra:
+        test_options += f" {test_options_extra}"
+    return run_loss_compare(
+        baseline_module="llama3",
+        baseline_config="llama3_debugmodel",
+        test_module="fullmodel.llama3",
+        test_config="fullmodel_llama3_debugmodel",
+        baseline_options=LLAMA3_PARALLELISM,
+        test_options=test_options,
+    )
+
+
+DSV3_PARALLELISM = (
+    "--parallelism.data_parallel_shard_degree=4"
+    " --parallelism.tensor_parallel_degree=2"
+    " --parallelism.expert_parallel_degree=2"
+)
+
+
+def _run_deepseek_v3_loss_compare(test_options_extra: str = "") -> bool:
+    """Run loss_compare for deepseek_v3 vs fullmodel.deepseek_v3."""
+    test_options = DSV3_PARALLELISM
+    if test_options_extra:
+        test_options += f" {test_options_extra}"
+    return run_loss_compare(
+        baseline_module="deepseek_v3",
+        baseline_config="deepseek_v3_debugmodel",
+        test_module="fullmodel.deepseek_v3",
+        test_config="fullmodel_deepseek_v3_debugmodel",
+        baseline_options=DSV3_PARALLELISM,
+        test_options=test_options,
+    )
+
+
+class TestFullmodelNumerics(unittest.TestCase):
+    """Test numerics equivalence between fullmodel and FSDP2 eager."""
+
+    def test_llama3_aot_vs_eager(self):
+        self.assertTrue(
+            _run_llama3_loss_compare(test_options_extra="--compile.mode aot"),
+        )
+
+    def test_llama3_auto_bucketing_aot_vs_eager(self):
+        self.assertTrue(
+            _run_llama3_loss_compare(
+                test_options_extra="--compile.mode aot --compile.passes auto_bucketing"
+            ),
+        )
+
+    def test_llama3_manual_bucketing_aot_vs_eager(self):
+        self.assertTrue(
+            _run_llama3_loss_compare(
+                test_options_extra="--compile.mode aot --compile.passes transformer_block_bucketing"
+            ),
+        )
+
+    def test_llama3_cudagraph_aot_vs_eager(self):
+        self.assertTrue(
+            _run_llama3_loss_compare(
+                test_options_extra="--compile.mode aot --compile.passes cudagraph"
+            ),
+        )
+
+    def test_dsv3_aot_vs_eager(self):
+        self.assertTrue(
+            _run_deepseek_v3_loss_compare(test_options_extra="--compile.mode aot"),
+        )
+
+    def test_dsv3_manual_bucketing_aot_vs_eager(self):
+        self.assertTrue(
+            _run_deepseek_v3_loss_compare(
+                test_options_extra="--compile.mode aot --compile.passes transformer_block_bucketing"
+            ),
+        )
+
+    def test_llama3_jit_vs_eager(self):
+        self.assertTrue(
+            _run_llama3_loss_compare(test_options_extra="--compile.mode jit"),
+        )
+
+    def test_llama3_auto_bucketing_jit_vs_eager(self):
+        self.assertTrue(
+            _run_llama3_loss_compare(
+                test_options_extra="--compile.mode jit --compile.passes auto_bucketing"
+            ),
+        )
+
+    def test_llama3_manual_bucketing_jit_vs_eager(self):
+        self.assertTrue(
+            _run_llama3_loss_compare(
+                test_options_extra="--compile.mode jit --compile.passes transformer_block_bucketing"
+            ),
+        )
+
+    def test_dsv3_jit_vs_eager(self):
+        """Test fullmodel.deepseek_v3 matches deepseek_v3 (JIT)."""
+        self.assertTrue(
+            _run_deepseek_v3_loss_compare(test_options_extra="--compile.mode jit"),
+        )
+
+    def test_dsv3_manual_bucketing_jit_vs_eager(self):
+        self.assertTrue(
+            _run_deepseek_v3_loss_compare(
+                test_options_extra="--compile.mode jit --compile.passes transformer_block_bucketing"
+            ),
+        )
 
 
 class TestSimpleFSDP(FSDPTest):
@@ -156,3 +325,7 @@ class TestSimpleFSDP(FSDPTest):
         ):
             assert torch.equal(fsdp2_loss, simple_fsdp_loss)
             assert torch.equal(fsdp2_loss, simple_fsdp_compiled_aot_eager_loss)
+
+
+if __name__ == "__main__":
+    unittest.main()

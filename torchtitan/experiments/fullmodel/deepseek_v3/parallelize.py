@@ -4,9 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
+from torch.fx.traceback import annotate_fn
 
 from torchtitan.components.quantization.float8 import find_float8_linear_config
 from torchtitan.config import (
@@ -20,37 +20,45 @@ from torchtitan.distributed import ParallelDims
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
+from torchtitan.experiments.fullmodel.common_utils import (
+    get_transformer_block_buckets,
+    maybe_disable_eager_ac,
+)
+from torchtitan.experiments.fullmodel.compilation import apply_compile
+from torchtitan.experiments.fullmodel.simple_fsdp import (
+    data_parallel,
+    MixedPrecisionPolicy,
+)
 from torchtitan.models.deepseek_v3.parallelize import apply_moe_ep_tp, apply_non_moe_tp
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
-from ..backend import get_compile_backend_with_passes
 
-from ..simple_fsdp import data_parallel, MixedPrecisionPolicy
+def annotate_deepseekv3() -> None:
+    """Attach annotations to FX graph nodes with ``torch.fx.traceback.annotate_fn``
 
+    - Expert Parallel (EP) annotations: Tags "dispatch", "combine", and "compute"
+      regions in MoE for debugging purposes.
+    - Flex attention annotation: Tags FlexAttentionWrapper.forward with
+      {"compile_with_inductor": "flex_attention"} so the compiler can apply
+      regional inductor pass based on the annontation.
 
-def get_transformer_block_buckets(model) -> list[list[str] | str]:
-    module_list = [
-        model.tok_embeddings,
-        [model.norm, model.output],
-    ]
-    for layer_id, transformer_block in model.layers.items():
-        # [TODO](ruisizhang123) add EP support for transformer block bucketing
-        module_list.append(transformer_block)
+    """
+    from torchtitan.distributed.expert_parallel import ExpertParallel
+    from torchtitan.models.common.attention import FlexAttentionWrapper
+    from torchtitan.models.common.moe.moe import MoE
 
-    def convert_modules_to_fqns(modules, module_to_fqn_mapping):
-        """Convert a (possibly nested) list of modules to FQN strings."""
-        result = []
-        for m in modules:
-            if isinstance(m, list):
-                result.append(convert_modules_to_fqns(m, module_to_fqn_mapping))
-            else:
-                result.append(module_to_fqn_mapping.get(m, None))
-        return result
+    ExpertParallel._token_dispatch = annotate_fn({"EP": "dispatch"})(
+        ExpertParallel._token_dispatch
+    )
+    ExpertParallel._token_combine = annotate_fn({"EP": "combine"})(
+        ExpertParallel._token_combine
+    )
+    MoE.forward = annotate_fn({"EP": "compute"})(MoE.forward)
 
-    module_to_name = {m: n for n, m in model.named_modules()}
-    module_fqns = convert_modules_to_fqns(module_list, module_to_name)
-    return module_fqns
+    FlexAttentionWrapper.forward = annotate_fn(
+        {"compile_with_inductor": "flex_attention"}
+    )(FlexAttentionWrapper.forward)
 
 
 # Adapted from llama4/infra/parallelize.py
@@ -80,6 +88,10 @@ def parallelize_deepseekv3(
         and model.config.layer.attention.attn_backend != "sdpa"
     ):
         raise NotImplementedError("CP support is only supported for SDPA.")
+
+    annotate_deepseekv3()
+
+    maybe_disable_eager_ac(compile_config, ac_config)
 
     if parallel_dims.tp_enabled:
         float8_config = find_float8_linear_config(model_converters.converters)
@@ -180,33 +192,14 @@ def parallelize_deepseekv3(
             "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode
         )
 
-    if compile_config.enable:
-        torch._inductor.config.reorder_for_peak_memory = False
-        torch._dynamo.config.capture_scalar_outputs = True
-
-        match parallelism.fsdp_reshard_after_forward:
-            case "always":
-                fsdp_reshard_after_forward = True
-            case "never":
-                fsdp_reshard_after_forward = False
-            case "default":
-                # For PP, by default do not reshard after forward to avoid per-microbatch
-                # all-gathers, which can be expensive and non-overlapped
-                fsdp_reshard_after_forward = not parallel_dims.pp_enabled
-            case _:
-                raise ValueError(
-                    f"Invalid reshard_after_forward_policy: {parallelism.fsdp_reshard_after_forward}."
-                )
-
-        backend = get_compile_backend_with_passes(
-            compile_config,
-            fsdp_reshard_after_forward,
-            get_transformer_block_buckets(model),
-        )
-        model = torch.compile(
-            model,
-            backend=backend,
-            fullgraph=True,
-        )
+    # Apply compilation based on mode
+    model = apply_compile(
+        model,
+        compile_config=compile_config,
+        parallelism=parallelism,
+        parallel_dims=parallel_dims,
+        dump_folder=dump_folder,
+        transformer_block_buckets=get_transformer_block_buckets(model),
+    )
 
     return model

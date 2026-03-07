@@ -77,14 +77,16 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--module simple_fsdp.deepseek_v3 --config simple_fsdp_deepseek_v3_debugmodel",
+                    "--module fullmodel.deepseek_v3 --config fullmodel_deepseek_v3_debugmodel",
                     "--parallelism.tensor_parallel_degree 1",
                     "--parallelism.expert_parallel_degree 8",
-                    "--compile.graph_passes auto_bucketing",
+                    "--compile.mode jit",
+                    "--compile.backend inductor",
+                    "--compile.passes=auto_bucketing",
                 ]
             ],
-            "[Experimental, non-blocking landing if fails] SimpleFSDP DeepSeekV3 auto_bucketing",
-            "simplefsdp_deepseekv3_auto_bucketing",
+            "[Experimental, non-blocking landing if fails] Fullmodel DeepSeekV3 auto_bucketing",
+            "fullmodel_deepseekv3_auto_bucketing",
             ngpu=8,
         ),
     ]

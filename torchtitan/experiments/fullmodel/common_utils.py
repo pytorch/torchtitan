@@ -5,29 +5,21 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from contextlib import contextmanager
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate
 from torch.utils._pytree import register_pytree_node, tree_map
+
 from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 
-@contextmanager
-def disable_compile(compile_config: CompileConfig):
-    """Context manager to temporarily disable compilation."""
-    original_value = compile_config.enable
-    compile_config.enable = False
-    try:
-        yield
-    finally:
-        compile_config.enable = original_value
-
-
 def parallelize_inputs(parallel_dims, args, kwargs):
+    if not parallel_dims.tp_enabled:
+        return args, kwargs
+
     def to_dtensor(tensor):
         if isinstance(tensor, torch.Tensor):
             return DTensor.from_local(
@@ -103,6 +95,37 @@ def create_extra_fsdp_pg(parallel_dims: ParallelDims) -> None:
 def get_extra_fsdp_pg_name(original_pg_name: str) -> str | None:
     """Look up the extra PG name for a given original FSDP PG name."""
     return _EXTRA_FSDP_PG_REGISTRY.get(original_pg_name)
+
+
+def get_transformer_block_buckets(model) -> list[list[str] | str]:
+    """Get transformer block buckets for manual bucketing passes.
+
+    Works for any model with tok_embeddings, layers (OrderedDict), norm, and output
+    attributes (e.g., Llama3, DeepSeekV3).
+    """
+    # [TODO](ruisizhang123) add EP support for transformer block bucketing
+    module_list = [
+        model.tok_embeddings,
+        [model.norm, model.output],
+    ]
+    for layer_id, transformer_block in model.layers.items():
+        module_list.append(transformer_block)
+
+    def convert_modules_to_fqns(modules, module_to_fqn_mapping):
+        """Convert a (possibly nested) list of modules to FQN strings."""
+        result = []
+        for m in modules:
+            if isinstance(m, list):
+                if fqn_list := convert_modules_to_fqns(m, module_to_fqn_mapping):
+                    result.append(fqn_list)
+            else:
+                if fqn := module_to_fqn_mapping.get(m):
+                    result.append(fqn)
+        return result
+
+    module_to_name = {m: n for n, m in model.named_modules()}
+    module_fqns = convert_modules_to_fqns(module_list, module_to_name)
+    return module_fqns
 
 
 def maybe_disable_eager_ac(
