@@ -577,7 +577,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
                     "--compile.enable",
                 ],
             ],
-            "FSDP+TP+PP+compile with torchcomms",
+            "FSDP+TP+CP+compile with torchcomms",
             "torchcomms_3d_dp+tp+cp+compile",
             ngpu=8,
         ),
