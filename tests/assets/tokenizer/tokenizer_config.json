@@ -60,6 +60,7 @@
     "input_ids",
     "attention_mask"
   ],
+  "chat_template": "{% for msg in messages %}<|im_start|>{{ msg.role }}\n{{ msg.content }}<|im_end|>\n{% endfor %}",
   "model_max_length": 131072,
   "tokenizer_class": "PreTrainedTokenizerFast"
 }

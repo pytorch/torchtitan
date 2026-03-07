@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import os
 import shutil
 import tempfile
@@ -16,7 +17,40 @@ from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
 )
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
+
+
+# ChatML (Chat Markup Language) template format.
+# See: https://platform.openai.com/docs/guides/text-generation#chat-markup-language-chatml
+CHATML_TEMPLATE = (
+    "{% for msg in messages %}"
+    "<|im_start|>{{ msg.role }}\n{{ msg.content }}<|im_end|>\n"
+    "{% endfor %}"
+)
+
+SAMPLE_MESSAGES = [
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hi there"},
+]
+
+ASSETS_TOKENIZER = os.path.join(os.path.dirname(__file__), "..", "assets", "tokenizer")
+
+
+class DummyTokenizer(BaseTokenizer):
+    """Minimal tokenizer for testing BaseTokenizer-level methods."""
+
+    def __init__(self):
+        super().__init__()
+        self.eos_id = 2
+
+    def encode(self, text: str, **kwargs) -> list[int]:
+        return [ord(c) for c in text]
+
+    def decode(self, token_ids: list[int], **kwargs) -> str:
+        return "".join(chr(t) for t in token_ids)
+
+    def get_vocab_size(self) -> int:
+        return 256
 
 
 class TestTokenizerIntegration(unittest.TestCase):
@@ -29,6 +63,32 @@ class TestTokenizerIntegration(unittest.TestCase):
     def tearDown(self):
         """Clean up temporary directory."""
         shutil.rmtree(self.temp_dir)
+
+    def test_works_without_tokenizer_config(self):
+        """Tokenizer works for encode/decode even without tokenizer_config.json."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Copy only tokenizer.json (no tokenizer_config.json)
+            src = os.path.join(ASSETS_TOKENIZER, "tokenizer.json")
+            dst = os.path.join(tmpdir, "tokenizer.json")
+            shutil.copy2(src, dst)
+
+            with self.assertLogs(level="WARNING") as cm:
+                tok = HuggingFaceTokenizer(tokenizer_path=tmpdir)
+
+            # Should have logged a warning
+            self.assertTrue(any("tokenizer_config.json" in msg for msg in cm.output))
+
+            # Basic encode/decode should still work
+            tokens = tok.encode("hello world")
+            self.assertIsInstance(tokens, list)
+            self.assertTrue(len(tokens) > 0)
+
+            text = tok.decode(tokens)
+            self.assertIsInstance(text, str)
+            self.assertIn("hello", text)
+
+            # No chat template should be set
+            self.assertIsNone(tok._chat_template)
 
     def _compare_tokenizers(self, our_tokenizer, reference_tokenizer, test_repo_id):
         """
@@ -305,6 +365,145 @@ for token '{our_token.content}' in {test_repo_id} ({tokenizer_type})",
             self._compare_tokenizers(
                 our_tokenizer, transformers_tokenizer, test_repo_id
             )
+
+
+class TestBaseTokenizerChatTemplate(unittest.TestCase):
+    """Tests for chat template methods on BaseTokenizer."""
+
+    def test_apply_chat_template_renders_chatml(self):
+        tok = DummyTokenizer()
+        tok.set_chat_template(CHATML_TEMPLATE)
+        result = tok.apply_chat_template(SAMPLE_MESSAGES)
+        expected = (
+            "<|im_start|>user\nHello<|im_end|>\n"
+            "<|im_start|>assistant\nHi there<|im_end|>\n"
+        )
+        self.assertEqual(result, expected)
+
+    def test_apply_chat_template_raises_when_no_template(self):
+        tok = DummyTokenizer()
+        with self.assertRaises(ValueError):
+            tok.apply_chat_template(SAMPLE_MESSAGES)
+
+    def test_raise_exception_available_in_template(self):
+        """Models like Llama3.1-Instruct use raise_exception() for input validation.
+
+        Without registering it as a Jinja global, templates that call
+        raise_exception() produce a confusing UndefinedError instead of the
+        intended TemplateError with a descriptive message.
+        """
+        from jinja2.exceptions import TemplateError
+
+        tok = DummyTokenizer()
+        tok.set_chat_template(
+            "{% if messages|length == 0 %}"
+            "{{ raise_exception('messages cannot be empty') }}"
+            "{% else %}OK{% endif %}"
+        )
+        self.assertEqual(tok.apply_chat_template(SAMPLE_MESSAGES), "OK")
+        with self.assertRaises(TemplateError) as ctx:
+            tok.apply_chat_template([])
+        self.assertIn("messages cannot be empty", str(ctx.exception))
+
+    def test_tojson_filter(self):
+        """Test that tojson filter works in templates."""
+        tok = DummyTokenizer()
+        tok.set_chat_template("{{ data | tojson(indent=2) }}")
+        result = tok.apply_chat_template([], data={"key": "value", "num": 42})
+        parsed = json.loads(result)
+        self.assertEqual(parsed, {"key": "value", "num": 42})
+
+    def test_loopcontrols_break(self):
+        """Test that loop controls (break) work in templates."""
+        tok = DummyTokenizer()
+        tok.set_chat_template(
+            "{% for i in range(10) %}{% if i == 3 %}{% break %}{% endif %}{{ i }}{% endfor %}"
+        )
+        result = tok.apply_chat_template([])
+        self.assertEqual(result, "012")
+
+    def test_strftime_now(self):
+        """Test that strftime_now works in templates."""
+        from datetime import datetime
+
+        tok = DummyTokenizer()
+        tok.set_chat_template("{{ strftime_now('%Y') }}")
+        result = tok.apply_chat_template([])
+        self.assertEqual(result, str(datetime.now().year))
+
+
+class TestHuggingFaceChatTemplateAutoLoad(unittest.TestCase):
+    """Tests for HuggingFaceTokenizer auto-loading chat_template from config."""
+
+    def test_auto_loads_chat_template_from_config(self):
+        """The test asset tokenizer_config.json includes a chat_template field."""
+        tok = HuggingFaceTokenizer(tokenizer_path=ASSETS_TOKENIZER)
+        self.assertIsNotNone(tok._chat_template)
+
+    def test_no_chat_template_when_config_lacks_field(self):
+        """When tokenizer_config.json has no chat_template, _chat_template stays None."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Copy tokenizer files from test assets
+            for fname in os.listdir(ASSETS_TOKENIZER):
+                src = os.path.join(ASSETS_TOKENIZER, fname)
+                dst = os.path.join(tmpdir, fname)
+                if os.path.isfile(src):
+                    with open(src, "rb") as f_in, open(dst, "wb") as f_out:
+                        f_out.write(f_in.read())
+
+            # Remove chat_template from the config
+            config_path = os.path.join(tmpdir, "tokenizer_config.json")
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            config.pop("chat_template", None)
+            with open(config_path, "w") as f:
+                json.dump(config, f)
+
+            tok = HuggingFaceTokenizer(tokenizer_path=tmpdir)
+            self.assertIsNone(tok._chat_template)
+
+    def test_auto_loads_chat_template_from_jinja_file(self):
+        """Standalone chat_template.jinja is loaded (e.g. GPT-OSS)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for fname in os.listdir(ASSETS_TOKENIZER):
+                src = os.path.join(ASSETS_TOKENIZER, fname)
+                dst = os.path.join(tmpdir, fname)
+                if os.path.isfile(src):
+                    with open(src, "rb") as f_in, open(dst, "wb") as f_out:
+                        f_out.write(f_in.read())
+
+            # Remove inline template from config, add standalone .jinja file
+            config_path = os.path.join(tmpdir, "tokenizer_config.json")
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            config.pop("chat_template", None)
+            with open(config_path, "w") as f:
+                json.dump(config, f)
+            with open(os.path.join(tmpdir, "chat_template.jinja"), "w") as f:
+                f.write(CHATML_TEMPLATE)
+
+            tok = HuggingFaceTokenizer(tokenizer_path=tmpdir)
+            self.assertIsNotNone(tok._chat_template)
+
+    def test_jinja_file_takes_priority_over_inline(self):
+        """Standalone .jinja file takes priority over inline tokenizer_config.json."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for fname in os.listdir(ASSETS_TOKENIZER):
+                src = os.path.join(ASSETS_TOKENIZER, fname)
+                dst = os.path.join(tmpdir, fname)
+                if os.path.isfile(src):
+                    with open(src, "rb") as f_in, open(dst, "wb") as f_out:
+                        f_out.write(f_in.read())
+
+            # Config already has inline template; add a different .jinja file
+            jinja_template = "{{ messages[0].content }}"
+            with open(os.path.join(tmpdir, "chat_template.jinja"), "w") as f:
+                f.write(jinja_template)
+
+            tok = HuggingFaceTokenizer(tokenizer_path=tmpdir)
+            result = tok.apply_chat_template(SAMPLE_MESSAGES)
+            # Should use the .jinja file (just outputs content), not the inline ChatML
+            self.assertEqual(result, "Hello")
 
 
 instantiate_parametrized_tests(TestTokenizerIntegration)
