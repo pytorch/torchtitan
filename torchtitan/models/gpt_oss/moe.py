@@ -142,6 +142,70 @@ def _run_experts_for_loop(
     return out
 
 
+@torch.library.custom_op("torchtitan::repeat_interleave_with_pad", mutates_args=())
+def _repeat_interleave_with_pad(
+    bias: torch.Tensor,
+    repeats: torch.Tensor,
+    padded_len: int,
+) -> torch.Tensor:
+    if repeats.shape[0] > bias.shape[0]:
+        bias = torch.cat([bias, bias.new_zeros(repeats.shape[0] - bias.shape[0], bias.shape[-1])])
+    expanded = bias.repeat_interleave(repeats, dim=0)
+    out = expanded.new_zeros((padded_len, expanded.shape[-1]))
+    out[: expanded.shape[0]] = expanded
+    return out
+
+
+@_repeat_interleave_with_pad.register_fake
+def _repeat_interleave_with_pad_fake(
+    bias: torch.Tensor,
+    repeats: torch.Tensor,
+    padded_len: int,
+) -> torch.Tensor:
+    return bias.new_empty((padded_len, bias.shape[-1]))
+
+
+@torch.library.custom_op("torchtitan::segment_sum", mutates_args=())
+def _segment_sum(
+    data: torch.Tensor,
+    lengths: torch.Tensor,
+    n_segments: int,
+) -> torch.Tensor:
+    n_valid = lengths.sum()
+    data_trimmed = data[:n_valid]
+    index = torch.arange(n_segments, device=data.device).repeat_interleave(lengths)
+    return data.new_zeros((n_segments, data.shape[-1])).index_add(
+        0, index, data_trimmed,
+    )
+
+
+@_segment_sum.register_fake
+def _segment_sum_fake(
+    data: torch.Tensor,
+    lengths: torch.Tensor,
+    n_segments: int,
+) -> torch.Tensor:
+    return data.new_empty((n_segments, data.shape[-1]))
+
+
+def _repeat_interleave_with_pad_setup_context(ctx, inputs, output):
+    bias, repeats, padded_len = inputs
+    ctx.save_for_backward(repeats)
+    ctx.bias_shape_0 = bias.shape[0]
+
+
+def _repeat_interleave_with_pad_backward(ctx, grad_output):
+    (repeats,) = ctx.saved_tensors
+    n = ctx.bias_shape_0
+    return _segment_sum(grad_output, repeats[:n], n), None, None
+
+
+_repeat_interleave_with_pad.register_autograd(
+    _repeat_interleave_with_pad_backward,
+    setup_context=_repeat_interleave_with_pad_setup_context,
+)
+
+
 def _run_experts_grouped_mm(
     mlp1_weight: torch.Tensor,
     mlp1_bias: torch.Tensor,
@@ -163,16 +227,13 @@ def _run_experts_grouped_mm(
         x.bfloat16(), mlp1_weight.transpose(-2, -1).bfloat16(), offs=offsets
     )
 
-    b1 = torch.cat([mlp1_bias, mlp1_bias.new_zeros(1, mlp1_bias.shape[-1])])
-    b1 = b1.repeat_interleave(num_tokens_per_expert_long, dim=0, output_size=x.shape[0])
+    b1 = _repeat_interleave_with_pad(mlp1_bias, num_tokens_per_expert_long, x.shape[0])
     h = h + b1.to(h.dtype)
 
     h = swiglu(h, limit=swiglu_limit)
     h = torch._grouped_mm(h, mlp2_weight.transpose(-2, -1).bfloat16(), offs=offsets)
 
-    # Apply custom autograd function to scale bias in forward but not in backward
-    b2 = torch.cat([mlp2_bias, mlp2_bias.new_zeros(1, mlp2_bias.shape[-1])])
-    b2 = b2.repeat_interleave(num_tokens_per_expert_long, dim=0, output_size=x.shape[0])
+    b2 = _repeat_interleave_with_pad(mlp2_bias, num_tokens_per_expert_long, x.shape[0])
     b2 = ScaleBiasForward.apply(b2, tp_degree)
     h = h + b2.to(h.dtype)
 
