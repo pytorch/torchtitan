@@ -22,6 +22,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe.moe import MoE
+from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.model import BaseModel
@@ -48,10 +49,11 @@ class TransformerBlock(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        norm_eps: float = 1e-5
         attention: BaseAttention.Config  # required, no default
         feed_forward: FeedForward.Config | None = None
         moe: MoE.Config | None = None
+        attention_norm: RMSNorm.Config
+        ffn_norm: RMSNorm.Config
 
 
 class Decoder(BaseModel):
@@ -66,8 +68,8 @@ class Decoder(BaseModel):
         dim: int
         n_layers: int
         vocab_size: int
-        norm_eps: float = 1e-5
         tok_embeddings: Embedding.Config
+        norm: RMSNorm.Config
         # TODO: Right now RoPE config is not in each TransformerBlock / Attention,
         # so that rope cache, a.k.a. freqs_cis, is shared by all layers. However,
         # it causes redundantly passing backend (complex / cos_sin) to both RoPE
@@ -93,7 +95,7 @@ class Decoder(BaseModel):
                 layer_id=layer_id, dim=config.dim, n_layers=config.n_layers
             )
 
-        self.norm = nn.RMSNorm(config.dim, eps=config.norm_eps)
+        self.norm = config.norm.build(normalized_shape=config.dim)
         self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
 
     def init_weights(
@@ -116,7 +118,7 @@ class Decoder(BaseModel):
             # pyrefly: ignore [not-callable]
             layer.init_weights(buffer_device=buffer_device)
         if self.norm is not None:
-            self.norm.reset_parameters()
+            self.norm.init_weights()
         final_out_std = self.config.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
