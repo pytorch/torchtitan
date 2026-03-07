@@ -84,7 +84,10 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            enforce_eager=True,
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,

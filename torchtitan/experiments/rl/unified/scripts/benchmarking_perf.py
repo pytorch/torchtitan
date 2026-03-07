@@ -230,10 +230,6 @@ class VLLMNativeBenchmark:
                 )
 
             # ── 2. Build engine kwargs (identical to VLLMTorchTitanBenchmark) ──
-            enforce_eager = gen_config.enforce_eager
-            if self.config.use_cuda_graph:
-                enforce_eager = False
-
             engine_kwargs = dict(
                 model=model_path,
                 trust_remote_code=True,
@@ -241,18 +237,12 @@ class VLLMNativeBenchmark:
                 tensor_parallel_size=self.config.tp,
                 distributed_executor_backend="external_launcher",
                 gpu_memory_utilization=gen_config.gpu_memory_limit,
-                enforce_eager=enforce_eager,
+                enforce_eager=gen_config.compile.is_eager,
             )
 
-            compilation_config = {}
-            if compile_enabled:
-                compilation_config["level"] = 3
-            else:
-                compilation_config["level"] = 0
-            if self.config.use_cuda_graph:
-                compilation_config["cudagraph_mode"] = "FULL_AND_PIECEWISE"
-            if compilation_config:
-                engine_kwargs["compilation_config"] = compilation_config
+            vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+            if vllm_compilation_config is not None:
+                engine_kwargs["compilation_config"] = vllm_compilation_config
 
             if gen_config.seed is not None:
                 engine_kwargs["seed"] = gen_config.seed
@@ -402,11 +392,6 @@ class VLLMTorchTitanBenchmark:
             register_model_to_vllm_model_registry(rl_config.model_spec)
 
             # ── 3. Build engine kwargs (mirroring inference_example.py) ──
-            # Use gen_config values as defaults; CLI args override where provided.
-            enforce_eager = gen_config.enforce_eager
-            if self.config.use_cuda_graph:
-                enforce_eager = False
-
             engine_kwargs = dict(
                 model=model_path,
                 trust_remote_code=True,
@@ -414,20 +399,13 @@ class VLLMTorchTitanBenchmark:
                 tensor_parallel_size=self.config.tp,
                 distributed_executor_backend="external_launcher",
                 gpu_memory_utilization=gen_config.gpu_memory_limit,
-                enforce_eager=enforce_eager,
+                enforce_eager=gen_config.compile.is_eager,
                 hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             )
 
-            # Compilation / CUDA graph settings (benchmark-specific)
-            compilation_config = {}
-            if compile_enabled:
-                compilation_config["level"] = 3
-            else:
-                compilation_config["level"] = 0
-            if self.config.use_cuda_graph:
-                compilation_config["cudagraph_mode"] = "FULL_AND_PIECEWISE"
-            if compilation_config:
-                engine_kwargs["compilation_config"] = compilation_config
+            vllm_compilation_config = gen_config.compile.get_vllm_compilation_config()
+            if vllm_compilation_config is not None:
+                engine_kwargs["compilation_config"] = vllm_compilation_config
 
             if gen_config.seed is not None:
                 engine_kwargs["seed"] = gen_config.seed
