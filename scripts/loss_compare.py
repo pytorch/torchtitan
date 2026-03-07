@@ -62,7 +62,7 @@ Example usages:
 
 import argparse
 import os
-import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -74,8 +74,11 @@ from typing import Any
 
 LOG_PREFIX = "[LOSS_COMPARE]"
 
+# TensorBoard scalar tag used to extract loss values
+TB_LOSS_TAG = "loss_metrics/global_avg_loss"
+
 # Fixed options that are always appended
-FIXED_OPTIONS = "--debug.deterministic --debug.seed=42"
+FIXED_OPTIONS = "--debug.deterministic --debug.seed=42 --metrics.enable_tensorboard --metrics.log_freq=1"
 
 
 # =============================================================================
@@ -98,16 +101,6 @@ def get_log_path(scenario: str, output_folder: str | None) -> str:
     return f"/tmp/{scenario}_training.log"
 
 
-def get_loss_file_path(scenario: str, output_folder: str) -> str:
-    """Get loss file path for a scenario."""
-    return f"{output_folder}/{scenario}_losses.txt"
-
-
-def get_clean_log_path(scenario: str, output_folder: str) -> str:
-    """Get cleaned log file path for a scenario."""
-    return f"{output_folder}/{scenario}_training_clean.log"
-
-
 def build_base_command(
     module: str, config: str, options: str, job_dump_folder: str
 ) -> str:
@@ -117,15 +110,6 @@ def build_base_command(
     if options:
         cmd += f" {options}"
     return cmd
-
-
-def strip_ansi_codes(input_file: str, output_file: str) -> None:
-    """Strip ANSI escape codes from log files."""
-    ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
-    with open(input_file, "r") as f_in:
-        with open(output_file, "w") as f_out:
-            for line in f_in:
-                f_out.write(ansi_escape.sub("", line))
 
 
 def run_with_realtime_output(cmd: str, logfile: str, env: dict[str, Any]) -> None:
@@ -157,6 +141,62 @@ def run_with_realtime_output(cmd: str, logfile: str, env: dict[str, Any]) -> Non
 
         if process.returncode != 0:
             raise subprocess.CalledProcessError(process.returncode, cmd)
+
+
+def extract_losses_from_tensorboard(
+    job_dump_folder: str, tb_folder: str
+) -> dict[int, float]:
+    """Extract full-precision loss values from TensorBoard event files.
+
+    The TB directory is cleared before each run (see ``run_training``), so
+    there is exactly one timestamped subdirectory.  We find it and point
+    ``EventAccumulator`` at it directly.
+
+    Args:
+        job_dump_folder: The --job-dump-folder value (e.g., "outputs")
+        tb_folder: The TB subfolder name (e.g., "tb_baseline")
+
+    Returns:
+        Dictionary mapping step number to full-precision loss value.
+    """
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    base_path = os.path.join(job_dump_folder, tb_folder)
+    if not os.path.exists(base_path):
+        raise FileNotFoundError(f"TensorBoard path does not exist: {base_path}")
+
+    # Find the single timestamped subdirectory (e.g., "20260306-1618")
+    subdirs = [
+        d for d in os.listdir(base_path) if os.path.isdir(os.path.join(base_path, d))
+    ]
+    if len(subdirs) == 1:
+        event_dir = os.path.join(base_path, subdirs[0])
+    else:
+        # Should not happen since we clear the directory before each run
+        raise RuntimeError(
+            f"Expected exactly one subdirectory under {base_path}, "
+            f"found {len(subdirs)}: {subdirs}"
+        )
+
+    log_print(f"Loading TensorBoard events from: {event_dir}")
+
+    event_acc = EventAccumulator(event_dir)
+    event_acc.Reload()
+
+    scalar_tag = TB_LOSS_TAG
+    available_tags = event_acc.Tags().get("scalars", [])
+
+    if scalar_tag not in available_tags:  # pyrefly: ignore [not-iterable]
+        raise KeyError(
+            f"Scalar tag '{scalar_tag}' not found in TensorBoard events. "
+            f"Available tags: {available_tags}"
+        )
+
+    scalars = event_acc.Scalars(scalar_tag)
+    losses = {scalar.step: scalar.value for scalar in scalars}
+
+    log_print(f"Extracted {len(losses)} steps from TensorBoard events")
+    return losses
 
 
 def log_and_save(message: str, stats_file: str | None) -> None:
@@ -292,10 +332,12 @@ def build_training_command(
     steps: int,
     enable_seed_checkpoint: bool,
     job_dump_folder: str,
+    tb_folder: str = "tb",
 ) -> str:
     """Build the final training command with all options."""
     base_cmd = build_base_command(module, config, options, job_dump_folder)
     cmd = f"{base_cmd} {FIXED_OPTIONS} --training.steps={steps}"
+    cmd += f" --metrics.save_tb_folder={tb_folder}"
     if enable_seed_checkpoint:
         cmd += (
             " --checkpoint.enable --checkpoint.export_dtype=bfloat16"
@@ -317,6 +359,8 @@ def print_configuration(
     enable_seed_checkpoint: bool,
     job_dump_folder: str,
     baseline_only_mode: bool = False,
+    baseline_tb_folder: str = "tb_baseline",
+    test_tb_folder: str = "tb_test",
 ) -> None:
     """Print configuration summary."""
     if baseline_only_mode:
@@ -338,6 +382,7 @@ def print_configuration(
         steps,
         enable_seed_checkpoint,
         job_dump_folder,
+        tb_folder=baseline_tb_folder,
     )
 
     log_print("Baseline command:")
@@ -352,6 +397,7 @@ def print_configuration(
             steps,
             enable_seed_checkpoint,
             job_dump_folder,
+            tb_folder=test_tb_folder,
         )
         log_print("Test command:")
         log_print(f"  {test_final_cmd}")
@@ -484,6 +530,7 @@ def run_training(
     output_folder: str | None,
     job_dump_folder: str,
     ngpus: int,
+    tb_folder: str = "tb",
 ) -> str:
     """Run training for a specific scenario. Returns the log file path."""
     log_file = get_log_path(scenario, output_folder)
@@ -491,9 +538,21 @@ def run_training(
         f"Running training with {scenario} commit and logging output " f"to {log_file}"
     )
 
+    # Clear stale TensorBoard data so EventAccumulator only sees this run
+    tb_dir = os.path.join(job_dump_folder, tb_folder)
+    if os.path.exists(tb_dir):
+        log_print(f"Removing stale TensorBoard directory: {tb_dir}")
+        shutil.rmtree(tb_dir)
+
     # Build the final command
     full_cmd = build_training_command(
-        module, config, options, steps, enable_seed_checkpoint, job_dump_folder
+        module,
+        config,
+        options,
+        steps,
+        enable_seed_checkpoint,
+        job_dump_folder,
+        tb_folder=tb_folder,
     )
 
     env = os.environ.copy()
@@ -509,24 +568,6 @@ def run_training(
 # =============================================================================
 
 
-def extract_losses_from_log(log_file: str) -> dict[int, float]:
-    """Extract step and loss pairs from a log file."""
-    losses = {}
-    step_loss_pattern = re.compile(r"step:\s*(\d+)\s*loss:\s*(\d+\.\d+)")
-    ansi_escape = re.compile(r"\x1b\[[0-9;]*m")
-
-    with open(log_file, "r") as f:
-        for line in f:
-            # Strip ANSI codes before matching
-            clean_line = ansi_escape.sub("", line)
-            match = step_loss_pattern.search(clean_line)
-            if match:
-                step, loss = match.groups()
-                losses[int(step)] = float(loss)
-
-    return losses
-
-
 def read_losses_from_file(loss_file: str) -> dict[int, float]:
     """Read losses from a processed loss file."""
     losses = {}
@@ -540,6 +581,8 @@ def read_losses_from_file(loss_file: str) -> dict[int, float]:
 def export_losses_to_file(losses: dict[int, float], export_path: str) -> None:
     """Export losses to file and stdout.
 
+    Uses repr() for float formatting to preserve full round-trip precision.
+
     Args:
         losses: Dictionary mapping step numbers to loss values
         export_path: Path to export file
@@ -550,7 +593,7 @@ def export_losses_to_file(losses: dict[int, float], export_path: str) -> None:
     with open(export_path, "w") as f:
         for step in sorted(losses.keys()):
             loss = losses[step]
-            line = f"{step} {loss}"
+            line = f"{step} {repr(loss)}"
             f.write(line + "\n")
 
     log_print(f"Exported {len(losses)} loss values:")
@@ -559,38 +602,10 @@ def export_losses_to_file(losses: dict[int, float], export_path: str) -> None:
     # Output to stdout in same format
     for step in sorted(losses.keys()):
         loss = losses[step]
-        print(f"{step} {loss}")
+        print(f"{step} {repr(loss)}")
 
     log_print()
     log_print(f"Losses saved to: {export_path}")
-
-
-def extract_loss_data(output_folder: str | None) -> None:
-    """Extract loss data from logs."""
-    if not output_folder:
-        return
-
-    log_print("Cleaning ANSI escape codes from log files...")
-
-    # Strip ANSI escape codes from log files before processing
-    scenarios = ["baseline", "test"]
-    for scenario in scenarios:
-        strip_ansi_codes(
-            get_log_path(scenario, output_folder),
-            get_clean_log_path(scenario, output_folder),
-        )
-
-    # Extract step and loss from cleaned logs
-    step_loss_pattern = re.compile(r"step:\s*(\d+)\s*loss:\s*(\d+\.\d+)")
-
-    for scenario in scenarios:
-        with open(get_clean_log_path(scenario, output_folder), "r") as f_in:
-            with open(get_loss_file_path(scenario, output_folder), "w") as f_out:
-                for line in f_in:
-                    match = step_loss_pattern.search(line)
-                    if match:
-                        step, loss = match.groups()
-                        f_out.write(f"{step} {loss}\n")
 
 
 def generate_step_comparison(
@@ -655,7 +670,9 @@ def generate_summary_statistics(
 
 
 def perform_loss_analysis(
-    baseline_log: str, test_log: str, stats_file: str | None
+    baseline_losses: dict[int, float],
+    test_losses: dict[int, float],
+    stats_file: str | None,
 ) -> None:
     """Perform loss comparison analysis."""
     # Initialize stats file and add header
@@ -663,17 +680,12 @@ def perform_loss_analysis(
     log_and_save(f"{LOG_PREFIX} LOSS COMPARISON ANALYSIS", stats_file)
     log_and_save(f"{LOG_PREFIX} ==========================================", stats_file)
 
-    # Extract losses directly from log files
-    baseline_losses = extract_losses_from_log(baseline_log)
-    test_losses = extract_losses_from_log(test_log)
-
     # Check if losses were extracted successfully
     name_losses = [("baseline", baseline_losses), ("test", test_losses)]
     for name, losses in name_losses:
         if not losses:
             log_and_save(
-                f"{LOG_PREFIX} Warning: Could not extract loss data from "
-                f"{name} training log.",
+                f"{LOG_PREFIX} Warning: No loss data for {name}.",
                 stats_file,
             )
             log_and_save(
@@ -689,50 +701,41 @@ def perform_loss_analysis(
 
 
 def assert_losses_equal(
-    baseline_log: str,
-    test_log: str | None = None,
+    baseline_losses: dict[int, float],
+    test_losses: dict[int, float] | None = None,
     import_result: str | None = None,
 ) -> None:
     """Assert that losses are equal between baseline and test using unittest.
 
     Args:
-        baseline_log: Path to baseline training log file.
-        test_log: Path to test training log file. If None, only compares
-            baseline against imported losses (baseline-only mode).
+        baseline_losses: Baseline loss values extracted from TensorBoard.
+        test_losses: Test loss values extracted from TensorBoard. If None,
+            only compares baseline against imported losses (baseline-only mode).
         import_result: Path to imported losses file for comparison.
 
-    In baseline-only mode (test_log is None), import_result must be provided.
+    In baseline-only mode (test_losses is None), import_result must be provided.
     """
     log_print("Asserting losses are equal...")
-    log_print(f"Baseline log: {baseline_log}")
-    if test_log:
-        log_print(f"Test log: {test_log}")
+    log_print(f"Baseline: {len(baseline_losses)} steps")
+    if test_losses is not None:
+        log_print(f"Test: {len(test_losses)} steps")
     else:
-        log_print("Test log: None (baseline-only mode)")
+        log_print("Test: None (baseline-only mode)")
     if import_result:
         log_print(f"Import file: {import_result}")
 
     # Validate baseline-only mode has import_result
-    if test_log is None and import_result is None:
+    if test_losses is None and import_result is None:
         log_print("Error: baseline-only mode requires --import-result")
         sys.exit(1)
 
-    # Extract losses from baseline log
-    baseline_losses = extract_losses_from_log(baseline_log)
-    log_print(f"Extracted {len(baseline_losses)} steps from baseline log")
-
     if not baseline_losses:
-        log_print("Error: No losses found in baseline log")
+        log_print("Error: No losses found in baseline")
         sys.exit(1)
 
-    # Extract losses from test log if provided
-    test_losses = None
-    if test_log:
-        test_losses = extract_losses_from_log(test_log)
-        log_print(f"Extracted {len(test_losses)} steps from test log")
-        if not test_losses:
-            log_print("Error: No losses found in test log")
-            sys.exit(1)
+    if test_losses is not None and not test_losses:
+        log_print("Error: No losses found in test")
+        sys.exit(1)
 
     # Load imported losses if provided
     imported_losses = None
@@ -779,7 +782,7 @@ def assert_losses_equal(
                         baseline_loss,
                         test_loss,
                         f"Loss mismatch at step {step}: "
-                        f"baseline={baseline_loss}, test={test_loss}",
+                        f"baseline={repr(baseline_loss)}, test={repr(test_loss)}",
                     )
 
                 # Compare baseline vs imported (if provided)
@@ -789,7 +792,8 @@ def assert_losses_equal(
                         baseline_loss,
                         imported_loss,
                         f"Loss mismatch at step {step}: "
-                        f"baseline={baseline_loss}, imported={imported_loss}",
+                        f"baseline={repr(baseline_loss)}, "
+                        f"imported={repr(imported_loss)}",
                     )
 
     # Run the test
@@ -810,34 +814,19 @@ def assert_losses_equal(
         )
         for step in sorted(baseline_losses.keys()):
             loss = baseline_losses[step]
-            print(f"{step} {loss}")
+            print(f"{step} {repr(loss)}")
         log_print()
         sys.exit(1)
     else:
-        if test_log and import_result:
+        if test_losses is not None and import_result:
             log_print(
                 "All losses are equal (baseline, test, and imported). "
                 "Assertion passed!"
             )
-        elif test_log:
+        elif test_losses is not None:
             log_print("All losses are equal (baseline and test). Assertion passed!")
         else:
             log_print("All losses are equal (baseline and imported). Assertion passed!")
-
-
-def cleanup_temp_files(output_folder: str | None) -> None:
-    """Cleanup temporary files."""
-    if not output_folder:
-        return
-
-    scenarios = ["baseline", "test"]
-    for scenario in scenarios:
-        for temp_file in [
-            get_loss_file_path(scenario, output_folder),
-            get_clean_log_path(scenario, output_folder),
-        ]:
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
 
 
 # =============================================================================
@@ -1039,6 +1028,7 @@ def run_scenario(
     output_folder: str | None,
     job_dump_folder: str,
     ngpus: int,
+    tb_folder: str = "tb",
 ) -> str:
     """Run training for a specific scenario (baseline or test).
 
@@ -1053,6 +1043,7 @@ def run_scenario(
         output_folder: Output folder for results
         job_dump_folder: Job dump folder path
         ngpus: Number of GPUs to use
+        tb_folder: TensorBoard subfolder name for this scenario
 
     Returns:
         Path to the log file
@@ -1069,6 +1060,7 @@ def run_scenario(
         output_folder,
         job_dump_folder,
         ngpus,
+        tb_folder=tb_folder,
     )
 
     return log_file
@@ -1096,6 +1088,11 @@ def main() -> None:
     # Setup environment
     stats_file = setup_output_directory(args.output_folder)
     enable_seed_checkpoint = not args.no_seed_checkpoint
+
+    # Define per-scenario TensorBoard folder names
+    baseline_tb_folder = "tb_baseline"
+    test_tb_folder = "tb_test"
+
     print_configuration(
         args.baseline_commit,
         args.test_commit,
@@ -1109,6 +1106,8 @@ def main() -> None:
         enable_seed_checkpoint,
         args.job_dump_folder,
         baseline_only_mode,
+        baseline_tb_folder=baseline_tb_folder,
+        test_tb_folder=test_tb_folder,
     )
 
     # Check if git working directory is clean before switching commits
@@ -1144,10 +1143,17 @@ def main() -> None:
             args.output_folder,
             args.job_dump_folder,
             args.baseline_ngpus,
+            tb_folder=baseline_tb_folder,
+        )
+
+        # Extract baseline losses from TensorBoard (full precision)
+        baseline_losses = extract_losses_from_tensorboard(
+            args.job_dump_folder, baseline_tb_folder
         )
 
         # Run test training (skip in baseline-only mode)
         test_log = None
+        test_losses = None
         if not baseline_only_mode:
             test_log = run_scenario(
                 "test",
@@ -1160,30 +1166,31 @@ def main() -> None:
                 args.output_folder,
                 args.job_dump_folder,
                 args.test_ngpus,
+                tb_folder=test_tb_folder,
+            )
+
+            # Extract test losses from TensorBoard (full precision)
+            test_losses = extract_losses_from_tensorboard(
+                args.job_dump_folder, test_tb_folder
             )
         log_print()
 
         # Assert losses are equal if requested
         if args.assert_equal:
-            # Pass test_log (None in baseline-only mode) and import_result
-            assert_losses_equal(baseline_log, test_log, args.import_result)
+            assert_losses_equal(baseline_losses, test_losses, args.import_result)
 
             # Export losses if requested (only after assertion passes)
             if args.export_result:
-                # Extract baseline losses (they equal test losses since assertion passed)
-                baseline_losses = extract_losses_from_log(baseline_log)
                 export_losses_to_file(baseline_losses, args.export_result)
 
         # Export losses in baseline-only mode without assertion
         # (when --export-result is used with identical settings)
         if args.export_result and baseline_only_mode and not args.assert_equal:
-            baseline_losses = extract_losses_from_log(baseline_log)
             export_losses_to_file(baseline_losses, args.export_result)
 
         # Analysis and reporting (skip in baseline-only mode as there's no test to compare)
-        if not baseline_only_mode and test_log is not None:
-            perform_loss_analysis(baseline_log, test_log, stats_file)
-            cleanup_temp_files(args.output_folder)
+        if not baseline_only_mode and test_losses is not None:
+            perform_loss_analysis(baseline_losses, test_losses, stats_file)
         print_completion_summary(
             args.output_folder, enable_seed_checkpoint, baseline_only_mode
         )
