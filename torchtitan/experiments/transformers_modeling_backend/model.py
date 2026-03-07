@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import importlib
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 import torch
 from torch import nn
@@ -105,6 +106,29 @@ class HFTransformerModel(BaseModel):
             self._configure_hf_attention(attn_implementation)
 
             self._initialize_dense_attributes(titan_dense_config)
+
+        def _replace(self, **overrides):
+            """Override to use ``copy.copy()`` instead of ``dataclasses.replace()``.
+
+            ``dataclasses.replace()`` re-invokes ``__init__``, which is
+            incompatible with the custom ``__init__`` here (it expects
+            ``titan_dense_config`` and calls ``PretrainedConfig.__init__``).
+            A shallow copy preserves all dynamically-set HF attributes.
+            """
+            clone = copy.copy(self)
+            for f in fields(self):
+                if f.init:
+                    continue
+                if f.name in overrides:
+                    setattr(clone, f.name, overrides[f.name])
+                elif hasattr(self, f.name):
+                    setattr(clone, f.name, getattr(self, f.name))
+                else:
+                    raise TypeError(
+                        f"{type(self).__name__} field '{f.name}' "
+                        f"(init=False) was not provided via build()"
+                    )
+            return clone
 
         def _initialize_dense_attributes(self, titan_dense_config):
             """Initialize all dense model attributes."""
