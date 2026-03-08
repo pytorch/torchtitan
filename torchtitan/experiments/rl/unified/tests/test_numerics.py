@@ -21,23 +21,20 @@ Usage:
         -m pytest torchtitan/experiments/rl/unified/tests/test_numerics.py -v -s
 """
 
-import glob
 import os
 from dataclasses import dataclass
 
 import pytest
 import torch
-from safetensors.torch import load_file as load_safetensors
 
 vllm = pytest.importorskip("vllm")
 
-from torch.distributed._tensor import DTensor
-from torchtitan.experiments.rl.unified.infra.parallelize import parallelize_qwen3
+from torch.distributed._tensor import DTensor, Replicate, Shard
+from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
 from torchtitan.experiments.rl.unified.models.vllm_wrapper import (
     TorchTitanVLLMModelWrapper,
 )
-from torchtitan.models.qwen3 import Qwen3Model, Qwen3ModelArgs
-from torchtitan.models.qwen3.model.state_dict_adapter import Qwen3StateDictAdapter
+from torchtitan.models.qwen3 import model_registry
 from vllm.config import set_current_vllm_config
 from vllm.distributed import (
     init_distributed_environment,
@@ -201,16 +198,35 @@ class SetupContext:
     world_size: int
 
 
+def get_model_flavor(checkpoint_path: str) -> str:
+    """Extract model flavor from checkpoint path (e.g., 'Qwen/Qwen3-0.6B' → '0.6B').
+
+    Falls back to '0.6B' if the flavor cannot be determined.
+    """
+    basename = os.path.basename(checkpoint_path.rstrip("/"))
+    if "Qwen3" in basename:
+        parts = basename.split("-", 1)
+        if len(parts) == 2:
+            return parts[1]
+    return "0.6B"
+
+
 def setup_models_and_inputs(
     model_checkpoint_path: str = DEFAULT_MODEL_CHECKPOINT,
     seq_len: int = 8,
 ) -> SetupContext:
     """Set up vLLM native and TorchTitan models with weights from the same checkpoint."""
-    ensure_distributed_initialized()
     world_size, rank, local_rank = get_distributed_info()
     device = f"cuda:{local_rank}"
 
-    # Create vLLM config
+    # Resolve HF model ID to local path for compatibility with both
+    # vLLM native model loader and TorchTitan's DCP-based weight loading.
+    if not os.path.isdir(model_checkpoint_path):
+        from huggingface_hub import snapshot_download
+
+        model_checkpoint_path = snapshot_download(model_checkpoint_path)
+
+    # Create vLLM config first (no distributed initialization needed)
     engine_args = EngineArgs(
         model=model_checkpoint_path,
         skip_tokenizer_init=True,
@@ -228,7 +244,6 @@ def setup_models_and_inputs(
     num_kv_heads = hf_config.num_key_value_heads
     num_layers = hf_config.num_hidden_layers
     head_dim = getattr(hf_config, "head_dim", model_dim // num_heads)
-    hidden_dim = hf_config.intermediate_size
     vocab_size = hf_config.vocab_size
 
     if rank == 0:
@@ -237,34 +252,24 @@ def setup_models_and_inputs(
             f"heads={num_heads}, kv_heads={num_kv_heads}, head_dim={head_dim}, TP={world_size}"
         )
 
-    model_args = Qwen3ModelArgs(
-        dim=model_dim,
-        n_layers=num_layers,
-        n_heads=num_heads,
-        n_kv_heads=num_kv_heads,
-        vocab_size=vocab_size,
-        head_dim=head_dim,
-        hidden_dim=hidden_dim,
-        norm_eps=hf_config.rms_norm_eps,
-        rope_theta=hf_config.rope_theta,
-        max_seq_len=seq_len * 2,
-        qk_norm=getattr(hf_config, "qk_norm", True),
-        depth_init=False,
-        attn_type="sdpa",
-        attn_mask_type="causal",
-    )
+    # Create ModelSpec from registry, matching simple_grpo.py
+    model_flavor = get_model_flavor(model_checkpoint_path)
+    model_spec = model_registry(model_flavor)
+    # Patch to use RL-specific parallelize function (same as simple_grpo.py)
+    model_spec.parallelize_fn = parallelize_qwen3
 
-    # Load vLLM native model
-    loader = get_model_loader(vllm_config.load_config)
-    vllm_native_model = loader.load_model(vllm_config, vllm_config.model_config)
-
-    # Create TorchTitan model with vLLM wrapper
+    # vLLM config must be set before distributed init (initialize_model_parallel
+    # calls get_current_vllm_config), model loading, and wrapper creation.
     with set_current_vllm_config(vllm_config):
+        ensure_distributed_initialized()
+
+        # Load vLLM native model
+        loader = get_model_loader(vllm_config.load_config)
+        vllm_native_model = loader.load_model(vllm_config, vllm_config.model_config)
+
+        # Create TorchTitan model with vLLM wrapper (weights loaded during init)
         torchtitan_vllm_model = TorchTitanVLLMModelWrapper(
-            model_cls=Qwen3Model,
-            model_args=model_args,
-            state_dict_adapter=Qwen3StateDictAdapter,
-            parallelize_fn=parallelize_qwen3,
+            model_spec=model_spec,
             vllm_config=vllm_config,
         )
     torchtitan_vllm_model.to(device=device, dtype=torch.bfloat16)
@@ -272,29 +277,6 @@ def setup_models_and_inputs(
 
     # Replace vLLM's RMSNorm with torch.nn.RMSNorm for numerical equivalence
     replace_vllm_rmsnorm_with_torch(vllm_native_model, rank)
-
-    # Load weights into TorchTitan model from the same checkpoint
-    def load_hf_weights_iter(checkpoint_path: str):
-        if os.path.isdir(checkpoint_path):
-            model_path = checkpoint_path
-        else:
-            from huggingface_hub import snapshot_download
-
-            model_path = snapshot_download(checkpoint_path)
-
-        safetensor_files = glob.glob(os.path.join(model_path, "*.safetensors"))
-        if not safetensor_files:
-            raise ValueError(f"No safetensors files found in {model_path}")
-
-        for st_file in sorted(safetensor_files):
-            weights = load_safetensors(st_file)
-            yield from weights.items()
-
-    loaded_params = torchtitan_vllm_model.load_weights(
-        load_hf_weights_iter(model_checkpoint_path)
-    )
-    if rank == 0:
-        print(f"Loaded {len(loaded_params)} parameters into TorchTitan model")
 
     # Create inputs
     torch.manual_seed(42)
@@ -428,12 +410,8 @@ class TestVLLMTorchTitan:
 
     @torch.inference_mode()
     def test_forward_attention(self, ctx: SetupContext):
-        """Test attention module outputs match (TP=1 only)."""
+        """Test attention module outputs match."""
         world_size, rank, local_rank = get_distributed_info()
-
-        if world_size > 1:
-            pytest.skip("Skipped for TP > 1")
-
         device = f"cuda:{local_rank}"
         vllm_attn = ctx.vllm_native_model.model.layers[0].self_attn
         tt_attn = ctx.torchtitan_vllm_model.model.layers["0"].attention
@@ -454,26 +432,56 @@ class TestVLLMTorchTitan:
         # TorchTitan attention forward
         reset_kv_caches(ctx.vllm_config, ctx.num_kv_heads_local, ctx.head_dim, device)
         with set_forward_context(ctx.attn_metadata, ctx.vllm_config):
-            rope_cache = ctx.torchtitan_vllm_model.model.rope_cache
-            if isinstance(rope_cache, DTensor):
-                rope_cache = rope_cache.to_local()
-            tt_out = tt_attn(
-                attn_input.unsqueeze(0).clone(),
-                rope_cache,
-                None,
-                attn_positions.unsqueeze(0),
-            )
-            tt_out = (
-                tt_out.full_tensor().squeeze(0)
-                if isinstance(tt_out, DTensor)
-                else tt_out.squeeze(0)
-            )
+            freqs_cis = ctx.torchtitan_vllm_model.model.freqs_cis
 
+            if world_size > 1:
+                # With TP, the attention module has PrepareModuleInput that expects
+                # DTensor inputs: hidden_states as Shard(1), freqs_cis and positions
+                # as Replicate.
+                tp_mesh = ctx.torchtitan_vllm_model.parallel_dims.get_mesh("tp")
+
+                attn_input_dt = DTensor.from_local(
+                    attn_input.unsqueeze(0).clone(),
+                    device_mesh=tp_mesh,
+                    placements=[Replicate()],
+                ).redistribute(placements=[Shard(1)])
+
+                if not isinstance(freqs_cis, DTensor):
+                    freqs_cis = DTensor.from_local(
+                        freqs_cis, device_mesh=tp_mesh, placements=[Replicate()]
+                    )
+
+                positions_dt = DTensor.from_local(
+                    attn_positions.unsqueeze(0),
+                    device_mesh=tp_mesh,
+                    placements=[Replicate()],
+                )
+
+                tt_out = tt_attn(attn_input_dt, freqs_cis, None, positions_dt)
+                tt_out = tt_out.full_tensor().squeeze(0)
+            else:
+                if isinstance(freqs_cis, DTensor):
+                    freqs_cis = freqs_cis.to_local()
+                tt_out = tt_attn(
+                    attn_input.unsqueeze(0).clone(),
+                    freqs_cis,
+                    None,
+                    attn_positions.unsqueeze(0),
+                )
+                tt_out = (
+                    tt_out.full_tensor().squeeze(0)
+                    if isinstance(tt_out, DTensor)
+                    else tt_out.squeeze(0)
+                )
+
+        # TP > 1 has larger numerical diffs due to different computation
+        # order (DTensor collectives vs fused vLLM matmuls)
+        atol = 1e-3 if world_size == 1 else 1e-2
         torch.testing.assert_close(
             vllm_out.float(),
             tt_out.float(),
-            rtol=1e-3,
-            atol=1e-3,
+            rtol=atol,
+            atol=atol,
             msg="Attention output mismatch",
         )
 
@@ -505,12 +513,12 @@ class TestVLLMTorchTitan:
                 else tt_embeddings
             )
 
-            rope_cache = ctx.torchtitan_vllm_model.model.rope_cache
-            if isinstance(rope_cache, DTensor):
-                rope_cache = rope_cache.to_local()
+            freqs_cis = ctx.torchtitan_vllm_model.model.freqs_cis
+            if isinstance(freqs_cis, DTensor):
+                freqs_cis = freqs_cis.to_local()
 
             h = ctx.torchtitan_vllm_model.model.layers["0"](
-                tt_embeddings.clone(), rope_cache, None, positions_2d
+                tt_embeddings.clone(), freqs_cis, None, positions_2d
             )
             tt_layer0 = h.full_tensor() if isinstance(h, DTensor) else h
 

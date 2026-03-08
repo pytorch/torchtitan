@@ -25,23 +25,22 @@ Example usages:
 
 2. Compare losses between two commits with custom config and options:
    loss_compare.py main my_branch \
-       --baseline-config='./custom.toml' \
+       --baseline-config='llama3_8b' \
        --baseline-options='--parallelism.tensor_parallel_degree=2' \
        --output-folder=my_comparison
 
-3. Compare commits with the same command but skip seed checkpoint for
+3. Compare losses between two commits using a different model module:
+   loss_compare.py main my_branch \
+       --baseline-module='qwen3' --baseline-config='qwen3_debugmodel'
+
+4. Compare commits with the same command but skip seed checkpoint for
    faster execution:
    loss_compare.py main my_branch --no-seed-checkpoint
 
-4. Compare the same commit with different training configurations:
+5. Compare the same commit with different training configurations:
    loss_compare.py . . \
        --baseline-options='--parallelism.dp=1' \
        --test-options='--parallelism.dp=2'
-
-5. Compare with different train files:
-   loss_compare.py main my_branch \
-       --baseline-train-file='torchtitan.train' \
-       --test-train-file='torchtitan.custom_train'
 
 6. Assert that losses are equal (for CI testing):
    loss_compare.py main my_branch --assert-equal
@@ -51,7 +50,7 @@ Example usages:
 
 8. Run baseline only with specific config and compare against imported losses:
    loss_compare.py . . --assert-equal --import-result=expected_losses.txt \
-       --baseline-config='./custom.toml'
+       --baseline-config='llama3_8b'
 
 9. Run baseline only and export the losses (no comparison):
    loss_compare.py . . --export-result=baseline_losses.txt
@@ -110,11 +109,11 @@ def get_clean_log_path(scenario: str, output_folder: str) -> str:
 
 
 def build_base_command(
-    config_file: str, train_file: str, options: str, job_dump_folder: str
+    module: str, config: str, options: str, job_dump_folder: str
 ) -> str:
-    """Build the base command from config file, train file, and options."""
-    cmd = f"TRAIN_FILE='{train_file}' CONFIG_FILE='{config_file}' ./run_train.sh"
-    cmd += f" --job.dump_folder={job_dump_folder}"
+    """Build the base command from module, config, and options."""
+    cmd = f"MODULE='{module}' CONFIG='{config}' ./run_train.sh"
+    cmd += f" --dump_folder={job_dump_folder}"
     if options:
         cmd += f" {options}"
     return cmd
@@ -176,11 +175,11 @@ def log_and_save(message: str, stats_file: str | None) -> None:
 def validate_arguments(
     baseline_commit: str,
     test_commit: str,
+    baseline_module: str,
     baseline_config: str,
-    baseline_train_file: str,
     baseline_options: str,
+    test_module: str,
     test_config: str,
-    test_train_file: str,
     test_options: str,
     steps: int,
     assert_equal: bool,
@@ -196,11 +195,11 @@ def validate_arguments(
     # Validate that we are comparing different settings
     commits_differ = baseline_commit != test_commit
     configs_differ = baseline_config != test_config
-    train_files_differ = baseline_train_file != test_train_file
+    modules_differ = baseline_module != test_module
     options_differ = baseline_options != test_options
 
     all_identical = not (
-        commits_differ or configs_differ or train_files_differ or options_differ
+        commits_differ or configs_differ or modules_differ or options_differ
     )
 
     # Determine baseline-only mode:
@@ -220,8 +219,7 @@ def validate_arguments(
         log_print("Error: All settings are identical")
         log_print("       Cannot compare identical configurations")
         log_print(
-            "       Please provide different commits, configs, train files, "
-            "or options"
+            "       Please provide different commits, configs, modules, or options"
         )
         log_print(
             "       Or use --import-result with --assert-equal "
@@ -288,15 +286,15 @@ def setup_output_directory(output_folder: str | None) -> str | None:
 
 
 def build_training_command(
-    config_file: str,
-    train_file: str,
+    module: str,
+    config: str,
     options: str,
     steps: int,
     enable_seed_checkpoint: bool,
     job_dump_folder: str,
 ) -> str:
     """Build the final training command with all options."""
-    base_cmd = build_base_command(config_file, train_file, options, job_dump_folder)
+    base_cmd = build_base_command(module, config, options, job_dump_folder)
     cmd = f"{base_cmd} {FIXED_OPTIONS} --training.steps={steps}"
     if enable_seed_checkpoint:
         cmd += (
@@ -309,11 +307,11 @@ def build_training_command(
 def print_configuration(
     baseline_commit: str,
     test_commit: str,
+    baseline_module: str,
     baseline_config: str,
-    baseline_train_file: str,
     baseline_options: str,
+    test_module: str,
     test_config: str,
-    test_train_file: str,
     test_options: str,
     steps: int,
     enable_seed_checkpoint: bool,
@@ -334,8 +332,8 @@ def print_configuration(
 
     # Build and display final commands
     baseline_final_cmd = build_training_command(
+        baseline_module,
         baseline_config,
-        baseline_train_file,
         baseline_options,
         steps,
         enable_seed_checkpoint,
@@ -348,8 +346,8 @@ def print_configuration(
 
     if not baseline_only_mode:
         test_final_cmd = build_training_command(
+            test_module,
             test_config,
-            test_train_file,
             test_options,
             steps,
             enable_seed_checkpoint,
@@ -452,8 +450,8 @@ def restore_original_commit(original_commit: str) -> None:
 
 def create_seed_checkpoint(
     enable_seed_checkpoint: bool,
-    config_file: str,
-    train_file: str,
+    module: str,
+    config: str,
     output_folder: str | None,
     job_dump_folder: str,
 ) -> None:
@@ -464,8 +462,8 @@ def create_seed_checkpoint(
 
         # Build seed checkpoint command
         seed_cmd = (
-            f"TRAIN_FILE='{train_file}' CONFIG_FILE='{config_file}' "
-            f"./run_train.sh --job.dump_folder={job_dump_folder} "
+            f"MODULE='{module}' CONFIG='{config}' "
+            f"./run_train.sh --dump_folder={job_dump_folder} "
             f"--checkpoint.create_seed_checkpoint "
             f"--checkpoint.enable {FIXED_OPTIONS}"
         )
@@ -478,8 +476,8 @@ def create_seed_checkpoint(
 
 def run_training(
     scenario: str,
-    config_file: str,
-    train_file: str,
+    module: str,
+    config: str,
     options: str,
     steps: int,
     enable_seed_checkpoint: bool,
@@ -495,7 +493,7 @@ def run_training(
 
     # Build the final command
     full_cmd = build_training_command(
-        config_file, train_file, options, steps, enable_seed_checkpoint, job_dump_folder
+        module, config, options, steps, enable_seed_checkpoint, job_dump_folder
     )
 
     env = os.environ.copy()
@@ -801,6 +799,19 @@ def assert_losses_equal(
 
     if not result.wasSuccessful():
         log_print("Loss assertion failed!")
+        log_print()
+        log_print(
+            "Actual baseline losses (can be used to update import file if "
+            "the loss curve change is expected):"
+        )
+        log_print(
+            "Note that you should verify the loss curve change is not a "
+            "regression first!!!"
+        )
+        for step in sorted(baseline_losses.keys()):
+            loss = baseline_losses[step]
+            print(f"{step} {loss}")
+        log_print()
         sys.exit(1)
     else:
         if test_log and import_result:
@@ -890,7 +901,7 @@ def parse_arguments() -> argparse.Namespace:
 Examples:
   %(prog)s abc123 def456
   %(prog)s abc123 def456 --steps=200
-  %(prog)s abc123 def456 --baseline-config='./custom.toml' \\
+  %(prog)s abc123 def456 --baseline-config='llama3_8b' \\
       --baseline-options='--parallelism.tensor_parallel_degree=2' --steps=50
   %(prog)s abc123 def456 --no-seed-checkpoint
   %(prog)s . . --baseline-options='--parallelism.dp=1' \\
@@ -901,18 +912,24 @@ Examples:
     parser.add_argument("baseline_commit", help="Git commit hash for baseline")
     parser.add_argument("test_commit", help="Git commit hash for test")
     parser.add_argument(
+        "--baseline-module",
+        default="llama3",
+        help="Module name for baseline run (default: llama3)",
+    )
+    parser.add_argument(
+        "--test-module",
+        default="",
+        help="Module name for test run (default: uses baseline-module)",
+    )
+    parser.add_argument(
         "--baseline-config",
-        default="./torchtitan/models/llama3/train_configs/debug_model.toml",
-        help=(
-            "Config file for baseline run "
-            "(default: ./torchtitan/models/llama3/train_configs/"
-            "llama3_debug.toml)"
-        ),
+        default="llama3_debugmodel",
+        help="Config name for baseline run (default: llama3_debugmodel)",
     )
     parser.add_argument(
         "--test-config",
         default="",
-        help="Config file for test run (default: uses baseline-config)",
+        help="Config name for test run (default: uses baseline-config)",
     )
     parser.add_argument(
         "--baseline-options",
@@ -923,22 +940,6 @@ Examples:
         "--test-options",
         default="",
         help="Additional CLI arguments for test run (default: empty)",
-    )
-    parser.add_argument(
-        "--baseline-train-file",
-        default="torchtitan.train",
-        help=(
-            "Train file (Python module path) for baseline run "
-            "(default: torchtitan.train)"
-        ),
-    )
-    parser.add_argument(
-        "--test-train-file",
-        default="",
-        help=(
-            "Train file (Python module path) for test run "
-            "(default: uses baseline-train-file)"
-        ),
     )
     parser.add_argument(
         "--steps",
@@ -1006,11 +1007,11 @@ Examples:
     args = parser.parse_args()
 
     # Set default values if not provided
+    if not args.test_module:
+        args.test_module = args.baseline_module
+
     if not args.test_config:
         args.test_config = args.baseline_config
-
-    if not args.test_train_file:
-        args.test_train_file = args.baseline_train_file
 
     # Convert empty output_folder to None
     if not args.output_folder:
@@ -1030,8 +1031,8 @@ Examples:
 def run_scenario(
     scenario: str,
     commit: str,
-    config_file: str,
-    train_file: str,
+    module: str,
+    config: str,
     options: str,
     steps: int,
     enable_seed_checkpoint: bool,
@@ -1044,8 +1045,8 @@ def run_scenario(
     Args:
         scenario: Name of the scenario ("baseline" or "test")
         commit: Git commit to checkout
-        config_file: Config file path
-        train_file: Train file (Python module path)
+        module: Module name (e.g., "llama3")
+        config: Config name (e.g., "llama3_debugmodel")
         options: Additional CLI options
         steps: Number of training steps
         enable_seed_checkpoint: Whether to use seed checkpoint
@@ -1060,8 +1061,8 @@ def run_scenario(
 
     log_file = run_training(
         scenario,
-        config_file,
-        train_file,
+        module,
+        config,
         options,
         steps,
         enable_seed_checkpoint,
@@ -1080,11 +1081,11 @@ def main() -> None:
     baseline_only_mode = validate_arguments(
         args.baseline_commit,
         args.test_commit,
+        args.baseline_module,
         args.baseline_config,
-        args.baseline_train_file,
         args.baseline_options,
+        args.test_module,
         args.test_config,
-        args.test_train_file,
         args.test_options,
         args.steps,
         args.assert_equal,
@@ -1098,11 +1099,11 @@ def main() -> None:
     print_configuration(
         args.baseline_commit,
         args.test_commit,
+        args.baseline_module,
         args.baseline_config,
-        args.baseline_train_file,
         args.baseline_options,
+        args.test_module,
         args.test_config,
-        args.test_train_file,
         args.test_options,
         args.steps,
         enable_seed_checkpoint,
@@ -1126,8 +1127,8 @@ def main() -> None:
     try:
         create_seed_checkpoint(
             enable_seed_checkpoint,
+            args.baseline_module,
             args.baseline_config,
-            args.baseline_train_file,
             args.output_folder,
             args.job_dump_folder,
         )
@@ -1135,8 +1136,8 @@ def main() -> None:
         baseline_log = run_scenario(
             "baseline",
             args.baseline_commit,
+            args.baseline_module,
             args.baseline_config,
-            args.baseline_train_file,
             args.baseline_options,
             args.steps,
             enable_seed_checkpoint,
@@ -1151,8 +1152,8 @@ def main() -> None:
             test_log = run_scenario(
                 "test",
                 args.test_commit,
+                args.test_module,
                 args.test_config,
-                args.test_train_file,
                 args.test_options,
                 args.steps,
                 enable_seed_checkpoint,
