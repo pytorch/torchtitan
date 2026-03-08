@@ -24,7 +24,6 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module
 
@@ -122,7 +121,7 @@ class Decoder(BaseModel):
         final_out_std = self.config.dim**-0.5
         cutoff_factor = 3
         if self.output is not None:
-            trunc_normal_(
+            nn.init.trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,

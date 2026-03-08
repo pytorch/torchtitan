@@ -28,7 +28,6 @@ from .rope import (
     apply_rotary_emb_single_complex,
     RoPE,
 )
-from .utils import trunc_normal_
 
 __all__ = [
     "create_attention_mask",
@@ -53,5 +52,4 @@ __all__ = [
     "apply_rotary_emb_cos_sin",
     "apply_rotary_emb_single_complex",
     "compute_ffn_hidden_dim",
-    "trunc_normal_",
 ]

@@ -13,7 +13,6 @@ from torch import nn
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -89,12 +88,12 @@ class Attention(BaseAttention):
             self.wv,
         ]
 
-        trunc_normal_(self.sinks, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
         for linear in linear_list:
-            trunc_normal_(linear.weight, mean=0.0, std=init_std)
-            trunc_normal_(linear.bias, mean=0.0, std=init_std)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-        trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(linear.bias, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
 
     def forward(
         self,

@@ -13,7 +13,6 @@ from torch import nn
 from torch.distributed.tensor import DTensor, Partial
 
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.module import Module
 
 from .utils import indices_padding_wrapper
@@ -126,9 +125,9 @@ class GroupedExperts(nn.Module):
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
     def init_weights(self, init_std: float):
-        trunc_normal_(self.w1, mean=0.0, std=0.02)
-        trunc_normal_(self.w2, mean=0.0, std=init_std)
-        trunc_normal_(self.w3, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -306,7 +305,7 @@ class TokenChoiceTopKRouter(nn.Module):
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
     def init_weights(self, init_std: float):
-        trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.gate.weight, mean=0.0, std=init_std)
         if self.gate.bias is not None:
             nn.init.zeros_(self.gate.bias)
 

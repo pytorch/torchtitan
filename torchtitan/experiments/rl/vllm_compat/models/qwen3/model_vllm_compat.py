@@ -18,7 +18,6 @@ from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
     silu_and_mul_with_gradients,
 )
 
-from torchtitan.models.common import trunc_normal_
 from torchtitan.models.common.attention import AttentionMasksType
 
 # Import from main torchtitan
@@ -135,8 +134,8 @@ class FeedForwardVLLMCompat(nn.Module):
 
     def init_weights(self, init_std: float):
         # Initialize like vLLM
-        trunc_normal_(self.gate_up_proj.weight, mean=0.0, std=0.02)
-        trunc_normal_(self.down_proj.weight, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.gate_up_proj.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.down_proj.weight, mean=0.0, std=init_std)
 
 
 class Attention(nn.Module):
@@ -175,8 +174,8 @@ class Attention(nn.Module):
 
     def init_weights(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
         if self.q_norm is not None:
             self.q_norm.reset_parameters()
         if self.k_norm is not None:
@@ -326,7 +325,7 @@ class Qwen3VLLMCompatModel(BaseModel):
         cutoff_factor = 3
 
         if self.output is not None:
-            trunc_normal_(
+            nn.init.trunc_normal_(
                 self.output.weight,
                 mean=0.0,
                 std=final_out_std,
