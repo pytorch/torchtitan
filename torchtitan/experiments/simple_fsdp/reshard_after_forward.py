@@ -88,3 +88,19 @@ def annotate_fsdp_all_gather(
                 force_recompute_node(ag_node.all_input_nodes[0])
 
     return gm
+
+
+def annotate_ep_must_save(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
+    """Mark EP collectives as MUST_SAVE in the AC graph.
+
+    Full AC recomputes MoE routing, which can produce different token
+    assignments across ranks. Saving the all_to_all outputs prevents
+    cross-rank mismatches that cause device-side asserts in grouped_mm.
+    """
+    for node in gm.graph.nodes:
+        if (
+            node.op == "call_function"
+            and node.target == torch.ops._c10d_functional.all_to_all_single.default
+        ):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+    return gm
