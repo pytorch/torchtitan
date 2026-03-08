@@ -27,7 +27,6 @@ from torchtitan.models.common.rope import (
     apply_rotary_emb_complex,
     apply_rotary_emb_cos_sin,
 )
-from torchtitan.models.common.utils import trunc_normal_
 from torchtitan.protocols.module import Module
 
 
@@ -547,12 +546,12 @@ class GQAttention(BaseAttention):
 
     def init_weights(self, init_std: float = 0.02, **kwargs) -> None:
         for linear in (self.wq, self.wk, self.wv):
-            trunc_normal_(linear.weight, mean=0.0, std=0.02)
+            nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
             if linear.bias is not None:
-                trunc_normal_(linear.bias, mean=0.0, std=0.02)
-        trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
+                nn.init.trunc_normal_(linear.bias, mean=0.0, std=0.02)
+        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
         if self.wo.bias is not None:
-            trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
+            nn.init.trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
         if self.q_norm is not None:
             self.q_norm.init_weights()
         if self.k_norm is not None:
