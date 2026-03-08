@@ -4,28 +4,27 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor, Replicate
 from torch.utils._pytree import register_pytree_node, tree_map
-
-from torchtitan.config import JobConfig
+from torchtitan.config import CompileConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools.logging import logger
 
 
 @contextmanager
-def disable_compile(job_config: JobConfig):
+def disable_compile(compile_config: CompileConfig):
     """Context manager to temporarily disable compilation."""
-    original_value = job_config.compile.enable
-    job_config.compile.enable = False
+    original_value = compile_config.enable
+    compile_config.enable = False
     try:
         yield
     finally:
-        job_config.compile.enable = original_value
+        compile_config.enable = original_value
 
 
 def parallelize_inputs(parallel_dims, args, kwargs):
@@ -104,3 +103,22 @@ def create_extra_fsdp_pg(parallel_dims: ParallelDims) -> None:
 def get_extra_fsdp_pg_name(original_pg_name: str) -> str | None:
     """Look up the extra PG name for a given original FSDP PG name."""
     return _EXTRA_FSDP_PG_REGISTRY.get(original_pg_name)
+
+
+def maybe_disable_eager_ac(
+    compile_config: CompileConfig,
+    ac_config: "ActivationCheckpointConfig",
+) -> None:
+    """Disable eager AC when apply_sac graph pass is enabled.
+
+    When apply_sac is used as a joint graph pass, eager activation checkpointing
+    must be disabled to avoid double-checkpointing. This must be called before
+    the model parallelization step that applies eager AC.
+    """
+    joint_pass_names = getattr(compile_config, "joint_passes", [])
+    if "apply_sac" in joint_pass_names:
+        if ac_config.mode != "none":
+            logger.info(
+                "apply_sac graph pass is enabled, overriding eager AC mode to none"
+            )
+            ac_config.mode = "none"

@@ -18,7 +18,7 @@ If you want to compile torchcomms from source, please follow the instructions in
 The following command uses Llama 3 as an example:
 
 ```bash
-TEST_BACKEND=ncclx TRAIN_FILE=torchtitan.experiments.torchcomms.train CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh
+TEST_BACKEND=ncclx TRAIN_FILE=torchtitan.experiments.torchcomms.train MODEL=llama3 CONFIG=llama3_8b ./run_train.sh
 ```
 
 ### Features
@@ -39,7 +39,7 @@ Locally tested with:
 
 ### Performance
 
-**Setup**: Similar setting as [docs/converging.md](../../docs/converging.md) based on [torchtitan/models/llama3/train_configs/llama3_8b.toml](../torchtitan/models/llama3/train_configs/llama3_8b.toml), but `training.local_batch_size = 1`
+**Setup**: Similar setting as [docs/converging.md](../../docs/converging.md) based on the `llama3_8b` config (see [config_registry.py](../../models/llama3/config_registry.py)), but `training.local_batch_size = 1`
 
 | Run Name    | Parallelism        | Distributed Library | Remarks               |
 | ----------- | ------------------ | ------------------- | --------------------- |

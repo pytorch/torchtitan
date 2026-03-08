@@ -18,11 +18,12 @@ from torchtitan.experiments.rl.vllm_compat.batch_invariant_backward import (
     silu_and_mul_with_gradients,
 )
 
+from torchtitan.models.common import trunc_normal_
+from torchtitan.models.common.attention import AttentionMasksType
+
 # Import from main torchtitan
-from torchtitan.models.qwen3.model.args import Qwen3ModelArgs
-from torchtitan.models.utils import trunc_normal_
-from torchtitan.protocols.model import AttentionMasksType
-from torchtitan.protocols.train_spec import ModelProtocol
+from torchtitan.models.qwen3.model import Qwen3Model
+from torchtitan.protocols.model import BaseModel
 
 # Import from local experiment's models
 from ..attention import VLLMCompatibleFlashAttention
@@ -143,7 +144,7 @@ class Attention(nn.Module):
     Multi-head attention module compatible with vLLM.
     """
 
-    def __init__(self, model_args: Qwen3ModelArgs):
+    def __init__(self, model_args: Qwen3Model.Config):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.n_kv_heads = (
@@ -235,7 +236,7 @@ class TransformerBlock(nn.Module):
     TransformerBlock with vLLM-compatible FFN.
     """
 
-    def __init__(self, layer_id: int, model_args: Qwen3ModelArgs):
+    def __init__(self, layer_id: int, model_args: Qwen3Model.Config):
         super().__init__()
         self.n_heads = model_args.n_heads
         self.dim = model_args.dim
@@ -278,15 +279,15 @@ class TransformerBlock(nn.Module):
         self.feed_forward.init_weights(self.weight_init_std)
 
 
-class Qwen3VLLMCompatModel(ModelProtocol):
+class Qwen3VLLMCompatModel(BaseModel):
     """
     Qwen3 model with vLLM-compatible implementation.
     Uses merged gate_up projections and vLLM Flash Attention.
     """
 
-    def __init__(self, model_args: Qwen3ModelArgs):
-        super().__init__(model_args)
-        self.model_args = model_args
+    def __init__(self, model_args: Qwen3Model.Config):
+        super().__init__()
+        self.config = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
         self.eos_id = model_args.eos_id
@@ -325,7 +326,7 @@ class Qwen3VLLMCompatModel(ModelProtocol):
                 layer.init_weights(buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
-        final_out_std = self.model_args.dim**-0.5
+        final_out_std = self.config.dim**-0.5
         cutoff_factor = 3
 
         if self.output is not None:
@@ -339,9 +340,9 @@ class Qwen3VLLMCompatModel(ModelProtocol):
 
     def _precompute_rope_cache(self) -> torch.Tensor:
         return precompute_rope_cache(
-            self.model_args.head_dim,
-            self.model_args.max_seq_len,
-            self.model_args.rope_theta,
+            self.config.head_dim,
+            self.config.max_seq_len,
+            self.config.rope_theta,
         )
 
     def get_attention_masks(

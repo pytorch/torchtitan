@@ -9,42 +9,33 @@
 import copy
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers_with_moe_load_balancing
-from torchtitan.components.tokenizer import build_hf_tokenizer
+from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
 
-from torchtitan.models.deepseek_v3 import deepseekv3_args, DeepSeekV3Model
-from torchtitan.models.deepseek_v3.model.args import DeepSeekV3ModelArgs
-from torchtitan.models.deepseek_v3.model.state_dict_adapter import (
-    DeepSeekV3StateDictAdapter,
-)
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.models.deepseek_v3 import deepseekv3_configs, DeepSeekV3Model
+from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
+from torchtitan.protocols.model_spec import ModelSpec
 
 from .parallelize_deepseekv3 import parallelize_deepseekv3
 
 
-def get_train_spec() -> TrainSpec:
-    model_args = copy.deepcopy(deepseekv3_args)
+def model_registry(flavor: str) -> ModelSpec:
+    model_args = copy.deepcopy(deepseekv3_configs)
 
-    default_args = DeepSeekV3ModelArgs()
+    default_args = DeepSeekV3Model.Config()
     for config, args in model_args.items():
         if "flex_attn" in config:
             continue
 
-        args.attn_type = default_args.attn_type
-        args.attn_mask_type = default_args.attn_mask_type
+        args.layer.attention = default_args.layer.attention
 
-    return TrainSpec(
-        model_cls=DeepSeekV3Model,
-        model_args=model_args,
+    return ModelSpec(
+        name="autoparallel/deepseek_v3",
+        flavor=flavor,
+        model=model_args[flavor],
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
-        build_optimizers_fn=build_optimizers_with_moe_load_balancing,
-        build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
         build_loss_fn=build_cross_entropy_loss,
+        post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )

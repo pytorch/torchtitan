@@ -54,10 +54,12 @@ DATASETS = {
 ```
 
 ### 4. Configure Your Training
-In your training configuration file (`.toml`), set your dataset:
+In your config_registry function, set your dataset:
 
-```toml
-dataset = "wikipedia"
+```python
+dataloader=HuggingFaceTextDataLoader.Config(
+    dataset="wikipedia",
+),
 ```
 
 That's it! Your custom dataset is now ready to use with `torchtitan`.
