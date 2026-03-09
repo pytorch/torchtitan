@@ -18,7 +18,7 @@ from torchtitan.experiments.rl.unified.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )
-from torchtitan.experiments.rl.unified.types import Episode
+from torchtitan.experiments.rl.unified.types import Episode, EpisodeGroup
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
@@ -224,12 +224,19 @@ class VLLMGenerator(Actor, Configurable):
         return self._engine.model_executor.driver_worker.get_model()
 
     @endpoint
-    async def generate(self, prompt_texts: list[str]) -> list[Episode]:
-        """Generate episodes and return list of Episode (one per prompt).
-        Called by the orchestrator (simple_grpo.py). The Grader fills in rewards.
+    async def generate(
+        self,
+        prompt_texts: list[str],
+        expected_answers: list[str] | None = None,
+    ) -> list[EpisodeGroup]:
+        """Generate completions and return a list of EpisodeGroups (one per prompt).
+
+        Each EpisodeGroup contains N Episode objects (one per completion sample).
 
         Args:
             prompt_texts: List of prompt strings for which to generate completions.
+            expected_answers: Optional expected answers, one per prompt. When
+                provided each Episode is tagged so the Grader can compute rewards.
         """
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
@@ -256,42 +263,39 @@ class VLLMGenerator(Actor, Configurable):
                 request_outputs = self._engine.step()
                 all_outputs.extend(request_outputs)
 
-            # Build one Episode per prompt
-            episodes = []
-            for output in all_outputs:
+            # Build one EpisodeGroup per prompt, each containing N Episodes.
+            groups: list[EpisodeGroup] = []
+            for idx, output in enumerate(all_outputs):
                 prompt_token_ids = output.prompt_token_ids
+                answer = expected_answers[idx] if expected_answers is not None else ""
 
-                completions = []
+                group: EpisodeGroup = []
                 for sample in output.outputs:
                     per_token_log_probs = [
                         list(logprob_dict.values())[0].logprob
                         for logprob_dict in sample.logprobs
                     ]
-                    completions.append(
-                        Episode.Completion(
+                    group.append(
+                        Episode(
+                            policy_version=self.policy_version,
+                            prompt_token_ids=prompt_token_ids,
                             text=sample.text,
                             token_ids=sample.token_ids,
                             token_log_probs=per_token_log_probs,
+                            expected_answer=answer,
                         )
                     )
-
-                episodes.append(
-                    Episode(
-                        policy_version=self.policy_version,
-                        prompt_token_ids=prompt_token_ids,
-                        completions=completions,
-                    )
-                )
+                groups.append(group)
 
         logger.debug(
             f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
         )
-        return episodes
+        return groups
 
     @endpoint
     async def update(self, version: int, state_dict: dict) -> None:
         """Update generator weights.
-        Called by the orchestrator (simple_grpo.py).
+        Called by the orchestrator.
 
         Args:
             version: New policy version number

@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 import torch
 from monarch.actor import Actor, endpoint
-from torchtitan.experiments.rl.unified.types import Episode
+from torchtitan.experiments.rl.unified.types import EpisodeGroup
 
 logger = logging.getLogger(__name__)
 
@@ -36,27 +36,33 @@ class Grader(Actor):
         logger.info("Grader initialized")
 
     @endpoint
-    async def score(self, episodes: list[Episode]) -> list[Episode]:
+    async def score(self, groups: list[EpisodeGroup]) -> list[EpisodeGroup]:
         """
         Score episodes by computing rewards.
 
+        Each Group contains episodes from the same prompt. The reward_fn
+        is called once per group with all completion texts.
+
         Args:
-            episodes: List of Episode data (one per prompt, with completions)
+            groups: List of Groups (one per prompt), each containing
+                    Episode objects to score.
 
         Returns:
-            Episodes with computed rewards
+            Groups with computed rewards.
         """
+        total = sum(len(g) for g in groups)
         logger.debug(
-            f"Grader scoring {len(episodes)} episodes "
-            f"(policy v{episodes[0].policy_version})..."
+            f"Grader scoring {total} episodes in {len(groups)} groups "
+            f"(policy v{groups[0][0].policy_version})..."
         )
 
         all_rewards = []
-        for episode in episodes:
-            completion_texts = [c.text for c in episode.completions]
-            rewards = self.reward_fn(completion_texts, episode.expected_answer)
-            for completion, reward in zip(episode.completions, rewards):
-                completion.reward = reward.item()
+        for group in groups:
+            completion_texts = [ep.text for ep in group]
+            expected_answer = group[0].expected_answer
+            rewards = self.reward_fn(completion_texts, expected_answer)
+            for episode, reward in zip(group, rewards):
+                episode.reward = reward.item()
             all_rewards.append(rewards)
 
         all_rewards_cat = torch.cat(all_rewards)
@@ -68,4 +74,4 @@ class Grader(Actor):
             f"reward_mean={reward_mean.item():.4f}, reward_std={reward_std.item():.4f}"
         )
 
-        return episodes
+        return groups
