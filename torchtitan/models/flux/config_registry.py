@@ -13,7 +13,7 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.models.flux.configs import Encoder, Inference, Validation
+from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.flux_datasets import FluxDataLoader
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.trainer import FluxTrainer
@@ -23,20 +23,18 @@ from . import model_registry
 
 
 def flux_debugmodel() -> FluxTrainer.Config:
-    encoder = Encoder(
-        t5_encoder="google/t5-v1_1-xxl",
-        clip_encoder="openai/clip-vit-large-patch14",
-        max_t5_encoding_len=256,
-        autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
-    )
     hf_assets_path = "tests/assets/tokenizer"
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
         tokenizer=FluxTokenizerContainer.Config(
-            t5_encoder=encoder.t5_encoder,
-            clip_encoder=encoder.clip_encoder,
-            max_t5_encoding_len=encoder.max_t5_encoding_len,
-            test_mode=encoder.test_mode,
+            t5_tokenizer_path="google/t5-v1_1-xxl",
+            clip_tokenizer_path="openai/clip-vit-large-patch14",
+            max_t5_encoding_len=256,
+        ),
+        encoder=FluxEncoderConfig(
+            t5_encoder="google/t5-v1_1-xxl",
+            clip_encoder="openai/clip-vit-large-patch14",
+            autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model_spec=model_registry("flux-debug"),
@@ -53,27 +51,22 @@ def flux_debugmodel() -> FluxTrainer.Config:
         dataloader=FluxDataLoader.Config(
             classifier_free_guidance_prob=0.447,
             img_size=256,
-            encoder=encoder,
-            hf_assets_path=hf_assets_path,
         ),
-        encoder=encoder,
         parallelism=ParallelismConfig(context_parallel_degree=1),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
         ),
-        validation=Validation(
-            enable_classifier_free_guidance=True,
-            classifier_free_guidance_scale=5.0,
-            denoising_steps=4,
-        ),
         validator=FluxValidator.Config(
             freq=5,
             steps=48,
+            enable_classifier_free_guidance=True,
+            classifier_free_guidance_scale=5.0,
+            denoising_steps=4,
             dataloader=FluxDataLoader.Config(
                 dataset="coco-validation",
-                classifier_free_guidance_prob=0.447,
+                classifier_free_guidance_prob=0.0,
                 img_size=256,
                 generate_timesteps=True,
             ),
@@ -90,18 +83,16 @@ def flux_debugmodel() -> FluxTrainer.Config:
 
 
 def flux_dev() -> FluxTrainer.Config:
-    encoder = Encoder(
-        t5_encoder="google/t5-v1_1-xxl",
-        clip_encoder="openai/clip-vit-large-patch14",
-        max_t5_encoding_len=512,
-        autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
-    )
     return FluxTrainer.Config(
         tokenizer=FluxTokenizerContainer.Config(
-            t5_encoder=encoder.t5_encoder,
-            clip_encoder=encoder.clip_encoder,
-            max_t5_encoding_len=encoder.max_t5_encoding_len,
-            test_mode=encoder.test_mode,
+            t5_tokenizer_path="google/t5-v1_1-xxl",
+            clip_tokenizer_path="openai/clip-vit-large-patch14",
+            max_t5_encoding_len=512,
+        ),
+        encoder=FluxEncoderConfig(
+            t5_encoder="google/t5-v1_1-xxl",
+            clip_encoder="openai/clip-vit-large-patch14",
+            autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model_spec=model_registry("flux-dev"),
@@ -118,19 +109,15 @@ def flux_dev() -> FluxTrainer.Config:
             dataset="cc12m-wds",
             classifier_free_guidance_prob=0.447,
             img_size=256,
-            encoder=encoder,
         ),
-        encoder=encoder,
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
         checkpoint=CheckpointManager.Config(interval=1000),
-        validation=Validation(
-            enable_classifier_free_guidance=True,
-            classifier_free_guidance_scale=5.0,
-            denoising_steps=50,
-        ),
         validator=FluxValidator.Config(
             freq=1000,
             steps=12,
+            enable_classifier_free_guidance=True,
+            classifier_free_guidance_scale=5.0,
+            denoising_steps=50,
             dataloader=FluxDataLoader.Config(
                 dataset="coco-validation",
                 classifier_free_guidance_prob=0,
@@ -145,18 +132,16 @@ def flux_dev() -> FluxTrainer.Config:
 
 
 def flux_schnell() -> FluxTrainer.Config:
-    encoder = Encoder(
-        t5_encoder="google/t5-v1_1-xxl",
-        clip_encoder="openai/clip-vit-large-patch14",
-        max_t5_encoding_len=256,
-        autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
-    )
     return FluxTrainer.Config(
         tokenizer=FluxTokenizerContainer.Config(
-            t5_encoder=encoder.t5_encoder,
-            clip_encoder=encoder.clip_encoder,
-            max_t5_encoding_len=encoder.max_t5_encoding_len,
-            test_mode=encoder.test_mode,
+            t5_tokenizer_path="google/t5-v1_1-xxl",
+            clip_tokenizer_path="openai/clip-vit-large-patch14",
+            max_t5_encoding_len=256,
+        ),
+        encoder=FluxEncoderConfig(
+            t5_encoder="google/t5-v1_1-xxl",
+            clip_encoder="openai/clip-vit-large-patch14",
+            autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model_spec=model_registry("flux-schnell"),
@@ -173,19 +158,15 @@ def flux_schnell() -> FluxTrainer.Config:
             dataset="cc12m-wds",
             classifier_free_guidance_prob=0.447,
             img_size=256,
-            encoder=encoder,
         ),
-        encoder=encoder,
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
         checkpoint=CheckpointManager.Config(interval=1000),
-        validation=Validation(
-            enable_classifier_free_guidance=True,
-            classifier_free_guidance_scale=5.0,
-            denoising_steps=50,
-        ),
         validator=FluxValidator.Config(
             freq=1000,
             steps=6,
+            enable_classifier_free_guidance=True,
+            classifier_free_guidance_scale=5.0,
+            denoising_steps=50,
             dataloader=FluxDataLoader.Config(
                 dataset="coco-validation",
                 classifier_free_guidance_prob=0,

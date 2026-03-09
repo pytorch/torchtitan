@@ -67,8 +67,12 @@ class TestFluxDataLoader(unittest.TestCase):
                         dataset_name,
                         "--dataloader.classifier_free_guidance_prob",
                         "0.447",
-                        "--dataloader.encoder.test_mode",
-                        "--encoder.test_mode",
+                        "--tokenizer.test_mode",
+                        "--tokenizer.t5_tokenizer_path",
+                        "tests/assets/tokenizer",
+                        "--tokenizer.clip_tokenizer_path",
+                        "tests/assets/tokenizer",
+                        "--encoder.random_init",
                         "--encoder.t5_encoder",
                         "tests/assets/flux_test_encoders/t5-v1_1-xxl",
                         "--encoder.clip_encoder",
@@ -76,10 +80,16 @@ class TestFluxDataLoader(unittest.TestCase):
                     ]
                 )
 
+                # Build the tokenizer container from config
+                tokenizer = config.tokenizer.build(
+                    tokenizer_path=config.hf_assets_path
+                )
+
                 dl = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
                     local_batch_size=batch_size,
+                    tokenizer=tokenizer,
                 )
 
                 it = iter(dl)
@@ -107,6 +117,7 @@ class TestFluxDataLoader(unittest.TestCase):
                     dp_world_size=world_size,
                     dp_rank=rank,
                     local_batch_size=batch_size,
+                    tokenizer=tokenizer,
                 )
                 dl_resumed.load_state_dict(state)
                 it_resumed = iter(dl_resumed)

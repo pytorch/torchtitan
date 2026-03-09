@@ -15,8 +15,6 @@ from transformers import CLIPTokenizer, T5Tokenizer
 
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 
-from .configs import Encoder
-
 
 class FluxTokenizerContainer(BaseTokenizer):
     """Container holding both T5 and CLIP tokenizers for Flux.
@@ -28,21 +26,22 @@ class FluxTokenizerContainer(BaseTokenizer):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseTokenizer.Config):
-        t5_encoder: str = "google/t5-v1_1-small"
-        clip_encoder: str = "openai/clip-vit-large-patch14"
+        t5_tokenizer_path: str = "google/t5-v1_1-small"
+        """HuggingFace model name or local path for the T5 tokenizer."""
+        clip_tokenizer_path: str = "openai/clip-vit-large-patch14"
+        """HuggingFace model name or local path for the CLIP tokenizer."""
         max_t5_encoding_len: int = 256
         test_mode: bool = False
 
-    def __init__(self, config: Config, *, tokenizer_path: str = "", **kwargs):
+    def __init__(self, config: Config, **kwargs):
         super().__init__()
-        # tokenizer_path maps to hf_assets_path (used in test mode)
         if config.test_mode:
             tokenizer_class = FluxTestTokenizer
-            t5_path = clip_path = tokenizer_path
         else:
             tokenizer_class = FluxTokenizer
-            t5_path = config.t5_encoder
-            clip_path = config.clip_encoder
+
+        t5_path = config.t5_tokenizer_path
+        clip_path = config.clip_tokenizer_path
 
         self.t5_tokenizer: BaseTokenizer = tokenizer_class(
             t5_path, max_length=config.max_t5_encoding_len
@@ -184,39 +183,3 @@ class FluxTokenizer(BaseTokenizer):
         Decode function. This function will not be called.
         """
         return self._tokenizer.decode(t)
-
-
-def build_flux_tokenizer(
-    encoder_config: Encoder,
-    hf_assets_path: str,
-) -> tuple[BaseTokenizer, BaseTokenizer]:
-    """
-    Build the tokenizer for Flux.
-    """
-    # pyrefly: ignore [missing-attribute]
-    t5_tokenizer_path = encoder_config.t5_encoder
-    # pyrefly: ignore [missing-attribute]
-    clip_tokenzier_path = encoder_config.clip_encoder
-    # pyrefly: ignore [missing-attribute]
-    max_t5_encoding_len = encoder_config.max_t5_encoding_len
-
-    # NOTE: This tokenizer is used for offline CI and testing only, borrowed from llama3 tokenizer
-    # pyrefly: ignore [missing-attribute]
-    if encoder_config.test_mode:
-        tokenizer_class = FluxTestTokenizer
-        t5_tokenizer_path = clip_tokenzier_path = hf_assets_path
-    else:
-        tokenizer_class = FluxTokenizer
-
-    # T5 tokenzier will pad the token sequence to max_t5_encoding_len,
-    # and CLIP tokenizer will pad the token sequence to 77 (fixed number).
-    t5_tokenizer = tokenizer_class(
-        t5_tokenizer_path,
-        max_length=max_t5_encoding_len,
-    )
-    clip_tokenizer = tokenizer_class(
-        clip_tokenzier_path,
-        max_length=77,
-    )
-
-    return t5_tokenizer, clip_tokenizer

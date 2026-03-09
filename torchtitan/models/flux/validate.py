@@ -25,8 +25,7 @@ from .flux_datasets import FluxDataLoader
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
-from .tokenizer import build_flux_tokenizer
-from .trainer import FluxTrainer
+from .tokenizer import FluxTokenizerContainer
 from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
 
 
@@ -66,6 +65,15 @@ class FluxValidator(Validator):
         save_img_folder: str = "validation_images"
         """Folder to save validation images"""
 
+        enable_classifier_free_guidance: bool = False
+        """Whether to use classifier-free guidance during sampling"""
+
+        classifier_free_guidance_scale: float = 5.0
+        """Classifier-free guidance scale when sampling"""
+
+        denoising_steps: int = 50
+        """How many denoising steps to sample when generating an image"""
+
     validation_dataloader: BaseDataLoader
 
     def __init__(
@@ -95,9 +103,10 @@ class FluxValidator(Validator):
         self.all_timesteps = config.all_timesteps
 
         assert isinstance(config.dataloader, FluxDataLoader.Config)
-        self.t5_tokenizer, self.clip_tokenizer = build_flux_tokenizer(
-            config.dataloader.encoder, config.dataloader.hf_assets_path
-        )
+        assert isinstance(tokenizer, FluxTokenizerContainer)
+        self.t5_tokenizer = tokenizer.t5_tokenizer
+        self.clip_tokenizer = tokenizer.clip_tokenizer
+
         dl_config = replace(
             config.dataloader,
             infinite=config.steps != -1,
@@ -106,9 +115,8 @@ class FluxValidator(Validator):
         self.validation_dataloader = dl_config.build(
             dp_world_size=dp_world_size,
             dp_rank=dp_rank,
-            t5_tokenizer=self.t5_tokenizer,
-            clip_tokenizer=self.clip_tokenizer,
             local_batch_size=local_batch_size,
+            tokenizer=tokenizer,
         )
         self.validation_context = validation_context
         self.maybe_enable_amp = maybe_enable_amp
@@ -128,7 +136,7 @@ class FluxValidator(Validator):
         autoencoder: AutoEncoder,
         t5_encoder: FluxEmbedder,
         clip_encoder: FluxEmbedder,
-        trainer_config: FluxTrainer.Config,  # TODO: remove this dependency
+        dump_folder: str,
     ):
         # pyrefly: ignore [read-only]
         self.device = device
@@ -136,9 +144,7 @@ class FluxValidator(Validator):
         self.autoencoder = autoencoder
         self.t5_encoder = t5_encoder
         self.clip_encoder = clip_encoder
-        # Store job_config for Flux-specific runtime accesses
-        # (generate_image, classifier_free_guidance_prob, etc.)
-        self.trainer_config = trainer_config
+        self.dump_folder = dump_folder
 
     @torch.no_grad()
     def validate(
@@ -171,11 +177,15 @@ class FluxValidator(Validator):
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if save_img_count != -1 and save_img_count <= 0:
                     break
+                img_size = self.config.dataloader.img_size
                 image = generate_image(
                     device=self.device,
                     dtype=self._dtype,
-                    job_config=self.trainer_config,
-                    # pyrefly: ignore [bad-argument-type]
+                    img_height=16 * (img_size // 16),
+                    img_width=16 * (img_size // 16),
+                    enable_classifier_free_guidance=self.config.enable_classifier_free_guidance,
+                    denoising_steps=self.config.denoising_steps,
+                    classifier_free_guidance_scale=self.config.classifier_free_guidance_scale,
                     model=model,
                     prompt=p,
                     autoencoder=self.autoencoder,
@@ -188,7 +198,7 @@ class FluxValidator(Validator):
                 save_image(
                     name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
                     output_dir=os.path.join(
-                        self.trainer_config.dump_folder,
+                        self.dump_folder,
                         self.config.save_img_folder,
                     ),
                     x=image,

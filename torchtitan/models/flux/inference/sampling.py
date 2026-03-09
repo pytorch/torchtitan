@@ -25,8 +25,6 @@ from torchtitan.models.flux.utils import (
 )
 from torchtitan.tools.logging import logger
 
-from ..trainer import FluxTrainer
-
 
 # ----------------------------------------
 #       Util functions for Sampling
@@ -72,7 +70,11 @@ def get_schedule(
 def generate_image(
     device: torch.device,
     dtype: torch.dtype,
-    job_config: FluxTrainer.Config,
+    img_height: int,
+    img_width: int,
+    enable_classifier_free_guidance: bool,
+    denoising_steps: int,
+    classifier_free_guidance_scale: float,
     model: FluxModel,
     prompt: str | list[str],
     autoencoder: AutoEncoder,
@@ -89,17 +91,6 @@ def generate_image(
 
     if isinstance(prompt, str):
         prompt = [prompt]
-
-    # allow for packing and conversion to latent space. Use the same resolution as training time.
-    # pyrefly: ignore [missing-attribute]
-    img_height = 16 * (job_config.validator.dataloader.img_size // 16)
-    # pyrefly: ignore [missing-attribute]
-    img_width = 16 * (job_config.validator.dataloader.img_size // 16)
-
-    enable_classifier_free_guidance = (
-        # pyrefly: ignore [missing-attribute]
-        job_config.validation.enable_classifier_free_guidance
-    )
 
     # Tokenize the prompt. Unsqueeze to add a batch dimension.
     clip_tokens = clip_tokenizer.encode(prompt)
@@ -151,8 +142,7 @@ def generate_image(
         model=model,
         img_width=img_width,
         img_height=img_height,
-        # pyrefly: ignore [missing-attribute]
-        denoising_steps=job_config.validation.denoising_steps,
+        denoising_steps=denoising_steps,
         clip_encodings=batch["clip_encodings"],
         t5_encodings=batch["t5_encodings"],
         enable_classifier_free_guidance=enable_classifier_free_guidance,
@@ -168,8 +158,7 @@ def generate_image(
             if enable_classifier_free_guidance
             else None
         ),
-        # pyrefly: ignore [missing-attribute]
-        classifier_free_guidance_scale=job_config.validation.classifier_free_guidance_scale,
+        classifier_free_guidance_scale=classifier_free_guidance_scale,
     )
 
     img = autoencoder.decode(img)

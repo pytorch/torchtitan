@@ -21,14 +21,8 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.models.flux.tokenizer import (
-    build_flux_tokenizer,
-    FluxTokenizer,
-    FluxTokenizerContainer,
-)
+from torchtitan.models.flux.tokenizer import FluxTokenizer, FluxTokenizerContainer
 from torchtitan.tools.logging import logger
-
-from .configs import Encoder
 
 
 def _process_cc12m_image(
@@ -382,7 +376,6 @@ class FluxDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Whether to loop the dataset infinitely"""
 
-        # TODO: In validation it should always be 0.0. Find a way to enforce this.
         classifier_free_guidance_prob: float = 0.0
         """Classifier-free guidance with probability `p` to dropout each text encoding independently.
         If `n` text encoders are used, the unconditional model is trained in `p ^ n` of all steps.
@@ -394,15 +387,13 @@ class FluxDataLoader(ParallelAwareDataloader):
         generate_timesteps: bool = False
         """Generate stratified timesteps in round-robin style (for validation)"""
 
-        # TODO: Remove after the tokenizer is properly built from the trainer. E.g.,
-        # we can have a tokenizer container which holds the t5 and clip tokenizers.
-        encoder: Encoder = field(default_factory=Encoder)
-        """This is a hack to get the T5 and CLIP tokenizer asset paths. Ideally tokenizer should be
-        built from the trainer, not inside dataloader. The reason we are doing this is because FLUX
-        has two tokenizer instead of just one."""
-
-        hf_assets_path: str = "./tests/assets/tokenizer"
-        """Similar to above, this is a hack to get the test tokenizer asset paths."""
+        def __post_init__(self):
+            if self.generate_timesteps and self.classifier_free_guidance_prob != 0.0:
+                logger.warning(
+                    f"classifier_free_guidance_prob={self.classifier_free_guidance_prob} "
+                    "overridden to 0.0 for validation (generate_timesteps=True)."
+                )
+                self.classifier_free_guidance_prob = 0.0
 
     def __init__(
         self,
@@ -415,16 +406,13 @@ class FluxDataLoader(ParallelAwareDataloader):
         **kwargs,
     ):
 
-        # Use tokenizer from trainer if provided (FluxTokenizerContainer)
-        if tokenizer is not None and isinstance(tokenizer, FluxTokenizerContainer):
-            t5_tokenizer = tokenizer.t5_tokenizer
-            clip_tokenizer = tokenizer.clip_tokenizer
-        else:
-            # Fallback to existing build logic for backward compatibility
-            t5_tokenizer, clip_tokenizer = build_flux_tokenizer(
-                encoder_config=config.encoder,
-                hf_assets_path=config.hf_assets_path,
+        if not isinstance(tokenizer, FluxTokenizerContainer):
+            raise ValueError(
+                "FluxDataLoader requires a FluxTokenizerContainer as tokenizer. "
+                "Set tokenizer=FluxTokenizerContainer.Config(...) in your trainer config."
             )
+        t5_tokenizer = tokenizer.t5_tokenizer
+        clip_tokenizer = tokenizer.clip_tokenizer
 
         if config.generate_timesteps:
             ds = FluxValidationDataset(

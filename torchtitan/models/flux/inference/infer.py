@@ -10,7 +10,6 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.config import ConfigManager
 from torchtitan.models.flux.inference.sampling import generate_image, save_image
-from torchtitan.models.flux.tokenizer import build_flux_tokenizer
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.tools.logging import init_logger, logger
 
@@ -38,9 +37,11 @@ def inference(config: FluxTrainer.Config):
     prompts = original_prompts[global_rank::world_size]
 
     trainer.checkpointer.load(step=config.checkpoint.load_step)
-    t5_tokenizer, clip_tokenizer = build_flux_tokenizer(
-        config.encoder, config.hf_assets_path
-    )
+
+    # Build tokenizers from the config
+    tokenizer_container = config.tokenizer.build()
+    t5_tokenizer = tokenizer_container.t5_tokenizer
+    clip_tokenizer = tokenizer_container.clip_tokenizer
 
     if global_rank == 0:
         logger.info("Starting inference...")
@@ -49,6 +50,8 @@ def inference(config: FluxTrainer.Config):
         # Generate images for this process's assigned prompts
         # pyrefly: ignore [missing-attribute]
         bs = config.inference.local_batch_size
+        # pyrefly: ignore [missing-attribute]
+        img_size = config.inference.img_size
 
         output_dir = os.path.join(
             config.dump_folder,
@@ -62,7 +65,14 @@ def inference(config: FluxTrainer.Config):
             images = generate_image(
                 device=trainer.device,
                 dtype=trainer._dtype,
-                job_config=config,
+                img_height=16 * (img_size // 16),
+                img_width=16 * (img_size // 16),
+                # pyrefly: ignore [missing-attribute]
+                enable_classifier_free_guidance=config.inference.enable_classifier_free_guidance,
+                # pyrefly: ignore [missing-attribute]
+                denoising_steps=config.inference.denoising_steps,
+                # pyrefly: ignore [missing-attribute]
+                classifier_free_guidance_scale=config.inference.classifier_free_guidance_scale,
                 # pyrefly: ignore [bad-argument-type]
                 model=trainer.model_parts[0],
                 prompt=prompts[i : i + bs],
