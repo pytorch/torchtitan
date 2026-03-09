@@ -15,6 +15,7 @@ from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config.configs import ParallelismConfig, TrainingConfig
 from torchtitan.experiments.rl.unified.actors.generator import (
+    GeneratorCompileConfig,
     SamplingConfig,
     VLLMGenerator,
 )
@@ -43,7 +44,10 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            enforce_eager=True,
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
                 data_parallel_replicate_degree=1,
@@ -78,7 +82,10 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
             ),
         ),
         generator=VLLMGenerator.Config(
-            enforce_eager=True,
+            compile=GeneratorCompileConfig(
+                backend="eager",
+                cudagraph_mode="piecewise",
+            ),
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
