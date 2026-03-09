@@ -38,6 +38,16 @@ from torchtitan.tools import utils
 logger = logging.getLogger(__name__)
 
 
+@dataclass(kw_only=True, slots=True)
+class TrainerCompileConfig:
+    """Compilation settings for the PolicyTrainer."""
+
+    enable: bool = False
+    """Enable per-layer torch.compile on the training model."""
+    backend: str = "eager"
+    """torch.compile backend (e.g. 'eager', 'aot_eager', 'inductor')."""
+
+
 class PolicyTrainer(Actor, Configurable):
     """
     Updates policy based on collected Episode using TorchTitan components.
@@ -64,6 +74,7 @@ class PolicyTrainer(Actor, Configurable):
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         """Communication configuration for distributed initialization."""
+        compile: TrainerCompileConfig = field(default_factory=TrainerCompileConfig)
 
     def __init__(
         self,
@@ -115,6 +126,8 @@ class PolicyTrainer(Actor, Configurable):
             model_spec, config, device_type, batch_invariant_mode, hf_assets_path
         )
         model.train()
+        if config.compile.enable:
+            model = self._compile_model(model, config.compile.backend)
         self.model = model
         self.model_parts = [model]
 
@@ -227,6 +240,20 @@ class PolicyTrainer(Actor, Configurable):
         # Load initial weights from HF
         self._load_initial_hf_weights(model, hf_assets_path)
 
+        return model
+
+    def _compile_model(self, model: torch.nn.Module, backend: str) -> torch.nn.Module:
+        """Compile each transformer layer with torch.compile.
+
+        Args:
+            model: The model whose layers will be compiled.
+            backend: torch.compile backend (e.g. 'eager', 'aot_eager', 'inductor').
+        """
+        for layer_id in model.layers:
+            model.layers[layer_id].compile(backend=backend, fullgraph=True)
+        logger.info(
+            f"Compiled {len(model.layers)} transformer layers with {backend} backend"
+        )
         return model
 
     @endpoint

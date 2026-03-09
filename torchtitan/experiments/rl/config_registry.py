@@ -19,7 +19,10 @@ from torchtitan.experiments.rl.actors.generator import (
     SamplingConfig,
     VLLMGenerator,
 )
-from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
+from torchtitan.experiments.rl.actors.trainer import (
+    PolicyTrainer,
+    TrainerCompileConfig,
+)
 from torchtitan.experiments.rl.simple_grpo_sum_digits import RLTrainer
 from torchtitan.models.qwen3 import model_registry
 
@@ -41,6 +44,7 @@ def rl_grpo_qwen3_0_6b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
+            compile=TrainerCompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -80,6 +84,7 @@ def rl_grpo_qwen3_1_7b() -> RLTrainer.Config:
             parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
             ),
+            compile=TrainerCompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -119,6 +124,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
                 tensor_parallel_degree=1,
                 data_parallel_replicate_degree=1,
             ),
+            compile=TrainerCompileConfig(enable=True, backend="aot_eager"),
         ),
         generator=VLLMGenerator.Config(
             compile=GeneratorCompileConfig(
