@@ -22,6 +22,7 @@ from torch.distributed.pipelining.schedules import (
     ScheduleZBVZeroBubble,
 )
 from torch.utils.flop_counter import FlopCounterMode
+
 from torchtitan.components.loss import LossFunction, rescale_accumulated_loss
 from torchtitan.components.tokenizer import build_hf_tokenizer
 from torchtitan.config import JobConfig
@@ -270,9 +271,7 @@ def pipeline_llm(
 
     # use auto_partition
     if job_config.autopipe_config.auto_partition:
-        flatten_module_names = [
-            item for sublist in z for item in sublist
-        ]
+        flatten_module_names = [item for sublist in z for item in sublist]
 
         copied_model = copy.deepcopy(model)
         use_flex_attn = getattr(model.model_args, "use_flex_attn", False)

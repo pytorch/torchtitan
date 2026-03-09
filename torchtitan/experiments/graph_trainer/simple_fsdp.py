@@ -191,8 +191,7 @@ class ReplicateComputation(torch.nn.Module):
             # for RMSNorm weights on the TP mesh that see Shard inputs).
             non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
             non_dp_grad_placements = tuple(
-                Partial() if isinstance(p, Replicate) else p
-                for p in non_dp_placements
+                Partial() if isinstance(p, Replicate) else p for p in non_dp_placements
             )
 
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
