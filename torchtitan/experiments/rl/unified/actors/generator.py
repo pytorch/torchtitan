@@ -12,6 +12,7 @@ import torch
 import torchstore as ts
 from monarch.actor import Actor, endpoint
 from torch.distributed.tensor import DTensor
+from torchstore.direct_weight_sync import DirectWeightSyncDest, RDMAWeightHandle
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.experiments.rl.unified.plugin import (
@@ -153,6 +154,8 @@ class VLLMGenerator(Actor, Configurable):
         logger.info("vLLM rollout engine initialized")
 
         self.policy_version = 0
+        self._rdma_dest = DirectWeightSyncDest()
+        self._rdma_handles: dict[str, list[RDMAWeightHandle]] | None = None
 
         logger.info("Generator initialized with vLLM engine")
 
@@ -239,22 +242,40 @@ class VLLMGenerator(Actor, Configurable):
             checksums[name] = t.to(torch.float64).sum().item()
         return checksums
 
+    async def _fetch_rdma_handles(self) -> dict[str, list[RDMAWeightHandle]]:
+        """Fetch RDMA handles from all trainer ranks via TorchStore."""
+        num_ranks = await ts.get("policy_rdma/num_ranks")
+        all_handles: dict[str, list[RDMAWeightHandle]] = {}
+        for r in range(num_ranks):
+            rank_handles = await ts.get(f"policy_rdma/rank_{r}")
+            for name, handle in rank_handles.items():
+                all_handles.setdefault(name, []).append(handle)
+        logger.debug(
+            f"Fetched RDMA handles from {num_ranks} trainer ranks "
+            f"({len(all_handles)} params)"
+        )
+        return all_handles
+
     @endpoint
     async def pull_weights(self, version: int) -> None:
-        """Pull latest weights from TorchStore into the vLLM model.
+        """Pull latest weights via direct RDMA from trainer memory.
 
-        TorchStore handles DTensor resharding automatically — it computes
-        slice intersections between the trainer's sharding and ours, and
-        copies data in-place into our model's parameter tensors.
+        On the first call, fetches and caches RDMA handles from
+        TorchStore. Subsequent calls reuse cached handles and just
+        re-read the data (which the trainer has updated in-place or
+        refreshed into staging buffers).
 
         Args:
             version: New policy version number.
         """
+        if self._rdma_handles is None:
+            self._rdma_handles = await self._fetch_rdma_handles()
+
         model_sd = self._get_model().model.state_dict()
-        await ts.get_state_dict(key="policy", user_state_dict=model_sd, strict=False)
+        await self._rdma_dest.pull(self._rdma_handles, model_sd)
         self.policy_version = version
         logger.debug(
-            f"{os.getpid()=} Generator pulled weights for policy v{version}"
+            f"{os.getpid()=} Generator pulled weights via RDMA for policy v{version}"
         )
 
     def __del__(self):
