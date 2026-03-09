@@ -78,13 +78,17 @@ def run_single_test(
 def run_tests(args, test_list: list[OverrideDefinitions], module=None, config=None):
     """Run all integration tests to test the core features of TorchTitan"""
 
+    exclude_set = set()
+    if hasattr(args, "exclude") and args.exclude:
+        exclude_set = {name.strip() for name in args.exclude.split(",")}
+
     ran_any_test = False
     for test_flavor in test_list:
         # Filter by test_name if specified
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
 
-        if test_flavor.disabled:
+        if test_flavor.disabled or test_flavor.test_name in exclude_set:
             continue
 
         # Skip the test for ROCm
@@ -154,6 +158,11 @@ def main():
     )
     parser.add_argument(
         "--ngpu", default=8, type=int, help="Maximum number of GPUs to use"
+    )
+    parser.add_argument(
+        "--exclude",
+        default=None,
+        help="Comma-separated list of test names to skip",
     )
     args = parser.parse_args()
 

@@ -6,30 +6,86 @@
 
 import logging
 import os
-
 from dataclasses import dataclass, field
+from typing import Literal
 
 import torch
 from monarch.actor import Actor, endpoint
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import distribute_tensor, DTensor
 from torchtitan.config import Configurable
 from torchtitan.config.configs import ParallelismConfig
-
 from torchtitan.experiments.rl.unified.plugin import (
     register_model_to_vllm_model_registry,
     VLLM_MODEL_NAME,
 )
-
 from torchtitan.experiments.rl.unified.types import Episode
 from torchtitan.protocols.model_spec import ModelSpec
 from vllm import EngineArgs, LLMEngine, SamplingParams
-
-from vllm.config import AttentionConfig
+from vllm.config import AttentionConfig, CompilationConfig
 from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(kw_only=True, slots=True)
+class GeneratorCompileConfig:
+    """Compilation and CUDA graph settings for the vLLM generator."""
+
+    backend: Literal["none", "eager", "inductor"] = "eager"
+    """torch.compile backend for vLLM
+    When set to a value other than "none", enables compilation with the specified backend.
+    See https://docs.vllm.ai/en/stable/api/vllm/config/#vllm.config.CompilationConfig.backend
+    NOTE: "eager" means compile with dynamo backend (like torch.compile(backend="eager"))
+    NOTE: inductor will offer the best performance, but will impact numerics - use eager for
+    bitwise identical results."""
+
+    cudagraph_mode: Literal[
+        "none", "piecewise", "full", "full_and_piecewise"
+    ] = "piecewise"
+    """CUDA graph capture mode for vLLM.
+    Piecewise capture supports dynamic sizes and splits cudagraphs around non capturable
+      ops like attention
+    Full capture captures one graph at the expense of less dynamism and requires full
+      capturability
+    full_and_piecewise does both and selects which to use based on dynamism
+    NOTE: Piecewise graph capture requires torch.compile for graph capture and splitting
+    See https://docs.vllm.ai/en/latest/design/cuda_graphs/#cudagraphmodes for more details."""
+
+    def __post_init__(self) -> None:
+        if self.backend == "none" and self.cudagraph_mode in (
+            "piecewise",
+            "full_and_piecewise",
+        ):
+            raise ValueError(
+                f"cudagraph_mode='{self.cudagraph_mode}' requires piecewise graph "
+                "capture which depends on torch.compile. Set backend "
+                "to 'eager' or 'inductor'."
+            )
+
+    @property
+    def is_eager(self) -> bool:
+        """Inferred from backend and cudagraph_mode."""
+        return self.backend == "none" and self.cudagraph_mode == "none"
+
+    def get_vllm_compilation_config(self) -> CompilationConfig | None:
+        """Build a vLLM ``CompilationConfig``, or return ``None`` when both
+        compilation and CUDA graphs are disabled.
+        """
+        if self.is_eager:
+            return None
+
+        kwargs: dict = dict(cudagraph_mode=self.cudagraph_mode)
+        if self.backend == "none":
+            # Disable torch.compile but keep CUDA graphs (e.g. full mode).
+            # mode=0 (CompilationMode.NONE) prevents vLLM from inferring
+            # VLLM_COMPILE based on the default optimization level.
+            kwargs["mode"] = 0
+        else:
+            kwargs["backend"] = self.backend
+
+        return CompilationConfig(**kwargs)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -80,17 +136,27 @@ class VLLMGenerator(Actor, Configurable):
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
 
-        gpu_memory_limit: float = 0.5
+        gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the vLLM engine (0.0 to 1.0)."""
 
-        enforce_eager: bool = True
-        """Disable CUDA graphs in vLLM (use eager execution)."""
+        compile: GeneratorCompileConfig = field(default_factory=GeneratorCompileConfig)
+        """Compilation and CUDA graph settings for the vLLM engine."""
 
         num_samples_per_prompt: int = 8
         """Number of completions to generate per prompt."""
 
         seed: int | None = None
         """Random seed for vLLM engine and sampling. None for non-deterministic."""
+
+        def __post_init__(self):
+            assert self.parallelism.data_parallel_shard_degree in (1, -1), (
+                f"Generator does not support data parallel sharding, "
+                f"got dp_shard={self.parallelism.data_parallel_shard_degree}"
+            )
+            assert self.parallelism.data_parallel_replicate_degree == 1, (
+                f"Generator does not support data parallel replication, "
+                f"got dp_replicate={self.parallelism.data_parallel_replicate_degree}"
+            )
 
     def __init__(
         self,
@@ -99,7 +165,6 @@ class VLLMGenerator(Actor, Configurable):
         model_spec: ModelSpec,
         model_path: str,
         batch_invariant_mode: bool,
-        prompt_texts: list[str],
     ):
         self.config = config
         self.model_spec = model_spec
@@ -113,8 +178,6 @@ class VLLMGenerator(Actor, Configurable):
         if batch_invariant_mode:
             os.environ["VLLM_BATCH_INVARIANT"] = "1"
             init_batch_invariance(AttentionBackendEnum[config.attention_backend])
-
-        self.prompt_texts = prompt_texts
 
         # Extract needed fields from configs
         self.model_path = model_path
@@ -132,12 +195,16 @@ class VLLMGenerator(Actor, Configurable):
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
-            enforce_eager=config.enforce_eager,
+            enforce_eager=config.compile.is_eager,
             hf_overrides={"architectures": [VLLM_MODEL_NAME]},
             attention_config=AttentionConfig(
                 backend=AttentionBackendEnum[config.attention_backend],
             ),
+            disable_log_stats=True,
         )
+        vllm_compilation_config = config.compile.get_vllm_compilation_config()
+        if vllm_compilation_config is not None:
+            engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.seed is not None:
             engine_kwargs["seed"] = config.seed
         engine_args = EngineArgs(**engine_kwargs)
@@ -157,9 +224,12 @@ class VLLMGenerator(Actor, Configurable):
         return self._engine.model_executor.driver_worker.get_model()
 
     @endpoint
-    async def generate(self) -> list[Episode]:
+    async def generate(self, prompt_texts: list[str]) -> list[Episode]:
         """Generate episodes and return list of Episode (one per prompt).
         Called by the orchestrator (simple_grpo.py). The Grader fills in rewards.
+
+        Args:
+            prompt_texts: List of prompt strings for which to generate completions.
         """
         logger.debug(
             f"{os.getpid()=} Generating start generate (policy v{self.policy_version})..."
@@ -177,7 +247,7 @@ class VLLMGenerator(Actor, Configurable):
                 output_kind=RequestOutputKind.FINAL_ONLY,  # Only return completed outputs
             )
 
-            for request_id, prompt in enumerate(self.prompt_texts):
+            for request_id, prompt in enumerate(prompt_texts):
                 self._engine.add_request(str(request_id), prompt, sampling_params)
 
             # Step through engine until all requests are finished
@@ -213,7 +283,7 @@ class VLLMGenerator(Actor, Configurable):
                     )
                 )
 
-        logger.info(
+        logger.debug(
             f"{os.getpid()=} Generating finish generate (policy v{self.policy_version})..."
         )
         return episodes
@@ -225,29 +295,22 @@ class VLLMGenerator(Actor, Configurable):
 
         Args:
             version: New policy version number
-            state_dict: Per-rank state dicts keyed by GPU index,
-                e.g. {0: state_dict_gpu0, 1: state_dict_gpu1}
+            state_dict: Full (unsharded) state dict with plain tensors.
         """
-        # Extract this rank's state dict from the per-rank dict
-        rank = int(os.environ.get("LOCAL_RANK", 0))
-        local_state_dict = state_dict[rank]
-
-        # Convert plain local tensors (TP shards from trainer) to DTensors
-        # matching the vLLM model's sharding layout. The trainer exports
-        # weights via to_local() which strips DTensor metadata.
+        # Reshard full tensors to match this generator's DTensor layout
         model_state_dict = dict(self._get_model().model.state_dict())
-        for name, tensor in local_state_dict.items():
+        for name, tensor in state_dict.items():
             if name in model_state_dict and isinstance(model_state_dict[name], DTensor):
                 if isinstance(tensor, DTensor):
                     continue
                 target_dtensor = model_state_dict[name]
-                local_state_dict[name] = DTensor.from_local(
+                state_dict[name] = distribute_tensor(
                     tensor.to(target_dtensor.device_mesh.device_type),
                     device_mesh=target_dtensor.device_mesh,
                     placements=target_dtensor.placements,
                 )
 
-        load_weights = self._get_model().load_weights_from_state_dict(local_state_dict)
+        load_weights = self._get_model().load_weights_from_state_dict(state_dict)
         self.policy_version = version
         logger.debug(
             f"Updated weights into vLLM engine model. "
