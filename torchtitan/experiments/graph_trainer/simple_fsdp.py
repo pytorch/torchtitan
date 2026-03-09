@@ -185,8 +185,21 @@ class ReplicateComputation(torch.nn.Module):
                     "full_dtensor not implemented for nD parallelisms"
                 )
             dp_mesh = self.device_mesh
+
+            # Compute grad placements for non-DP mesh dims so that
+            # backward properly reduces gradients (e.g., Replicate -> Partial
+            # for RMSNorm weights on the TP mesh that see Shard inputs).
+            non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
+            non_dp_grad_placements = tuple(
+                Partial() if isinstance(p, Replicate) else p
+                for p in non_dp_placements
+            )
+
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
-            sharded_local_tensor = x.to_local()
+            # Pass grad_placements so backward knows how to reduce across non-DP dims
+            sharded_local_tensor = x.to_local(
+                grad_placements=self.param_sharding + non_dp_grad_placements
+            )
             sharded_dtensor = DTensor.from_local(
                 sharded_local_tensor, dp_mesh, self.param_sharding
             )
@@ -205,7 +218,6 @@ class ReplicateComputation(torch.nn.Module):
                 grad_placements=self.grad_placements
             )
 
-            non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
             non_dp_mesh_dim_names = tuple(
                 x._spec.mesh.mesh_dim_names[-non_dp_mesh_dims:]
             )
