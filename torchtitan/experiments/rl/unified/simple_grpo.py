@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 
 import torch
 from monarch.actor import this_host
-from monarch.utils import setup_env_for_distributed
+from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import Configurable
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
@@ -175,8 +175,8 @@ class RLTrainer(Configurable):
         )
         grader_mesh = this_host().spawn_procs()
 
-        await setup_env_for_distributed(trainer_mesh)
-        await setup_env_for_distributed(generator_mesh)
+        await setup_torch_elastic_env_async(trainer_mesh)
+        await setup_torch_elastic_env_async(generator_mesh)
 
         # Spawn actors on their respective meshes
         self.trainer = trainer_mesh.spawn(
