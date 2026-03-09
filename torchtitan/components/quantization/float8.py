@@ -185,9 +185,11 @@ class Float8LinearConverter(QuantizationConverter):
 
         from torchao.float8 import convert_to_float8_training
 
-        # Capture Module attrs before conversion (Float8 creates new instances)
+        # Capture Module attrs before conversion (Float8 creates new instances).
+        # We need to first verify if all nn.Linear have been converted to Linear.
+        verify_module_protocol(model, nn.Linear, Linear)
         saved_attrs = capture_module_attrs(
-            model, ["_module_config", "_init_mean", "_init_std"]
+            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
         )
 
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
@@ -283,9 +285,11 @@ class Float8GroupedMMConverter(QuantizationConverter):
                     return True
             return False
 
-        # Capture Module attrs before conversion
+        # Capture Module attrs before conversion (Float8 creates new instances).
+        # We need to first verify if all nn.Linear have been converted to Linear.
+        verify_module_protocol(model, nn.Linear, Linear)
         saved_attrs = capture_module_attrs(
-            model, ["_module_config", "_init_mean", "_init_std"]
+            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
         )
 
         config = FP8GroupedMMConfig()

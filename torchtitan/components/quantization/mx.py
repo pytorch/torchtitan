@@ -115,9 +115,11 @@ class MXLinearConverter(QuantizationConverter):
 
         assert isinstance(self.torchao_config, TorchAOMXLinearConfig)
 
-        # Capture Module attrs before conversion
+        # Capture Module attrs before conversion (MX may swap classes, losing them).
+        # We need to first verify if all nn.Linear have been converted to Linear.
+        verify_module_protocol(model, nn.Linear, Linear)
         saved_attrs = capture_module_attrs(
-            model, ["_module_config", "_init_mean", "_init_std"]
+            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
         )
 
         quantize_(
@@ -218,9 +220,11 @@ class MXGroupedMMConverter(QuantizationConverter):
                     return True
             return False
 
-        # Capture Module attrs before conversion
+        # Capture Module attrs before conversion (MX may swap classes, losing them).
+        # We need to first verify if all nn.Linear have been converted to Linear.
+        verify_module_protocol(model, nn.Linear, Linear)
         saved_attrs = capture_module_attrs(
-            model, ["_module_config", "_init_mean", "_init_std"]
+            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
         )
 
         config = MoETrainingConfig(scaling_type=MoEScalingType.MXFP8)

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F
@@ -45,12 +45,19 @@ class FeedForward(Module):
         w1: Linear.Config
         w2: Linear.Config
         w3: Linear.Config
+        dim: int = field(init=False)
 
-    def __init__(self, config: Config, *, dim: int):
+    def __init__(self, config: Config):
         super().__init__()
-        self.w1 = config.w1.build(in_features=dim, out_features=config.hidden_dim)
-        self.w2 = config.w2.build(in_features=config.hidden_dim, out_features=dim)
-        self.w3 = config.w3.build(in_features=dim, out_features=config.hidden_dim)
+        self.w1 = config.w1.build(
+            in_features=config.dim, out_features=config.hidden_dim
+        )
+        self.w2 = config.w2.build(
+            in_features=config.hidden_dim, out_features=config.dim
+        )
+        self.w3 = config.w3.build(
+            in_features=config.dim, out_features=config.hidden_dim
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))

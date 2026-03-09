@@ -94,7 +94,7 @@ def inject_module_protocol(
             orig_cls = type(mod)
             if orig_cls not in patched_classes:
                 patched_classes[orig_cls] = type(
-                    orig_cls.__name__,
+                    f"{orig_cls.__name__}_With{module_cls.__name__}",
                     (orig_cls, module_cls),
                     {"__init__": _raise_error},
                 )

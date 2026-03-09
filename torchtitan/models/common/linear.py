@@ -41,11 +41,11 @@ class Linear(nn.Linear, Module):
                 "on the Config instance before constructing Linear directly."
             )
         super().__init__(config.in_features, config.out_features, bias=config.bias)
-        self._module_config = config
         self._init_mean = config.init_mean
         self._init_std = config.init_std
 
-    def init_weights(self, init_std: float | None = None, **kwargs) -> None:
+    def init_weights(self, **kwargs) -> None:
+        init_std: float | None = kwargs.pop("init_std", None)
         std = init_std if init_std is not None else self._init_std
         nn.init.trunc_normal_(self.weight, mean=self._init_mean, std=std)
         if self.bias is not None:

@@ -68,14 +68,18 @@ class TestLinear(unittest.TestCase):
         self.assertLess(linear.weight.std().item(), 0.005 * 2)
 
     def test_custom_init_std(self):
-        """Linear respects custom init_std from Config."""
-        config = Linear.Config(init_std=0.01)
+        """Linear respects custom init_mean and init_std."""
+        config = Linear.Config(init_mean=0.1, init_std=0.02)
         linear = config.build(in_features=1000, out_features=500)
 
         torch.manual_seed(42)
         with torch.no_grad():
             linear.init_weights()
-        self.assertLess(linear.weight.std().item(), config.init_std * 2)
+        # With large amount of samples (1000 * 500) the sample statistics should
+        # be close to the requested values. places=3 checks within 0.0005, which
+        # is well within statistical tolerance for this sample size.
+        self.assertAlmostEqual(linear.weight.mean().item(), 0.1, places=3)
+        self.assertAlmostEqual(linear.weight.std().item(), 0.02, places=3)
 
     def test_forward(self):
         """Forward pass works through nn.Linear's implementation."""
@@ -102,20 +106,6 @@ class TestLinear(unittest.TestCase):
         self.assertIsInstance(linear, nn.Module)
         self.assertIsInstance(linear, Module)
 
-    def test_state_dict(self):
-        """state_dict works correctly for no-bias case."""
-        config = Linear.Config()
-        linear = config.build(in_features=8, out_features=4)
-        sd = linear.state_dict()
-        self.assertEqual(list(sd.keys()), ["weight"])
-
-    def test_state_dict_with_bias(self):
-        """state_dict works correctly for bias case."""
-        config = Linear.Config(bias=True)
-        linear = config.build(in_features=8, out_features=4)
-        sd = linear.state_dict()
-        self.assertEqual(sorted(sd.keys()), ["bias", "weight"])
-
     def test_default_bias_false(self):
         """Linear.Config defaults to bias=False."""
         config = Linear.Config()
@@ -132,12 +122,11 @@ class TestLinear(unittest.TestCase):
         self.assertIsInstance(linear, Linear)
         self.assertIsNotNone(linear.bias)
 
-    def test_module_config_stored(self):
-        """_module_config is stored on the instance."""
-        config = Linear.Config(init_std=0.05)
+    def test_init_attrs_stored(self):
+        """_init_mean and _init_std are stored on the instance."""
+        config = Linear.Config(init_mean=0.1, init_std=0.05)
         linear = config.build(in_features=8, out_features=4)
-        self.assertEqual(linear._module_config.init_std, config.init_std)
-        self.assertEqual(linear._module_config.bias, config.bias)
+        self.assertEqual(linear._init_mean, 0.1)
         self.assertEqual(linear._init_std, 0.05)
 
     def test_config_pre_specified_build(self):
@@ -198,9 +187,7 @@ class TestModuleInjection(unittest.TestCase):
         model.fc = config.build(in_features=8, out_features=4)
 
         # Capture attrs, simulate conversion, inject
-        saved_attrs = capture_module_attrs(
-            model, ["_module_config", "_init_mean", "_init_std"]
-        )
+        saved_attrs = capture_module_attrs(model, ["_init_mean", "_init_std"])
         model.fc = FakeQuantLinear(8, 4)
         inject_module_protocol(model, Linear, saved_attrs)
 
@@ -233,25 +220,20 @@ class TestModuleInjection(unittest.TestCase):
         model.fc = config.build(in_features=8, out_features=4)
 
         # Capture attrs
-        saved = capture_module_attrs(
-            model, ["_module_config", "_init_mean", "_init_std"]
-        )
+        saved = capture_module_attrs(model, ["_init_mean", "_init_std"])
         self.assertIn("fc", saved)
-        self.assertIn("_module_config", saved["fc"])
         self.assertIn("_init_mean", saved["fc"])
         self.assertIn("_init_std", saved["fc"])
 
         # Simulate Float8 conversion: replace with a new FakeQuantLinear
         model.fc = FakeQuantLinear(8, 4, bias=True)
         self.assertNotIsInstance(model.fc, Module)
-        self.assertFalse(hasattr(model.fc, "_module_config"))
+        self.assertFalse(hasattr(model.fc, "_init_std"))
 
         # Inject and re-attach
         inject_module_protocol(model, Linear, saved)
         self.assertIsInstance(model.fc, Module)
         self.assertIsInstance(model.fc, Linear)
-        self.assertTrue(hasattr(model.fc, "_module_config"))
-        self.assertEqual(model.fc._module_config.init_std, 0.05)
         self.assertEqual(model.fc._init_std, 0.05)
 
     def test_inject_idempotent(self):
@@ -286,7 +268,7 @@ class TestModuleInjection(unittest.TestCase):
         # Simulate MX conversion: class swap (instance attrs survive)
         model.fc.__class__ = FakeQuantLinear
         self.assertFalse(isinstance(model.fc, Module))
-        self.assertTrue(hasattr(model.fc, "_module_config"))  # attrs survive
+        self.assertTrue(hasattr(model.fc, "_init_std"))  # attrs survive
 
         # Inject Linear back
         inject_module_protocol(model, Linear)
