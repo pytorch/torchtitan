@@ -10,6 +10,7 @@
 import torch
 import torch._inductor.config
 import torch.nn as nn
+from torch.backends.cuda import SDPBackend
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 from torch.distributed.tensor.experimental import local_map
@@ -61,9 +62,9 @@ class _LocalMapInnerAttention(nn.Module):
         # q, k, v are sharded on heads dim (dim=1 after transpose in GQAttention)
         # Each PlacementType is a Sequence[Placement], e.g. (Shard(1),)
         shard_heads = (Shard(1),)
+        # note: needs support for attention mask sharding if non-SDPA attn_backend is added
         self._local_map_fn = local_map(
             inner_attn,
-            # Single output: wrap in tuple so local_map sees Tuple[PlacementType]
             out_placements=(shard_heads,),
             in_placements=(shard_heads, shard_heads, shard_heads),
             in_grad_placements=(shard_heads, shard_heads, shard_heads),
@@ -77,6 +78,7 @@ class _LocalMapInnerAttention(nn.Module):
 # for selective op activation checkpointing
 _op_sac_save_list = {
     torch.ops.aten.mm.default,
+    torch.ops.aten.linear.default,
     torch.ops.aten._scaled_dot_product_efficient_attention.default,
     torch.ops.aten._scaled_dot_product_flash_attention.default,
     torch.ops.aten._scaled_dot_product_cudnn_attention.default,
@@ -173,15 +175,25 @@ def parallelize_qwen3(
     # When both TP and CP are enabled, wrap inner_attention with local_map
     # to properly handle DTensor <-> local tensor conversion at the TP/CP
     # boundary. TP's use_local_output=False produces DTensor q/k/v, but CP
-    # hooks expect plain tensors. local_map handles this with correct
-    # grad_placements for backward pass.
+    # hooks expect plain tensors.
+    # TODO(pianpwk): remove this once full DTensor lands
     if parallel_dims.tp_enabled and parallel_dims.cp_enabled:
         tp_mesh = parallel_dims.get_mesh("tp")
         # pyrefly: ignore [missing-attribute, not-callable]
         for block in model.layers.values():
             attn = block.attention  # pyrefly: ignore [missing-attribute]
-            attn.inner_attention = _LocalMapInnerAttention(
-                attn.inner_attention, tp_mesh
+            # Workaround: cuDNN SDPA backward has a stride mismatch bug with CP.
+            # Exclude cuDNN until PyTorch fix lands.
+            attn.inner_attention.sdpa_backends = (
+                [  # pyrefly: ignore [missing-attribute]
+                    SDPBackend.FLASH_ATTENTION,
+                    SDPBackend.MATH,
+                ]
+            )
+            attn.inner_attention = (
+                _LocalMapInnerAttention(  # pyrefly: ignore [missing-attribute]
+                    attn.inner_attention, tp_mesh  # pyrefly: ignore [missing-attribute]
+                )
             )
 
     if ac_config.mode != "none":
