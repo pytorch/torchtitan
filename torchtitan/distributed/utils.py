@@ -358,6 +358,7 @@ def init_distributed(
     torch.distributed.init_process_group(
         backend=_get_distributed_backend(enable_cpu_backend),
         timeout=timedelta(seconds=comm_config.init_timeout_seconds),
+        device_id=torch.device(device_type, int(os.environ["LOCAL_RANK"])),
         _ranks=ranks if ranks is not None else [],
     )
 
