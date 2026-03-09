@@ -15,7 +15,14 @@ from torchtitan.components.quantization import (
     QuantizationConverter,
 )
 from torchtitan.distributed import ParallelDims
+
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe.utils import set_token_group_alignment_size_m
+from torchtitan.protocols.module import (
+    capture_module_attrs,
+    inject_module_protocol,
+    verify_module_protocol,
+)
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 
@@ -107,11 +114,22 @@ class MXLinearConverter(QuantizationConverter):
         from torchao.quantization import quantize_
 
         assert isinstance(self.torchao_config, TorchAOMXLinearConfig)
+
+        # Capture Module attrs before conversion
+        saved_attrs = capture_module_attrs(
+            model, ["_module_config", "_init_mean", "_init_std"]
+        )
+
         quantize_(
             model,
             config=self.torchao_config,
             filter_fn=partial(module_filter_fn, filter_fqns=self.filter_fqns),
         )
+
+        # Re-inject Linear protocol and re-attach attrs
+        inject_module_protocol(model, Linear, saved_attrs)
+        verify_module_protocol(model, nn.Linear, Linear)
+
         logger.info("Swapped to MXLinear layers")
 
     def post_optimizer_hook(self, model: nn.Module | list[nn.Module]):
@@ -200,8 +218,18 @@ class MXGroupedMMConverter(QuantizationConverter):
                     return True
             return False
 
+        # Capture Module attrs before conversion
+        saved_attrs = capture_module_attrs(
+            model, ["_module_config", "_init_mean", "_init_std"]
+        )
+
         config = MoETrainingConfig(scaling_type=MoEScalingType.MXFP8)
         quantize_(model, config=config, filter_fn=moe_module_filter_fn)
+
+        # Re-inject Linear protocol and re-attach attrs
+        inject_module_protocol(model, Linear, saved_attrs)
+        verify_module_protocol(model, nn.Linear, Linear)
+
         logger.info(
             f"Converted MoE layers matching FQNS {self.moe_fqns} "
             f"to use dynamic {self.recipe_name} quantization with scaled grouped GEMMs"

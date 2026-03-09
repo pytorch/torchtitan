@@ -23,6 +23,7 @@ from torchtitan.models.common.attention import (
     get_sliding_window_mask_mod,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
 from torchtitan.tools.logging import logger
@@ -36,6 +37,10 @@ class Attention(BaseAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
+        wq: Linear.Config
+        wk: Linear.Config
+        wv: Linear.Config
+        wo: Linear.Config
         n_heads: int = 64
         n_kv_heads: int = 8
         head_dim: int = 64
@@ -55,25 +60,17 @@ class Attention(BaseAttention):
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
-        self.wq = nn.Linear(
-            dim,
-            config.n_heads * config.head_dim,
-            bias=True,
+        self.wq = config.wq.build(
+            in_features=dim, out_features=config.n_heads * config.head_dim
         )
-        self.wk = nn.Linear(
-            dim,
-            config.n_kv_heads * config.head_dim,
-            bias=True,
+        self.wk = config.wk.build(
+            in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wv = nn.Linear(
-            dim,
-            config.n_kv_heads * config.head_dim,
-            bias=True,
+        self.wv = config.wv.build(
+            in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wo = nn.Linear(
-            config.n_heads * config.head_dim,
-            dim,
-            bias=True,
+        self.wo = config.wo.build(
+            in_features=config.n_heads * config.head_dim, out_features=dim
         )
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         assert config.attn_backend == "flex", "gpt-oss only supports FlexAttention"
@@ -82,18 +79,9 @@ class Attention(BaseAttention):
     def init_weights(self, **kwargs):
         init_std = kwargs.get("init_std")
         assert init_std is not None
-        linear_list = [
-            self.wq,
-            self.wk,
-            self.wv,
-        ]
-
         nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
-        for linear in linear_list:
-            nn.init.trunc_normal_(linear.weight, mean=0.0, std=init_std)
-            nn.init.trunc_normal_(linear.bias, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.wo.bias, mean=0.0, std=init_std)
+        for linear in (self.wq, self.wk, self.wv, self.wo):
+            linear.init_weights(init_std=init_std)
 
     def forward(
         self,
@@ -276,13 +264,6 @@ class GptOssModel(Decoder):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        # GptOss uses dtype=torch.get_default_dtype() for output linear
-        self.output = nn.Linear(
-            config.dim,
-            config.vocab_size,
-            dtype=torch.get_default_dtype(),
-            bias=False,
-        )
 
     def get_attention_masks(
         self,
