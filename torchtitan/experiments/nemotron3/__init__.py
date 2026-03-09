@@ -37,7 +37,7 @@ nemotron3_configs = {
         max_seq_len=4096,
         mamba_num_heads=16,
         mamba_head_dim=64,
-        attn_type="flex",
+        attn_type="sdpa",
     ),
     # NemotronH-nano-30B configuration
     # From https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/main/config.json
@@ -76,6 +76,7 @@ nemotron3_configs = {
         n_group=1,
         topk_group=1,
         norm_topk_prob=True,
+        attn_type="sdpa",
     ),
 }
 

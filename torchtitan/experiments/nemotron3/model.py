@@ -62,7 +62,6 @@ class Nemotron3Config(BaseModel.Config):
     head_dim: int = 128
     n_kv_heads: int = 8  # num_key_value_heads (GQA)
     max_seq_len: int = 4096  # max_position_embeddings
-    attn_dropout: float = 0.0  # attention_dropout
 
     # Activation and biases
     mlp_hidden_act: str = "relu2"
@@ -747,8 +746,8 @@ class Attention(nn.Module):
         self.head_dim = model_args.head_dim
         self.num_kv_heads = model_args.n_kv_heads
         self.num_kv_groups = self.num_heads // self.num_kv_heads
-        self.attention_dropout = model_args.attn_dropout
         self.attn_backend = model_args.attn_backend
+        self.attn_mask_type = model_args.attn_mask_type
 
         self.wq = nn.Linear(
             self.hidden_size, self.num_heads * self.head_dim, bias=model_args.attn_bias
@@ -827,19 +826,27 @@ class Attention(nn.Module):
         match self.attn_backend:
             case "sdpa":
                 attn_kwargs = {
-                    "dropout_p": self.attention_dropout if self.training else 0.0,
                     "is_causal": True,
                 }
             case "varlen":
                 raise ValueError("Varlen attention is not supported with Nemotron3.")
             case "flex":
+                if attention_masks is None:
+                    if self.attn_mask_type != "causal":
+                        raise TypeError(
+                            "flex attention with block_causal mask requires "
+                            "attention_masks to be provided."
+                        )
+                    attention_masks = create_attention_mask(
+                        and_masks(get_causal_mask_mod()),
+                        1,
+                        None,
+                        q_len,
+                        q_len,
+                    )
                 if not isinstance(attention_masks, BlockMask):
                     raise TypeError(
                         f"flex attention expects BlockMask, got {type(attention_masks)}"
-                    )
-                if self.attention_dropout > 0.0 and self.training:
-                    raise NotImplementedError(
-                        "Attention dropout is not supported for flex attention in Nemotron3."
                     )
                 attn_kwargs = {"block_mask": attention_masks}
 
