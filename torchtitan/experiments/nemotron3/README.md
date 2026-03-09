@@ -43,39 +43,41 @@ python scripts/download_hf_assets.py \
 
 **Multi-GPU Training (8 GPUs):**
 ```bash
-NGPU=8 CONFIG_FILE="./torchtitan/experiments/nemotron3/train_configs/nemotron3-nano-30B.toml" ./run_train.sh
+NGPU=8 MODULE=nemotron3 CONFIG=nemotron3_nano_30b ./run_train.sh
 ```
 
 **Single GPU (debug model):**
 ```bash
-NGPU=1 CONFIG_FILE="./torchtitan/experiments/nemotron3/train_configs/debug_model.toml" ./run_train.sh
+NGPU=1 MODULE=nemotron3 CONFIG=nemotron3_debugmodel ./run_train.sh
 ```
 
 ## Available Configurations
 
 | Config | Description | Use Case |
 |--------|-------------|----------|
-| `nemotron3-nano-30B.toml` | Full Nemotron3 Nano-30B model with bf16 |  |
-| `debug_model.toml` | Small 16-layer model | testing & debugging |
+| `nemotron3_nano_30b` | Full Nemotron3 Nano-30B model with bf16 | production-scale training |
+| `nemotron3_debugmodel` | Small debug configuration | testing & debugging |
 
 ## Key Training Options
 
-Edit the `.toml` config file to customize:
+Customize with CLI overrides:
 
-```toml
-[training]
-local_batch_size = 1      # Per-GPU batch size
-seq_len = 4096            # Sequence length
-dtype = "bfloat16"        # Training precision
-
-[parallelism]
-data_parallel_shard_degree = -1  # FSDP sharding (-1 = auto)
-tensor_parallel_degree = 1       # Tensor parallelism
-
-[checkpoint]
-initial_load_path = "./assets/hf/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-initial_load_in_hf = true        # Load from HuggingFace format
+```bash
+NGPU=1 MODULE=nemotron3 CONFIG=nemotron3_debugmodel ./run_train.sh \
+  --training.local_batch_size=1 \
+  --training.seq_len=4096 \
+  --training.dtype=bfloat16 \
+  --parallelism.data_parallel_shard_degree=-1 \
+  --parallelism.tensor_parallel_degree=1 \
+  --checkpoint.initial_load_path=./assets/hf/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+  --checkpoint.initial_load_in_hf=true
 ```
+
+## Legacy TOML Presets
+
+The files under `train_configs/` are legacy presets. The active path is Python config registry:
+- `torchtitan.experiments.nemotron3.config_registry.nemotron3_debugmodel`
+- `torchtitan.experiments.nemotron3.config_registry.nemotron3_nano_30b`
 
 ## Hardware Requirements
 

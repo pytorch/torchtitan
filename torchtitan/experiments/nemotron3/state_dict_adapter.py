@@ -10,7 +10,7 @@ from typing import Any
 from torchtitan.models.utils import MoEStateDictAdapter
 from torchtitan.tools.logging import logger
 
-from .args import Nemotron3ModelArgs
+from .model import Nemotron3Config
 
 
 class Nemotron3StateDictAdapter(MoEStateDictAdapter):
@@ -36,7 +36,7 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
 
     def __init__(
         self,
-        model_args: Nemotron3ModelArgs,
+        model_args: Nemotron3Config,
         hf_assets_path: str | None,
     ):
         super().__init__(model_args, hf_assets_path)
@@ -84,8 +84,8 @@ class Nemotron3StateDictAdapter(MoEStateDictAdapter):
 
         # MoE mixer components (gate/router)
         self.moe_gate_from_hf_map: dict[str, str | None] = {
-            "backbone.layers.{}.mixer.gate.weight": "layers.{}.mixer.gate.weight",
-            "backbone.layers.{}.mixer.gate.e_score_correction_bias": "layers.{}.mixer.gate.e_score_correction_bias",
+            "backbone.layers.{}.mixer.gate.weight": "layers.{}.mixer.router.weight",
+            "backbone.layers.{}.mixer.gate.e_score_correction_bias": "layers.{}.mixer.router.e_score_correction_bias",
         }
 
         # MoE shared experts

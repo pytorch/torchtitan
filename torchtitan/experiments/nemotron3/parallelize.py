@@ -15,15 +15,28 @@ from torch.distributed._composable.fsdp import (
     MixedPrecisionPolicy,
 )
 
-from torchtitan.config import JobConfig, TORCH_DTYPE_MAP
+from torchtitan.config import (
+    ActivationCheckpointConfig,
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed import ParallelDims
+from torchtitan.protocols import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
 
 def parallelize_nemotron3(
     model: nn.Module,
+    *,
     parallel_dims: ParallelDims,
-    job_config: JobConfig,
+    training: TrainingConfig,
+    model_converters: ModelConvertersContainer.Config,
+    parallelism: ParallelismConfig,
+    compile_config: CompileConfig,
+    ac_config: ActivationCheckpointConfig,
+    dump_folder: str,
 ) -> nn.Module:
     """
     Apply data parallelism (FSDP) to the Nemotron3 model.
@@ -33,8 +46,13 @@ def parallelize_nemotron3(
 
     Args:
         model: The Nemotron3 model to parallelize
-        parallel_dims: Parallel dimensions configuration
-        job_config: Job configuration
+        parallel_dims: Parallel dimensions configuration.
+        training: Training config.
+        model_converters: Model converters config (unused currently).
+        parallelism: Parallelism config.
+        compile_config: Compile config (unused currently).
+        ac_config: Activation checkpoint config (unused currently).
+        dump_folder: Dump folder (unused currently).
 
     Returns:
         The parallelized model
@@ -71,11 +89,11 @@ def parallelize_nemotron3(
         apply_fsdp(
             model,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[job_config.training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
             pp_enabled=parallel_dims.pp_enabled,
-            cpu_offload=job_config.training.enable_cpu_offload,
-            reshard_after_forward_policy=job_config.parallelism.fsdp_reshard_after_forward,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         )
 
         if parallel_dims.dp_replicate_enabled:
@@ -83,7 +101,7 @@ def parallelize_nemotron3(
         else:
             logger.info("Applied FSDP to the model")
 
-        if job_config.training.enable_cpu_offload:
+        if training.enable_cpu_offload:
             logger.info("Applied CPU Offloading to the model")
 
     return model

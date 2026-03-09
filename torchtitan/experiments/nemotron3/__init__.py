@@ -5,31 +5,27 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers
-from torchtitan.components.tokenizer import build_hf_tokenizer
-from torchtitan.hf_datasets.text_datasets import build_text_dataloader
-from torchtitan.protocols.train_spec import TrainSpec
+from torchtitan.protocols.model_spec import ModelSpec
 
-from .infra.parallelize import parallelize_nemotron3
-from .model.args import Nemotron3ModelArgs
-from .model.model import Nemotron3Model
-from .model.state_dict_adapter import Nemotron3StateDictAdapter
+from .model import Nemotron3Config, Nemotron3Model
+from .parallelize import parallelize_nemotron3
+from .state_dict_adapter import Nemotron3StateDictAdapter
 
 __all__ = [
-    "Nemotron3ModelArgs",
+    "Nemotron3Config",
     "Nemotron3Model",
     "Nemotron3StateDictAdapter",
     "parallelize_nemotron3",
-    "nemotron3_args",
+    "nemotron3_configs",
+    "model_registry",
 ]
 
 
 # NemotronH model flavors
 # Pattern key: M=Mamba2, *=Attention, E=MoE
-nemotron3_args = {
+nemotron3_configs = {
     # Debug model for testing
-    "debugmodel": Nemotron3ModelArgs(
+    "debugmodel": Nemotron3Config(
         vocab_size=131072,
         dim=1024,
         hidden_dim=4096,
@@ -41,10 +37,11 @@ nemotron3_args = {
         max_seq_len=4096,
         mamba_num_heads=16,
         mamba_head_dim=64,
+        attn_type="flex",
     ),
     # NemotronH-nano-30B configuration
     # From https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/blob/main/config.json
-    "nano-30B": Nemotron3ModelArgs(
+    "nano-30B": Nemotron3Config(
         vocab_size=131072,
         dim=2688,  # hidden_size
         hidden_dim=1856,  # intermediate_size
@@ -83,16 +80,14 @@ nemotron3_args = {
 }
 
 
-def get_train_spec() -> TrainSpec:
-    return TrainSpec(
-        model_cls=Nemotron3Model,
-        model_args=nemotron3_args,
+def model_registry(flavor: str) -> ModelSpec:
+    return ModelSpec(
+        name="nemotron3",
+        flavor=flavor,
+        model=nemotron3_configs[flavor],
         parallelize_fn=parallelize_nemotron3,
-        pipelining_fn=None,  # TODO: Implement pipelining if needed
-        build_optimizers_fn=build_optimizers,
-        build_lr_schedulers_fn=build_lr_schedulers,
-        build_dataloader_fn=build_text_dataloader,
-        build_tokenizer_fn=build_hf_tokenizer,
+        pipelining_fn=None,
         build_loss_fn=build_cross_entropy_loss,
+        post_optimizer_build_fn=None,
         state_dict_adapter=Nemotron3StateDictAdapter,
     )

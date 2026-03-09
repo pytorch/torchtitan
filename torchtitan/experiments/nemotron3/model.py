@@ -21,17 +21,209 @@ The layer pattern is defined by the `hybrid_override_pattern` configuration.
 """
 
 import math
-from typing import Callable, Optional
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention.flex_attention import and_masks, BlockMask
 
+from torchtitan.components.tokenizer import BaseTokenizer
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    FlexAttentionWrapper,
+    ScaledDotProductAttentionWrapper,
+    create_attention_mask,
+    get_causal_mask_mod,
+    get_document_mask_mod,
+)
 from torchtitan.models.common.moe.moe_nemotron import NemotronMoE
-from torchtitan.protocols.train_spec import ModelProtocol
+from torchtitan.protocols.model import BaseModel
 from torchtitan.tools.logging import logger
 
-from .args import Nemotron3ModelArgs
+
+@dataclass(kw_only=True, slots=True)
+class Nemotron3Config(BaseModel.Config):
+    # Core model architecture
+    vocab_size: int = 131072
+    dim: int = 4096  # hidden_size
+    hidden_dim: int = 21504  # intermediate_size
+    n_layers: int = 52  # num_hidden_layers
+
+    # Hybrid layer pattern: M=Mamba2, *=Attention, -=MLP, other (E/O)=MoE
+    hybrid_override_pattern: str = (
+        "M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-"
+    )
+
+    # Attention configuration
+    n_heads: int = 32  # num_attention_heads
+    head_dim: int = 128
+    n_kv_heads: int = 8  # num_key_value_heads (GQA)
+    max_seq_len: int = 4096  # max_position_embeddings
+    attn_dropout: float = 0.0  # attention_dropout
+
+    # Activation and biases
+    mlp_hidden_act: str = "relu2"
+    attn_bias: bool = False  # attention_bias
+    mlp_bias: bool = False
+
+    # Initialization and normalization
+    initializer_range: float = 0.02
+    norm_eps: float = 1e-5  # layer_norm_epsilon
+    residual_in_fp32: bool = False
+
+    # Weight tying
+    enable_weight_tying: bool = False  # tie_word_embeddings
+
+    # Mamba2 configuration
+    ssm_state_size: int = 128  # mamba_state_size
+    mamba_num_heads: int = 128
+    mamba_n_groups: int = 8
+    mamba_head_dim: int = 64
+    mamba_d_conv: int = 4
+    mamba_hidden_act: str = "silu"
+    mamba_dt_limit: tuple[float, float] = field(
+        default_factory=lambda: (0.0, float("inf"))
+    )
+    mamba_conv_bias: bool = True
+    mamba_proj_bias: bool = False
+    mamba_chunk_size: int = 128
+
+    # MoE (Mixture of Experts) configuration
+    n_routed_experts: int = 8
+    moe_intermediate_size: int = 7688
+    moe_shared_expert_intermediate_size: int = 7688
+    num_experts_per_tok: int = 2
+    routed_scaling_factor: float = 1.0
+    n_group: int = 1
+    topk_group: int = 1
+    norm_topk_prob: bool = True
+
+    # Attention backend for attention blocks in the hybrid stack.
+    # Supported: "sdpa", "flex".
+    attn_type: str = "sdpa"
+    # Attention mask type for attention blocks.
+    # Supported: "causal", "block_causal".
+    attn_mask_type: str = "causal"
+
+    # Block initialization strategy
+    depth_init: bool = True
+
+    def __post_init__(self) -> None:
+        assert len(self.hybrid_override_pattern) == self.n_layers, (
+            f"hybrid_override_pattern length ({len(self.hybrid_override_pattern)}) "
+            f"must match n_layers ({self.n_layers})"
+        )
+        assert re.match(r"^[*M\-EO]+$", self.hybrid_override_pattern), (
+            "hybrid_override_pattern must only contain characters 'M' (Mamba2), "
+            "'*' (Attention), '-' (MLP), or 'E'/'O' (MoE)"
+        )
+
+        if self.n_kv_heads is None:
+            self.n_kv_heads = self.n_heads
+
+        if self.attn_backend not in {"sdpa", "varlen", "flex"}:
+            raise ValueError(
+                f"attn_type must be one of ['sdpa', 'varlen', 'flex'], got {self.attn_type}"
+            )
+        if self.attn_backend == "varlen":
+            raise ValueError("Varlen attention is not supported with Nemotron3.")
+        if self.attn_mask_type not in {"causal", "block_causal"}:
+            raise ValueError(
+                f"attn_mask_type must be one of ['causal', 'block_causal'], got {self.attn_mask_type}"
+            )
+
+    @property
+    def attn_backend(self) -> str:
+        return self.attn_type
+
+    @attn_backend.setter
+    def attn_backend(self, value: str) -> None:
+        self.attn_type = value
+
+    @property
+    def layers_block_type(self):
+        return [
+            "mamba"
+            if self.hybrid_override_pattern[i] == "M"
+            else "attention"
+            if self.hybrid_override_pattern[i] == "*"
+            else "mlp"
+            if self.hybrid_override_pattern[i] == "-"
+            else "moe"
+            for i in range(self.n_layers)
+        ]
+
+    def update_from_config(self, *, trainer_config: Any, **kwargs) -> None:
+        seq_len = trainer_config.training.seq_len
+        if seq_len > self.max_seq_len:
+            logger.warning(
+                f"Sequence length {seq_len} exceeds original maximum {self.max_seq_len}."
+            )
+        self.max_seq_len = seq_len
+
+        if (
+            trainer_config.parallelism.context_parallel_degree > 1
+            and self.attn_backend != "sdpa"
+        ):
+            raise NotImplementedError(
+                "CP support for non-SDPA attention backends is still in progress."
+            )
+
+    def get_nparams_and_flops(
+        self, model: nn.Module, seq_len: int
+    ) -> tuple[int, int]:
+        nparams_embedding = 0
+        nparams_moe_router = 0
+        nparams_shared_experts = 0
+        nparams_experts = 0
+        nparams_dense = 0
+
+        for name, p in model.named_parameters():
+            if "tok_embeddings" in name:
+                nparams_embedding += p.numel()
+                nparams_dense += p.numel()
+            elif ".mixer.shared_experts." in name:
+                nparams_shared_experts += p.numel()
+            elif ".mixer.router." in name:
+                nparams_moe_router += p.numel()
+            elif ".mixer.experts." in name:
+                nparams_experts += p.numel()
+            else:
+                nparams_dense += p.numel()
+
+        nparams_sparse = nparams_moe_router + nparams_shared_experts + nparams_experts
+        nparams = nparams_dense + nparams_sparse
+
+        if self.n_routed_experts > 0:
+            nparams_sparse_active = (
+                nparams_moe_router
+                + nparams_shared_experts
+                + nparams_experts * self.num_experts_per_tok // self.n_routed_experts
+            )
+        else:
+            nparams_sparse_active = nparams_moe_router + nparams_shared_experts
+        active_nparams = nparams_dense + nparams_sparse_active
+
+        attention_layers = self.layers_block_type.count("attention")
+        head_dims = 2 * self.head_dim
+        num_flops_per_token = (
+            6 * (active_nparams - nparams_embedding)
+            + 6 * attention_layers * self.n_heads * head_dims * seq_len
+        )
+
+        logger.info(
+            f"Nemotron hybrid parameter count: dense {nparams_dense:,}, "
+            f"sparse {nparams_sparse:,}, active {active_nparams:,}, "
+            f"attention_layers {attention_layers}"
+        )
+
+        if self.enable_weight_tying:
+            nparams = nparams - nparams_embedding
+
+        return nparams, num_flops_per_token
 
 
 # =============================================================================
@@ -270,7 +462,7 @@ class Mamba2Mixer(nn.Module):
     and is why Mamba is called **selective** state spaces)
     """
 
-    def __init__(self, model_args: Nemotron3ModelArgs, layer_idx: int):
+    def __init__(self, model_args: Nemotron3Config, layer_idx: int):
         super().__init__()
         self.layer_idx = layer_idx
         self.hidden_size = model_args.dim
@@ -547,7 +739,7 @@ class Mamba2Mixer(nn.Module):
 class Attention(nn.Module):
     """Multi-headed attention with GQA support."""
 
-    def __init__(self, model_args: Nemotron3ModelArgs, layer_idx: int):
+    def __init__(self, model_args: Nemotron3Config, layer_idx: int):
         super().__init__()
         self.layer_idx = layer_idx
         self.hidden_size = model_args.dim
@@ -556,6 +748,7 @@ class Attention(nn.Module):
         self.num_kv_heads = model_args.n_kv_heads
         self.num_kv_groups = self.num_heads // self.num_kv_heads
         self.attention_dropout = model_args.attn_dropout
+        self.attn_backend = model_args.attn_backend
 
         self.wq = nn.Linear(
             self.hidden_size, self.num_heads * self.head_dim, bias=model_args.attn_bias
@@ -573,11 +766,22 @@ class Attention(nn.Module):
         self.wo = nn.Linear(
             self.num_heads * self.head_dim, self.hidden_size, bias=model_args.attn_bias
         )
+        self.inner_attention: nn.Module
+        match self.attn_backend:
+            case "flex":
+                self.inner_attention = FlexAttentionWrapper()
+            case "sdpa":
+                self.inner_attention = ScaledDotProductAttentionWrapper()
+            case "varlen":
+                raise ValueError("Varlen attention is not supported with Nemotron3.")
+            case _:
+                raise ValueError(f"Unknown attention backend: {self.attn_backend}")
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         freqs_cis: torch.Tensor,
+        attention_masks: AttentionMasksType | None = None,
     ) -> torch.Tensor:
         """
         Forward pass of attention.
@@ -615,17 +819,32 @@ class Attention(nn.Module):
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
-        # Repeat K, V for GQA
+        # Repeat K/V for GQA once before backend dispatch.
         key_states = repeat_kv(key_states, self.num_kv_groups)
         value_states = repeat_kv(value_states, self.num_kv_groups)
 
-        # SDPA attention (causal)
-        attn_output = F.scaled_dot_product_attention(
-            query_states,
-            key_states,
-            value_states,
-            dropout_p=self.attention_dropout if self.training else 0.0,
-            is_causal=True,
+        attn_kwargs = {}
+        match self.attn_backend:
+            case "sdpa":
+                attn_kwargs = {
+                    "dropout_p": self.attention_dropout if self.training else 0.0,
+                    "is_causal": True,
+                }
+            case "varlen":
+                raise ValueError("Varlen attention is not supported with Nemotron3.")
+            case "flex":
+                if not isinstance(attention_masks, BlockMask):
+                    raise TypeError(
+                        f"flex attention expects BlockMask, got {type(attention_masks)}"
+                    )
+                if self.attention_dropout > 0.0 and self.training:
+                    raise NotImplementedError(
+                        "Attention dropout is not supported for flex attention in Nemotron3."
+                    )
+                attn_kwargs = {"block_mask": attention_masks}
+
+        attn_output = self.inner_attention(
+            query_states, key_states, value_states, **attn_kwargs
         )
 
         # Reshape back
@@ -653,7 +872,7 @@ class Attention(nn.Module):
 class MLP(nn.Module):
     """Simple MLP with configurable activation."""
 
-    def __init__(self, model_args: Nemotron3ModelArgs, layer_idx: int):
+    def __init__(self, model_args: Nemotron3Config, layer_idx: int):
         super().__init__()
         self.layer_idx = layer_idx
         self.hidden_size = model_args.dim
@@ -690,7 +909,7 @@ class Nemotron3Block(nn.Module):
     Block type is determined by the `layers_block_type` from model args.
     """
 
-    def __init__(self, layer_idx: int, model_args: Nemotron3ModelArgs):
+    def __init__(self, layer_idx: int, model_args: Nemotron3Config):
         super().__init__()
         self.layer_idx = layer_idx
         self.block_type = model_args.layers_block_type[layer_idx]
@@ -740,6 +959,7 @@ class Nemotron3Block(nn.Module):
         hidden_states: torch.Tensor,
         freqs_cis: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
+        attention_masks: AttentionMasksType | None = None,
     ) -> torch.Tensor:
         """
         Forward pass of hybrid block.
@@ -761,7 +981,9 @@ class Nemotron3Block(nn.Module):
         if self.block_type == "mamba":
             hidden_states = self.mixer(hidden_states, attention_mask=attention_mask)
         elif self.block_type == "attention":
-            hidden_states = self.mixer(hidden_states, freqs_cis=freqs_cis)
+            hidden_states = self.mixer(
+                hidden_states, freqs_cis=freqs_cis, attention_masks=attention_masks
+            )
         elif self.block_type in ["mlp", "moe"]:
             hidden_states = self.mixer(hidden_states)
 
@@ -770,13 +992,13 @@ class Nemotron3Block(nn.Module):
     def init_weights(self) -> None:
         """Initialize block weights."""
         self.norm.reset_parameters()
-        self.mixer.init_weights(self.weight_init_std)
+        self.mixer.init_weights(init_std=self.weight_init_std)
 
 
 # =============================================================================
 # Nemotron3 Model
 # =============================================================================
-class Nemotron3Model(nn.Module, ModelProtocol):
+class Nemotron3Model(BaseModel):
     """
     Nemotron3 (NemotronH) Hybrid Model.
 
@@ -784,14 +1006,17 @@ class Nemotron3Model(nn.Module, ModelProtocol):
     The layer pattern is defined by the `hybrid_override_pattern` configuration.
     """
 
-    def __init__(self, model_args: Nemotron3ModelArgs) -> None:
+    Config = Nemotron3Config
+
+    def __init__(self, config: Config) -> None:
         super().__init__()
-        self.model_args = model_args
-        self.vocab_size = model_args.vocab_size
-        self.n_layers = model_args.n_layers
+        self.config = config
+        self.model_args = config
+        self.vocab_size = config.vocab_size
+        self.n_layers = config.n_layers
 
         # Token embeddings
-        self.tok_embeddings = nn.Embedding(model_args.vocab_size, model_args.dim)
+        self.tok_embeddings = nn.Embedding(config.vocab_size, config.dim)
 
         # Precompute RoPE frequencies for attention layers
         self.register_buffer(
@@ -800,17 +1025,17 @@ class Nemotron3Model(nn.Module, ModelProtocol):
 
         # Build layers
         self.layers = nn.ModuleDict()
-        for layer_idx in range(model_args.n_layers):
-            self.layers[str(layer_idx)] = Nemotron3Block(layer_idx, model_args)
+        for layer_idx in range(config.n_layers):
+            self.layers[str(layer_idx)] = Nemotron3Block(layer_idx, config)
 
         # Final normalization
-        self.norm = RMSNorm(model_args.dim, eps=model_args.norm_eps)
+        self.norm = RMSNorm(config.dim, eps=config.norm_eps)
 
         # Output projection
-        self.output = nn.Linear(model_args.dim, model_args.vocab_size, bias=False)
+        self.output = nn.Linear(config.dim, config.vocab_size, bias=False)
 
         # Weight tying
-        if model_args.enable_weight_tying:
+        if config.enable_weight_tying:
             self.output.weight = self.tok_embeddings.weight
 
         # Log model configuration
@@ -888,6 +1113,7 @@ class Nemotron3Model(nn.Module, ModelProtocol):
         self,
         tokens: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
+        attention_masks: AttentionMasksType | None = None,
     ) -> torch.Tensor:
         """
         Forward pass of Nemotron3 model.
@@ -904,7 +1130,12 @@ class Nemotron3Model(nn.Module, ModelProtocol):
 
         # Apply layers
         for layer in self.layers.values():
-            h = layer(h, freqs_cis=self.freqs_cis, attention_mask=attention_mask)
+            h = layer(
+                h,
+                freqs_cis=self.freqs_cis,
+                attention_mask=attention_mask,
+                attention_masks=attention_masks,
+            )
 
         # Final normalization
         h = self.norm(h) if self.norm else h
@@ -913,3 +1144,33 @@ class Nemotron3Model(nn.Module, ModelProtocol):
         output = self.output(h) if self.output else h
 
         return output
+
+    def get_attention_masks(
+        self,
+        input_batch: torch.Tensor,
+        tokenizer: BaseTokenizer,
+        extra_inputs: dict[str, torch.Tensor] | None = None,
+    ) -> AttentionMasksType:
+        attn_backend = self.model_args.attn_backend
+        attn_mask_type = self.model_args.attn_mask_type
+
+        if attn_backend == "varlen":
+            raise ValueError("Varlen attention is not supported with Nemotron3.")
+
+        if attn_backend == "flex":
+            mask_mods = [get_causal_mask_mod()]
+            match attn_mask_type:
+                case "causal":
+                    B = 1
+                case "block_causal":
+                    B = input_batch.shape[0]
+                    assert tokenizer.eos_id is not None
+                    mask_mods.append(get_document_mask_mod(input_batch, tokenizer.eos_id))
+                case _:
+                    raise ValueError(f"Unknown attention mask type: {attn_mask_type}")
+            seqlen = input_batch.shape[1]
+            return create_attention_mask(
+                and_masks(*mask_mods), B, None, seqlen, seqlen
+            )
+
+        raise TypeError("Only flex backend uses explicit attention masks.")
