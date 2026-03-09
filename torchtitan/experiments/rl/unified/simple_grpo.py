@@ -26,12 +26,13 @@ import asyncio
 import logging
 import os
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
 from monarch.actor import this_host
-from monarch.utils import setup_env_for_distributed
+from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.config import Configurable
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.unified.actors.generator import VLLMGenerator
@@ -174,8 +175,8 @@ class RLTrainer(Configurable):
         )
         grader_mesh = this_host().spawn_procs()
 
-        await setup_env_for_distributed(trainer_mesh)
-        await setup_env_for_distributed(generator_mesh)
+        await setup_torch_elastic_env_async(trainer_mesh)
+        await setup_torch_elastic_env_async(generator_mesh)
 
         # Spawn actors on their respective meshes
         self.trainer = trainer_mesh.spawn(
@@ -287,6 +288,8 @@ class RLTrainer(Configurable):
                 train_answers.append(answer)
                 train_questions.append(question)
 
+            step_start = time.perf_counter()
+
             # Fully sync RL loop with separate scoring step
             # 1. VLLMGenerator produces episodes (one per prompt, without rewards)
             # TODO: Create a queue to use all episode from all GPUs
@@ -322,6 +325,8 @@ class RLTrainer(Configurable):
             weights = self.trainer.get_weights.call().get().item(gpus=0)
             self.generator.update.call(metrics["policy_version"], weights).get()
 
+            t_step = time.perf_counter() - step_start
+
             all_token_lens = [
                 len(c.token_ids) for ep in scored_episodes for c in ep.completions
             ]
@@ -337,7 +342,8 @@ class RLTrainer(Configurable):
                 f"Correct: {correct_count:>2}/{total_count} | "
                 f"Avg tokens: {avg_len:>3.0f} | "
                 f"Logprob diff: mean={metrics['logprob_diff_mean']:.4e}, "
-                f"max={metrics['logprob_diff_max']:.4e}"
+                f"max={metrics['logprob_diff_max']:.4e} | "
+                f"Time: {t_step:.1f}s"
             )
 
             # Check for divergence
