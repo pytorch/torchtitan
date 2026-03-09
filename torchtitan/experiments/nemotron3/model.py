@@ -473,6 +473,11 @@ class Mamba2Mixer(nn.Module):
         self.n_groups = model_args.mamba_n_groups
         self.chunk_size = model_args.mamba_chunk_size
         self.time_step_limit = model_args.mamba_dt_limit
+        # Hard-coded Mamba-2 dt initialization range.
+        self.time_step_min = 1e-3
+        self.time_step_max = 1e-1
+        self.dt_init_floor = 1e-4
+        self.A_init_range = (1.0, 16.0)
         self.use_conv_bias = model_args.mamba_conv_bias
         self.use_bias = model_args.mamba_proj_bias
 
@@ -496,12 +501,25 @@ class Mamba2Mixer(nn.Module):
         projection_size = self.intermediate_size + self.conv_dim + self.num_heads
         self.in_proj = nn.Linear(self.hidden_size, projection_size, bias=self.use_bias)
 
-        # Time step projection bias
-        self.dt_bias = nn.Parameter(torch.ones(self.num_heads))
+        # Time step projection bias (inverse-softplus parameterization).
+        self.dt_bias = nn.Parameter(
+            self._build_dt_bias(
+                num_heads=self.num_heads,
+                time_step_min=self.time_step_min,
+                time_step_max=self.time_step_max,
+                dt_init_floor=self.dt_init_floor,
+                device=self.in_proj.weight.device,
+            )
+        )
+        self.dt_bias._no_weight_decay = True
 
-        # S4D real initialization for A
-        A = torch.arange(1, self.num_heads + 1)
-        self.A_log = nn.Parameter(torch.log(A))
+        # S4D real initialization for A.
+        assert self.A_init_range[0] > 0 and self.A_init_range[1] >= self.A_init_range[0]
+        A = torch.empty(
+            self.num_heads, dtype=torch.float32, device=self.in_proj.weight.device
+        ).uniform_(*self.A_init_range)
+        A_log = torch.log(A).to(dtype=self.in_proj.weight.dtype)
+        self.A_log = nn.Parameter(A_log)
         self.A_log._no_weight_decay = True
 
         # Gated normalization
@@ -668,51 +686,15 @@ class Mamba2Mixer(nn.Module):
     def init_weights(self, init_std: float) -> None:
         """Initialize weights for Mamba2Mixer."""
         with torch.no_grad():
-            # =================================================================
-            # FIX: NaN Loss Bug - dt_bias initialization produces -inf in bf16
-            # =================================================================
-            #
-            # PROBLEM:
-            # When training with bf16, the inverse softplus
-            # computation `log(1 - exp(-x))` produces -inf values, which then
-            # propagate through the forward pass causing NaN loss.
-            #
-            # ROOT CAUSE:
-            # After clamping, dt_bias has small values like 0.0001. When computing
-            # `exp(-0.0001)` in bf16, the result is ~0.9999, but bf16's limited
-            # precision can round this to exactly 1.0.
-            # Then `1 - exp(-x) = 0`, and `log(0) = -inf`.
-            #
-            # Example failure path:
-            #   dt_bias = 0.0001 (after clamp)
-            #   neg_exp = exp(-0.0001) = 0.99990... → rounds to 1.0 in bf16
-            #   log(1 - 1.0) = log(0) = -inf
-            #   dt + dt_bias = some_value + (-inf) = -inf
-            #   softplus(-inf) = 0, but gradients become NaN
-            #
-            # SOLUTION:
-            # 1. Perform all initialization math in float32
-            # 2. Use log1p(-x) which is more numerically stable than log(1-x)
-            # 3. Clamp neg_exp to ensure 1-neg_exp never becomes exactly 0
-            # 4. Copy the result back to the original dtype
-            # =================================================================
-
-            dt_bias_f32 = self.dt_bias.float()
-
-            # Generate uniform values in log space, then transform
-            dt_bias_f32.uniform_(math.log(0.001), math.log(0.1))
-            dt_bias_f32.exp_()
-            dt_bias_f32.clamp_(min=1e-4)
-
-            # Apply inverse softplus: inv_softplus(x) = x + log(1 - exp(-x))
-            # Use log1p for numerical stability: log1p(-y) = log(1 - y)
-            neg_exp = torch.exp(-dt_bias_f32)
-            # Clamp to ensure (1 - neg_exp) > 0, preventing log(0) = -inf
-            log_term = torch.log1p(-neg_exp.clamp(max=1.0 - 1e-7))
-            dt_bias_f32.add_(log_term)
-
-            # Copy back to original dtype (e.g., bf16)
-            self.dt_bias.copy_(dt_bias_f32)
+            self.dt_bias.copy_(
+                self._build_dt_bias(
+                    num_heads=self.num_heads,
+                    time_step_min=self.time_step_min,
+                    time_step_max=self.time_step_max,
+                    dt_init_floor=self.dt_init_floor,
+                    device=self.dt_bias.device,
+                ).to(dtype=self.dt_bias.dtype)
+            )
 
         # Initialize projections
         nn.init.trunc_normal_(self.in_proj.weight, mean=0.0, std=0.02)
@@ -730,6 +712,24 @@ class Mamba2Mixer(nn.Module):
 
         # Initialize norm
         self.norm.reset_parameters()
+
+    @staticmethod
+    def _build_dt_bias(
+        *,
+        num_heads: int,
+        time_step_min: float,
+        time_step_max: float,
+        dt_init_floor: float,
+        device: torch.device,
+    ) -> torch.Tensor:
+        dt = torch.exp(
+            torch.rand(num_heads, device=device, dtype=torch.float32)
+            * (math.log(time_step_max) - math.log(time_step_min))
+            + math.log(time_step_min)
+        )
+        dt = torch.clamp(dt, min=dt_init_floor)
+        # Inverse of softplus.
+        return dt + torch.log(-torch.expm1(-dt))
 
 
 # =============================================================================
