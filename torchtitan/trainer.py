@@ -515,13 +515,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             dist_config.use_torchcomms = True
 
-        # torchcomms requires the CPU backend (gloo) to be initialized
-        # alongside the GPU backend (nccl) in the process group, because
-        # it needs cpu:gloo for host-side coordination.
         world_size = dist_utils.init_distributed(
             config.comm,
-            enable_cpu_backend=config.training.enable_cpu_offload
-            or config.comm.use_torchcomms,
+            enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=config.dump_folder,
         )
 
