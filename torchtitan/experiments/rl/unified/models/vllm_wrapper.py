@@ -12,12 +12,14 @@ TorchTitan models for vLLM.
 """
 
 import dataclasses
+import types
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torch.distributed._tensor import DTensor, Replicate
+import torch.nn.functional as F
+from torch.distributed._tensor import DTensor, Replicate, Shard
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
@@ -93,6 +95,192 @@ def create_torchtitan_config_from_vllm_config(
     return parallel_dims, parallelism
 
 
+def _to_local(t):
+    """Extract local tensor from DTensor, or return plain tensor as-is."""
+    return t.to_local() if isinstance(t, DTensor) else t
+
+
+def _fuse_weights_and_optimize_for_inference(model):
+    """Fuse QKV and gate+up weights, pre-cast RoPE cache for inference.
+
+    Must be called AFTER weight loading and parallelization.
+    Reduces matmuls per layer from 7 to 4 (matching native vLLM) and
+    eliminates per-layer f32→bf16 RoPE cache cast.
+
+    Fused weights are stored as plain local tensors (not DTensors) because
+    torch.cat on Shard(0) DTensors produces incorrect global-to-local mapping
+    (local data is interleaved [wq_local, wk_local, wv_local] but Shard(0)
+    assumes contiguous global rows). The fused forward operates on local
+    tensors and wraps back to DTensor only for RowwiseParallel modules.
+    """
+    from torchtitan.experiments.rl.unified.models.attention import (
+        _torchtitan_to_vllm_cos_sin_cache,
+    )
+    from torchtitan.models.common.attention import (
+        apply_rotary_emb_complex,
+        AttentionMasksType,
+        GQAttention,
+    )
+    from torchtitan.models.common.feed_forward import FeedForward
+
+    # Pre-cast RoPE cache to bf16 so the per-layer f32→bf16 conversion
+    # becomes a no-op inside the compiled graph.
+    model.freqs_cis = model.freqs_cis.to(dtype=torch.bfloat16)
+    head_dim = model.config.layer.attention.head_dim
+
+    for layer in model.layers.values():
+        attn = layer.attention
+
+        # --- Fuse QKV weights as LOCAL tensors ---
+        wq_local = _to_local(attn.wq.weight)
+        wk_local = _to_local(attn.wk.weight)
+        wv_local = _to_local(attn.wv.weight)
+        attn._fused_qkv_weight = torch.cat(
+            [wq_local, wk_local, wv_local], dim=0
+        )
+        attn._qkv_split_sizes = [
+            wq_local.shape[0],
+            wk_local.shape[0],
+            wv_local.shape[0],
+        ]
+        if attn.wq.bias is not None:
+            attn._fused_qkv_bias = torch.cat(
+                [_to_local(attn.wq.bias), _to_local(attn.wk.bias),
+                 _to_local(attn.wv.bias)], dim=0
+            )
+        else:
+            attn._fused_qkv_bias = None
+
+        # Unwrap q_norm/k_norm weights to plain tensors so they work
+        # with the plain-tensor activations in the fused forward.
+        if attn.q_norm is not None:
+            attn.q_norm.weight = nn.Parameter(
+                _to_local(attn.q_norm.weight.data), requires_grad=False
+            )
+        if attn.k_norm is not None:
+            attn.k_norm.weight = nn.Parameter(
+                _to_local(attn.k_norm.weight.data), requires_grad=False
+            )
+
+        # --- Fuse gate+up weights (w1 + w3) as LOCAL tensors ---
+        ffn = layer.feed_forward
+        w1_local = _to_local(ffn.w1.weight)
+        w3_local = _to_local(ffn.w3.weight)
+        ffn._fused_w13_weight = torch.cat([w1_local, w3_local], dim=0)
+        ffn._w13_split_size = w1_local.shape[0]
+        if ffn.w1.bias is not None:
+            ffn._fused_w13_bias = torch.cat(
+                [_to_local(ffn.w1.bias), _to_local(ffn.w3.bias)], dim=0
+            )
+        else:
+            ffn._fused_w13_bias = None
+
+    # --- Re-patch attention forward to use fused QKV + pre-cast RoPE ---
+    # Operates on plain local tensors throughout, wraps output as DTensor
+    # Shard(-1) only for the wo RowwiseParallel linear.
+    def _fused_attn_forward(
+        self,
+        x: torch.Tensor,
+        rope_cache: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        bs, seqlen, _ = x.shape
+
+        # Extract device_mesh for DTensor re-wrap, then go local
+        device_mesh = x.device_mesh if isinstance(x, DTensor) else None
+        x_local = _to_local(x)
+
+        # Fused QKV: 1 matmul instead of 3 (plain local tensors)
+        xqkv = F.linear(x_local, self._fused_qkv_weight, self._fused_qkv_bias)
+        xq, xk, xv = xqkv.split(self._qkv_split_sizes, dim=-1)
+
+        xq = xq.view(bs, seqlen, -1, self.head_dim)
+        xk = xk.view(bs, seqlen, -1, self.head_dim)
+        xv = xv.view(bs, seqlen, -1, self.head_dim)
+
+        if self.q_norm is not None:
+            xq = self.q_norm(xq)
+        if self.k_norm is not None:
+            xk = self.k_norm(xk)
+
+        if self.use_rope:
+            if self.rope_backend == "cos_sin":
+                assert positions is not None, (
+                    "vLLM RoPE kernel requires explicit positions"
+                )
+                rope_local = _to_local(rope_cache)
+                cos_sin_cache = _torchtitan_to_vllm_cos_sin_cache(
+                    rope_local, self.head_dim
+                )
+
+                num_tokens = bs * seqlen
+                flat_q = xq.reshape(num_tokens, -1)
+                flat_k = xk.reshape(num_tokens, -1)
+                flat_pos = _to_local(positions).reshape(num_tokens)
+
+                flat_q, flat_k = torch.ops.vllm.rotary_embedding_return_tensors(
+                    flat_pos, flat_q, flat_k,
+                    self.head_dim, cos_sin_cache, True,
+                )
+
+                xq = flat_q.view(bs, seqlen, -1, self.head_dim)
+                xk = flat_k.view(bs, seqlen, -1, self.head_dim)
+            else:
+                xq, xk = apply_rotary_emb_complex(
+                    xq, xk, freqs_cis=_to_local(rope_cache),
+                    positions=_to_local(positions),
+                )
+
+        # VLLMAttention: plain tensors → skips DTensor unwrap,
+        # uses local shapes directly, returns plain tensor
+        output = self.inner_attention(xq, xk, xv)
+
+        # Wrap as Shard(-1) DTensor for wo (RowwiseParallel)
+        if device_mesh is not None:
+            output = DTensor.from_local(
+                output, device_mesh=device_mesh, placements=[Shard(-1)]
+            )
+
+        return self.wo(output)
+
+    for layer in model.layers.values():
+        if hasattr(layer, "attention") and isinstance(layer.attention, GQAttention):
+            layer.attention.forward = types.MethodType(
+                _fused_attn_forward, layer.attention
+            )
+
+    # --- Patch FFN forward to use fused gate+up ---
+    # Same approach: local tensors, wrap for w2 RowwiseParallel.
+    def _fused_ffn_forward(self, x: torch.Tensor) -> torch.Tensor:
+        device_mesh = x.device_mesh if isinstance(x, DTensor) else None
+        x_local = _to_local(x)
+
+        w13_out = F.linear(x_local, self._fused_w13_weight, self._fused_w13_bias)
+        w1_out, w3_out = w13_out.split(
+            [self._w13_split_size, self._w13_split_size], dim=-1
+        )
+        intermediate = F.silu(w1_out) * w3_out
+
+        # Wrap as Shard(-1) DTensor for w2 (RowwiseParallel)
+        if device_mesh is not None:
+            intermediate = DTensor.from_local(
+                intermediate, device_mesh=device_mesh, placements=[Shard(-1)]
+            )
+
+        return self.w2(intermediate)
+
+    for layer in model.layers.values():
+        ffn = layer.feed_forward
+        if isinstance(ffn, FeedForward):
+            ffn.forward = types.MethodType(_fused_ffn_forward, ffn)
+
+    logger.info(
+        "Fused QKV and gate+up weights (7→4 matmuls/layer), "
+        "pre-cast RoPE cache to bf16"
+    )
+
+
 class TorchTitanVLLMModelWrapper(nn.Module):
     """
     Generic vLLM-compatible model wrapper for TorchTitan models. Implemented
@@ -161,6 +349,24 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Initial load model weights from HuggingFace checkpoint path
         self._initial_load_weights(checkpoint_path=vllm_config.model_config.model)
 
+        # Pre-extend RoPE cache to max_model_len so we never need to extend
+        # dynamically (which requires .item() and breaks the compiled graph).
+        max_model_len = vllm_config.model_config.max_model_len
+        self.model.freqs_cis = self._extend_rope_cache_if_needed(
+            self.model.freqs_cis, max_model_len
+        )
+
+        # Fuse QKV/gate+up weights and pre-cast RoPE cache for inference perf
+        _fuse_weights_and_optimize_for_inference(self.model)
+
+        # Pre-compile functions once (avoids re-wrapping each forward call)
+        self._compiled_forward_body = torch.compile(
+            self._forward_body, backend="inductor", fullgraph=True
+        )
+        self._compiled_compute_logits = torch.compile(
+            self._compute_logits, backend="inductor", fullgraph=True
+        )
+
     def _extend_rope_cache_if_needed(
         self, rope_cache: torch.Tensor, max_position: int
     ) -> torch.Tensor:
@@ -220,14 +426,13 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         Convert input token IDs to embeddings (deprecated vLLM interface)."""
         return self.embed_input_ids(input_ids)
 
-    def _embed_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
-        """Embed tokens."""
+    def _forward_body(self, tokens, rope_cache, positions):
+        """Embed + all transformer layers + final norm in one compiled graph."""
         torch._check(tokens.shape[1] >= 2)
-        return self.model.tok_embeddings(tokens)
-
-    def _run_layers(self, h, rope_cache, positions):
+        h = self.model.tok_embeddings(tokens)
         for layer in self.model.layers.values():
             h = layer(h, rope_cache, attention_masks=None, positions=positions)
+        h = self.model.norm(h)
         return h
 
     def forward(
@@ -259,34 +464,16 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Convert vLLM interface to TorchTitan interface
         # vLLM: [total_tokens] → TorchTitan: [batch_size, seq_len]
         tokens_2d = input_ids.unsqueeze(0)
-        torch._dynamo.decorators.mark_unbacked(tokens_2d, 1)
-
-        # Get embeddings
-        fn = torch.compile(self._embed_tokens, backend="aot_eager", fullgraph=True)
-        h = fn(tokens_2d)
-
-        # Extend RoPE cache if needed (vLLM profiling may use 2x max_seq_len)
-        if positions is not None:
-            max_position = positions.max().item()
-        else:
-            max_position = 0
-        rope_cache = self._extend_rope_cache_if_needed(
-            self.model.freqs_cis, max_position
-        )
-
-        # Wait on async collectives
-        if isinstance(h, DTensor) and isinstance(h._local_tensor, torch.distributed._functional_collectives.AsyncCollectiveTensor):
-            h._local_tensor = h._local_tensor.wait()
-        if isinstance(h, DTensor):
-            h._local_tensor = h._local_tensor.contiguous()
-
         positions = positions.unsqueeze(0)
-        torch._dynamo.decorators.mark_unbacked(h, 1)
+        torch._dynamo.decorators.mark_unbacked(tokens_2d, 1)
         torch._dynamo.decorators.mark_unbacked(positions, 1)
-        fn = torch.compile(self._run_layers, backend="aot_eager", fullgraph=True)
-        h = fn(h, rope_cache, positions)
 
-        h = self.model.norm(h)
+        # RoPE cache is pre-extended in __init__ to max_model_len
+        rope_cache = self.model.freqs_cis
+
+        # Single compiled region: embed + layers + norm
+        h = self._compiled_forward_body(tokens_2d, rope_cache, positions)
+
         # When parallelism is applied, get full tensor before return to vLLM Engine
         if isinstance(h, DTensor):
             h = h.full_tensor()
@@ -324,8 +511,11 @@ class TorchTitanVLLMModelWrapper(nn.Module):
             )
 
         torch._dynamo.decorators.mark_unbacked(hidden_states, 0)
-        fn = torch.compile(self._compute_logits, backend="aot_eager", fullgraph=True)
-        return fn(hidden_states)
+        logits = self._compiled_compute_logits(hidden_states)
+        # Unwrap DTensor to plain tensor before returning to vLLM
+        if isinstance(logits, DTensor):
+            logits = logits.full_tensor()
+        return logits
 
     def load_weights_from_state_dict(self, state_dict):
         """
@@ -348,8 +538,19 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         Helper function to load torchtitan model weights from HF checkpoint when initialize this model.
 
         Args:
-            checkpoint_path: Path to the HuggingFace checkpoint directory
+            checkpoint_path: Path to the HuggingFace checkpoint directory or HF hub model ID
         """
+        # Resolve HF hub model IDs (e.g. "Qwen/Qwen3-1.7B") to local cache paths.
+        # HuggingFaceStorageReader requires a local filesystem path.
+        import os
+
+        if not os.path.exists(checkpoint_path):
+            from huggingface_hub import snapshot_download
+
+            checkpoint_path = snapshot_download(
+                checkpoint_path, local_files_only=True
+            )
+
         # Create adapter instance
         adapter = self.state_dict_adapter(
             model_config=self.config,

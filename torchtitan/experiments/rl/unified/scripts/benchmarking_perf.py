@@ -199,15 +199,32 @@ class ProfilerManager:
         )
         return self.profiler
 
+    def _get_rank(self) -> int:
+        """Get the current distributed rank, or 0 if not distributed."""
+        rank = int(os.environ.get("RANK", 0))
+        return rank
+
     def export_chrome_trace(self, run_idx: int):
         """Export Chrome trace file for visualization in Perfetto."""
         if self.profiler is None:
             return
 
         trace_dir = self.get_trace_dir()
-        trace_file = Path(trace_dir) / f"trace_run_{run_idx}.json"
+        rank = self._get_rank()
+        trace_file = Path(trace_dir) / f"trace_run_{run_idx}_rank{rank}.json"
         self.profiler.export_chrome_trace(str(trace_file))
         print(f"  Exported Chrome trace to: {trace_file}")
+
+    def export_text_trace(self, run_idx: int):
+        """Export a hierarchical text trace for diffing or LLM analysis."""
+        if self.profiler is None:
+            return
+
+        trace_dir = self.get_trace_dir()
+        rank = self._get_rank()
+        trace_file = Path(trace_dir) / f"trace_run_{run_idx}_rank{rank}.txt"
+        self.profiler.export_text_trace(str(trace_file))
+        print(f"  Exported text trace to: {trace_file}")
 
     def print_summary(self):
         """Print profiler summary statistics."""
@@ -216,7 +233,7 @@ class ProfilerManager:
 
         print(f"\n  === Profiler Summary for {self.approach_name} ===")
         print(
-            self.profiler.key_averages().table(sort_by="cuda_time_total", row_limit=20)
+            self.profiler.key_averages().table(sort_by="cuda_time_total", row_limit=100)
         )
 
 
@@ -379,8 +396,16 @@ class VLLMTorchTitanBenchmark:
     def setup(self):
         """Initialize vLLM engine with TorchTitan Qwen3 model."""
         try:
-            # Import unified module to register TorchTitan models with vLLM
             from vllm import LLM, SamplingParams
+
+            from torchtitan.experiments.rl.unified.plugin import (
+                register_model_to_vllm_model_registry,
+                VLLM_MODEL_NAME,
+            )
+            from torchtitan.experiments.rl.unified.models.parallelize import (
+                parallelize_qwen3,
+            )
+            from torchtitan.models.qwen3 import model_registry
 
             print("Loading vLLM with TorchTitan Qwen3 model...")
             print(f"Model: {self.config.model_path}")
@@ -388,6 +413,13 @@ class VLLMTorchTitanBenchmark:
             print(
                 f"CUDA Graph: {'Enabled' if self.config.use_cuda_graph else 'Disabled (eager mode)'}"
             )
+
+            # Derive model flavor from HF model path (e.g. "Qwen/Qwen3-1.7B" -> "1.7B")
+            model_flavor = self.config.model_path.rsplit("-", 1)[-1]
+            model_spec = model_registry(model_flavor)
+            # Use RL-specific parallelize_fn compatible with vLLM wrapper
+            model_spec.parallelize_fn = parallelize_qwen3
+            register_model_to_vllm_model_registry(model_spec)
 
             # Set up profiling via environment variable (compatible with more vLLM versions)
             if self.config.profile:
@@ -415,7 +447,7 @@ class VLLMTorchTitanBenchmark:
                 model=self.config.model_path,
                 hf_overrides={
                     # Override architectures to use our registered TorchTitan model class
-                    "architectures": ["Qwen3TorchTitanForCausalLM"],
+                    "architectures": [VLLM_MODEL_NAME],
                 },
                 dtype="bfloat16",
                 trust_remote_code=True,
@@ -787,7 +819,7 @@ class TorchTitanNativeBenchmark:
         return generated_tokens, prefill_time, decode_time
 
     def run_inference(
-        self, prompts: List[str], profiler: Optional[torch.profiler.profile] = None
+        self, prompts: List[str], profiler: Optional[torch.profiler.profile] = None,
     ) -> BenchmarkMetrics:
         """Run inference and collect metrics."""
         if self.model is None or self.tokenizer is None:
@@ -841,12 +873,15 @@ class TorchTitanNativeBenchmark:
                 total_decode_time += decode_time
 
         # Run with or without profiler
-        if profiler is not None:
-            with profiler:
+        from torch.utils._debug_mode import DebugMode
+        with DebugMode() as debug_mode:
+            if profiler is not None:
+                with profiler:
+                    run_generation()
+                    profiler.step()
+            else:
                 run_generation()
-                profiler.step()
-        else:
-            run_generation()
+        print(debug_mode.debug_string())
 
         end_time = time.perf_counter()
         total_time = end_time - start_time
@@ -946,24 +981,42 @@ class BenchmarkRunner:
 
             if self.config.profile:
                 if is_vllm_benchmark:
-                    # For vLLM benchmarks, use vLLM's built-in profiler API
-                    # Only run 1 iteration when profiling to avoid large trace files
+                    # For vLLM benchmarks, wrap with external PyTorch profiler
+                    # (vLLM's built-in profiler API may not be available)
                     profile_runs = 1
                     print(
                         f"  (Profiling mode: running {profile_runs} iteration only, no warmup iterations)"
                     )
-                    for i in range(profile_runs):
-                        # from torch.utils._debug_mode import DebugMode
+                    approach_name = key.replace("_", " ").title()
+                    profiler_manager = ProfilerManager(self.config, approach_name)
+                    profiler = profiler_manager.create_simple_profiler()
 
-                        # with DebugMode() as debug_mode:
-                        metrics = benchmark.run_inference(prompts, use_profiler=True)
-                        # print(debug_mode.debug_string())
+                    if profiler is not None:
+                        profiler.__enter__()
+
+                    from torch.utils._debug_mode import DebugMode
+
+                    for i in range(profile_runs):
+                        if int(os.environ.get("LOCAL_RANK", 0)) == 0 and i == profile_runs - 1:
+                            with DebugMode() as debug_mode:
+                                metrics = benchmark.run_inference(prompts, use_profiler=True)
+                            print(debug_mode.debug_string())
+                        else:
+                            metrics = benchmark.run_inference(prompts, use_profiler=True)
                         self.results[key].append(metrics)
                         print(
                             f"  Run {i + 1}/{profile_runs} (profiled): "
                             f"{metrics.throughput_tokens_per_sec:.2f} tokens/s, "
                             f"latency: {metrics.latency_per_token_ms:.2f} ms/token"
                         )
+                        if profiler is not None:
+                            profiler.step()
+
+                    if profiler is not None:
+                        profiler.__exit__(None, None, None)
+                        profiler_manager.export_chrome_trace(0)
+                        profiler_manager.export_text_trace(0)
+                        profiler_manager.print_summary()
                 else:
                     # For TorchTitan Native, use external PyTorch profiler
                     approach_name = key.replace("_", " ").title()
@@ -987,6 +1040,7 @@ class BenchmarkRunner:
                     if profiler is not None:
                         profiler.__exit__(None, None, None)
                         profiler_manager.export_chrome_trace(0)
+                        profiler_manager.export_text_trace(0)
                         profiler_manager.print_summary()
             else:
                 for i in range(self.config.num_runs):
