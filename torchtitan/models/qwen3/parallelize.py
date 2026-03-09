@@ -10,8 +10,10 @@
 import torch
 import torch._inductor.config
 import torch.nn as nn
+from torch.backends.cuda import SDPBackend
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor.experimental import local_map
 from torch.distributed.tensor.parallel import (
     ColwiseParallel,
     parallelize_module,
@@ -40,7 +42,37 @@ from torchtitan.models.llama4.parallelize import (
 )
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.protocols.model_converter import ModelConvertersContainer
+
 from torchtitan.tools.logging import logger
+
+
+class _LocalMapInnerAttention(nn.Module):
+    """Wraps inner_attention with local_map for TP + CP composition.
+
+    When TP uses use_local_output=False, q/k/v arrive at inner_attention as
+    DTensors on the TP mesh (Shard on heads dim). The CP hooks expect plain
+    tensors. This wrapper uses local_map to properly convert DTensors to local
+    tensors (with correct grad_placements for backward) before calling the
+    wrapped module (which has CP hooks), and wraps the output back to DTensor.
+    """
+
+    def __init__(self, inner_attn: nn.Module, tp_mesh: DeviceMesh):
+        super().__init__()
+        self._inner = inner_attn
+        # q, k, v are sharded on heads dim (dim=1 after transpose in GQAttention)
+        # Each PlacementType is a Sequence[Placement], e.g. (Shard(1),)
+        shard_heads = (Shard(1),)
+        # note: needs support for attention mask sharding if non-SDPA attn_backend is added
+        self._local_map_fn = local_map(
+            inner_attn,
+            out_placements=(shard_heads,),
+            in_placements=(shard_heads, shard_heads, shard_heads),
+            in_grad_placements=(shard_heads, shard_heads, shard_heads),
+            device_mesh=tp_mesh,
+        )
+
+    def forward(self, *args, **kwargs):
+        return self._local_map_fn(*args, **kwargs)
 
 
 # for selective op activation checkpointing
@@ -139,6 +171,30 @@ def parallelize_qwen3(
             parallel_dims.get_mesh("cp"),
             attn_backend,
         )
+
+    # When both TP and CP are enabled, wrap inner_attention with local_map
+    # to properly handle DTensor <-> local tensor conversion at the TP/CP
+    # boundary. TP's use_local_output=False produces DTensor q/k/v, but CP
+    # hooks expect plain tensors.
+    # TODO(pianpwk): remove this once full DTensor lands
+    if parallel_dims.tp_enabled and parallel_dims.cp_enabled:
+        tp_mesh = parallel_dims.get_mesh("tp")
+        # pyrefly: ignore [missing-attribute, not-callable]
+        for block in model.layers.values():
+            attn = block.attention  # pyrefly: ignore [missing-attribute]
+            # Workaround: cuDNN SDPA backward has a stride mismatch bug with CP.
+            # Exclude cuDNN until PyTorch fix lands.
+            attn.inner_attention.sdpa_backends = (
+                [  # pyrefly: ignore [missing-attribute]
+                    SDPBackend.FLASH_ATTENTION,
+                    SDPBackend.MATH,
+                ]
+            )
+            attn.inner_attention = (
+                _LocalMapInnerAttention(  # pyrefly: ignore [missing-attribute]
+                    attn.inner_attention, tp_mesh  # pyrefly: ignore [missing-attribute]
+                )
+            )
 
     if ac_config.mode != "none":
         apply_ac(
