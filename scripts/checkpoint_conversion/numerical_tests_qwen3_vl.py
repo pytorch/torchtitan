@@ -235,17 +235,19 @@ def _tt_forward(model, tokens, gpus, **kwargs):
         hidden_states = layer(hidden_states, model.freqs_cis, None, positions)
 
         layer_idx_int = int(layer_idx)
-        if layer_idx_int in model.deepstack_layer_indices:
-            ds_idx = model.deepstack_layer_indices.index(layer_idx_int)
-            if deepstack_visual_embeds is not None and visual_pos_masks is not None:
-                if ds_idx < len(deepstack_visual_embeds):
-                    vis_mask = visual_pos_masks.to(layer_device)
-                    vis_embed = deepstack_visual_embeds[ds_idx].to(layer_device)
-                    hidden_states = model._deepstack_process(
-                        hidden_states,
-                        vis_mask,
-                        vis_embed,
-                    )
+        if (
+            layer_idx_int < model.num_deepstack_layers
+            and deepstack_visual_embeds is not None
+            and visual_pos_masks is not None
+            and layer_idx_int < len(deepstack_visual_embeds)
+        ):
+            vis_mask = visual_pos_masks.to(layer_device)
+            vis_embed = deepstack_visual_embeds[layer_idx_int].to(layer_device)
+            hidden_states = model._deepstack_process(
+                hidden_states,
+                vis_mask,
+                vis_embed,
+            )
 
     if model.norm is not None:
         norm_device = next(model.norm.parameters()).device
@@ -270,6 +272,8 @@ def forward_tt(model_flavor, checkpoint_path, tt_inputs_list, gpus):
     special_tokens = SpecialTokens(
         img_token="<|image_pad|>",
         img_id=model_config.image_token_id,  # pyrefly: ignore[missing-attribute]
+        vid_token="<|video_pad|>",
+        vid_id=model_config.video_token_id,  # pyrefly: ignore[missing-attribute]
         vision_start_token="<|vision_start|>",
         vision_start_id=model_config.vision_start_token_id,  # pyrefly: ignore[missing-attribute]
         vision_end_token="<|vision_end|>",
