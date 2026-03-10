@@ -93,6 +93,7 @@ def rl_grpo_qwen3_debug() -> RLTrainer.Config:
             num_samples_per_prompt=4,
             sampling=SamplingConfig(
                 temperature=1.0,
+                top_p=0.95,
                 max_tokens=50,
             ),
         ),
