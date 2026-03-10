@@ -5,19 +5,34 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
 
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.state_initializer import StateInitializer
 
 __all__ = [
     "RoPE",
+    "RoPEStateInitializer",
     "apply_rotary_emb_complex",
     "apply_rotary_emb_cos_sin",
     "apply_rotary_emb_single_complex",
 ]
+
+
+class RoPEStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        pass
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        if buffer_device is not None:
+            with torch.device(buffer_device):
+                module.cache = module._precompute()
+        else:
+            module.cache = module._precompute()
 
 
 class RoPE(Module):
@@ -53,9 +68,12 @@ class RoPE(Module):
         beta_slow: float = 1.0
         original_seq_len: int = 4096
         mscale: float = 0.0
+        state_initializer: StateInitializer.Config = field(
+            default_factory=RoPEStateInitializer.Config
+        )
 
     def __init__(self, config: Config):
-        super().__init__()
+        super().__init__(config)
         self.config = config
         self.cache: torch.Tensor = self._precompute()
 
@@ -199,14 +217,6 @@ class RoPE(Module):
     ) -> torch.Tensor:
         """Return the precomputed cache tensor (slicing is done by apply_rotary_emb)."""
         return self.cache
-
-    def init_weights(self, **kwargs) -> None:
-        buffer_device = kwargs.get("buffer_device")
-        if buffer_device is not None:
-            with torch.device(buffer_device):
-                self.cache = self._precompute()
-        else:
-            self.cache = self._precompute()
 
 
 def _reshape_for_broadcast_complex(

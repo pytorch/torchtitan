@@ -5,8 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from dataclasses import dataclass
-from typing import cast
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -20,12 +19,36 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import apply_rotary_emb_single_complex
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.state_initializer import StateInitializer
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
+
+
+class DeepSeekV3AttentionStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        init_std: float = 0.02
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        linear_list = [
+            module.wkv_a,
+            module.wkv_b,
+        ]
+        if module.q_lora_rank > 0:
+            linear_list.extend([module.wq_a, module.wq_b])
+        else:
+            linear_list.append(module.wq)
+
+        for linear in linear_list:
+            linear.init_states()
+        module.wo.init_states()
+
+        module.kv_norm.init_states()
+        if module.q_lora_rank > 0:
+            module.q_norm.init_states()
 
 
 class Attention(BaseAttention):
@@ -57,9 +80,12 @@ class Attention(BaseAttention):
         rope_factor: float = 1.0
         rope_max_seq_len: int = 4096
         rope_original_seq_len: int = 4096
+        state_initializer: StateInitializer.Config = field(
+            default_factory=DeepSeekV3AttentionStateInitializer.Config
+        )
 
     def __init__(self, config: Config, *, dim: int):
-        super().__init__()
+        super().__init__(config)
         self.dim = dim
         self.n_heads = config.n_heads
         self.q_lora_rank = config.q_lora_rank
@@ -95,7 +121,12 @@ class Attention(BaseAttention):
             in_features=self.kv_lora_rank,
             out_features=self.n_heads * (self.qk_nope_head_dim + self.v_head_dim),
         )
-        self.wo = config.wo.build(
+        assert isinstance(
+            config.state_initializer, DeepSeekV3AttentionStateInitializer.Config
+        )
+        init_std = config.state_initializer.init_std
+        wo_cfg = config.wo.replace_state_init_field(init_std=init_std)
+        self.wo = wo_cfg.build(
             in_features=self.n_heads * self.v_head_dim, out_features=self.dim
         )
         self.softmax_scale = self.qk_head_dim**-0.5
@@ -167,25 +198,21 @@ class Attention(BaseAttention):
         output = output.view(bsz, seqlen, -1)
         return self.wo(output)
 
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        linear_list = [
-            self.wkv_a,
-            self.wkv_b,
-        ]
-        if self.q_lora_rank > 0:
-            linear_list.extend([self.wq_a, self.wq_b])
+
+class DeepSeekV3TransformerBlockStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        pass
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        assert buffer_device is not None
+        for norm in (module.attention_norm, module.ffn_norm):
+            norm.init_states()
+        module.attention.init_states()
+        if module.moe_enabled:
+            module.moe.init_states(buffer_device=buffer_device)
         else:
-            linear_list.append(self.wq)
-
-        for linear in linear_list:
-            linear.init_weights()
-        self.wo.init_weights(init_std=init_std)
-
-        self.kv_norm.init_weights()
-        if self.q_lora_rank > 0:
-            self.q_norm.init_weights()
+            module.feed_forward.init_states()
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):
@@ -196,22 +223,33 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
         n_dense_layers: int = 1
+        state_initializer: StateInitializer.Config = field(
+            default_factory=DeepSeekV3TransformerBlockStateInitializer.Config
+        )
 
     def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
-        super().__init__()
-        self.attention = config.attention.build(dim=dim)
+        super().__init__(config)
+
+        weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+
+        # Replace init_std on output projections before building
+        attn_cfg = config.attention.replace_state_init_field(init_std=weight_init_std)
+        self.attention = attn_cfg.build(dim=dim)
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
 
         self.moe_enabled = layer_id >= config.n_dense_layers
         if self.moe_enabled:
             assert config.moe is not None
-            self.moe = config.moe.build(dim=dim)
+            moe_cfg = config.moe.replace_state_init_field(init_std=weight_init_std)
+            self.moe = moe_cfg.build(dim=dim)
         else:
             assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build(dim=dim)
+            ff_cfg = config.feed_forward.replace_state_init_field(
+                init_std=weight_init_std
+            )
+            self.feed_forward = ff_cfg.build(dim=dim)
 
-        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
     def forward(
@@ -229,19 +267,6 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         else:
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
-
-    def init_weights(self, **kwargs):
-        buffer_device = kwargs.get("buffer_device")
-        assert buffer_device is not None
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(init_std=self.weight_init_std)
-        if self.moe_enabled:
-            cast(MoE, self.moe).init_weights(
-                init_std=self.weight_init_std, buffer_device=buffer_device
-            )
-        else:
-            self.feed_forward.init_weights(self.weight_init_std)
 
 
 class DeepSeekV3Model(Decoder):

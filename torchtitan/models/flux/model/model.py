@@ -114,7 +114,7 @@ class FluxModel(BaseModel):
             return nparams, 1
 
     def __init__(self, config: Config):
-        super().__init__()
+        super().__init__(config)
 
         self.config = config
 
@@ -154,7 +154,7 @@ class FluxModel(BaseModel):
 
         self.final_layer = config.final_layer_config.build()
 
-    def init_weights(self, *, buffer_device=None, **kwargs):
+    def init_states(self, *, buffer_device=None):
         # Adapted from DiT weight initialization: https://github.com/facebookresearch/DiT/blob/main/models.py#L189
         # initialize Linear Layers: img_in, txt_in
         nn.init.xavier_uniform_(self.img_in.weight)
@@ -163,19 +163,19 @@ class FluxModel(BaseModel):
         nn.init.constant_(self.txt_in.bias, 0)
 
         # Initialize time_in, vector_in (MLPEmbedder)
-        self.time_in.init_weights(init_std=0.02)
-        self.vector_in.init_weights(init_std=0.02)
+        self.time_in.init_states(init_std=0.02)
+        self.vector_in.init_states(init_std=0.02)
 
         # Initialize transformer blocks:
         for block in self.single_blocks:
             # pyrefly: ignore [not-callable]
-            block.init_weights()
+            block.init_states()
         for block in self.double_blocks:
             # pyrefly: ignore [not-callable]
-            block.init_weights()
+            block.init_states()
 
         # Zero-out output layers:
-        self.final_layer.init_weights()
+        self.final_layer.init_states()
 
     def forward(
         self,

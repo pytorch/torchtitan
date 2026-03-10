@@ -12,6 +12,7 @@ from torchtitan.models.common import (
     FeedForward,
     GQAttention,
     Linear,
+    LinearStateInitializer,
     RMSNorm,
     RoPE,
 )
@@ -35,7 +36,9 @@ llama3_configs = {
         vocab_size=2048,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -70,7 +73,9 @@ llama3_configs = {
         vocab_size=2048,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -105,7 +110,9 @@ llama3_configs = {
         vocab_size=2048,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -139,7 +146,9 @@ llama3_configs = {
         n_layers=32,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -175,7 +184,9 @@ llama3_configs = {
         n_layers=32,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -212,7 +223,9 @@ llama3_configs = {
         n_layers=32,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -249,7 +262,9 @@ llama3_configs = {
         n_layers=80,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -285,7 +300,9 @@ llama3_configs = {
         n_layers=126,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama3TransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),

@@ -4,10 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
-import torch.nn as nn
 from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -27,13 +26,47 @@ from torchtitan.models.common.rmsnorm import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.state_initializer import StateInitializer
 
-__all__ = ["Decoder", "TransformerBlock"]
+__all__ = ["Decoder", "DecoderStateInitializer", "TransformerBlock"]
+
+
+class DecoderStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        pass
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        buffer_device = buffer_device or module.freqs_cis.device
+
+        if module.rope is not None:
+            module.rope.init_states(buffer_device=buffer_device)
+            module.freqs_cis = module.rope.cache
+        else:
+            # PP case: rope module was pruned, rebuild to get freqs_cis
+            rope = module.config.rope.build()
+            rope.init_states(buffer_device=buffer_device)
+            module.freqs_cis = rope.cache
+
+        if module.tok_embeddings is not None:
+            module.tok_embeddings.init_states()
+
+        for layer in module.layers.values():
+            # FSDP mess up the class, so we cannot use isinstance to check
+            # anymore. But all the methods and attributes still preserve.
+            if hasattr(layer, "init_states"):
+                layer.init_states(buffer_device=buffer_device)
+
+        if module.norm is not None:
+            module.norm.init_states()
+
+        if module.output is not None:
+            module.output.init_states()
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
 # there is no special logic for each model, including
-# init_weights, ffn vs. moe naming and creation, rope vs. nope, etc.
+# init_states, ffn vs. moe naming and creation, rope vs. nope, etc.
 class TransformerBlock(Module):
     """Base class for all language model transformer blocks.
 
@@ -44,7 +77,7 @@ class TransformerBlock(Module):
     - ``weight_init_std`` computed from ``layer_id``
     - Forward: ``x + attn(norm(x), ...); x + ffn(norm(x))``
 
-    Children implement ``__init__``, ``forward``, and ``init_weights``.
+    Children implement ``__init__`` and ``forward``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -59,7 +92,7 @@ class TransformerBlock(Module):
 class Decoder(BaseModel):
     """Base class for autoregressive decoder-only language models.
 
-    Provides shared ``__init__``, ``forward``, ``init_weights``, and
+    Provides shared ``__init__``, ``forward``, ``init_states``, and
     ``get_attention_masks`` (flex/varlen dispatch) used by most models.
     """
 
@@ -78,9 +111,12 @@ class Decoder(BaseModel):
         # handling, see below.
         rope: RoPE.Config
         layer: TransformerBlock.Config  # required, no default
+        state_initializer: StateInitializer.Config = field(
+            default_factory=DecoderStateInitializer.Config
+        )
 
     def __init__(self, config: Config):
-        super().__init__()
+        super().__init__(config)
         self.config = config
 
         self.tok_embeddings = config.tok_embeddings.build(
@@ -97,46 +133,16 @@ class Decoder(BaseModel):
             )
 
         self.norm = config.norm.build(normalized_shape=config.dim)
-        self.output = config.output.build(
+
+        # Set init_std on the output projection before building
+        final_out_std = config.dim**-0.5
+        output_cfg = config.output.replace_state_init_field(init_std=final_out_std)
+        self.output = output_cfg.build(
             in_features=config.dim, out_features=config.vocab_size
         )
 
-    def init_weights(
-        self,
-        **kwargs,
-    ):
-        buffer_device: torch.device | None = kwargs.get("buffer_device")
-        buffer_device = buffer_device or self.freqs_cis.device
-        if self.rope is not None:
-            self.rope.init_weights(buffer_device=buffer_device)
-            self.freqs_cis = self.rope.cache
-        else:
-            # PP case: rope module was pruned, rebuild to get freqs_cis
-            rope = self.config.rope.build()
-            rope.init_weights(buffer_device=buffer_device)
-            self.freqs_cis = rope.cache
-        if self.tok_embeddings is not None:
-            self.tok_embeddings.init_weights()
-        for layer in self.layers.values():
-            # pyrefly: ignore [not-callable]
-            layer.init_weights(buffer_device=buffer_device)
-        if self.norm is not None:
-            self.norm.init_weights()
-
-        # TODO: this init_weights logic can be the same as others
-        # if we move final_out_std and cutoff_factor logic to
-        # decoder.__init__(). Refactor this logic when we refactor
-        # init_weights.
-        final_out_std = self.config.dim**-0.5
-        cutoff_factor = 3
-        if self.output is not None:
-            nn.init.trunc_normal_(
-                self.output.weight,
-                mean=0.0,
-                std=final_out_std,
-                a=-cutoff_factor * final_out_std,
-                b=cutoff_factor * final_out_std,
-            )
+    def init_states(self, *, buffer_device=None):
+        self._state_initializer.init_states(self, buffer_device=buffer_device)
 
     def forward(
         self,

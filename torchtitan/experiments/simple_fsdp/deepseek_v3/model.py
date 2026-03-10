@@ -19,6 +19,6 @@ class SimpleFSDPDeepSeekV3Model(DeepSeekV3Model):
     def __init__(self, config: Config):
         super().__init__(config)
 
-    def init_weights(self, *args, **kwargs):
+    def init_states(self, *, buffer_device=None):
         with disable_active_parametrization():
-            super().init_weights(*args, **kwargs)
+            super().init_states(buffer_device=buffer_device)

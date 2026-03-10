@@ -84,6 +84,7 @@ class DeepEPMoE(MoE):
 
         if self.load_balance_coeff is not None:
             with torch.no_grad():
+                # pyrefly: ignore [not-callable]  # Tensor.add_ not in pyrefly stubs
                 self.tokens_per_expert.add_(num_tokens_per_expert)
 
         # Call experts with routing info - hooks handle DeepEP dispatch/combine.

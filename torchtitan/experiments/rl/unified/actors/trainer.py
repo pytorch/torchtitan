@@ -216,7 +216,7 @@ class PolicyTrainer(Actor, Configurable):
 
         model.to_empty(device=device_type)
         with torch.no_grad():
-            model.init_weights(buffer_device=None)
+            model.init_states(buffer_device=None)
 
         # Load initial weights from HF
         self._load_initial_hf_weights(model, hf_assets_path)

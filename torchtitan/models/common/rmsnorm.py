@@ -9,10 +9,21 @@ from dataclasses import dataclass, field
 import torch.nn as nn
 
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.state_initializer import StateInitializer
 
 
-class RMSNorm(nn.RMSNorm, Module):
-    """Configurable nn.RMSNorm with init_weights support.
+class RMSNormStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        pass
+
+    def init_states(self, module: nn.Module, *, buffer_device=None) -> None:
+        assert isinstance(module, nn.RMSNorm)
+        module.reset_parameters()
+
+
+class RMSNorm(Module, nn.RMSNorm):
+    """Configurable nn.RMSNorm with StateInitializer support.
 
     Uses diamond inheritance (nn.RMSNorm + Module) so that:
     - The module hierarchy stays flat (no extra wrapper layer).
@@ -31,6 +42,9 @@ class RMSNorm(nn.RMSNorm, Module):
         normalized_shape: int = field(init=False)
         eps: float = 1e-5
         elementwise_affine: bool = True
+        state_initializer: StateInitializer.Config = field(
+            default_factory=RMSNormStateInitializer.Config
+        )
 
     def __init__(self, config: Config):
         if not hasattr(config, "normalized_shape"):
@@ -40,11 +54,9 @@ class RMSNorm(nn.RMSNorm, Module):
                 "on the Config instance before constructing RMSNorm directly."
             )
         super().__init__(
+            config,
             config.normalized_shape,
             eps=config.eps,
             elementwise_affine=config.elementwise_affine,
         )
         self.config = config
-
-    def init_weights(self, **kwargs) -> None:
-        self.reset_parameters()

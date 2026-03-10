@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, NamedTuple
 
 import torch
@@ -29,6 +29,7 @@ from torchtitan.models.common.rope import (
     apply_rotary_emb_cos_sin,
 )
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.state_initializer import StateInitializer
 
 
 __all__ = [
@@ -369,6 +370,22 @@ def create_varlen_metadata_for_document(
     )
 
 
+class GQAttentionStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        init_std: float = 0.02
+
+    def init_states(self, module: nn.Module, *, buffer_device=None) -> None:
+        assert isinstance(module, GQAttention)
+        for linear in (module.wq, module.wk, module.wv):
+            linear.init_states()
+        module.wo.init_states()
+        if module.q_norm is not None:
+            module.q_norm.init_states()
+        if module.k_norm is not None:
+            module.k_norm.init_states()
+
+
 class BaseAttention(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -419,6 +436,9 @@ class GQAttention(BaseAttention):
         attn_backend: str = "sdpa"
         attn_mask_type: str = "causal"
         rope_backend: str = "complex"  # "complex" or "cos_sin"
+        state_initializer: StateInitializer.Config = field(
+            default_factory=GQAttentionStateInitializer.Config
+        )
 
         def __post_init__(self):
             BaseAttention.Config.__post_init__(self)
@@ -426,7 +446,7 @@ class GQAttention(BaseAttention):
                 raise ValueError("q_norm and k_norm must be both None or both set")
 
     def __init__(self, config: Config, *, dim: int):
-        super().__init__()
+        super().__init__(config)
         self.n_heads = config.n_heads
         self.n_kv_heads = (
             config.n_heads if config.n_kv_heads is None else config.n_kv_heads
@@ -448,6 +468,10 @@ class GQAttention(BaseAttention):
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
+        # Read init_std from our state_initializer config for output projection
+        assert isinstance(config.state_initializer, GQAttentionStateInitializer.Config)
+        init_std = config.state_initializer.init_std
+
         self.wq = config.wq.build(
             in_features=dim, out_features=self.n_heads * self.head_dim
         )
@@ -457,7 +481,8 @@ class GQAttention(BaseAttention):
         self.wv = config.wv.build(
             in_features=dim, out_features=self.n_kv_heads * self.head_dim
         )
-        self.wo = config.wo.build(
+        wo_cfg = config.wo.replace_state_init_field(init_std=init_std)
+        self.wo = wo_cfg.build(
             in_features=self.n_heads * self.head_dim, out_features=dim
         )
 
@@ -555,12 +580,3 @@ class GQAttention(BaseAttention):
 
         output = output.view(bs, seqlen, -1)
         return self.wo(output)
-
-    def init_weights(self, init_std: float = 0.02, **kwargs) -> None:
-        for linear in (self.wq, self.wk, self.wv):
-            linear.init_weights()
-        self.wo.init_weights(init_std=init_std)
-        if self.q_norm is not None:
-            self.q_norm.init_weights()
-        if self.k_norm is not None:
-            self.k_norm.init_weights()

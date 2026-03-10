@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 
 import torch
@@ -15,12 +15,25 @@ from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.llama3 import model_registry, parallelize_llama
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.state_initializer import StateInitializer
+
+
+class FakeStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        pass
+
+    def init_states(self, module: nn.Module, *, buffer_device=None) -> None:
+        nn.init.normal_(module.linear.weight, mean=0.0, std=0.02)
 
 
 class FakeModel(BaseModel):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
         hidden: int = 8
+        state_initializer: StateInitializer.Config = field(
+            default_factory=FakeStateInitializer.Config
+        )
 
         def update_from_config(self, *, trainer_config, **kwargs):
             pass
@@ -29,14 +42,11 @@ class FakeModel(BaseModel):
             return 0, 0
 
     def __init__(self, config: Config):
-        super().__init__()
+        super().__init__(config)
         self.linear = nn.Linear(config.hidden, config.hidden)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(x)
-
-    def init_weights(self, buffer_device: torch.device | None = None) -> None:
-        nn.init.normal_(self.linear.weight, mean=0.0, std=0.02)
 
 
 def fake_post_optimizer_build_fn(
