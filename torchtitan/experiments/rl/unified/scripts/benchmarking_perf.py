@@ -145,6 +145,7 @@ class BenchmarkConfig:
     profile_warmup: int = 1  # Warmup steps for profiler
     profile_active: int = 2  # Active profiling steps
     profile_repeat: int = 1  # Number of profiling cycles
+    debug_mode: bool = False  # Enable torch DebugMode to capture dispatch trace
 
 
 class ProfilerManager:
@@ -246,11 +247,15 @@ class VLLMNativeBenchmark:
                 f"CUDA Graph: {'Enabled' if self.config.use_cuda_graph else 'Disabled (eager mode)'}"
             )
 
-            # Set up profiling via environment variable (compatible with more vLLM versions)
+            # Set up profiling
+            profiler_config = None
             if self.config.profile:
                 self.profile_dir = Path(self.config.profile_dir) / "vllm_native"
                 self.profile_dir.mkdir(parents=True, exist_ok=True)
-                os.environ["VLLM_TORCH_PROFILER_DIR"] = str(self.profile_dir)
+                profiler_config = {
+                    "profiler": "torch",
+                    "torch_profiler_dir": str(self.profile_dir.resolve()),
+                }
                 self.profiling_enabled = True
                 print(
                     f"Profiling ENABLED - traces will be saved to: {self.profile_dir}"
@@ -268,7 +273,7 @@ class VLLMNativeBenchmark:
             # vLLM will pick up WORLD_SIZE, RANK, etc. from environment
             distributed_backend = "external_launcher" if self.config.tp > 1 else None
 
-            self.engine = LLM(
+            engine_kwargs = dict(
                 model=self.config.model_path,
                 trust_remote_code=True,
                 dtype="bfloat16",
@@ -278,6 +283,10 @@ class VLLMNativeBenchmark:
                 compilation_config=compilation_config,
                 enforce_eager=enforce_eager,
             )
+            if profiler_config is not None:
+                engine_kwargs["profiler_config"] = profiler_config
+
+            self.engine = LLM(**engine_kwargs)
             self.sampling_params = SamplingParams(
                 temperature=self.config.temperature,
                 top_p=self.config.top_p,
@@ -318,10 +327,26 @@ class VLLMNativeBenchmark:
                     "  Note: LLM.start_profile() not available, relying on VLLM_TORCH_PROFILER_DIR"
                 )
 
+        # Optionally wrap with DebugMode
+        debug_ctx = None
+        if self.config.debug_mode:
+            from torch.utils._debug_mode import DebugMode
+            debug_ctx = DebugMode()
+            debug_ctx.__enter__()
+
         # Measure prefill (first token) time separately
         start_time = time.perf_counter()
         outputs = self.engine.generate(prompts, self.sampling_params)
         end_time = time.perf_counter()
+
+        # Save DebugMode trace if active
+        if debug_ctx is not None:
+            debug_ctx.__exit__(None, None, None)
+            debug_dir = Path(self.config.profile_dir) / "vllm_native"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_file = debug_dir / "debug_mode_trace.txt"
+            debug_file.write_text(debug_ctx.debug_string())
+            print(f"  DebugMode trace saved to: {debug_file}")
 
         # Stop profiler if it was started
         if profile_started:
@@ -399,11 +424,15 @@ class VLLMTorchTitanBenchmark:
                 f"CUDA Graph: {'Enabled' if self.config.use_cuda_graph else 'Disabled (eager mode)'}"
             )
 
-            # Set up profiling via environment variable (compatible with more vLLM versions)
+            # Set up profiling
+            profiler_config = None
             if self.config.profile:
                 self.profile_dir = Path(self.config.profile_dir) / "vllm_torchtitan"
                 self.profile_dir.mkdir(parents=True, exist_ok=True)
-                os.environ["VLLM_TORCH_PROFILER_DIR"] = str(self.profile_dir)
+                profiler_config = {
+                    "profiler": "torch",
+                    "torch_profiler_dir": str(self.profile_dir.resolve()),
+                }
                 self.profiling_enabled = True
                 print(
                     f"Profiling ENABLED - traces will be saved to: {self.profile_dir}"
@@ -421,7 +450,7 @@ class VLLMTorchTitanBenchmark:
             # vLLM will pick up WORLD_SIZE, RANK, etc. from environment
             distributed_backend = "external_launcher" if self.config.tp > 1 else None
 
-            self.engine = LLM(
+            engine_kwargs = dict(
                 model=self.config.model_path,
                 hf_overrides={
                     # Override architectures to use our registered TorchTitan model class
@@ -435,6 +464,10 @@ class VLLMTorchTitanBenchmark:
                 distributed_executor_backend=distributed_backend,
                 compilation_config=compilation_config,
             )
+            if profiler_config is not None:
+                engine_kwargs["profiler_config"] = profiler_config
+
+            self.engine = LLM(**engine_kwargs)
 
             self.sampling_params = SamplingParams(
                 temperature=self.config.temperature,
@@ -474,9 +507,25 @@ class VLLMTorchTitanBenchmark:
                         "  Profiling will rely on VLLM_TORCH_PROFILER_DIR environment variable"
                     )
 
+        # Optionally wrap with DebugMode
+        debug_ctx = None
+        if self.config.debug_mode:
+            from torch.utils._debug_mode import DebugMode
+            debug_ctx = DebugMode()
+            debug_ctx.__enter__()
+
         start_time = time.perf_counter()
         outputs = self.engine.generate(prompts, self.sampling_params)
         end_time = time.perf_counter()
+
+        # Save DebugMode trace if active
+        if debug_ctx is not None:
+            debug_ctx.__exit__(None, None, None)
+            debug_dir = Path(self.config.profile_dir) / "vllm_torchtitan"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_file = debug_dir / "debug_mode_trace.txt"
+            debug_file.write_text(debug_ctx.debug_string())
+            print(f"  DebugMode trace saved to: {debug_file}")
 
         # Stop profiler if it was started
         if profile_started:
@@ -1288,6 +1337,11 @@ def main():
         action="store_true",
         help="Enable CUDA graph via compilation config. If not set, uses eager mode (default: eager)",
     )
+    parser.add_argument(
+        "--debug-mode",
+        action="store_true",
+        help="Enable torch DebugMode to capture dispatch trace during inference and save to file",
+    )
 
     args = parser.parse_args()
 
@@ -1315,6 +1369,7 @@ def main():
         profile_warmup=args.profile_warmup,
         profile_active=args.profile_active,
         use_cuda_graph=args.use_cuda_graph,
+        debug_mode=args.debug_mode,
     )
 
     runner = BenchmarkRunner(config)

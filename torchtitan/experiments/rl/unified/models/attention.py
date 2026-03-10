@@ -40,6 +40,11 @@ class VLLMAttention(torch.nn.Module):
 
         self.hidden_size = hidden_size
         self.layer_name = layer_name
+        # DTensor mesh/placements are stored as module attributes so they
+        # don't cross piecewise-compile split boundaries as opaque objects.
+        # Set lazily on the first forward call when TP is active.
+        self._device_mesh = None
+        self._placements = None
 
         from vllm.config import get_current_vllm_config
 
@@ -94,12 +99,16 @@ class VLLMAttention(torch.nn.Module):
         # in its .view(bs, seqlen, -1) call.
         batch_size, _, seq_len, head_dim = q.shape
 
-        # Unwrap DTensor inputs to local tensors for attention computation
-        device_mesh = None
-        placements = None
-        if isinstance(q, DTensor):
-            device_mesh = q.device_mesh
-            placements = q.placements
+        # Unwrap DTensor inputs to local tensors for attention computation.
+        # We read device_mesh/placements from module attributes (set once)
+        # rather than extracting them from the input each call, so that
+        # they don't appear as opaque objects flowing across piecewise
+        # compile split boundaries.
+        is_dtensor = isinstance(q, DTensor)
+        if is_dtensor:
+            if self._device_mesh is None:
+                self._device_mesh = q.device_mesh
+                self._placements = q.placements
             q = q.to_local()
             k = k.to_local()
             v = v.to_local()
@@ -126,9 +135,9 @@ class VLLMAttention(torch.nn.Module):
         output = output_flat.view(batch_size, seq_len, -1, head_dim)
         output = output.transpose(1, 2)
 
-        if device_mesh is not None:
+        if is_dtensor:
             output = DTensor.from_local(
-                output, device_mesh=device_mesh, placements=placements
+                output, device_mesh=self._device_mesh, placements=self._placements
             )
 
         return output
