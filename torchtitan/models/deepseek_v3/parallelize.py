@@ -81,14 +81,6 @@ def parallelize_deepseekv3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
-    if parallelism.context_parallel_degree > 1 and attn_backend != "sdpa":
-        raise NotImplementedError(
-            f"Context Parallel only supports SDPA attention. "
-            f"Got attn_backend='{attn_backend}'. "
-            f"FlexAttention and varlen attention are not supported with CP."
-        )
-
     if parallel_dims.tp_enabled:
         float8_config = find_float8_linear_config(model_converters.converters)
         enable_float8_linear = float8_config is not None
@@ -154,6 +146,12 @@ def parallelize_deepseekv3(
         )
 
     if parallel_dims.cp_enabled:
+        if parallel_dims.tp_enabled:
+            raise NotImplementedError(
+                "Context Parallel with Tensor Parallel is not yet supported for DeepSeek-V3. "
+                "See https://github.com/pytorch/torchtitan/issues/2446"
+            )
+        attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
