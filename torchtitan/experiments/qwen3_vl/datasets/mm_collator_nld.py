@@ -150,11 +150,21 @@ class MultiModalCollatorNLD:
         ]
         patches, grids = self.collate_images(all_images)
 
+        all_videos = [
+            vid
+            for sample in batch
+            if "pixel_values_videos" in sample
+            for vid in sample["pixel_values_videos"]
+        ]
+        video_patches, video_grids = self.collate_images(all_videos)
+
         input_ids, labels = self.collate_text(batch)
         input_dict = {
             "input": input_ids,
             "pixel_values": patches,
             "grid_thw": grids,
+            "pixel_values_videos": video_patches,
+            "grid_thw_videos": video_grids,
             "special_tokens": self.special_tokens,
         }
 

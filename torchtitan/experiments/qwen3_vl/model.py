@@ -31,6 +31,8 @@ class SpecialTokens:
 
     img_token: str
     img_id: int
+    vid_token: str
+    vid_id: int
     vision_start_token: str
     vision_start_id: int
     vision_end_token: str
@@ -43,6 +45,7 @@ class SpecialTokens:
     def from_tokenizer(cls, tokenizer: HuggingFaceTokenizer):
         SPECIAL_TOKENS_MAP = {
             "img": "<|image_pad|>",
+            "vid": "<|video_pad|>",
             "vision_start": "<|vision_start|>",
             "vision_end": "<|vision_end|>",
             "pad": "<|endoftext|>",
@@ -164,10 +167,8 @@ class Qwen3VLModel(Qwen3Model):
         # MRoPE section for interleaved multi-dimensional RoPE
         self.mrope_section = config.mrope_section
 
-        # Inject deepstack features from ViT layers deepstack_visual_indicies[i] into LLM decoder layer i
-        self.deepstack_layer_indices = list(
-            range(len(config.encoder.deepstack_visual_indicies))
-        )
+        # Number of early LLM layers that receive DeepStack visual features
+        self.num_deepstack_layers = len(config.encoder.deepstack_visual_indicies)
 
     def _get_mrope_position_ids(
         self,
@@ -194,14 +195,15 @@ class Qwen3VLModel(Qwen3Model):
             )
             grid_thw_videos[:, 0] = 1
 
-        spatial_merge_size = (
-            self.visual.spatial_merge_size if self.visual is not None else 2
-        )
-        image_token_id = (
-            special_tokens.img_id if special_tokens is not None else self.image_token_id
-        )
-        video_token_id = self.video_token_id
-        vision_start_token_id = self.vision_start_token_id
+        spatial_merge_size = self.visual.spatial_merge_size
+        if special_tokens is not None:
+            image_token_id = special_tokens.img_id
+            video_token_id = special_tokens.vid_id
+            vision_start_token_id = special_tokens.vision_start_id
+        else:
+            image_token_id = self.image_token_id
+            video_token_id = self.video_token_id
+            vision_start_token_id = self.vision_start_token_id
 
         batch_size, seq_len = input_ids.shape
         position_ids = torch.ones(
@@ -240,20 +242,12 @@ class Qwen3VLModel(Qwen3Model):
                     next_video_pos = len(input_tokens) + 1
 
                 if next_image_pos < next_video_pos:
-                    t, h, w = (
-                        grid_thw[image_index][0],
-                        grid_thw[image_index][1],
-                        grid_thw[image_index][2],
-                    )
+                    t, h, w = grid_thw[image_index]
                     image_index += 1
                     remain_images -= 1
                     next_vision_pos = next_image_pos
                 else:
-                    t, h, w = (
-                        grid_thw_videos[video_index][0],
-                        grid_thw_videos[video_index][1],
-                        grid_thw_videos[video_index][2],
-                    )
+                    t, h, w = grid_thw_videos[video_index]
                     video_index += 1
                     remain_videos -= 1
                     next_vision_pos = next_video_pos
@@ -368,34 +362,34 @@ class Qwen3VLModel(Qwen3Model):
         if self.visual is not None:
             self.visual.init_weights()
 
-    def get_image_features(
+    def _get_visual_features(
         self,
         pixel_values: torch.Tensor,
-        image_grid_thw: torch.Tensor,
+        grid_thw: torch.Tensor,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Extract image features from the vision encoder.
+        """Extract visual features from the vision encoder.
+
+        Works for both images and videos — the ViT processes them identically.
 
         Args:
-            pixel_values: Padded image patches (num_images, max_num_patch, patch_dim)
-            image_grid_thw: Grid dimensions (num_images, 3) for [t, h, w]
+            pixel_values: Padded patches (num_items, max_num_patch, patch_dim)
+            grid_thw: Grid dimensions (num_items, 3) for [t, h, w]
 
         Returns:
-            image_embeds: List of image embeddings per image (only valid tokens)
+            visual_embeds: List of embeddings per item (only valid tokens)
             deepstack_embeds: List of DeepStack features from intermediate layers
         """
         pixel_values = pixel_values.type(self.visual.patch_embed.proj.weight.dtype)
-        merged_embeds, deepstack_features = self.visual(
-            pixel_values, grid_thw=image_grid_thw
-        )
+        merged_embeds, deepstack_features = self.visual(pixel_values, grid_thw=grid_thw)
 
-        # Compute valid sequence lengths per image (after merging)
+        # Compute valid sequence lengths per item (after merging)
         merge_unit = self.visual.spatial_merge_unit
-        seq_lens = (image_grid_thw.prod(-1) // merge_unit).tolist()
+        seq_lens = (grid_thw.prod(-1) // merge_unit).tolist()
 
-        # Extract only valid tokens (remove padding) per image
-        image_embeds = []
+        # Extract only valid tokens (remove padding) per item
+        visual_embeds = []
         for i, seq_len in enumerate(seq_lens):
-            image_embeds.append(merged_embeds[i, :seq_len])
+            visual_embeds.append(merged_embeds[i, :seq_len])
 
         # Extract valid tokens from DeepStack features
         deepstack_embeds_extracted = []
@@ -405,16 +399,7 @@ class Qwen3VLModel(Qwen3Model):
                 ds_list.append(ds_feat[i, :seq_len])
             deepstack_embeds_extracted.append(torch.cat(ds_list, dim=0))
 
-        return image_embeds, deepstack_embeds_extracted
-
-    def get_video_features(
-        self,
-        pixel_values_videos: torch.Tensor,
-        grid_thw_videos: torch.Tensor,
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Extract video features from the vision encoder."""
-        # Same implementation as for images
-        return self.get_image_features(pixel_values_videos, grid_thw_videos)
+        return visual_embeds, deepstack_embeds_extracted
 
     def _scatter_vision_embeds(
         self,
@@ -483,8 +468,10 @@ class Qwen3VLModel(Qwen3Model):
             return hidden_states
 
         if num_mask_positions != num_visual_embeds:
-            # Size mismatch - skip DeepStack for this layer
-            return hidden_states
+            raise ValueError(
+                f"DeepStack size mismatch: {num_mask_positions} vision mask positions "
+                f"but {num_visual_embeds} visual embeddings."
+            )
 
         visual_pos_masks = visual_pos_masks.to(hidden_states.device)
         visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
@@ -518,10 +505,12 @@ class Qwen3VLModel(Qwen3Model):
             visual_pos_masks: (batch, seq_len) bool mask or None
             deepstack_visual_embeds: list of (num_visual_tokens, dim) or None
         """
-        img_token_id = (
-            special_tokens.img_id if special_tokens is not None else self.image_token_id
-        )
-        vid_token_id = self.video_token_id
+        if special_tokens is not None:
+            img_token_id = special_tokens.img_id
+            vid_token_id = special_tokens.vid_id
+        else:
+            img_token_id = self.image_token_id
+            vid_token_id = self.video_token_id
 
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
@@ -535,7 +524,7 @@ class Qwen3VLModel(Qwen3Model):
             and pixel_values is not None
             and grid_thw is not None
         ):
-            image_embeds_list, deepstack_image_embeds = self.get_image_features(
+            image_embeds_list, deepstack_image_embeds = self._get_visual_features(
                 pixel_values, grid_thw
             )
             image_embeds = torch.cat(image_embeds_list, dim=0)
@@ -555,7 +544,7 @@ class Qwen3VLModel(Qwen3Model):
             and pixel_values_videos is not None
             and grid_thw_videos is not None
         ):
-            video_embeds_list, deepstack_video_embeds = self.get_video_features(
+            video_embeds_list, deepstack_video_embeds = self._get_visual_features(
                 pixel_values_videos, grid_thw_videos
             )
             video_embeds = torch.cat(video_embeds_list, dim=0)
@@ -643,18 +632,17 @@ class Qwen3VLModel(Qwen3Model):
 
             # Apply DeepStack: add visual features to early layer hidden states
             layer_idx_int = int(layer_idx)
-            if layer_idx_int in self.deepstack_layer_indices:
-                ds_idx = self.deepstack_layer_indices.index(layer_idx_int)
-                if (
-                    deepstack_visual_embeds is not None
-                    and visual_pos_masks is not None
-                    and ds_idx < len(deepstack_visual_embeds)
-                ):
-                    hidden_states = self._deepstack_process(
-                        hidden_states,
-                        visual_pos_masks,
-                        deepstack_visual_embeds[ds_idx],
-                    )
+            if (
+                layer_idx_int < self.num_deepstack_layers
+                and deepstack_visual_embeds is not None
+                and visual_pos_masks is not None
+                and layer_idx_int < len(deepstack_visual_embeds)
+            ):
+                hidden_states = self._deepstack_process(
+                    hidden_states,
+                    visual_pos_masks,
+                    deepstack_visual_embeds[layer_idx_int],
+                )
 
         # Final normalization and output
         hidden_states = self.norm(hidden_states)

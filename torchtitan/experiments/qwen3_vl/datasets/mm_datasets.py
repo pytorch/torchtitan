@@ -10,6 +10,8 @@ This module provides dataset classes for handling multimodal data
 including images, videos, and text for Qwen3-VL model training.
 """
 
+import inspect
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -29,7 +31,13 @@ from ..model import SpecialTokens
 from .mm_collator_nld import MultiModalCollatorNLD
 from .utils.image import calculate_image_tokens, process_image
 from .utils.packing import SamplePacker
-from .utils.text import process_text_with_images
+from .utils.text import process_text_with_images, process_text_with_videos
+from .utils.video import (
+    calculate_video_tokens,
+    load_video,
+    process_video,
+    smart_resize_video,
+)
 
 
 def _process_mm_sample(
@@ -206,6 +214,177 @@ def _process_cc12_wd_sample(
     )
 
 
+def _process_nemotron_video_sample(
+    sample: dict[str, Any],
+    tokenizer: BaseTokenizer,
+    patch_size: int,
+    temporal_patch_size: int,
+    spatial_merge_size: int,
+    min_pixels: int,
+    max_pixels: int,
+    image_mean: tuple[float, ...],
+    image_std: tuple[float, ...],
+    special_tokens: SpecialTokens,
+    video_dir: str = "",
+    video_fps: float = 2.0,
+    video_min_frames: int = 4,
+    video_max_frames: int = 768,
+    **kwargs,
+) -> dict[str, Any] | None:
+    """Process a sample from the Nemotron video dataset.
+
+    Expected format::
+
+        {
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "video", "video": "NExTVideo/1122/xxx.mp4", ...},
+                    {"type": "text", "text": "question text"},
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "answer"},
+                ]},
+            ]
+        }
+    """
+    try:
+        messages = sample.get("messages", [])
+        if len(messages) < 2:
+            return None
+
+        # Extract video filename and user text from the first turn
+        user_turn = messages[0]
+        user_content = user_turn.get("content", [])
+        video_filename = None
+        user_text = ""
+        for item in user_content:
+            if item.get("type") == "video" and item.get("video"):
+                video_filename = item["video"]
+            if item.get("type") == "text" and item.get("text"):
+                user_text = item["text"]
+
+        if video_filename is None:
+            return None
+
+        # Pre-filter: estimate token count from metadata to avoid decoding
+        # videos that will exceed seq_len
+        video_item = next(
+            (item for item in user_content if item.get("type") == "video"), None
+        )
+        metadata = video_item.get("metadata", {}) if video_item else {}
+        if metadata and "video_duration" in metadata:
+            duration = metadata["video_duration"]
+            src_frames = metadata.get("video_num_frames") or int(
+                duration * (metadata.get("video_fps") or 24.0)
+            )
+            est_frames = int(duration * video_fps)
+            est_frames = max(video_min_frames, min(est_frames, video_max_frames))
+            est_frames = min(est_frames, src_frames)
+
+            factor = patch_size * spatial_merge_size
+            est_h, est_w = smart_resize_video(
+                num_frames=est_frames,
+                height=metadata.get("video_height", 360),
+                width=metadata.get("video_width", 640),
+                temporal_factor=temporal_patch_size,
+                factor=factor,
+                min_pixels=min_pixels,
+                max_pixels=max_pixels,
+            )
+            est_tokens, _, _ = calculate_video_tokens(
+                num_frames=est_frames,
+                height=est_h,
+                width=est_w,
+                patch_size=patch_size,
+                spatial_merge_size=spatial_merge_size,
+                temporal_patch_size=temporal_patch_size,
+            )
+
+            if est_tokens > kwargs.get("seq_len", float("inf")):
+                logger.debug(
+                    f"Pre-filter skip {video_filename}: ~{est_tokens} video tokens > seq_len"
+                )
+                return None
+
+        # Extract assistant response
+        assistant_turn = messages[1]
+        assistant_content = assistant_turn.get("content", [])
+        assistant_text = ""
+        for item in assistant_content:
+            if item.get("type") == "text" and item.get("text"):
+                assistant_text = item["text"]
+
+        # Load and process video
+        video_path = os.path.join(video_dir, video_filename)
+        raw_video = load_video(
+            video_path,
+            fps=video_fps,
+            min_frames=video_min_frames,
+            max_frames=video_max_frames,
+        )
+        if raw_video is None:
+            return None
+
+        processed_video = process_video(
+            raw_video,
+            patch_size=patch_size,
+            merge_size=spatial_merge_size,
+            temporal_patch_size=temporal_patch_size,
+            max_pixels=max_pixels,
+            min_pixels=min_pixels,
+            image_mean=image_mean,
+            image_std=image_std,
+        )
+        if processed_video is None:
+            return None
+
+        # Calculate video token count
+        T, H, W, _C = processed_video.shape
+        num_tokens, tokens_per_row, num_rows = calculate_video_tokens(
+            num_frames=T,
+            height=H,
+            width=W,
+            patch_size=patch_size,
+            spatial_merge_size=spatial_merge_size,
+            temporal_patch_size=temporal_patch_size,
+        )
+
+        # Build text: [video_placeholder, user_text + assistant_text]
+        full_text = user_text + assistant_text
+        texts = [None, full_text]
+        video_dimensions = [(num_tokens, tokens_per_row, num_rows)]
+
+        processed_text = process_text_with_videos(
+            texts, video_dimensions, tokenizer, special_tokens, add_eos=True
+        )
+
+        tokens = tokenizer.encode(processed_text)
+        input_ids = torch.tensor(tokens)
+        labels = torch.tensor(tokens)
+
+        # Mask vision token IDs in labels
+        special_token_ids = torch.tensor(
+            [
+                special_tokens.vision_start_id,
+                special_tokens.vision_end_id,
+                special_tokens.vid_id,
+            ]
+        )
+        labels = torch.where(
+            torch.isin(labels, special_token_ids), special_tokens.ignore_id, labels
+        )
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "pixel_values_videos": [processed_video],
+        }
+
+    except Exception as e:
+        logger.warning(f"Error processing Nemotron video sample: {e}")
+        return None
+
+
 MM_DATASETS = {
     "obelics": DatasetConfig(
         path="HuggingFaceM4/OBELICS",
@@ -224,13 +403,20 @@ MM_DATASETS = {
         ),
         sample_processor=_process_cc12_wd_sample,
     ),
+    "nemotron-video": DatasetConfig(
+        path="nvidia/Nemotron-VLM-Dataset-V2",
+        loader=lambda path, subset="nextqa": load_dataset(
+            path, subset or "nextqa", split="train", streaming=True
+        ),
+        sample_processor=_process_nemotron_video_sample,
+    ),
 }
 
 
 def _validate_mm_dataset(
     dataset_name: str, dataset_path: str | None = None
 ) -> tuple[str, Callable, Callable]:
-    """Validate dataset name and path."""
+    """Validate dataset name and path, returning (path, loader, sample_processor)."""
     if dataset_name not in MM_DATASETS:
         raise ValueError(
             f"Dataset {dataset_name} is not supported. "
@@ -266,13 +452,24 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         dp_rank: int = 0,
         dp_world_size: int = 1,
         infinite: bool = False,
+        video_dir: str = "",
+        video_fps: float = 2.0,
+        video_min_frames: int = 4,
+        video_max_frames: int = 768,
+        dataset_subset: str = "",
     ) -> None:
         dataset_name = dataset_name.lower()
 
         path, dataset_loader, self.sample_processor = _validate_mm_dataset(
             dataset_name, dataset_path
         )
-        ds = dataset_loader(path)
+
+        # Pass subset to loaders that accept it (e.g. nemotron-video)
+        sig = inspect.signature(dataset_loader)
+        if "subset" in sig.parameters and dataset_subset:
+            ds = dataset_loader(path, subset=dataset_subset)
+        else:
+            ds = dataset_loader(path)
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
 
         self._tokenizer = tokenizer
@@ -287,6 +484,10 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
         self.image_mean = image_mean
         self.image_std = image_std
         self.special_tokens = special_tokens
+        self.video_dir = video_dir
+        self.video_fps = video_fps
+        self.video_min_frames = video_min_frames
+        self.video_max_frames = video_max_frames
         self.enable_packing = packing_buffer_size > 0
         if self.enable_packing:
             self.packer = SamplePacker(
@@ -315,6 +516,11 @@ class HuggingFaceMultiModalDataset(IterableDataset, Stateful):
                         image_mean=self.image_mean,
                         image_std=self.image_std,
                         special_tokens=self.special_tokens,
+                        video_dir=self.video_dir,
+                        video_fps=self.video_fps,
+                        video_min_frames=self.video_min_frames,
+                        video_max_frames=self.video_max_frames,
+                        seq_len=self.seq_len,
                     )
                     if processed is None:
                         continue
@@ -424,6 +630,9 @@ class MMDataLoader(ParallelAwareDataloader):
         dataset: str = "cc12m-test"
         """Dataset to use"""
 
+        dataset_subset: str = ""
+        """Dataset subset/config name (e.g. 'nextqa' for nemotron-video)."""
+
         infinite: bool = True
         """Whether to loop the dataset infinitely"""
 
@@ -459,6 +668,18 @@ class MMDataLoader(ParallelAwareDataloader):
         image_std: tuple[float, ...] = (0.5, 0.5, 0.5)
         """Per-channel std for image normalization."""
 
+        video_dir: str = ""
+        """Base directory for video files (for datasets with video filename references)."""
+
+        video_fps: float = 2.0
+        """Target frames per second for video sampling."""
+
+        video_min_frames: int = 4
+        """Minimum number of frames to sample from a video."""
+
+        video_max_frames: int = 768
+        """Maximum number of frames to sample from a video."""
+
     def __init__(
         self,
         config: Config,
@@ -491,6 +712,11 @@ class MMDataLoader(ParallelAwareDataloader):
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             infinite=config.infinite,
+            video_dir=config.video_dir,
+            video_fps=config.video_fps,
+            video_min_frames=config.video_min_frames,
+            video_max_frames=config.video_max_frames,
+            dataset_subset=config.dataset_subset,
         )
 
         collate_fn = MultiModalCollatorNLD(
