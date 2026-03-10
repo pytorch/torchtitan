@@ -1,4 +1,4 @@
-name: RL Unified 2 GPU Integration Tests
+name: RL Unified Integration Tests
 
 on:
   push:
@@ -10,6 +10,9 @@ on:
     paths:
       - 'torchtitan/experiments/rl/unified/**'
       - '.github/workflows/integration_test_2gpu_rl.yaml'
+  schedule:
+    # Runs every 12 hours
+    - cron: '0 */12 * * *'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -59,14 +62,18 @@ jobs:
         # Install uv for faster dependency resolution
         pip install uv
 
-        # Install vllm with nightly torch
-        uv pip install torch vllm xformers --pre \
+        # Install vllm, Monarch, and nightly torch
+        uv pip install torch vllm xformers torchmonarch --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
           --index-strategy unsafe-best-match
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
-        # Run the numerics tests for RL unified (test with TP=2)
-        torchrun --nproc-per-node=2 -m pytest torchtitan/experiments/rl/unified/tests/test_numerics.py -v
+        # Run numerics unit tests (TP=1)
+        torchrun --nproc-per-node=1 -m pytest torchtitan/experiments/rl/unified/tests/test_numerics.py -v
         rm -rf $RUNNER_TEMP/artifacts-to-be-uploaded/*/checkpoint
+
+        # Run E2E RL integration tests (TP=1 on 2 GPUs, TP=2 on 4 GPUs)
+        python -m torchtitan.experiments.rl.unified.tests.integration_tests \
+          $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 4

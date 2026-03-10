@@ -307,8 +307,8 @@ def setup_models_and_inputs(
     )
 
 
-class TestVLLMTorchTitan:
-    """Compare TorchTitanVLLMModelWrapper vs vLLM native Qwen3 model."""
+class TestVLLMTorchTitanNumerics:
+    """GPU unit tests: compare TorchTitanVLLMModelWrapper vs vLLM native Qwen3 model."""
 
     @pytest.fixture(autouse=True)
     def setup(self):
