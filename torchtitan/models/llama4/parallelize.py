@@ -394,7 +394,10 @@ def apply_fsdp(
             )
 
     if model.enable_weight_tying:
-        modules = [m for m in (model.tok_embeddings, model.norm, model.output) if m is not None]
+        modules = [
+            m for m in (model.tok_embeddings, model.norm, model.output) if m is not None
+        ]
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             modules,
             **fsdp_config,
@@ -402,17 +405,19 @@ def apply_fsdp(
         )
     else:
         if model.tok_embeddings is not None:
+            # pyrefly: ignore [no-matching-overload]
             fully_shard(
                 model.tok_embeddings,
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward,
             )
-        if model.output is not None and model.norm is not None:
+        if model.norm is not None and model.output is not None:
+            # As an optimization, do not reshard_after_forward the last layers by default
+            # since FSDP would prefetch them immediately after the forward pass
+            # pyrefly: ignore [no-matching-overload]
             fully_shard(
-                model.output,
+                [model.norm, model.output],
                 **fsdp_config,
-                # As an optimization, do not reshard_after_forward the last layers by default
-                # since FSDP would prefetch them immediately after the forward pass
                 reshard_after_forward=reshard_after_forward_policy == "always",
             )
 
