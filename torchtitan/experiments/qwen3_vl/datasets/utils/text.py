@@ -105,3 +105,47 @@ def process_text_with_images(
 
     result = "".join(parts)
     return result.strip() + (tokenizer.eos_token if add_eos else "")
+
+
+def process_text_with_videos(
+    text: list[str],
+    video_tokens: list[tuple[int, int, int]],
+    tokenizer,
+    special_tokens,
+    add_eos: bool = True,
+) -> str:
+    """Process text by interleaving video tokens for Qwen3-VL.
+
+    Same as ``process_text_with_images`` but uses ``vid_token`` (``<|video_pad|>``)
+    instead of ``img_token``.
+
+    Args:
+        text: List of text parts (None indicates a video placeholder position).
+        video_tokens: List of (total_tokens, width, height) for each video.
+        tokenizer: Tokenizer with special tokens.
+        special_tokens: Special token definitions.
+        add_eos: Whether to add EOS token.
+
+    Returns:
+        Processed text with video tokens inserted.
+    """
+    parts = []
+    video_idx = 0
+
+    for part in text:
+        if part is None and video_idx < len(video_tokens):
+            num_video_tokens, _, _ = video_tokens[video_idx]
+
+            parts.extend(
+                [
+                    special_tokens.vision_start_token,
+                    *([special_tokens.vid_token] * num_video_tokens),
+                    special_tokens.vision_end_token,
+                ]
+            )
+            video_idx += 1
+        else:
+            parts.append(part)
+
+    result = "".join(parts)
+    return result.strip() + (tokenizer.eos_token if add_eos else "")
