@@ -154,6 +154,12 @@ class PolicyTrainer(Actor, Configurable):
             )
             return
 
+        if not os.path.isdir(checkpoint_path):
+            raise FileNotFoundError(
+                f"Checkpoint path '{checkpoint_path}' does not exist. "
+                "Please provide a valid path to a HuggingFace checkpoint directory."
+            )
+
         storage_reader = self.sd_adapter.get_hf_storage_reader(checkpoint_path)
         hf_state_dict = self.sd_adapter.to_hf(model.state_dict())
         dcp.load(hf_state_dict, storage_reader=storage_reader)
