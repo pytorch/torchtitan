@@ -265,9 +265,10 @@ def _reshape_for_broadcast_cos_sin(
         shape = [-1, seqlen, 1, head_dim * 2]
         return rope_cache.view(*shape)
     elif positions.size(0) == 1:
-        assert positions.shape == (1, seqlen)
+        # assert positions.shape == (1, seqlen)
+        torch._check(positions.shape[1] == seqlen)
         rope_cache = rope_cache[positions.squeeze(0)]
-        assert rope_cache.shape == (seqlen, head_dim * 2)
+        # assert rope_cache.shape == (seqlen, head_dim * 2)
         shape = [-1, seqlen, 1, head_dim * 2]
         return rope_cache.view(*shape)
     else:

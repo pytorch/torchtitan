@@ -146,6 +146,7 @@ class BenchmarkConfig:
     profile_active: int = 2  # Active profiling steps
     profile_repeat: int = 1  # Number of profiling cycles
     debug_mode: bool = False  # Enable torch DebugMode to capture dispatch trace
+    aot_eager_compile: bool = False  # Compile forward/logits with aot_eager + unbacked seq len
 
 
 class ProfilerManager:
@@ -410,6 +411,12 @@ class VLLMTorchTitanBenchmark:
         """Initialize vLLM engine with TorchTitan Qwen3 model."""
         try:
             from vllm import LLM, SamplingParams
+
+            # Set aot_eager compile flag before engine creation (the wrapper
+            # reads this module-level flag during __init__)
+            from torchtitan.experiments.rl.unified.models import vllm_wrapper
+
+            vllm_wrapper.aot_eager_compile_enabled = self.config.aot_eager_compile
 
             # Register TorchTitan model with vLLM before engine creation
             model_spec = model_registry("1.7B")
@@ -1342,6 +1349,11 @@ def main():
         action="store_true",
         help="Enable torch DebugMode to capture dispatch trace during inference and save to file",
     )
+    parser.add_argument(
+        "--aot-eager-unbacked-sequence-length",
+        action="store_true",
+        help="Compile forward/compute_logits with aot_eager backend and mark sequence length as unbacked (dynamic)",
+    )
 
     args = parser.parse_args()
 
@@ -1370,6 +1382,7 @@ def main():
         profile_active=args.profile_active,
         use_cuda_graph=args.use_cuda_graph,
         debug_mode=args.debug_mode,
+        aot_eager_compile=args.aot_eager_unbacked_sequence_length,
     )
 
     runner = BenchmarkRunner(config)

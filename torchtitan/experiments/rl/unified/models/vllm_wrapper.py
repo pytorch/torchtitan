@@ -14,6 +14,12 @@ TorchTitan models for vLLM.
 import dataclasses
 
 import torch
+
+# Module-level flag: when True, TorchTitanVLLMModelWrapper compiles
+# forward/compute_logits with aot_eager and marks the sequence length
+# dimension as unbacked (dynamic).  Set before engine creation via
+# `vllm_wrapper.aot_eager_compile_enabled = True`.
+aot_eager_compile_enabled = False
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
@@ -196,6 +202,34 @@ class TorchTitanVLLMModelWrapper(nn.Module):
 
         # Weights are loaded later by vLLM via load_weights() callback
 
+        # Optionally compile forward/compute_logits with aot_eager for
+        # torch.compile with unbacked (dynamic) sequence length.
+        if aot_eager_compile_enabled:
+            self._compiled_forward_body = torch.compile(
+                self._forward_body, backend="aot_eager", fullgraph=True
+            )
+            self._compiled_compute_logits = torch.compile(
+                self._compute_logits, backend="aot_eager", fullgraph=True
+            )
+            logger.info("Compiled forward/compute_logits with aot_eager")
+        else:
+            self._compiled_forward_body = None
+            self._compiled_compute_logits = None
+
+    def _forward_body(self, tokens_2d, rope_cache, positions):
+        """Embed + all transformer layers + final norm."""
+        torch._check(tokens_2d.shape[1] >= 2)
+        h = self.model.tok_embeddings(tokens_2d)
+        for layer in self.model.layers.values():
+            h = layer(h, rope_cache, attention_masks=None, positions=positions)
+        h = self.model.norm(h)
+        return h
+
+    def _compute_logits(self, hidden_states):
+        """Compute logits from hidden states (compilable)."""
+        torch._check(hidden_states.shape[0] >= 2)
+        return self.model.output(hidden_states)
+
     def _extend_rope_cache(
         self, rope_cache: torch.Tensor, required_len: int
     ) -> torch.Tensor:
@@ -278,18 +312,20 @@ class TorchTitanVLLMModelWrapper(nn.Module):
         # Convert vLLM interface to TorchTitan interface
         # vLLM: [total_tokens] → TorchTitan: [batch_size, seq_len]
         tokens_2d = input_ids.unsqueeze(0)
-
-        # Get embeddings
-        h = self.model.tok_embeddings(tokens_2d)
-
-        rope_cache = self.model.freqs_cis
         positions = positions.unsqueeze(0)
+        rope_cache = self.model.freqs_cis
 
-        # Pass through transformer layers
-        for layer in self.model.layers.values():
-            h = layer(h, rope_cache, attention_masks=None, positions=positions)
+        if self._compiled_forward_body is not None:
+            torch._dynamo.decorators.mark_unbacked(tokens_2d, 1)
+            torch._dynamo.decorators.mark_unbacked(positions, 1)
+            h = self._compiled_forward_body(tokens_2d, rope_cache, positions)
+        else:
+            # Eager path
+            h = self.model.tok_embeddings(tokens_2d)
+            for layer in self.model.layers.values():
+                h = layer(h, rope_cache, attention_masks=None, positions=positions)
+            h = self.model.norm(h)
 
-        h = self.model.norm(h)
         # When parallelism is applied, get full tensor before return to vLLM Engine
         if isinstance(h, DTensor):
             h = h.full_tensor()
@@ -320,7 +356,15 @@ class TorchTitanVLLMModelWrapper(nn.Module):
                 ],
             )
 
-        logits = self.model.output(hidden_states)
+        if self._compiled_compute_logits is not None:
+            torch._dynamo.decorators.mark_unbacked(hidden_states, 0)
+            logits = self._compiled_compute_logits(hidden_states)
+        else:
+            logits = self.model.output(hidden_states)
+
+        # Unwrap DTensor to plain tensor before returning to vLLM
+        if isinstance(logits, DTensor):
+            logits = logits.full_tensor()
 
         return logits
 
