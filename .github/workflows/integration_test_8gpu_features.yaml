@@ -65,7 +65,7 @@ jobs:
           TORCH_SPEC="torch==${{ matrix.torch-version }}"
         fi
         python -m pip install --force-reinstall --pre \
-          "${TORCH_SPEC}" --index-url ${{ matrix.index-url }}
+          "${TORCH_SPEC}" torchcomms --index-url ${{ matrix.index-url }}
         end=$(date +%s)
         echo "pip install torch took $((end - start)) seconds"
 

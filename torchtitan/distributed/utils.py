@@ -361,7 +361,7 @@ def init_distributed(
         "_ranks": ranks if ranks is not None else [],
     }
     if comm_config.use_torchcomms:
-        init_pg_kwargs["device_id"] = torch.device(
+        init_pg_kwargs["device_id"] = torch.device(  # type: ignore[typeddict-item]
             device_type, int(os.environ["LOCAL_RANK"])
         )
     torch.distributed.init_process_group(**init_pg_kwargs)
