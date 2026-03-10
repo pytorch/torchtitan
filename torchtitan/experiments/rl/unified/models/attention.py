@@ -7,7 +7,7 @@
 import logging
 
 import torch
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard
 from torchtitan.experiments.rl.vllm_compat.models.attention import (
     VLLMCompatibleFlashAttention,
 )
@@ -21,8 +21,10 @@ class VLLMAttention(torch.nn.Module):
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
     but expects flattened ``(num_tokens, num_heads, head_dim)`` inputs.  This
-    wrapper handles the transpose/reshape from TorchTitan's
-    ``(batch, num_heads, seq_len, head_dim)`` layout and back.
+    wrapper reshapes from TorchTitan's ``(batch, seq_len, num_heads, head_dim)``
+    layout and returns ``(batch, seq_len, num_heads * head_dim)`` — no
+    transposes needed since the (B, S, H, D) layout can be directly reshaped
+    to (B*S, H, D).
 
     Used by the **generator** (via :func:`replace_with_vllm_attention`).
     """
@@ -40,11 +42,10 @@ class VLLMAttention(torch.nn.Module):
 
         self.hidden_size = hidden_size
         self.layer_name = layer_name
-        # DTensor mesh/placements are stored as module attributes so they
-        # don't cross piecewise-compile split boundaries as opaque objects.
+        # DTensor device_mesh is stored as a module attribute so it doesn't
+        # cross piecewise-compile split boundaries as an opaque object.
         # Set lazily on the first forward call when TP is active.
         self._device_mesh = None
-        self._placements = None
 
         from vllm.config import get_current_vllm_config
 
@@ -78,66 +79,52 @@ class VLLMAttention(torch.nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        *,
-        scale: float | None = None,
-        enable_gqa: bool = False,
+        **kwargs,
     ) -> torch.Tensor:
         """Run vLLM paged attention.
 
         Args:
-            q: ``(batch, num_heads, seq_len, head_dim)``
-            k: ``(batch, num_kv_heads, seq_len, head_dim)``
-            v: ``(batch, num_kv_heads, seq_len, head_dim)``
-            scale: Ignored — vLLM uses its own internal scale.
-            enable_gqa: Ignored — vLLM handles GQA internally.
+            q: ``(batch, seq_len, num_heads, head_dim)``
+            k: ``(batch, seq_len, num_kv_heads, head_dim)``
+            v: ``(batch, seq_len, num_kv_heads, head_dim)``
 
         Returns:
-            ``(batch, num_heads, seq_len, head_dim)``
+            ``(batch, seq_len, num_heads * head_dim)``
         """
-        # Capture the original symbolic seq_len from the input BEFORE
-        # to_local() so that the symbol is the same one GQAttention uses
-        # in its .view(bs, seqlen, -1) call.
-        batch_size, _, seq_len, head_dim = q.shape
+        # Capture batch_size and seq_len from the DTensor BEFORE to_local()
+        # so that the symbolic shapes are consistent with the caller's.
+        # Don't capture num_heads here — DTensor global shape includes all
+        # heads, but after to_local() we only have the local shard.
+        batch_size, seq_len, _, head_dim = q.shape
 
         # Unwrap DTensor inputs to local tensors for attention computation.
-        # We read device_mesh/placements from module attributes (set once)
-        # rather than extracting them from the input each call, so that
-        # they don't appear as opaque objects flowing across piecewise
-        # compile split boundaries.
         is_dtensor = isinstance(q, DTensor)
         if is_dtensor:
             if self._device_mesh is None:
                 self._device_mesh = q.device_mesh
-                self._placements = q.placements
             q = q.to_local()
             k = k.to_local()
             v = v.to_local()
 
-        # TODO: may be good to use einops in future as we can explicitly reshape
-        # with dimension names - see https://github.com/arogozhnikov/einops
-        # Convert from (batch, num_heads, seq_len, head_dim)
-        #   to (batch*seq_len, num_heads (or num_kv_heads), head_dim) for vLLM Attn
-        q = q.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
-        k = k.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
-        v = v.transpose(1, 2).reshape(batch_size * seq_len, -1, head_dim)
+        # (B, S, H_local, D) → (B*S, H_local, D) — no transpose needed
+        q = q.reshape(batch_size * seq_len, -1, head_dim)
+        k = k.reshape(batch_size * seq_len, -1, head_dim)
+        v = v.reshape(batch_size * seq_len, -1, head_dim)
 
-        # vLLM attention returns (num_tokens, num_heads/num_kv_heads * head_dim)
+        # vLLM attention returns (num_tokens, num_heads * head_dim)
         output_flat = self.vllm_attn(q, k, v)
 
         # vLLM's flash attention backend may pad the token count (e.g.
         # round up to an even number), which introduces a new symbolic
-        # shape under torch.compile.  Narrow to trim this padding
-        # NOTE: this error only happens when batch_size and seq_len are 1
-        # which happens with cudagraph capture for dummy input
+        # shape under torch.compile.  Narrow to trim this padding.
         output_flat = output_flat.narrow(0, 0, batch_size * seq_len)
 
-        # Reshape back to titan: (batch, num_heads_local, seq_len, head_dim)
-        output = output_flat.view(batch_size, seq_len, -1, head_dim)
-        output = output.transpose(1, 2)
+        # Reshape to (B, S, H*D) — no transpose needed
+        output = output_flat.view(batch_size, seq_len, -1)
 
         if is_dtensor:
             output = DTensor.from_local(
-                output, device_mesh=self._device_mesh, placements=self._placements
+                output, device_mesh=self._device_mesh, placements=[Shard(-1)]
             )
 
         return output
@@ -191,6 +178,9 @@ def replace_with_vllm_attention(model, tp_degree=1):
         )
 
         layer.attention.inner_attention = vllm_attn
+        # VLLMAttention accepts (B, S, H, D) directly — skip the transpose
+        # to/from (B, H, S, D) that other backends (sdpa, flex) need.
+        layer.attention.sequence_first = True
 
     logger.info(
         f"Successfully replaced TorchTitan attention with VLLMAttention "

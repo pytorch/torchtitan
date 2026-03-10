@@ -449,6 +449,12 @@ class GQAttention(BaseAttention):
         self.wv = nn.Linear(dim, self.n_kv_heads * self.head_dim, bias=config.bias)
         self.wo = nn.Linear(self.n_heads * self.head_dim, dim, bias=config.bias)
 
+        # When True, inner_attention receives (B, S, H, D) and returns
+        # (B, S, H*D) directly — skipping the transpose to/from (B, H, S, D).
+        # Used by VLLMAttention which reshapes (B, S, H, D) → (B*S, H, D)
+        # without needing a transpose.
+        self.sequence_first = False
+
         self.attn_backend = config.attn_backend
         self.inner_attention: nn.Module
         match self.attn_backend:
@@ -492,6 +498,11 @@ class GQAttention(BaseAttention):
                 xq, xk = apply_rotary_emb_complex(
                     xq, xk, freqs_cis=rope_cache, positions=positions
                 )
+
+        if self.sequence_first:
+            # correct fix would be to skip transposes, skip view
+            output = self.inner_attention(xq, xk, xv)
+            return self.wo(output)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         xk = xk.transpose(1, 2)  # (bs, n_kv_heads, seqlen, head_dim)
