@@ -6,7 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -14,7 +14,20 @@ from torch import nn
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_dense_model_nparams_and_flops
+from torchtitan.protocols.state_initializer import StateInitializer
 from torchtitan.tools.logging import logger
+
+
+class Llama3TransformerBlockStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        depth_init: bool = True
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        for norm in (module.attention_norm, module.ffn_norm):
+            norm.init_states()
+        module.attention.init_states()
+        module.feed_forward.init_states()
 
 
 class Llama3TransformerBlock(TransformerBlock):
@@ -30,20 +43,33 @@ class Llama3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        depth_init: bool = True
+        state_initializer: StateInitializer.Config = field(
+            default_factory=lambda: Llama3TransformerBlockStateInitializer.Config(
+                depth_init=True
+            )
+        )
 
     def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
-        super().__init__()
-        self.attention = config.attention.build(dim=dim)
+        super().__init__(config)
+
+        assert isinstance(
+            config.state_initializer, Llama3TransformerBlockStateInitializer.Config
+        )
+        if config.state_initializer.depth_init:
+            weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+        else:
+            weight_init_std = 0.02 / (2 * n_layers) ** 0.5
+
+        # Replace init_std on output projections before building
+        attn_cfg = config.attention.replace_state_init_field(init_std=weight_init_std)
+        self.attention = attn_cfg.build(dim=dim)
+
         assert config.feed_forward is not None
-        self.feed_forward = config.feed_forward.build(dim=dim)
+        ff_cfg = config.feed_forward.replace_state_init_field(init_std=weight_init_std)
+        self.feed_forward = ff_cfg.build(dim=dim)
+
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
-
-        if config.depth_init:
-            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        else:
-            self.weight_init_std = 0.02 / (2 * n_layers) ** 0.5
 
     def forward(
         self,
@@ -57,12 +83,6 @@ class Llama3TransformerBlock(TransformerBlock):
         )
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
-
-    def init_weights(self, **kwargs):
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
 
 
 class Llama3Model(Decoder):

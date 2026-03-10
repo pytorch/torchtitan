@@ -4,35 +4,54 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from abc import abstractmethod
+from __future__ import annotations
+
+import dataclasses
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch.nn as nn
 
 from torchtitan.config import Configurable
+from torchtitan.protocols.state_initializer import (
+    NoOpStateInitializer,
+    StateInitializer,
+)
 
 
 class Module(nn.Module, Configurable):
     """Base class for all configurable nn.Module components.
     Combines nn.Module with Configurable, so subclasses only inherit from Module.
 
-    All Module subclasses must implement ``init_weights``.
+    All Module subclasses should provide a ``state_initializer`` in their Config
+    and call ``init_states()`` to initialize weights.
     """
 
-    @abstractmethod
-    def init_weights(self, **kwargs) -> None:
-        """Initialize weights. Subclasses must override this method.
-
-        Note: ``@abstractmethod`` alone does not enforce this because
-        ``nn.Module`` uses plain ``type`` as its metaclass, not ``ABCMeta``.
-        The ``raise NotImplementedError`` provides runtime enforcement so
-        that any subclass (including diamond-inheritance cases like
-        ``Embedding(nn.Embedding, Module)``) gets a clear error if it
-        forgets to implement ``init_weights``.
-        """
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement init_weights()"
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        state_initializer: StateInitializer.Config = field(
+            default_factory=NoOpStateInitializer.Config
         )
+
+        def replace_state_init_field(self, **kwargs):
+            """Return a copy with fields updated on the state_initializer."""
+            return dataclasses.replace(
+                self,
+                state_initializer=dataclasses.replace(self.state_initializer, **kwargs),
+            )
+
+    def __init__(self, config: Config, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._state_initializer: StateInitializer = config.state_initializer.build()
+
+    def init_states(self, *, buffer_device=None) -> None:
+        """Initialize weights by delegating to the StateInitializer."""
+        if hasattr(self, "_state_initializer") and self._state_initializer is not None:
+            self._state_initializer.init_states(self, buffer_device=buffer_device)
+        else:
+            raise NotImplementedError(
+                f"{type(self).__name__} must provide a state_initializer in Config"
+            )
 
 
 def capture_module_attrs(

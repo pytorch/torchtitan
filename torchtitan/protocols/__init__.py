@@ -11,6 +11,7 @@ from .model_converter import ModelConverter, ModelConvertersContainer
 from .model_spec import FaultTolerantModelSpec, ModelSpec
 from .module import Module
 from .state_dict_adapter import BaseStateDictAdapter, StateDictAdapter
+from .state_initializer import StateInitializer
 
 __all__ = [
     "BaseModel",
@@ -20,6 +21,7 @@ __all__ = [
     "ModelConvertersContainer",
     "ModelSpec",
     "Module",
+    "StateInitializer",
     "StateDictAdapter",
     "BaseStateDictAdapter",
 ]

@@ -256,7 +256,7 @@ class HFTransformerModel(BaseModel):
             )
 
     def __init__(self, config: Config):
-        super().__init__()
+        super().__init__(config)
 
         # NOTE(3outeille): This prevents Hugging Face modeling from initializing ROPE (inv_freq) buffers to NaN.
         # Needed when loading from seed checkpoint.
@@ -633,7 +633,7 @@ class HFTransformerModel(BaseModel):
         output = self.model.lm_head(output.last_hidden_state)
         return output
 
-    def init_weights(self, *args, **kwargs):
+    def init_states(self, *args, **kwargs):
         # This method replicates the behavior of the original PreTrainedModel.init_weights,
         # but with a custom weight initialization function that skips nn.Identity modules (when PP is enabled)
 

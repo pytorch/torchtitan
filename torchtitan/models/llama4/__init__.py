@@ -13,6 +13,7 @@ from torchtitan.models.common import (
     FeedForward,
     GQAttention,
     Linear,
+    LinearStateInitializer,
     RMSNorm,
     RoPE,
 )
@@ -36,7 +37,9 @@ llama4_configs = {
         vocab_size=2048,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
             fixed_attn_block_size=256,
@@ -75,7 +78,9 @@ llama4_configs = {
         n_layers=48,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
             interleave_moe_layer_step=1,
@@ -126,7 +131,9 @@ llama4_configs = {
         n_layers=48,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=Llama4TransformerBlock.Config(
             every_n_layers_nope=4,
             attention_norm=RMSNorm.Config(),

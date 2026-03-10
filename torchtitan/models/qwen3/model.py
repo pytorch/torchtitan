@@ -6,15 +6,35 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
 
 from torchtitan.models.common.attention import AttentionMasksType, GQAttention
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import (
+    Decoder,
+    DecoderStateInitializer,
+    TransformerBlock,
+)
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.state_initializer import StateInitializer
 from torchtitan.tools.logging import logger
+
+
+class Qwen3TransformerBlockStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        depth_init: bool = True
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        for norm in (module.attention_norm, module.ffn_norm):
+            norm.init_states()
+        module.attention.init_states()
+        if module.moe_enabled:
+            module.moe.init_states(buffer_device=buffer_device)
+        else:
+            module.feed_forward.init_states()
 
 
 class Qwen3TransformerBlock(TransformerBlock):
@@ -30,29 +50,42 @@ class Qwen3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        depth_init: bool = True
         moe_enabled: bool = False
+        state_initializer: StateInitializer.Config = field(
+            default_factory=lambda: Qwen3TransformerBlockStateInitializer.Config(
+                depth_init=True
+            )
+        )
 
     def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
-        super().__init__()
+        super().__init__(config)
 
-        self.attention = config.attention.build(dim=dim)
+        assert isinstance(
+            config.state_initializer, Qwen3TransformerBlockStateInitializer.Config
+        )
+        if config.state_initializer.depth_init:
+            weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+        else:
+            weight_init_std = 0.02 / (2 * n_layers) ** 0.5
+
+        # Replace init_std on output projections before building
+        attn_cfg = config.attention.replace_state_init_field(init_std=weight_init_std)
+        self.attention = attn_cfg.build(dim=dim)
 
         self.moe_enabled = config.moe_enabled
         if self.moe_enabled:
             assert config.moe is not None
-            self.moe = config.moe.build(dim=dim)
+            moe_cfg = config.moe.replace_state_init_field(init_std=weight_init_std)
+            self.moe = moe_cfg.build(dim=dim)
         else:
             assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build(dim=dim)
+            ff_cfg = config.feed_forward.replace_state_init_field(
+                init_std=weight_init_std
+            )
+            self.feed_forward = ff_cfg.build(dim=dim)
 
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
-
-        if config.depth_init:
-            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        else:
-            self.weight_init_std = 0.02 / (2 * n_layers) ** 0.5
 
     def forward(
         self,
@@ -71,17 +104,23 @@ class Qwen3TransformerBlock(TransformerBlock):
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
 
-    def init_weights(self, **kwargs):
-        buffer_device: torch.device | None = kwargs.get("buffer_device")
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(self.weight_init_std)
-        if self.moe_enabled:
-            self.moe.init_weights(
-                init_std=self.weight_init_std, buffer_device=buffer_device
-            )
-        else:
-            self.feed_forward.init_weights(self.weight_init_std)
+
+class Qwen3DecoderStateInitializer(DecoderStateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(DecoderStateInitializer.Config):
+        enable_weight_tying: bool = False
+
+    def __init__(self, config: Config):
+        self.enable_weight_tying = config.enable_weight_tying
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        if self.enable_weight_tying:
+            # since when the model is initialized on meta device,
+            # the tying in the __init__ may not have worked correctly
+            # we ensure the weights are tied here
+            assert module.tok_embeddings is not None and module.output is not None
+            module.tok_embeddings.weight = module.output.weight
+        super().init_states(module, buffer_device=buffer_device)
 
 
 class Qwen3Model(Decoder):
@@ -99,6 +138,11 @@ class Qwen3Model(Decoder):
         vocab_size: int = 151936
         enable_weight_tying: bool = False
         layer: TransformerBlock.Config
+        state_initializer: StateInitializer.Config = field(
+            default_factory=lambda: Qwen3DecoderStateInitializer.Config(
+                enable_weight_tying=False
+            )
+        )
 
         def update_from_config(
             self,
@@ -157,21 +201,8 @@ class Qwen3Model(Decoder):
         if self.enable_weight_tying:
             self.tok_embeddings.weight = self.output.weight
 
-    def init_weights(
-        self,
-        *,
-        buffer_device: torch.device | None = None,
-        **kwargs,
-    ):
-        # The token embedding initialization produces weights with too large
-        # standard deviation for the output layer. Under weight_tying, both should
-        # use the output weights with a smaller, truncated normal distribution to
-        # improve training stability.
-        if self.enable_weight_tying:
-            # since when the model is initialized on meta device,
-            # the tying in the __init__ may not have worked correctly
-            # we ensure the weights are tied here
-            assert self.tok_embeddings is not None and self.output is not None
-            self.tok_embeddings.weight = self.output.weight
-
-        super().init_weights(buffer_device=buffer_device, **kwargs)
+        # Rebuild state_initializer to pick up enable_weight_tying
+        si_config = Qwen3DecoderStateInitializer.Config(
+            enable_weight_tying=config.enable_weight_tying
+        )
+        self._state_initializer = Qwen3DecoderStateInitializer(si_config)

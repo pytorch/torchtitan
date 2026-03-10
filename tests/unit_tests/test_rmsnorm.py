@@ -29,16 +29,16 @@ class TestRMSNorm(unittest.TestCase):
         with self.assertRaises(TypeError):
             config.build()
 
-    def test_init_weights(self):
-        """RMSNorm.init_weights re-initializes the weight tensor."""
+    def test_init_states(self):
+        """RMSNorm.init_states re-initializes the weight tensor."""
         config = RMSNorm.Config()
         norm = config.build(normalized_shape=16)
 
-        # Set weights to zero, then call init_weights
+        # Set weights to zero, then call init_states
         nn.init.zeros_(norm.weight)
         self.assertTrue(torch.all(norm.weight == 0))
-        norm.init_weights()
-        # After init_weights, weights should be all ones (RMSNorm default)
+        norm.init_states()
+        # After init_states, weights should be all ones (RMSNorm default)
         self.assertTrue(torch.all(norm.weight == 1))
 
     def test_custom_eps(self):

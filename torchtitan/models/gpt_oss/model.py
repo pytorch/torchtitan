@@ -6,7 +6,7 @@
 
 import dataclasses
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -26,8 +26,25 @@ from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import apply_rotary_emb_cos_sin
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.state_initializer import StateInitializer
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
+
+
+class GptOssAttentionStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        init_std: float = 0.02
+
+    def __init__(self, config: Config):
+        self.init_std = config.init_std
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        assert isinstance(module, Attention)
+        assert isinstance(module.sinks, nn.Parameter)
+        nn.init.trunc_normal_(module.sinks, mean=0.0, std=self.init_std)
+        for linear in (module.wq, module.wk, module.wv, module.wo):
+            linear.init_states()
 
 
 class Attention(BaseAttention):
@@ -47,9 +64,12 @@ class Attention(BaseAttention):
         attn_backend: str = "flex"  # NOTE: gpt-oss only supports FlexAttention
         attn_mask_type: str = "causal"
         sliding_window_size: int = 128
+        state_initializer: StateInitializer.Config = field(
+            default_factory=GptOssAttentionStateInitializer.Config
+        )
 
     def __init__(self, config: Config, *, dim: int):
-        super().__init__()
+        super().__init__(config)
         self.head_dim = config.head_dim
         self.n_heads = config.n_heads
         self.n_kv_heads = config.n_kv_heads
@@ -60,28 +80,26 @@ class Attention(BaseAttention):
         # Standard attention softmax scale (1/sqrt(head_dim))
         self.softmax_scale = 1.0 / math.sqrt(self.head_dim)
 
-        self.wq = config.wq.build(
+        # Read init_std from our state_initializer config for all projections
+        assert isinstance(
+            config.state_initializer, GptOssAttentionStateInitializer.Config
+        )
+        init_std = config.state_initializer.init_std
+        self.wq = config.wq.replace_state_init_field(init_std=init_std).build(
             in_features=dim, out_features=config.n_heads * config.head_dim
         )
-        self.wk = config.wk.build(
+        self.wk = config.wk.replace_state_init_field(init_std=init_std).build(
             in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wv = config.wv.build(
+        self.wv = config.wv.replace_state_init_field(init_std=init_std).build(
             in_features=dim, out_features=config.n_kv_heads * config.head_dim
         )
-        self.wo = config.wo.build(
+        self.wo = config.wo.replace_state_init_field(init_std=init_std).build(
             in_features=config.n_heads * config.head_dim, out_features=dim
         )
         self.sinks = nn.Parameter(torch.empty(config.n_heads))
         assert config.attn_backend == "flex", "gpt-oss only supports FlexAttention"
         self.inner_attention = FlexAttentionWrapper()
-
-    def init_weights(self, **kwargs):
-        init_std = kwargs.get("init_std")
-        assert init_std is not None
-        nn.init.trunc_normal_(self.sinks, mean=0.0, std=init_std)
-        for linear in (self.wq, self.wk, self.wv, self.wo):
-            linear.init_weights(init_std=init_std)
 
     def forward(
         self,
@@ -141,6 +159,18 @@ class Attention(BaseAttention):
         return output
 
 
+class GptOssTransformerBlockStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        pass
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        for norm in (module.attention_norm, module.ffn_norm):
+            norm.init_states()
+        module.attention.init_states()
+        module.moe.init_states(buffer_device=buffer_device)
+
+
 class GptOssTransformerBlock(TransformerBlock):
     """
     GptOss Transformer block with sliding window attention support.
@@ -148,20 +178,28 @@ class GptOssTransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        pass
+        state_initializer: StateInitializer.Config = field(
+            default_factory=GptOssTransformerBlockStateInitializer.Config
+        )
 
     def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
-        super().__init__()
+        super().__init__(config)
+
+        weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+
         self.use_sliding_attention = layer_id % 2 == 0
-        self.attention = config.attention.build(dim=dim)
+
+        # Replace init_std on output projections before building
+        attn_cfg = config.attention.replace_state_init_field(init_std=weight_init_std)
+        self.attention = attn_cfg.build(dim=dim)
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
 
         assert config.moe is not None
-        self.moe = config.moe.build(dim=dim)
+        moe_cfg = config.moe.replace_state_init_field(init_std=weight_init_std)
+        self.moe = moe_cfg.build(dim=dim)
         self.moe_enabled = True  # for composability with load balancing
 
-        self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
         self.layer_id = layer_id
 
     def forward(
@@ -195,15 +233,6 @@ class GptOssTransformerBlock(TransformerBlock):
         x = x + self.attention(self.attention_norm(x), freqs_cis, layer_mask, positions)
         x = x + self.moe(self.ffn_norm(x))
         return x
-
-    def init_weights(self, **kwargs):
-        buffer_device = kwargs.get("buffer_device")
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(init_std=self.weight_init_std)
-        self.moe.init_weights(
-            init_std=self.weight_init_std, buffer_device=buffer_device
-        )
 
 
 class GptOssModel(Decoder):

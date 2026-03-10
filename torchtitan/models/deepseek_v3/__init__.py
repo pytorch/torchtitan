@@ -7,7 +7,14 @@
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
-from torchtitan.models.common import Embedding, FeedForward, Linear, RMSNorm, RoPE
+from torchtitan.models.common import (
+    Embedding,
+    FeedForward,
+    Linear,
+    LinearStateInitializer,
+    RMSNorm,
+    RoPE,
+)
 from torchtitan.models.common.moe import MoE
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
@@ -29,7 +36,9 @@ deepseekv3_configs = {
         n_layers=6,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=1,
             attention_norm=RMSNorm.Config(),
@@ -85,7 +94,9 @@ deepseekv3_configs = {
         n_layers=6,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=1,
             attention_norm=RMSNorm.Config(),
@@ -143,7 +154,9 @@ deepseekv3_configs = {
         n_layers=27,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=1,
             attention_norm=RMSNorm.Config(),
@@ -201,7 +214,9 @@ deepseekv3_configs = {
         n_layers=60,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=1,
             attention_norm=RMSNorm.Config(),
@@ -261,7 +276,9 @@ deepseekv3_configs = {
         n_layers=61,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=DeepSeekV3TransformerBlock.Config(
             n_dense_layers=3,
             attention_norm=RMSNorm.Config(),
