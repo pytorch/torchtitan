@@ -507,6 +507,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         config = self.config
 
         if config.comm.use_torchcomms:
+            try:
+                import torchcomms  # noqa: F401
+            except ImportError:
+                raise ImportError(
+                    "torchcomms package is required for --comm.use_torchcomms. "
+                )
             os.environ["TORCH_DISTRIBUTED_USE_TORCHCOMMS"] = "1"
             # torch.distributed.config reads the env var at import time, so
             # setting os.environ alone is too late. We must also set the

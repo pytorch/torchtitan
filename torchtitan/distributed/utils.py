@@ -355,12 +355,16 @@ def init_distributed(
         os.makedirs(dump_dir, exist_ok=True)
         _warn_overwrite_env(TRACE_FILE, f"{dump_dir}/{prefix}")
 
-    torch.distributed.init_process_group(
-        backend=_get_distributed_backend(enable_cpu_backend),
-        timeout=timedelta(seconds=comm_config.init_timeout_seconds),
-        device_id=torch.device(device_type, int(os.environ["LOCAL_RANK"])),
-        _ranks=ranks if ranks is not None else [],
-    )
+    init_pg_kwargs = {
+        "backend": _get_distributed_backend(enable_cpu_backend),
+        "timeout": timedelta(seconds=comm_config.init_timeout_seconds),
+        "_ranks": ranks if ranks is not None else [],
+    }
+    if comm_config.use_torchcomms:
+        init_pg_kwargs["device_id"] = torch.device(
+            device_type, int(os.environ["LOCAL_RANK"])
+        )
+    torch.distributed.init_process_group(**init_pg_kwargs)
 
     return torch.distributed.get_world_size()
 
