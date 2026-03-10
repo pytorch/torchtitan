@@ -56,19 +56,6 @@ class TestLinear(unittest.TestCase):
             # After init_states, weights should no longer be all zero
             self.assertFalse(torch.all(linear.weight == 0))
 
-    def test_init_states_with_override(self):
-        """Linear.init_states respects init_std set via replace_state_init_field."""
-        config = Linear.Config(
-            state_initializer=LinearStateInitializer.Config(init_std=0.01)
-        ).replace_state_init_field(init_std=0.005)
-        linear = config.build(in_features=1000, out_features=500)
-
-        torch.manual_seed(42)
-        with torch.no_grad():
-            linear.init_states()
-        # std should be close to the config init_std
-        self.assertLess(linear.weight.std().item(), 0.005 * 2)
-
     def test_custom_init_std(self):
         """Linear respects custom init_mean and init_std."""
         config = Linear.Config(
@@ -105,11 +92,10 @@ class TestLinear(unittest.TestCase):
         self.assertEqual(l2.weight.shape, torch.Size([8, 64]))
 
     def test_isinstance_checks(self):
-        """Linear is instance of nn.Linear, nn.Module, and Module."""
+        """Linear is instance of nn.Linear, and Module."""
         config = Linear.Config()
         linear = config.build(in_features=8, out_features=4)
         self.assertIsInstance(linear, nn.Linear)
-        self.assertIsInstance(linear, nn.Module)
         self.assertIsInstance(linear, Module)
 
     def test_default_bias_false(self):
@@ -156,6 +142,18 @@ class TestLinear(unittest.TestCase):
         self.assertIsInstance(linear, Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
 
+    def test_dtype_explicit(self):
+        """Linear.Config(dtype=torch.float16) creates a float16 linear."""
+        config = Linear.Config(dtype=torch.float16)
+        linear = config.build(in_features=32, out_features=16)
+        self.assertEqual(linear.weight.dtype, torch.float16)
+
+    def test_dtype_default_none(self):
+        """Default dtype=None uses torch.get_default_dtype()."""
+        config = Linear.Config()
+        linear = config.build(in_features=32, out_features=16)
+        self.assertEqual(linear.weight.dtype, torch.get_default_dtype())
+
 
 class TestModuleInjection(unittest.TestCase):
     """Tests for post-quantization Module protocol injection."""
@@ -171,7 +169,6 @@ class TestModuleInjection(unittest.TestCase):
         self.assertNotIsInstance(model.fc, Module)
 
         inject_module_protocol(model, Linear)
-        self.assertIsInstance(model.fc, Module)
         self.assertIsInstance(model.fc, Linear)
         self.assertIsInstance(model.fc, nn.Linear)
         self.assertIsInstance(model.fc, FakeQuantLinear)

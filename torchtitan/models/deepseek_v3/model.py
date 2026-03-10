@@ -61,9 +61,9 @@ class Attention(BaseAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
-        wq: Linear.Config | None = None
-        wq_a: Linear.Config | None = None
-        wq_b: Linear.Config | None = None
+        wq: Linear.Config | None
+        wq_a: Linear.Config | None
+        wq_b: Linear.Config | None
         wkv_a: Linear.Config
         wkv_b: Linear.Config
         wo: Linear.Config

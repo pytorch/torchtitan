@@ -56,7 +56,7 @@ class Linear(Module, nn.Linear):
       is inherited from ``Configurable.Config``.
 
     ``in_features`` and ``out_features`` use ``field(init=False)`` so
-    they are excluded from ``Config.__init__``.  They are typically supplied
+    they are excluded from ``Config.__init__()``.  They are typically supplied
     via ``build()`` kwargs from the parent model.
     """
 
@@ -65,6 +65,7 @@ class Linear(Module, nn.Linear):
         in_features: int = field(init=False)
         out_features: int = field(init=False)
         bias: bool = False
+        dtype: torch.dtype | None = None
         state_initializer: StateInitializer.Config = field(
             default_factory=LinearStateInitializer.Config
         )
@@ -77,5 +78,9 @@ class Linear(Module, nn.Linear):
                 "on the Config instance before constructing Linear directly."
             )
         super().__init__(
-            config, config.in_features, config.out_features, bias=config.bias
+            config,
+            config.in_features,
+            config.out_features,
+            bias=config.bias,
+            dtype=config.dtype,
         )
