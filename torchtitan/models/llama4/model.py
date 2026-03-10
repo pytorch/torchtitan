@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -22,6 +22,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.protocols.state_initializer import StateInitializer
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -59,6 +60,21 @@ def compute_moe_hidden_dim(
     return hidden_dim
 
 
+class Llama4TransformerBlockStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        depth_init: bool = True
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        for norm in (module.attention_norm, module.ffn_norm):
+            norm.init_states()
+        module.attention.init_states()
+        if module.moe_enabled:
+            module.moe.init_states(buffer_device=buffer_device)
+        else:
+            module.feed_forward.init_states()
+
+
 class Llama4TransformerBlock(TransformerBlock):
     """
     Llama4 TransformerBlock Module
@@ -72,13 +88,25 @@ class Llama4TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        depth_init: bool = True
         every_n_layers_nope: int | None = None
         interleave_moe_layer_step: int = 2
         fixed_attn_block_size: int = 8192
+        state_initializer: StateInitializer.Config = field(
+            default_factory=lambda: Llama4TransformerBlockStateInitializer.Config(
+                depth_init=True
+            )
+        )
 
     def __init__(self, config: Config, *, layer_id: int, dim: int, n_layers: int):
-        super().__init__()
+        super().__init__(config)
+
+        assert isinstance(
+            config.state_initializer, Llama4TransformerBlockStateInitializer.Config
+        )
+        if config.state_initializer.depth_init:
+            weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
+        else:
+            weight_init_std = 0.02 / (2 * n_layers) ** 0.5
 
         # iRoPE: determine per-layer use_rope and fixed_attn_block_size
         attn_use_rope = True
@@ -89,11 +117,13 @@ class Llama4TransformerBlock(TransformerBlock):
                 attn_use_rope = False
 
         # Create per-layer attention config with potentially overridden use_rope
+        # and set init_std on output projection
+        layer_attention = config.attention.replace_state_init_field(
+            init_std=weight_init_std
+        )
         if not attn_use_rope:
             assert isinstance(config.attention, GQAttention.Config)
-            layer_attention = dataclasses.replace(config.attention, use_rope=False)
-        else:
-            layer_attention = config.attention
+            layer_attention = dataclasses.replace(layer_attention, use_rope=False)
 
         self.attention = layer_attention.build(dim=dim)
 
@@ -101,18 +131,17 @@ class Llama4TransformerBlock(TransformerBlock):
         self.moe_enabled = (layer_id + 1) % config.interleave_moe_layer_step == 0
         if self.moe_enabled:
             assert config.moe is not None
-            self.moe = config.moe.build(dim=dim)
+            moe_cfg = config.moe.replace_state_init_field(init_std=weight_init_std)
+            self.moe = moe_cfg.build(dim=dim)
         else:
             assert config.feed_forward is not None
-            self.feed_forward = config.feed_forward.build(dim=dim)
+            ff_cfg = config.feed_forward.replace_state_init_field(
+                init_std=weight_init_std
+            )
+            self.feed_forward = ff_cfg.build(dim=dim)
 
         self.attention_norm = config.attention_norm.build(normalized_shape=dim)
         self.ffn_norm = config.ffn_norm.build(normalized_shape=dim)
-
-        if config.depth_init:
-            self.weight_init_std = 0.02 / (2 * (layer_id + 1)) ** 0.5
-        else:
-            self.weight_init_std = 0.02 / (2 * n_layers) ** 0.5
 
     def forward(
         self,
@@ -129,18 +158,6 @@ class Llama4TransformerBlock(TransformerBlock):
         else:
             out = h + self.feed_forward(self.ffn_norm(h))
         return out
-
-    def init_weights(self, **kwargs):
-        buffer_device: torch.device | None = kwargs.get("buffer_device")
-        for norm in (self.attention_norm, self.ffn_norm):
-            norm.init_weights()
-        self.attention.init_weights(self.weight_init_std)
-        if self.moe_enabled:
-            self.moe.init_weights(
-                init_std=self.weight_init_std, buffer_device=buffer_device
-            )
-        else:
-            self.feed_forward.init_weights(self.weight_init_std)
 
 
 class Llama4Model(Decoder):

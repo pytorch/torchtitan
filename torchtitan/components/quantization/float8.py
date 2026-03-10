@@ -189,7 +189,7 @@ class Float8LinearConverter(QuantizationConverter):
         # We need to first verify if all nn.Linear have been converted to Linear.
         verify_module_protocol(model, nn.Linear, Linear)
         saved_attrs = capture_module_attrs(
-            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
+            model, ["_state_initializer"], nn_module_cls=nn.Linear
         )
 
         # Mutates the model inplace replacing instances of nn.Linear with Float8Linear
@@ -289,7 +289,7 @@ class Float8GroupedMMConverter(QuantizationConverter):
         # We need to first verify if all nn.Linear have been converted to Linear.
         verify_module_protocol(model, nn.Linear, Linear)
         saved_attrs = capture_module_attrs(
-            model, ["_init_mean", "_init_std"], nn_module_cls=nn.Linear
+            model, ["_state_initializer"], nn_module_cls=nn.Linear
         )
 
         config = FP8GroupedMMConfig()

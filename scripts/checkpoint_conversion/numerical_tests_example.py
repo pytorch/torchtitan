@@ -75,7 +75,7 @@ def forward_tt(model_name, config_name, checkpoint_path, test_set):
     # materalize model
     device = torch.device(device_type)
     model.to_empty(device=device)
-    model.init_weights(buffer_device=device)
+    model.init_states(buffer_device=device)
     model.eval()
 
     modelWrapper = ModelWrapper(model)

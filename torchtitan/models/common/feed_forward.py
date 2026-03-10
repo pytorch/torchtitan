@@ -11,8 +11,9 @@ import torch.nn.functional as F
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.state_initializer import StateInitializer
 
-__all__ = ["FeedForward", "compute_ffn_hidden_dim"]
+__all__ = ["FeedForward", "FeedForwardStateInitializer", "compute_ffn_hidden_dim"]
 
 
 def compute_ffn_hidden_dim(
@@ -31,6 +32,17 @@ def compute_ffn_hidden_dim(
     return multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
 
+class FeedForwardStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        init_std: float = 0.02
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        module.w1.init_states()
+        module.w2.init_states()
+        module.w3.init_states()
+
+
 class FeedForward(Module):
     """SwiGLU feed-forward module shared across models.
 
@@ -46,23 +58,23 @@ class FeedForward(Module):
         w2: Linear.Config
         w3: Linear.Config
         dim: int = field(init=False)
+        state_initializer: StateInitializer.Config = field(
+            default_factory=FeedForwardStateInitializer.Config
+        )
 
     def __init__(self, config: Config):
-        super().__init__()
+        super().__init__(config)
+        # Read init_std from our state_initializer config for output projections
+        assert isinstance(config.state_initializer, FeedForwardStateInitializer.Config)
+        init_std = config.state_initializer.init_std
+
         self.w1 = config.w1.build(
             in_features=config.dim, out_features=config.hidden_dim
         )
-        self.w2 = config.w2.build(
-            in_features=config.hidden_dim, out_features=config.dim
-        )
-        self.w3 = config.w3.build(
-            in_features=config.dim, out_features=config.hidden_dim
-        )
+        w2_cfg = config.w2.replace_state_init_field(init_std=init_std)
+        self.w2 = w2_cfg.build(in_features=config.hidden_dim, out_features=config.dim)
+        w3_cfg = config.w3.replace_state_init_field(init_std=init_std)
+        self.w3 = w3_cfg.build(in_features=config.dim, out_features=config.hidden_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
-
-    def init_weights(self, init_std: float = 0.02, **kwargs):
-        self.w1.init_weights()
-        self.w2.init_weights(init_std=init_std)
-        self.w3.init_weights(init_std=init_std)

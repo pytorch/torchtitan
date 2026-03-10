@@ -132,7 +132,7 @@ class FeedForwardVLLMCompat(nn.Module):
         output = self.down_proj(activated)
         return output
 
-    def init_weights(self, init_std: float):
+    def init_states(self, init_std: float):
         # Initialize like vLLM
         nn.init.trunc_normal_(self.gate_up_proj.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.down_proj.weight, mean=0.0, std=init_std)
@@ -172,7 +172,7 @@ class Attention(nn.Module):
         # Always use vLLM compatible flash attention
         self.inner_attention = VLLMCompatibleFlashAttention()
 
-    def init_weights(self, init_std: float):
+    def init_states(self, init_std: float):
         for linear in (self.wq, self.wk, self.wv):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.wo.weight, mean=0.0, std=init_std)
@@ -267,11 +267,11 @@ class TransformerBlock(nn.Module):
 
         return x
 
-    def init_weights(self, buffer_device: torch.device):
+    def init_states(self, buffer_device: torch.device):
         for norm in (self.attention_norm, self.ffn_norm):
             norm.reset_parameters()
-        self.attention.init_weights(self.weight_init_std)
-        self.feed_forward.init_weights(self.weight_init_std)
+        self.attention.init_states(self.weight_init_std)
+        self.feed_forward.init_states(self.weight_init_std)
 
 
 class Qwen3VLLMCompatModel(BaseModel):
@@ -281,7 +281,7 @@ class Qwen3VLLMCompatModel(BaseModel):
     """
 
     def __init__(self, model_args: Qwen3Model.Config):
-        super().__init__()
+        super().__init__(model_args)
         self.config = model_args
         self.vocab_size = model_args.vocab_size
         self.n_layers = model_args.n_layers
@@ -307,7 +307,7 @@ class Qwen3VLLMCompatModel(BaseModel):
         # both update together
         self.output.weight = self.tok_embeddings.weight
 
-    def init_weights(
+    def init_states(
         self,
         buffer_device: torch.device | None = None,
     ):
@@ -318,7 +318,7 @@ class Qwen3VLLMCompatModel(BaseModel):
             nn.init.normal_(self.tok_embeddings.weight)
         for layer in self.layers.values():
             if layer is not None:
-                layer.init_weights(buffer_device)
+                layer.init_states(buffer_device)
         if self.norm is not None:
             self.norm.reset_parameters()
         final_out_std = self.config.dim**-0.5

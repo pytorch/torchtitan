@@ -17,7 +17,7 @@ class BaseModel(Module):
     Each model defines a nested Config(BaseModel.Config) with model hyperparameters.
     The model is constructed via ``config.build()``.
 
-    All models must implement ``init_weights`` (from Module).
+    All models should provide a ``state_initializer`` and use ``init_states()``.
     """
 
     @dataclass(kw_only=True, slots=True)

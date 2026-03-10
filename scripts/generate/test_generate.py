@@ -162,7 +162,7 @@ def test_generate(
     # materalize model
     model.to_empty(device=device_type)
     with torch.no_grad():
-        model.init_weights()
+        model.init_states()
     model.eval()
 
     state_dict = model.state_dict()

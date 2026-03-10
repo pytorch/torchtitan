@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
@@ -12,9 +12,13 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor, Partial
 
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import (
+    FeedForward,
+    FeedForwardStateInitializer,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.state_initializer import StateInitializer
 
 from .utils import indices_padding_wrapper
 
@@ -83,6 +87,7 @@ class GroupedExperts(nn.Module):
         hidden_dim: int,
         num_experts: int,
         use_grouped_mm: bool,
+        init_std: float = 0.02,
     ):
         super().__init__()
         self.num_experts = num_experts
@@ -90,6 +95,7 @@ class GroupedExperts(nn.Module):
         self.w2 = nn.Parameter(torch.empty(num_experts, dim, hidden_dim))
         self.w3 = nn.Parameter(torch.empty(num_experts, hidden_dim, dim))
         self.use_grouped_mm = use_grouped_mm
+        self._init_std = init_std
 
     def forward(
         self,
@@ -125,10 +131,10 @@ class GroupedExperts(nn.Module):
         else:
             return _run_experts_for_loop(w1, w2, w3, x, num_tokens_per_expert)
 
-    def init_weights(self, init_std: float):
+    def init_states(self):
         nn.init.trunc_normal_(self.w1, mean=0.0, std=0.02)
-        nn.init.trunc_normal_(self.w2, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.w3, mean=0.0, std=init_std)
+        nn.init.trunc_normal_(self.w2, mean=0.0, std=self._init_std)
+        nn.init.trunc_normal_(self.w3, mean=0.0, std=self._init_std)
 
 
 class TokenChoiceTopKRouter(nn.Module):
@@ -165,10 +171,13 @@ class TokenChoiceTopKRouter(nn.Module):
         route_scale: float,
         gate_bias: bool,
         _debug_force_load_balance: bool = False,
+        init_std: float = 0.02,
     ):
         super().__init__()
-        self.gate = Linear.Config(bias=gate_bias).build(
-            in_features=dim, out_features=num_experts
+        self.gate = (
+            Linear.Config(bias=gate_bias)
+            .replace_state_init_field(init_std=init_std)
+            .build(in_features=dim, out_features=num_experts)
         )
         self.num_experts = num_experts
         self.num_expert_groups = num_expert_groups
@@ -305,8 +314,8 @@ class TokenChoiceTopKRouter(nn.Module):
 
         return top_scores, selected_experts_indices, num_tokens_per_expert
 
-    def init_weights(self, init_std: float):
-        self.gate.init_weights(init_std=init_std)
+    def init_states(self):
+        self.gate.init_states()
 
 
 # NOTE: the reason we make this a stateless module is to support
@@ -369,6 +378,32 @@ class TokenReorderer(nn.Module):
         )
 
 
+class MoEStateInitializer(StateInitializer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(StateInitializer.Config):
+        init_std: float = 0.02
+
+    def init_states(self, module, *, buffer_device=None) -> None:
+        assert isinstance(buffer_device, torch.device), (
+            f"MoEStateInitializer requires 'buffer_device' to be a torch.device, "
+            f"got {type(buffer_device).__name__}"
+        )
+
+        module.experts.init_states()
+        module.router.init_states()
+        if module.shared_experts is not None:
+            module.shared_experts.init_states()
+
+        with torch.device(buffer_device):
+            module.tokens_per_expert = torch.zeros(
+                module.experts.num_experts, dtype=torch.float32
+            )
+            if module.load_balance_coeff is not None:
+                module.expert_bias = torch.zeros(
+                    module.experts.num_experts, dtype=torch.float32
+                )
+
+
 class MoE(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -395,17 +430,23 @@ class MoE(Module):
 
         # Expert hidden dimension (replaces old moe_inter_dim)
         hidden_dim: int = 0
+        state_initializer: StateInitializer.Config = field(
+            default_factory=MoEStateInitializer.Config
+        )
 
     def __init__(self, config: Config, *, dim: int):
-        super().__init__()
+        super().__init__(config)
 
         num_experts = config.num_experts
         hidden_dim = config.hidden_dim
+        # pyrefly: ignore [missing-attribute]
+        init_std = config.state_initializer.init_std
         self.experts = GroupedExperts(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
             use_grouped_mm=config.use_grouped_mm,
+            init_std=init_std,
         )
         self.router = TokenChoiceTopKRouter(
             dim=dim,
@@ -418,6 +459,7 @@ class MoE(Module):
             route_scale=config.route_scale,
             gate_bias=config.gate_bias,
             _debug_force_load_balance=config._debug_force_load_balance,
+            init_std=init_std,
         )
         self.reorderer = TokenReorderer(num_experts=num_experts, top_k=config.top_k)
         self.shared_experts = (
@@ -426,6 +468,7 @@ class MoE(Module):
                 w1=Linear.Config(),
                 w2=Linear.Config(),
                 w3=Linear.Config(),
+                state_initializer=FeedForwardStateInitializer.Config(init_std=init_std),
             ).build(dim=dim)
             if config.num_shared_experts > 0
             else None
@@ -501,6 +544,7 @@ class MoE(Module):
         #       first in the forward pass, and then in the backward pass. However, this has no
         #       effect on the expert bias update thanks to the torch.sign() operator.
         with torch.no_grad():
+            # pyrefly: ignore [not-callable]  # Tensor.add_ not in pyrefly stubs
             self.tokens_per_expert.add_(num_tokens_per_expert)
 
         # top_scores_experts_sorted and token_indices_experts_sorted shape (bs*slen*top_k,)
@@ -559,23 +603,3 @@ class MoE(Module):
         if out is None:
             return out_experts.reshape(bs, slen, dim)
         return (out + out_experts).reshape(bs, slen, dim)
-
-    def init_weights(self, **kwargs) -> None:
-        init_std = kwargs.get("init_std")
-        buffer_device = kwargs.get("buffer_device")
-        assert init_std is not None
-        assert isinstance(buffer_device, torch.device)
-
-        self.experts.init_weights(init_std)
-        self.router.init_weights(init_std)
-        if self.shared_experts is not None:
-            self.shared_experts.init_weights(init_std)
-
-        with torch.device(buffer_device):
-            self.tokens_per_expert = torch.zeros(
-                self.experts.num_experts, dtype=torch.float32
-            )
-            if self.load_balance_coeff is not None:
-                self.expert_bias = torch.zeros(
-                    self.experts.num_experts, dtype=torch.float32
-                )

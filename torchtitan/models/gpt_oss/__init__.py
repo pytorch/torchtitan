@@ -6,7 +6,13 @@
 
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import Embedding, Linear, RMSNorm, RoPE
+from torchtitan.models.common import (
+    Embedding,
+    Linear,
+    LinearStateInitializer,
+    RMSNorm,
+    RoPE,
+)
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 
@@ -27,7 +33,9 @@ gptoss_configs = {
         n_layers=4,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=GptOssTransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -67,7 +75,9 @@ gptoss_configs = {
         n_layers=24,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=GptOssTransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),
@@ -107,7 +117,9 @@ gptoss_configs = {
         n_layers=36,
         tok_embeddings=Embedding.Config(),
         norm=RMSNorm.Config(),
-        output=Linear.Config(),
+        output=Linear.Config(
+            state_initializer=LinearStateInitializer.Config(cutoff_factor=3)
+        ),
         layer=GptOssTransformerBlock.Config(
             attention_norm=RMSNorm.Config(),
             ffn_norm=RMSNorm.Config(),

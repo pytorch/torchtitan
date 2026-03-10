@@ -20,7 +20,7 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
-from .linear import Linear
+from .linear import Linear, LinearStateInitializer
 from .moe import MoE
 from .rmsnorm import RMSNorm
 from .rope import (
@@ -43,6 +43,7 @@ __all__ = [
     "get_sliding_window_mask_mod",
     "GQAttention",
     "Linear",
+    "LinearStateInitializer",
     "MoE",
     "RMSNorm",
     "RoPE",

@@ -186,11 +186,13 @@ class GptOssGroupedExperts(nn.Module):
         num_experts: int,
         swiglu_limit: float,
         use_grouped_mm: bool,
+        init_std: float = 0.02,
     ):
         super().__init__()
         self.num_experts = num_experts
         self.use_grouped_mm = use_grouped_mm
         self.swiglu_limit = swiglu_limit
+        self._init_std = init_std
 
         self.mlp1_weight = nn.Parameter(
             torch.empty((num_experts, hidden_dim * 2, dim))
@@ -263,11 +265,11 @@ class GptOssGroupedExperts(nn.Module):
                 tp_degree,
             )
 
-    def init_weights(self, init_std: float):
-        nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=init_std)
-        nn.init.trunc_normal_(self.mlp2_bias, mean=0.0, std=init_std)
+    def init_states(self):
+        nn.init.trunc_normal_(self.mlp1_weight, mean=0.0, std=self._init_std)
+        nn.init.trunc_normal_(self.mlp1_bias, mean=0.0, std=self._init_std)
+        nn.init.trunc_normal_(self.mlp2_weight, mean=0.0, std=self._init_std)
+        nn.init.trunc_normal_(self.mlp2_bias, mean=0.0, std=self._init_std)
 
 
 class GptOssMoE(MoE):
@@ -282,6 +284,8 @@ class GptOssMoE(MoE):
         super().__init__(config, dim=dim)
 
         # Override the base GroupedExperts with GptOssGroupedExperts
+        # pyrefly: ignore [missing-attribute]
+        init_std = config.state_initializer.init_std
         # pyrefly: ignore [bad-assignment]
         self.experts = GptOssGroupedExperts(
             dim=dim,
@@ -289,4 +293,5 @@ class GptOssMoE(MoE):
             num_experts=config.num_experts,
             swiglu_limit=config.swiglu_limit,
             use_grouped_mm=config.use_grouped_mm,
+            init_std=init_std,
         )

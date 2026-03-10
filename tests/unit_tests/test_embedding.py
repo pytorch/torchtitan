@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import Embedding, EmbeddingStateInitializer
 
 
 class TestEmbedding(unittest.TestCase):
@@ -30,24 +30,28 @@ class TestEmbedding(unittest.TestCase):
         with self.assertRaises(TypeError):
             config.build()
 
-    def test_init_weights(self):
-        """Embedding.init_weights re-initializes the weight tensor."""
+    def test_init_states(self):
+        """Embedding.init_states re-initializes the weight tensor."""
         config = Embedding.Config()
         emb = config.build(num_embeddings=50, embedding_dim=16)
 
         nn.init.zeros_(emb.weight)
         self.assertTrue(torch.all(emb.weight == 0))
-        emb.init_weights()
-        # After init_weights, weights should no longer be all zero
+        emb.init_states()
+        # After init_states, weights should no longer be all zero
         self.assertFalse(torch.all(emb.weight == 0))
 
     def test_custom_init_std(self):
         """Embedding respects custom init_mean and init_std."""
-        config = Embedding.Config(init_mean=0.1, init_std=0.02)
+        config = Embedding.Config(
+            state_initializer=EmbeddingStateInitializer.Config(
+                init_mean=0.1, init_std=0.02
+            )
+        )
         emb = config.build(num_embeddings=1000, embedding_dim=160)
 
         torch.manual_seed(42)
-        emb.init_weights()
+        emb.init_states()
         # With large amount of samples (160 * 1000) the sample statistics should
         # be close to the requested values. places=3 checks within 0.0005, which
         # is well within statistical tolerance for this sample size.

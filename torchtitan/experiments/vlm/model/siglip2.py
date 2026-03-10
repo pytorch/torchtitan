@@ -81,7 +81,7 @@ class VisionEmbeddings(nn.Module):
         self.position_embedding = nn.Embedding(args.n_pos_embs**2, args.dim)
         self.n_pos_embs = args.n_pos_embs
 
-    def init_weights(self):
+    def init_states(self):
         nn.init.trunc_normal_(self.patch_embedding.weight, mean=0.0, std=0.02)
         nn.init.normal_(self.position_embedding.weight)
 
@@ -151,7 +151,7 @@ class Attention(nn.Module):
 
         return self.out_proj(output)
 
-    def init_weights(self):
+    def init_states(self):
         for linear in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
             nn.init.trunc_normal_(linear.weight, mean=0.0, std=0.02)
 
@@ -168,7 +168,7 @@ class FeedForward(nn.Module):
         x = self.fc2(x)
         return x
 
-    def init_weights(self):
+    def init_states(self):
         nn.init.trunc_normal_(self.fc1.weight, mean=0.0, std=0.02)
         nn.init.trunc_normal_(self.fc2.weight, mean=0.0, std=0.02)
 
@@ -188,11 +188,11 @@ class TransformerLayer(nn.Module):
         x = x + self.mlp(self.layer_norm2(x))
         return x
 
-    def init_weights(self):
+    def init_states(self):
         self.layer_norm1.reset_parameters()
         self.layer_norm2.reset_parameters()
-        self.self_attn.init_weights()
-        self.mlp.init_weights()
+        self.self_attn.init_states()
+        self.mlp.init_states()
 
 
 class VisionTransformer(nn.Module):
@@ -251,8 +251,8 @@ class VisionTransformer(nn.Module):
 
         return h
 
-    def init_weights(self):
-        self.embeddings.init_weights()
+    def init_states(self):
+        self.embeddings.init_states()
         for layer in self.layers.values():
-            layer.init_weights()
+            layer.init_states()
         self.post_layernorm.reset_parameters()
