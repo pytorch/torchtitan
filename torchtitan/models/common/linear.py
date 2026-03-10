@@ -6,6 +6,7 @@
 
 from dataclasses import dataclass, field
 
+import torch
 import torch.nn as nn
 
 from torchtitan.protocols.module import Module
@@ -21,7 +22,7 @@ class Linear(nn.Linear, Module):
       is inherited from ``Configurable.Config``.
 
     ``in_features`` and ``out_features`` use ``field(init=False)`` so
-    they are excluded from ``Config.__init__``.  They are typically supplied
+    they are excluded from ``Config.__init__()``.  They are typically supplied
     via ``build()`` kwargs from the parent model.
     """
 
@@ -32,6 +33,7 @@ class Linear(nn.Linear, Module):
         bias: bool = False
         init_mean: float = 0.0
         init_std: float = 0.02
+        dtype: torch.dtype | None = None
 
     def __init__(self, config: Config):
         if not hasattr(config, "in_features") or not hasattr(config, "out_features"):
@@ -40,7 +42,12 @@ class Linear(nn.Linear, Module):
                 "Use Config.build(in_features=..., out_features=...) or set them "
                 "on the Config instance before constructing Linear directly."
             )
-        super().__init__(config.in_features, config.out_features, bias=config.bias)
+        super().__init__(
+            config.in_features,
+            config.out_features,
+            bias=config.bias,
+            dtype=config.dtype,
+        )
         self._init_mean = config.init_mean
         self._init_std = config.init_std
 
