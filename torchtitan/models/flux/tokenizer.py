@@ -46,9 +46,7 @@ class FluxTokenizerContainer(BaseTokenizer):
         self.t5_tokenizer: BaseTokenizer = tokenizer_class(
             t5_path, max_length=config.max_t5_encoding_len
         )
-        self.clip_tokenizer: BaseTokenizer = tokenizer_class(
-            clip_path, max_length=77
-        )
+        self.clip_tokenizer: BaseTokenizer = tokenizer_class(clip_path, max_length=77)
 
     def encode(self, *args, **kwargs) -> list[int]:
         raise NotImplementedError(

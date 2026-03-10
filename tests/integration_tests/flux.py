@@ -60,12 +60,8 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     t5_encoder_version_arg = (
         "--encoder.t5_encoder tests/assets/flux_test_encoders/t5-v1_1-xxl/"
     )
-    t5_tokenizer_path_arg = (
-        "--tokenizer.t5_tokenizer_path tests/assets/tokenizer"
-    )
-    clip_tokenizer_path_arg = (
-        "--tokenizer.clip_tokenizer_path tests/assets/tokenizer"
-    )
+    t5_tokenizer_path_arg = "--tokenizer.t5_tokenizer_path tests/assets/tokenizer"
+    clip_tokenizer_path_arg = "--tokenizer.clip_tokenizer_path tests/assets/tokenizer"
     hf_assets_path_arg = "--hf_assets_path tests/assets/tokenizer"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))

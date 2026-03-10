@@ -15,7 +15,9 @@ class FluxEncoderConfig:
     """HuggingFace model name or local path for the T5 text encoder."""
     clip_encoder: str = "openai/clip-vit-large-patch14"
     """HuggingFace model name or local path for the CLIP text encoder."""
-    autoencoder_path: str = "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"
+    autoencoder_path: str = (
+        "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"
+    )
     """Autoencoder checkpoint path to load. This should be a local path referring to a safetensors file."""
     random_init: bool = False
     """If True, initialize encoders with random weights instead of loading pretrained weights (for testing only)."""

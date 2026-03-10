@@ -66,10 +66,26 @@ class FluxValidator(Validator):
         """Folder to save validation images"""
 
         enable_classifier_free_guidance: bool = False
-        """Whether to use classifier-free guidance during sampling"""
+        """Whether to use classifier-free guidance (CFG) during validation image generation.
+
+        When enabled, the model runs two forward passes per denoising step — one with
+        the text prompt and one without — then interpolates the results using
+        `classifier_free_guidance_scale` to produce images that more closely follow
+        the prompt. This typically yields higher-quality, more prompt-adherent images
+        but doubles the compute cost per sampling step.
+
+        Note: This only affects the image generation/sampling path (controlled by
+        `save_img_count`), NOT the validation loss computation.
+        """
 
         classifier_free_guidance_scale: float = 5.0
-        """Classifier-free guidance scale when sampling"""
+        """Interpolation weight for classifier-free guidance during sampling.
+
+        Higher values steer the output more strongly toward the text prompt, producing
+        sharper and more prompt-adherent images, but may reduce diversity or introduce
+        artifacts. Typical values range from 1.0 (no guidance) to 10.0 (strong guidance).
+        Only takes effect when `enable_classifier_free_guidance` is True.
+        """
 
         denoising_steps: int = 50
         """How many denoising steps to sample when generating an image"""

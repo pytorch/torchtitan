@@ -49,7 +49,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             steps=10,
         ),
         dataloader=FluxDataLoader.Config(
-            classifier_free_guidance_prob=0.447,
+            prompt_dropout_prob=0.447,
             img_size=256,
         ),
         parallelism=ParallelismConfig(context_parallel_degree=1),
@@ -66,7 +66,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             denoising_steps=4,
             dataloader=FluxDataLoader.Config(
                 dataset="coco-validation",
-                classifier_free_guidance_prob=0.0,
+                prompt_dropout_prob=0.0,
                 img_size=256,
                 generate_timesteps=True,
             ),
@@ -107,7 +107,7 @@ def flux_dev() -> FluxTrainer.Config:
         ),
         dataloader=FluxDataLoader.Config(
             dataset="cc12m-wds",
-            classifier_free_guidance_prob=0.447,
+            prompt_dropout_prob=0.447,
             img_size=256,
         ),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
@@ -120,7 +120,7 @@ def flux_dev() -> FluxTrainer.Config:
             denoising_steps=50,
             dataloader=FluxDataLoader.Config(
                 dataset="coco-validation",
-                classifier_free_guidance_prob=0,
+                prompt_dropout_prob=0,
                 img_size=256,
                 generate_timesteps=True,
             ),
@@ -156,7 +156,7 @@ def flux_schnell() -> FluxTrainer.Config:
         ),
         dataloader=FluxDataLoader.Config(
             dataset="cc12m-wds",
-            classifier_free_guidance_prob=0.447,
+            prompt_dropout_prob=0.447,
             img_size=256,
         ),
         activation_checkpoint=ActivationCheckpointConfig(mode="full"),
@@ -169,7 +169,7 @@ def flux_schnell() -> FluxTrainer.Config:
             denoising_steps=50,
             dataloader=FluxDataLoader.Config(
                 dataset="coco-validation",
-                classifier_free_guidance_prob=0,
+                prompt_dropout_prob=0,
                 img_size=256,
                 generate_timesteps=True,
             ),

@@ -65,7 +65,7 @@ class TestFluxDataLoader(unittest.TestCase):
                         str(256),
                         "--dataloader.dataset",
                         dataset_name,
-                        "--dataloader.classifier_free_guidance_prob",
+                        "--dataloader.prompt_dropout_prob",
                         "0.447",
                         "--tokenizer.test_mode",
                         "--tokenizer.t5_tokenizer_path",
@@ -81,9 +81,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 )
 
                 # Build the tokenizer container from config
-                tokenizer = config.tokenizer.build(
-                    tokenizer_path=config.hf_assets_path
-                )
+                tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
 
                 dl = config.dataloader.build(
                     dp_world_size=world_size,

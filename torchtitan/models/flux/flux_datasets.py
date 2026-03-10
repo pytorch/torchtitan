@@ -7,7 +7,7 @@
 import itertools
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -189,7 +189,7 @@ class FluxDataset(IterableDataset, Stateful):
         dataset_path: str | None,
         t5_tokenizer: BaseTokenizer,
         clip_tokenizer: BaseTokenizer,
-        classifier_free_guidance_prob: float,
+        prompt_dropout_prob: float,
         img_size: int,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -212,7 +212,7 @@ class FluxDataset(IterableDataset, Stateful):
         self._clip_tokenizer = clip_tokenizer
         self._clip_empty_token = clip_tokenizer.encode("")
         self._data_processor = data_processor
-        self.classifier_free_guidance_prob = classifier_free_guidance_prob
+        self.prompt_dropout_prob = prompt_dropout_prob
         self.img_size = img_size
 
         self.infinite = infinite
@@ -280,7 +280,7 @@ class FluxDataset(IterableDataset, Stateful):
             # Classifier-free guidance: Replace some of the strings with empty strings.
             # Distinct random seed is initialized at the beginning of training for each FSDP rank.
             # pyrefly: ignore [missing-attribute]
-            dropout_prob = self.classifier_free_guidance_prob
+            dropout_prob = self.prompt_dropout_prob
             if dropout_prob > 0.0:
                 if torch.rand(1).item() < dropout_prob:
                     sample_dict["t5_tokens"] = self._t5_empty_token
@@ -321,7 +321,7 @@ class FluxValidationDataset(FluxDataset):
         dataset_path: str | None,
         t5_tokenizer: BaseTokenizer,
         clip_tokenizer: BaseTokenizer,
-        classifier_free_guidance_prob: float,
+        prompt_dropout_prob: float,
         img_size: int,
         dp_rank: int = 0,
         dp_world_size: int = 1,
@@ -334,7 +334,7 @@ class FluxValidationDataset(FluxDataset):
             dataset_path=dataset_path,
             t5_tokenizer=t5_tokenizer,
             clip_tokenizer=clip_tokenizer,
-            classifier_free_guidance_prob=classifier_free_guidance_prob,
+            prompt_dropout_prob=prompt_dropout_prob,
             img_size=img_size,
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
@@ -376,10 +376,14 @@ class FluxDataLoader(ParallelAwareDataloader):
         infinite: bool = True
         """Whether to loop the dataset infinitely"""
 
-        classifier_free_guidance_prob: float = 0.0
-        """Classifier-free guidance with probability `p` to dropout each text encoding independently.
-        If `n` text encoders are used, the unconditional model is trained in `p ^ n` of all steps.
-        For example, if `n = 2` and `p = 0.447`, the unconditional model is trained in 20% of all steps"""
+        prompt_dropout_prob: float = 0.0
+        """Probability of dropping out (replacing with empty string) each text encoding
+        independently during training. This enables classifier-free guidance at inference
+        time. If `n` text encoders are used, the unconditional model is trained in
+        `p ^ n` of all steps. For example, if `n = 2` and `p = 0.447`, the unconditional
+        model is trained in 20% of all steps.
+
+        Should be 0.0 for validation (enforced automatically when generate_timesteps=True)."""
 
         img_size: int = 256
         """Image width to sample"""
@@ -388,12 +392,12 @@ class FluxDataLoader(ParallelAwareDataloader):
         """Generate stratified timesteps in round-robin style (for validation)"""
 
         def __post_init__(self):
-            if self.generate_timesteps and self.classifier_free_guidance_prob != 0.0:
+            if self.generate_timesteps and self.prompt_dropout_prob != 0.0:
                 logger.warning(
-                    f"classifier_free_guidance_prob={self.classifier_free_guidance_prob} "
+                    f"prompt_dropout_prob={self.prompt_dropout_prob} "
                     "overridden to 0.0 for validation (generate_timesteps=True)."
                 )
-                self.classifier_free_guidance_prob = 0.0
+                self.prompt_dropout_prob = 0.0
 
     def __init__(
         self,
@@ -420,7 +424,7 @@ class FluxDataLoader(ParallelAwareDataloader):
                 dataset_path=config.dataset_path,
                 t5_tokenizer=t5_tokenizer,
                 clip_tokenizer=clip_tokenizer,
-                classifier_free_guidance_prob=config.classifier_free_guidance_prob,
+                prompt_dropout_prob=config.prompt_dropout_prob,
                 img_size=config.img_size,
                 dp_rank=dp_rank,
                 dp_world_size=dp_world_size,
@@ -433,7 +437,7 @@ class FluxDataLoader(ParallelAwareDataloader):
                 dataset_path=config.dataset_path,
                 t5_tokenizer=t5_tokenizer,
                 clip_tokenizer=clip_tokenizer,
-                classifier_free_guidance_prob=config.classifier_free_guidance_prob,
+                prompt_dropout_prob=config.prompt_dropout_prob,
                 img_size=config.img_size,
                 dp_rank=dp_rank,
                 dp_world_size=dp_world_size,
