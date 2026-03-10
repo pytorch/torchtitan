@@ -101,6 +101,7 @@ def create_torchtitan_config_from_vllm_config(
         pipeline_parallel_degree=parallel_config.pipeline_parallel_size,
         expert_parallel_degree=1,
         expert_tensor_parallel_degree=1,
+        enable_sequence_parallel=False,
     )
 
     logger.info(

@@ -126,6 +126,11 @@ class ParallelismConfig:
     disable_loss_parallel: bool = False
     """Whether to apply loss parallel when sequence parallel is enabled"""
 
+    enable_sequence_parallel: bool = True
+    """Whether to use SequenceParallel for norm layers in tensor parallelism.
+    Enabled by default for training (saves activation memory). Disable for
+    inference where the allgather/reduce-scatter overhead dominates latency."""
+
     enable_async_tensor_parallel: bool = False
     """Whether to apply async tensor parallel (currently only effective when compile is enabled)"""
 
