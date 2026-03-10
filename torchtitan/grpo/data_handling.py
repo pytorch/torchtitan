@@ -301,12 +301,13 @@ def data_worker(
 
 
 class OnlineDataHandler:
-    def __init__(self):
+    def __init__(self, metrics_rank: int = 0):
+        self.metrics_rank = metrics_rank
         if int(os.environ.get("SLURM_NODEID", "0")) == 0:
             self.server_url = "http://localhost:8000"
         else:
             self.server_url = f'http://{os.environ["head_node_ip"]}:8000'
-        if torch.distributed.get_rank() == 0:
+        if torch.distributed.get_rank() == self.metrics_rank:
             self.queue = Queue()
         else:
             self.queue = None
@@ -328,36 +329,21 @@ class OnlineDataHandler:
         - global_batch_size (int): Total batch size used for training globally
                                    across all workers.
         """
-        if torch.distributed.get_rank() == 0:
-            requests.post(
-                f"{self.server_url}/register",
-                json={
-                    "wandb_group": wandb.run.group,
-                    "wandb_project": wandb.run.project,
-                    "batch_size": global_batch_size,
-                    "max_token_len": job_config.training.seq_len,
-                    "starting_step": step,
-                    "checkpoint_dir": job_config.checkpoint.folder,
-                    "save_checkpoint_interval": job_config.checkpoint.interval,
-                    "num_steps": job_config.training.steps,
-                },
-            )
-            # Startup data process
-            # grad_accum_size = job_config.training.global_batch_size // (
-            #         job_config.training.local_batch_size * dp_degree
-            # )
-            # grad_accum_size = max(1, grad_accum_size)
-            # data_process = Process(target=data_worker, args=(
-            #     self.queue,
-            #     self.server_url,
-            #     cp_degree,
-            #     dp_degree,
-            #     job_config.training.local_batch_size,
-            #     grad_accum_size,
-            #     job_config.training.seq_len,
-            #     job_config.grpo.scale_adv_by_len
-            # ))
-            # data_process.start()
+        if torch.distributed.get_rank() != self.metrics_rank:
+            return
+        requests.post(
+            f"{self.server_url}/register",
+            json={
+                "wandb_group": wandb.run.group,
+                "wandb_project": wandb.run.project,
+                "batch_size": global_batch_size,
+                "max_token_len": job_config.training.seq_len,
+                "starting_step": step,
+                "checkpoint_dir": job_config.checkpoint.folder,
+                "save_checkpoint_interval": job_config.checkpoint.interval,
+                "num_steps": job_config.training.steps,
+            },
+        )
 
     def data_handling(
         self,
@@ -395,7 +381,7 @@ class OnlineDataHandler:
         )
         grad_accum_size = max(1, grad_accum_size)
         while True:
-            if torch.distributed.get_rank() == 0:
+            if torch.distributed.get_rank() == self.metrics_rank:
                 # if not self.queue.empty():
                 #     (
                 #         batches,
@@ -434,7 +420,7 @@ class OnlineDataHandler:
                     prep_time = time.perf_counter() - start_data_prep_time
 
                     flag = flag + 1
-                    torch.distributed.broadcast(flag, 0)
+                    torch.distributed.broadcast(flag, self.metrics_rank)
                     if dp_replicate_rank == 0:
                         send_wait(sglang_nccl_group, device)
                     max_token_len = torch.tensor(max_token_len).to(device)
@@ -442,25 +428,27 @@ class OnlineDataHandler:
                     # back to int
                     max_token_len = max_token_len.item()
                     # distribute the lengths
-                    torch.distributed.broadcast_object_list(data_lens, 0)
+                    torch.distributed.broadcast_object_list(
+                        data_lens, self.metrics_rank
+                    )
                     # now broadcast the batch
-                    torch.distributed.broadcast_object_list(batches, 0)
+                    torch.distributed.broadcast_object_list(batches, self.metrics_rank)
                     # Finally, the timing info
                     prep_time = torch.tensor(prep_time).to(device)
                     data_dump_time = torch.tensor(data_dump_time).to(device)
                     data_get_time = torch.tensor(data_get_time).to(device)
-                    torch.distributed.broadcast(prep_time, 0)
-                    torch.distributed.broadcast(data_dump_time, 0)
-                    torch.distributed.broadcast(data_get_time, 0)
+                    torch.distributed.broadcast(prep_time, self.metrics_rank)
+                    torch.distributed.broadcast(data_dump_time, self.metrics_rank)
+                    torch.distributed.broadcast(data_get_time, self.metrics_rank)
                     break
                 else:
                     logger.debug("No batch yet, retrying...")
-                    torch.distributed.broadcast(flag, 0)
+                    torch.distributed.broadcast(flag, self.metrics_rank)
                     if dp_replicate_rank == 0:
                         send_wait(sglang_nccl_group, device)
             else:
                 logger.debug("Waiting for batch from server...")
-                torch.distributed.broadcast(flag, 0)
+                torch.distributed.broadcast(flag, self.metrics_rank)
                 if dp_replicate_rank == 0:
                     send_wait(sglang_nccl_group, device)
                 if flag.item() > 0:
@@ -477,7 +465,9 @@ class OnlineDataHandler:
                             * dp_degree
                         )
                     ]
-                    torch.distributed.broadcast_object_list(data_lens, 0)
+                    torch.distributed.broadcast_object_list(
+                        data_lens, self.metrics_rank
+                    )
                     (
                         batches,
                         max_token_len,
@@ -492,13 +482,13 @@ class OnlineDataHandler:
                         num_microbatches=job_config.grpo.num_microbatches,
                     )
                     # now get the batch
-                    torch.distributed.broadcast_object_list(batches, 0)
+                    torch.distributed.broadcast_object_list(batches, self.metrics_rank)
                     prep_time = torch.tensor(0.0).to(device)
                     data_dump_time = torch.tensor(0.0).to(device)
                     data_get_time = torch.tensor(0.0).to(device)
-                    torch.distributed.broadcast(prep_time, 0)
-                    torch.distributed.broadcast(data_dump_time, 0)
-                    torch.distributed.broadcast(data_get_time, 0)
+                    torch.distributed.broadcast(prep_time, self.metrics_rank)
+                    torch.distributed.broadcast(data_dump_time, self.metrics_rank)
+                    torch.distributed.broadcast(data_get_time, self.metrics_rank)
                     break
             time.sleep(1)
         # Now to check data...

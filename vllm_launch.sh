@@ -59,8 +59,18 @@ if [[ "$SLURM_NODEID" -lt "$NUM_TRAINING_NODES" ]]; then
 # else we're inferencing...
 else
 
-    # Setup 8 vllm instances with model in vllm venv
+    # Setup vllm instances with model in vllm venv
     echo "Starting vllm instances..."
+
+    VLLM_PP=${VLLM_PP:-1}
+    GPUS_PER_INSTANCE=$VLLM_PP
+    NUM_INSTANCES=$((8 / GPUS_PER_INSTANCE))
+
+    # Build PP args
+    PP_ARGS=""
+    if [[ "$VLLM_PP" -gt 1 ]]; then
+        PP_ARGS="--pipeline-parallel-size $VLLM_PP"
+    fi
 
     # Startup wandb monitoring...
     source ${API_ENV}/bin/activate
@@ -70,34 +80,39 @@ else
     source ${VLLM_ENV}/bin/activate
 
     PORT_BASE=9000
+    LOG_OFFSET=$((SLURM_NODEID * NUM_INSTANCES))
 
-    # Start 8 vllm instances on GPUs 0-3
-    # this assumes you can run it with tp=1
-    # if not, well, good luck with single node training, I'll pray for you
-    LOG_OFFSET=$((SLURM_NODEID * 8))
-    for i in {0..6}; do
-        GPU_ID=$i
-        LOG_ID=$((GPU_ID + LOG_OFFSET))
+    # Start all but the last instance in background
+    for ((i=0; i<NUM_INSTANCES-1; i++)); do
+        START_GPU=$((i * GPUS_PER_INSTANCE))
+        GPU_IDS=$(seq -s, $START_GPU $((START_GPU + GPUS_PER_INSTANCE - 1)))
+        LOG_ID=$((i + LOG_OFFSET))
         PORT=$((PORT_BASE + i))
-        echo "Starting vllm instance on GPU $GPU_ID, logdir $LOG_ID, port $PORT"
-        CUDA_VISIBLE_DEVICES=$GPU_ID nohup python -m torchtitan.grpo.vllm_handling.vllm_runner \
+        echo "Starting vllm instance $i on GPUs $GPU_IDS, port $PORT"
+        CUDA_VISIBLE_DEVICES=$GPU_IDS nohup python -m torchtitan.grpo.vllm_handling.vllm_runner \
           --model $MODEL_NAME \
           --host 0.0.0.0 \
           --gpu-memory-utilization 0.75 \
           --dtype="bfloat16" \
           --log-level="error" \
+          $PP_ARGS \
           --port $PORT > ${LOGDIR}/vllm_${LOG_ID}.log 2>&1 &
-        sleep 3  # wait so vllm can find ports without conflicts :)
+        sleep 3
     done
-    GPU_ID=7
-    LOG_ID=$((GPU_ID + LOG_OFFSET))
-    PORT=$((PORT_BASE + 7))
-    echo "Starting vllm instance on GPU 7, port 9007"
-    CUDA_VISIBLE_DEVICES=7 nohup python -m torchtitan.grpo.vllm_handling.vllm_runner \
+
+    # Last instance in foreground so srun doesn't exit
+    i=$((NUM_INSTANCES - 1))
+    START_GPU=$((i * GPUS_PER_INSTANCE))
+    GPU_IDS=$(seq -s, $START_GPU $((START_GPU + GPUS_PER_INSTANCE - 1)))
+    LOG_ID=$((i + LOG_OFFSET))
+    PORT=$((PORT_BASE + i))
+    echo "Starting vllm instance $i on GPUs $GPU_IDS, port $PORT"
+    CUDA_VISIBLE_DEVICES=$GPU_IDS python -m torchtitan.grpo.vllm_handling.vllm_runner \
       --model $MODEL_NAME \
       --host 0.0.0.0 \
       --gpu-memory-utilization 0.75 \
       --dtype="bfloat16" \
       --log-level="error" \
-      --port 9007 > ${LOGDIR}/vllm_${LOG_ID}.log 2>&1
+      $PP_ARGS \
+      --port $PORT > ${LOGDIR}/vllm_${LOG_ID}.log 2>&1
 fi

@@ -27,7 +27,10 @@ def get_sglang_urls(job_config: JobConfig):
         for node in nodelist:
             if node == "":
                 continue
-            for i in range(8 // job_config.grpo.sglang_tp):
+            instances_per_node = 8 // (
+                job_config.grpo.sglang_tp * job_config.grpo.sglang_pp
+            )
+            for i in range(instances_per_node):
                 urls.append(f"{node}:{9000 + i}")
         return urls
     else:
@@ -103,7 +106,7 @@ def init_process_group(
     store: Optional = None,
     group_name: str = None,
     pg_options: Optional[Any] = None,
-):
+) -> torch.distributed.ProcessGroup:
     from torch.distributed.distributed_c10d import (
         _new_process_group_helper,
         _world,
@@ -160,6 +163,47 @@ def init_process_group(
 
     _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
 
+    return pg
+
+
+def new_group(parent_pg, backend, world_size, rank, group_name, timeout=None):
+    """Create a subgroup reusing an existing PG's store — no new TCP rendezvous.
+
+    Like ``torch.distributed.new_group`` but uses a custom parent PG
+    instead of the default process group. Extracts the store from
+    ``_world.pg_map[parent_pg]`` and passes it to ``_new_process_group_helper``,
+    which wraps it in ``PrefixStore(group_name/, ...)`` for key isolation.
+    """
+    from torch.distributed.distributed_c10d import (
+        _new_process_group_helper,
+        _world,
+        Backend,
+        default_pg_timeout,
+    )
+
+    if timeout is None:
+        timeout = default_pg_timeout
+    if isinstance(backend, str):
+        backend = Backend(backend)
+
+    # Extract store from parent PG — same as torch.distributed.new_group
+    _, parent_store = _world.pg_map[parent_pg]
+
+    pg_options_param_name = (
+        "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
+    )
+    pg, _ = _new_process_group_helper(
+        world_size,
+        rank,
+        [],
+        backend,
+        parent_store,
+        group_name=group_name,
+        **{pg_options_param_name: None},
+        timeout=timeout,
+    )
+
+    _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
     return pg
 
 
@@ -322,6 +366,12 @@ def param_to_sglang_data(name, needs_permute=False):
 
 @env_fix_wrapper
 def setup_group(hostname, sglang_port, total_group_size, local_rank):
+    """Create the signal/heartbeat group (gloo + nccl).
+
+    This group includes ALL training dp_replicate_rank==0 ranks (across all PP
+    stages) plus ALL vLLM ranks.  Used only for heartbeat (-1) and start-update
+    (1) broadcasts — NOT for weight data.
+    """
     gloo_group = init_process_group(
         backend="gloo",
         init_method=f"tcp://{hostname}:{sglang_port}",
@@ -349,43 +399,32 @@ def send_param(
     weight_dtypes,
     tp_degree,
     dp_shard_degree,
-    total_group_size,
-    sglang_gloo_group,
-    sglang_nccl_group,
-    param_indx,
+    pp_data_group,
+    pp_data_group_size,
 ):
-    if torch.distributed.get_rank() == 0:
-        object_list = [
-            {
-                "name": name,
-                "shape": param_shape,
-                "local_shape": local_param.shape,
-                "dtype": weight_dtypes[name],
-            }
-        ]
-    else:
-        object_list = [
-            None,
-        ]
+    """Send a parameter via all_gather on the per-PP data group.
+
+    The group contains dp_shard*tp training ranks + vLLM ranks for the
+    mapped vLLM PP stage.  Training ranks provide real shards; vLLM ranks
+    provide scalar dummies and collect the gathered result.
+    """
     desired_dtype = (
         weight_dtypes[name]
         if isinstance(weight_dtypes[name], torch.dtype)
         else getattr(torch, weight_dtypes[name])
     )
-    logger.debug(f"Attempting to send {object_list}")
-    obj_indx = torch.LongTensor([param_indx]).to(device=local_param.device)
-    torch.distributed.broadcast(obj_indx, group_src=0, group=sglang_nccl_group)
-    # setup tensor list
+    num_training_ranks = dp_shard_degree * tp_degree
+    logger.debug(f"Sending param {name} with shape {local_param.shape}")
     tensor_list = [
         torch.zeros(
-            local_param.shape if indx < (dp_shard_degree * tp_degree) else 1,
+            local_param.shape if indx < num_training_ranks else 1,
             dtype=desired_dtype,
             device=local_param.device,
         )
-        for indx in range(total_group_size)
+        for indx in range(pp_data_group_size)
     ]
     torch.distributed.all_gather(
-        tensor_list, local_param.to(desired_dtype), group=sglang_nccl_group
+        tensor_list, local_param.to(desired_dtype), group=pp_data_group
     )
 
 
@@ -394,3 +433,15 @@ def send_wait(sglang_nccl_group, device):
     logger.debug("Sending wait signal to sglang...")
     indx_tensor = torch.LongTensor([-1]).to(device=device)
     torch.distributed.broadcast(indx_tensor, 0, group=sglang_nccl_group)
+
+
+@env_fix_wrapper
+def send_start_update(sglang_nccl_group, device):
+    """Signal the vLLM/SGLang weight updater to start receiving a weight update.
+
+    After this signal, both sides iterate the sorted param list in lockstep,
+    doing one all_gather per param with no further index broadcasts.
+    """
+    logger.debug("Sending start-update signal to inference...")
+    signal = torch.LongTensor([1]).to(device=device)
+    torch.distributed.broadcast(signal, 0, group=sglang_nccl_group)

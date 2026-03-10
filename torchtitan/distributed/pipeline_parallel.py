@@ -60,6 +60,7 @@ def pipeline_llm(
     model_args: BaseModelArgs,
     parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
+    vllm_mode: bool = False,
 ) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
     pp_mesh = parallel_dims.world_mesh["pp"]
 
@@ -129,7 +130,11 @@ def pipeline_llm(
     module_names_per_stage = job_config.parallelism.module_fqns_per_model_part
     if module_names_per_stage is None:
         module_names_per_stage = generate_llm_fqn_per_model_part(
-            num_virtual_stages, num_layers, input_weight, output_weight
+            num_virtual_stages,
+            num_layers,
+            input_weight,
+            output_weight,
+            vllm_mode=vllm_mode,
         )
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
@@ -242,6 +247,7 @@ def generate_llm_fqn_per_model_part(
     num_layers: int,
     input_weight: int = 1,
     output_weight: int = 1,
+    vllm_mode: bool = False,
 ) -> list[list[str]]:
     """
     Programmatically generates module names model part, focused on LLMs models.
@@ -258,7 +264,18 @@ def generate_llm_fqn_per_model_part(
     Example:
         generate_llm_fqn_per_model_part(2, 3, input_weight=2, output_weight=2)
         treats embeddings as 2 layers and norm+output as 2 layers for distribution
+
+        vllm_mode: When True, ignores input/output weights for balancing
+            (distributes only transformer layers evenly across stages), while
+            still placing tok_embeddings on the first stage and norm+output on
+            the last stage. This ensures training PP boundaries align with
+            vLLM's PP split, which divides layers evenly without accounting
+            for embed/lm_head.
     """
+    if vllm_mode:
+        input_weight = 0
+        output_weight = 0
+
     if num_stages < 1:
         raise ValueError("Number of stages must be at least 1")
 

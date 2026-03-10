@@ -1118,6 +1118,9 @@ class GRPO:
     sglang_tp: int = 1
     """sglang tensor parallelism"""
 
+    sglang_pp: int = 1
+    """sglang pipeline parallelism (vLLM PP degree). train_pp must be a multiple of this."""
+
     pos_scaler: float = 1.0
     """Positive reward scaling factor for GRPO"""
 

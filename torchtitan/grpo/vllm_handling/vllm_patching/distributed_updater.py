@@ -74,9 +74,8 @@ def init_process_group(
     # NOTE: The pg_options parameter was renamed into backend_options in PyTorch 2.6.0
     # https://github.com/pytorch/pytorch/commit/a0c7029a75628cd5fa8df83c0de0ea98ee7fd844
     # We need to determine the appropriate parameter name based on PyTorch version
-    pg_options_param_name = (
-        "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
-    )
+    # Since we're never using < torch 2.8, we can just use the backend_options parameter name
+    pg_options_param_name = "backend_options"
     pg, _ = _new_process_group_helper(
         world_size,
         rank,
@@ -90,6 +89,47 @@ def init_process_group(
 
     _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
 
+    return pg
+
+
+def new_group(parent_pg, backend, world_size, rank, group_name, timeout=None):
+    """Create a subgroup reusing an existing PG's store - no new TCP rendezvous.
+
+    Like ``torch.distributed.new_group`` but uses a custom parent PG
+    instead of the default process group. Extracts the store from
+    ``_world.pg_map[parent_pg]`` and passes it to ``_new_process_group_helper``,
+    which wraps it in ``PrefixStore(group_name/, ...)`` for key isolation.
+    """
+    from torch.distributed.distributed_c10d import (
+        _new_process_group_helper,
+        _world,
+        Backend,
+        default_pg_timeout,
+    )
+
+    if timeout is None:
+        timeout = default_pg_timeout
+    if isinstance(backend, str):
+        backend = Backend(backend)
+
+    # Extract store from parent PG - same as torch.distributed.new_group
+    _, parent_store = _world.pg_map[parent_pg]
+
+    pg_options_param_name = (
+        "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
+    )
+    pg, _ = _new_process_group_helper(
+        world_size,
+        rank,
+        [],
+        backend,
+        parent_store,
+        group_name=group_name,
+        **{pg_options_param_name: None},
+        timeout=timeout,
+    )
+
+    _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
     return pg
 
 
@@ -278,7 +318,18 @@ def permute_1d(w, n_heads):
     return w.view(n_heads, dim1 // n_heads // 2, 2).transpose(1, 2).reshape(dim1)
 
 
-def weight_updater_process(state_dict, q_heads, kv_heads, tp_rank, tp_size, gpu_id):
+def weight_updater_process(
+    state_dict,
+    q_heads,
+    kv_heads,
+    tp_rank,
+    tp_size,
+    ep_rank,
+    ep_size,
+    gpu_id,
+    pp_rank=0,
+    pp_size=1,
+):
     NUM_SGLANG_NODES = int(os.environ.get("NUM_INFERENCE_NODES", -1))
     CUDA_VISIBLE_DEVICES = str(os.environ.get("CUDA_VISIBLE_DEVICES", -1)).split(",")
     SGLANG_UPDATE_PROC_DEBUG = int(os.environ.get("SGLANG_UPDATE_PROC_DEBUG", 0))
@@ -291,11 +342,13 @@ def weight_updater_process(state_dict, q_heads, kv_heads, tp_rank, tp_size, gpu_
     for key, val in state_dict.items():
         print(f"{key}: {val.shape}", flush=True)
     master_addr, master_gloo_addr, master_sglang_addr, urls = get_sglang_urls()
-    torch.cuda.set_device(tp_rank)
+    torch.cuda.set_device(gpu_id)
     print(
-        f"Beginning weight updater process on TP rank {tp_rank} of {tp_size} with q heads: {q_heads} and "
-        f"kv heads: {kv_heads} and gpu_id {gpu_id} with CUDA_VISIBLE_DEVICES={CUDA_VISIBLE_DEVICES}"
-        f" with hostname: {hostnames[1]}, master {master_addr}, and world size: {world_size}",
+        f"Beginning weight updater process on TP rank {tp_rank} of {tp_size}, "
+        f"PP rank {pp_rank} of {pp_size}, "
+        f"with q heads: {q_heads} and kv heads: {kv_heads} and gpu_id {gpu_id} "
+        f"with CUDA_VISIBLE_DEVICES={CUDA_VISIBLE_DEVICES} "
+        f"with hostname: {hostnames[1]}, master {master_addr}, and world size: {world_size}",
         flush=True,
     )
     if master_addr is None:
@@ -322,230 +375,410 @@ def weight_updater_process(state_dict, q_heads, kv_heads, tp_rank, tp_size, gpu_
     param_name_list.sort()
     if rank == 0:
         print("Rank 0, writing json of weight dtypes...", flush=True)
-        name_conversions = get_name_conversions(json_data["param_mappings"])
-        weight_dtypes = {}
-        for name in state_dict.keys():
-            tt_names = name_conversions[name]
-            for tt_name in tt_names:
-                weight_dtypes[tt_name] = str(state_dict[name].dtype).split(".")[-1]
+        # Use a common dtype for all params - with PP, rank 0 may not have all
+        # keys in its state_dict, but all params share the same dtype in practice.
+        common_dtype = str(next(iter(state_dict.values())).dtype).split(".")[-1]
+        weight_dtypes = {
+            tt_name: common_dtype for tt_name in json_data["param_mappings"]
+        }
         with open(f"{os.environ['LOGDIR']}/sglang_dtypes.json", "w") as f:
             json.dump(weight_dtypes, f)
     print("Got json", flush=True)
-    num_training_gpus = json_data["dp_shard_degree"] * json_data["tp_degree"]
-    total_group_size = num_training_gpus + world_size
-    rank = rank + num_training_gpus  # scale rank up by num_training_gpus
-    print(f"Total group size: {total_group_size}", flush=True)
-    print(f"Num training gpus: {num_training_gpus}", flush=True)
-    print(f"Creating process group with rank {rank} of {total_group_size}", flush=True)
+    train_pp_size = json_data.get("train_pp_size", 1)
+    num_training_gpus_per_pp = json_data["dp_shard_degree"] * max(
+        json_data["tp_degree"], json_data["ep_degree"]
+    )
+    vllm_global_rank = rank  # vLLM rank before any offset
+
+    # ── Signal group ──────────────────────────────────────────────
+    # All training dp_replicate_rank==0 ranks (across PP stages) +
+    # all vLLM ranks.  Used for heartbeat/start-update signals only.
+    signal_training_size = train_pp_size * num_training_gpus_per_pp
+    signal_group_size = signal_training_size + world_size
+    signal_rank = signal_training_size + vllm_global_rank
+    print(
+        f"Signal group: size={signal_group_size}, rank={signal_rank}, "
+        f"train_pp_size={train_pp_size}",
+        flush=True,
+    )
+
+    # Intra-vLLM group (unchanged)
     sglang_group = torch.distributed.init_process_group(
         backend="gloo",
         init_method=f"tcp://{master_sglang_addr}",
         world_size=world_size,
-        rank=rank - num_training_gpus,
+        rank=vllm_global_rank,
         group_name="sglang_group",
     )
     print("Created SGLang Process group", flush=True)
     gloo_group = init_process_group(
         backend="gloo",
         init_method=f"tcp://{master_addr}",
-        world_size=total_group_size,
-        rank=rank,
+        world_size=signal_group_size,
+        rank=signal_rank,
         group_name="gloo_group",
     )
     print("Created Gloo group", flush=True)
-    nccl_group = init_process_group(
+    signal_nccl_group = init_process_group(
         backend="nccl",
         init_method=f"tcp://{master_addr}",
-        world_size=total_group_size,
-        rank=rank,
+        world_size=signal_group_size,
+        rank=signal_rank,
         group_name="weight_update_group",
     )
-    print("Created NCCL Process group", flush=True)
-    print("Initialized process group", flush=True)
+    print("Created signal NCCL group", flush=True)
+
+    # ── Per-PP data groups ────────────────────────────────────────
+    # One per training PP stage that maps to this vLLM PP stage.
+    # Subgroups of the signal NCCL group - share its store via
+    # PrefixStore namespacing, no extra TCP ports needed.
+    assert (
+        train_pp_size % pp_size == 0
+    ), f"train_pp ({train_pp_size}) must be a multiple of vllm_pp ({pp_size})"
+    vllm_ranks_per_pp = world_size // pp_size
+    stages_per_vllm_pp = train_pp_size // pp_size
+    pp_data_group_size = num_training_gpus_per_pp + vllm_ranks_per_pp
+    # Interleaved layout: within each vLLM instance, GPUs are assigned
+    # PP rank 0, PP rank 1, ... so global ranks interleave by pp_size.
+    vllm_rank_within_pp = vllm_global_rank // pp_size
+    pp_data_rank = num_training_gpus_per_pp + vllm_rank_within_pp
+
+    pp_data_groups = {}  # train_pp_stage -> nccl_group
+    for train_stage in range(train_pp_size):
+        mapped_vllm_stage = train_stage // stages_per_vllm_pp
+        if mapped_vllm_stage != pp_rank:
+            continue
+        group = new_group(
+            signal_nccl_group,
+            "nccl",
+            pp_data_group_size,
+            pp_data_rank,
+            f"weight_data_pp{train_stage}",
+        )
+        pp_data_groups[train_stage] = group
+        print(
+            f"Created per-PP data group for train stage {train_stage}, "
+            f"rank={pp_data_rank}/{pp_data_group_size}",
+            flush=True,
+        )
+
+    # ── Build per-PP param lists + interleaved iteration order ────
+    per_pp_params = defaultdict(list)
+    for tt_name in param_name_list:
+        pp_stage = json_data["param_mappings"][tt_name].get("train_pp_stage", 0)
+        per_pp_params[pp_stage].append(tt_name)
+
+    # Round-robin interleave across PP stages so NCCL can pipeline
+    # ops across different groups (different communicators = different
+    # CUDA streams = natural parallelism when issued back-to-back).
+    interleaved_params = []
+    max_params = max(len(v) for v in per_pp_params.values()) if per_pp_params else 0
+    for i in range(max_params):
+        for pp_stage in sorted(per_pp_params.keys()):
+            if i < len(per_pp_params[pp_stage]):
+                interleaved_params.append((per_pp_params[pp_stage][i], pp_stage))
+
+    print(
+        f"PP rank {pp_rank}/{pp_size}: joined {len(pp_data_groups)} data groups "
+        f"(train stages {sorted(pp_data_groups.keys())}), "
+        f"state_dict has {len(state_dict)} keys, "
+        f"{len(interleaved_params)} interleaved params to iterate",
+        flush=True,
+    )
+    # setup ep shard dim modifier
+    gpus_per_ep_dp = json_data["ep_degree"] * json_data["dp_shard_degree"]
+    # Dump interleaved iteration order for debugging
+    if pp_rank == 0:
+        import json as _json
+
+        _logdir = os.environ.get("LOGDIR", "/tmp")
+        vllm_debug = {
+            "per_pp_params": {str(k): v for k, v in per_pp_params.items()},
+            "interleaved_params": [
+                {"name": n, "pp_stage": s} for n, s in interleaved_params
+            ],
+            "state_dict_keys": sorted(state_dict.keys()),
+            "pp_data_groups_stages": sorted(pp_data_groups.keys()),
+        }
+        with open(f"{_logdir}/vllm_pp{pp_rank}_iteration_order.json", "w") as _f:
+            _json.dump(vllm_debug, _f, indent=2)
     my_device = list(state_dict.values())[0].device
     with torch.no_grad():
-        qkv_buffer = {}
-        gate_up_buffer = {}
-        qkv_bias_buffer = {}
-        w1w3_buffer = {}
+        # Keyed by vLLM target name so interleaved PP stages don't
+        # cross-contaminate (e.g. layers.0 vs layers.24 buffers).
+        qkv_buffer = defaultdict(dict)
+        gate_up_buffer = defaultdict(dict)
+        qkv_bias_buffer = defaultdict(dict)
+        w1w3_buffer = defaultdict(dict)
         while True:
-            object_list = [
-                None,
-            ]
-            obj_indx = torch.zeros(1, dtype=torch.long).to(device=my_device)
-            torch.distributed.broadcast(obj_indx, group_src=0, group=nccl_group)
-            tt_indx = obj_indx.item()
-            if tt_indx == -1:
+            # Receive signal on the signal group.
+            # -1 = wait/heartbeat, >0 = start weight update.
+            signal = torch.zeros(1, dtype=torch.long).to(device=my_device)
+            torch.distributed.broadcast(signal, group_src=0, group=signal_nccl_group)
+            if signal.item() <= 0:
                 continue
-            tt_name = param_name_list[tt_indx]
-            name = json_data["param_mappings"][tt_name]["sglang_name"]
-            shape = json_data["param_mappings"][tt_name]["shape"]
-            # dtype = json_data["param_mappings"][tt_name]["dtype"]
-            local_shape = json_data["param_mappings"][tt_name]["local_shape"]
-            target_dtype = state_dict[name].dtype
-            if SGLANG_UPDATE_PROC_DEBUG == 1:
+
+            # Weight update: iterate params in interleaved order across PP
+            # stages.  Each all_gather goes to the per-PP data group for
+            # that training PP stage.  Different groups = different NCCL
+            # communicators = different CUDA streams = natural pipelining.
+            total_interleaved = len(interleaved_params)
+            if SGLANG_UPDATE_PROC_DEBUG:
                 print(
-                    f"Received tt_indx: {tt_indx}, Orig: {state_dict[name].shape}, {state_dict[name].dtype}, "
-                    f"assumed local shape: {local_shape}, target dtype: {target_dtype}",
+                    f"[vLLM PP {pp_rank}] weight update: starting {total_interleaved} "
+                    f"interleaved params",
                     flush=True,
                 )
-            # setup tensor list
-            tensor_list = [
-                torch.zeros(
-                    local_shape if indx < num_training_gpus else 1,
-                    dtype=target_dtype,
-                    device=state_dict[name].device,
-                )
-                for indx in range(total_group_size)
-            ]
-            torch.distributed.all_gather(
-                tensor_list,
-                torch.zeros(1, dtype=target_dtype, device=state_dict[name].device),
-                group=nccl_group,
-            )
-            tensor_list = tensor_list[:num_training_gpus]  # remove dummy tensors
-            # Now merge them together...
-            # First, data parallel...
-            if json_data["dp_shard_degree"] > 1:
-                tensor_parallel_tensors = []
-                for i in range(json_data["tp_degree"]):
-                    tensor_parallel_tensors.append(
-                        torch.cat(tensor_list[i :: json_data["tp_degree"]], dim=0)
-                    )
-                if json_data["tp_degree"] > 1:
-                    if tensor_parallel_tensors[0].shape == state_dict[name].shape:
-                        tensor = tensor_parallel_tensors[0].contiguous()
-                    else:
-                        tensor = torch.cat(
-                            tensor_parallel_tensors,
-                            dim=json_data["param_mappings"][tt_name]["tp_shard_dim"],
-                        ).contiguous()
-                else:
-                    tensor = tensor_parallel_tensors[0].contiguous()
-            else:
-                # No fsdp?
-                tensor = torch.cat(
-                    tensor_list,
-                    dim=json_data["param_mappings"][tt_name]["tp_shard_dim"],
-                ).contiguous()
-            if tensor.dtype != state_dict[name].dtype:
-                tensor = tensor.to(state_dict[name].dtype)
+            for tt_name, train_pp_stage in interleaved_params:
+                if train_pp_stage not in pp_data_groups:
+                    if SGLANG_UPDATE_PROC_DEBUG:
+                        print(
+                            f"[vLLM PP {pp_rank}] skipping {tt_name} "
+                            f"(train PP {train_pp_stage} not mine)",
+                            flush=True,
+                        )
+                    continue  # not mapped to this vLLM PP stage
 
-            def _debug_diff(name, old, new):
+                data_group = pp_data_groups[train_pp_stage]
+                name = json_data["param_mappings"][tt_name]["sglang_name"]
+                shape = json_data["param_mappings"][tt_name]["shape"]
+                local_shape = json_data["param_mappings"][tt_name]["local_shape"]
+
+                owns_param = name in state_dict
+
+                if owns_param:
+                    target_dtype = state_dict[name].dtype
+                else:
+                    dtype_str = json_data["param_mappings"][tt_name]["dtype"]
+                    target_dtype = getattr(torch, dtype_str)
+
+                if SGLANG_UPDATE_PROC_DEBUG == 1 and owns_param:
+                    print(
+                        f"Updating {tt_name} -> {name} (train PP {train_pp_stage}), "
+                        f"shape: {state_dict[name].shape}, "
+                        f"local_shape: {local_shape}, dtype: {target_dtype}",
+                        flush=True,
+                    )
+
+                # all_gather on the per-PP data group
                 if SGLANG_UPDATE_PROC_DEBUG:
-                    diff = (new.float() - old.float()).abs()
                     print(
-                        f"[WEIGHT DIFF] {name}: mean={diff.mean().item():.6e}, std={diff.std().item():.6e}, "
-                        f"old_mean={old.float().mean().item():.6e}, new_mean={new.float().mean().item():.6e}",
+                        f"[vLLM PP {pp_rank}] all_gather {tt_name} -> {name} "
+                        f"(train PP {train_pp_stage}, owns={owns_param})",
                         flush=True,
                     )
+                tensor_list = [
+                    torch.zeros(
+                        local_shape if indx < num_training_gpus_per_pp else 1,
+                        dtype=target_dtype,
+                        device=my_device,
+                    )
+                    for indx in range(pp_data_group_size)
+                ]
+                torch.distributed.all_gather(
+                    tensor_list,
+                    torch.zeros(1, dtype=target_dtype, device=my_device),
+                    group=data_group,
+                )
+                if SGLANG_UPDATE_PROC_DEBUG:
                     print(
-                        f"[STRIDE COMP] {name}: new: {new.stride()}, old: {old.stride()}",
+                        f"[vLLM PP {pp_rank}] all_gather {tt_name} -> {name} "
+                        f"(train PP {train_pp_stage}, owns={owns_param})",
                         flush=True,
                     )
 
-            # Check if this is a LoRA parameter by looking at the name
-            if is_lora_param(name):
-                # Handle LoRA weights - they should NOT be permuted
-                if json_data["param_mappings"][tt_name]["needs_permute"]:
-                    raise NotImplementedError(
-                        f"LoRA weights do not support permutation at this time, but {tt_name} has needs_permute=True."
-                    )
+                if not owns_param:
+                    del tensor_list
+                    continue
 
-                # Reshape LoRA tensor to match vLLM stacked format
-                vllm_shape = state_dict[name].shape
-                tensor = reshape_lora_for_vllm(tensor, name, vllm_shape)
-
-                _debug_diff(name, state_dict[name].data, tensor)
-                state_dict[name].data.copy_(tensor)
-            elif "qkv_proj.weight" in name:
-                key_val = (
-                    "q" if ".wq." in tt_name else "v" if ".wv." in tt_name else "k"
-                )
-                if (
-                    key_val == "q"
-                    and json_data["param_mappings"][tt_name]["needs_permute"]
-                ):
-                    tensor = permute(tensor, q_heads)
-                elif (
-                    key_val == "k"
-                    and json_data["param_mappings"][tt_name]["needs_permute"]
-                ):
-                    tensor = permute(tensor, kv_heads)
-                qkv_buffer[key_val] = tensor
-                if len(qkv_buffer) == 3:
-                    # cat them all together
-                    tensor = torch.cat(
-                        [qkv_buffer["q"], qkv_buffer["k"], qkv_buffer["v"]], dim=0
-                    ).contiguous()
-                    qkv_buffer = {}
-                    _debug_diff(name, state_dict[name].data, tensor)
-                    state_dict[name].data.copy_(tensor)
-            elif "gate_up_proj.weight" in name:
-                key_val = "w1" if ".w1." in tt_name else "w3"
-                gate_up_buffer[key_val] = tensor
-                if len(gate_up_buffer) == 2:
-                    # cat them all together
-                    tensor = torch.cat(
-                        [gate_up_buffer["w1"], gate_up_buffer["w3"]], dim=0
-                    ).contiguous()
-                    gate_up_buffer = {}
-                    _debug_diff(name, state_dict[name].data, tensor)
-                    state_dict[name].data.copy_(tensor)
-            elif "w13_weight" in name:
-                key_val = "w1" if ".w1" in tt_name else "w3"
-                w1w3_buffer[key_val] = tensor
-                if len(w1w3_buffer) == 2:
-                    tensor = torch.cat(
-                        [w1w3_buffer["w1"], w1w3_buffer["w3"]], dim=1
-                    ).contiguous()
-                    w1w3_buffer = {}
-                    _debug_diff(name, state_dict[name].data, tensor)
-                    state_dict[name].data.copy_(tensor)
-            elif "qkv_proj.bias" in name:
-                key_val = (
-                    "q" if ".wq." in tt_name else "v" if ".wv." in tt_name else "k"
-                )
-                if (
-                    key_val == "q"
-                    and json_data["param_mappings"][tt_name]["needs_permute"]
-                ):
-                    tensor = permute_1d(tensor, q_heads)
-                elif (
-                    key_val == "k"
-                    and json_data["param_mappings"][tt_name]["needs_permute"]
-                ):
-                    tensor = permute_1d(tensor, kv_heads)
-                qkv_bias_buffer[key_val] = tensor
-                if len(qkv_bias_buffer) == 3:
-                    # cat them all together
-                    tensor = torch.cat(
-                        [
-                            qkv_bias_buffer["q"],
-                            qkv_bias_buffer["k"],
-                            qkv_bias_buffer["v"],
-                        ],
-                        dim=0,
-                    ).contiguous()
-                    qkv_bias_buffer = {}
-                    _debug_diff(name, state_dict[name].data, tensor)
-                    state_dict[name].data.copy_(tensor)
-            elif json_data["param_mappings"][tt_name]["needs_permute"]:
-                if len(shape) == 2:
-                    tensor = permute(tensor, shape[0]).contiguous()
-                elif len(shape) == 1:
-                    if ("q_norm" in name or "k_norm" in name) and json_data[
-                        "param_mappings"
-                    ][tt_name]["needs_permute"]:
-                        tensor = permute_1d(tensor, 1).contiguous()
+                tensor_list = tensor_list[:num_training_gpus_per_pp]
+                # Now merge them together...
+                # First, data parallel...
+                if json_data["dp_shard_degree"] > 1:
+                    # TODO: support tp in ep case
+                    if json_data["param_mappings"][tt_name]["ep_enabled"]:
+                        expert_parallel_tensors = []
+                        for i in range(json_data["ep_degree"]):
+                            expert_parallel_tensors.append(
+                                torch.cat(
+                                    tensor_list[i :: json_data["ep_degree"]],
+                                    dim=0
+                                    if gpus_per_ep_dp < state_dict[name].shape[0]
+                                    else 1,
+                                )
+                            )
+                        if json_data["ep_degree"] > 1:
+                            if (
+                                expert_parallel_tensors[0].shape
+                                == state_dict[name].shape
+                            ):
+                                tensor = expert_parallel_tensors[0].contiguous()
+                            else:
+                                tensor = torch.cat(
+                                    expert_parallel_tensors,
+                                    dim=0,
+                                ).contiguous()
+                        else:
+                            tensor = expert_parallel_tensors[0].contiguous()
                     else:
-                        tensor = permute_1d(tensor, shape[0]).contiguous()
+                        tensor_parallel_tensors = []
+                        for i in range(json_data["tp_degree"]):
+                            tensor_parallel_tensors.append(
+                                torch.cat(
+                                    tensor_list[i :: json_data["tp_degree"]], dim=0
+                                )
+                            )
+                        if json_data["tp_degree"] > 1:
+                            if (
+                                tensor_parallel_tensors[0].shape
+                                == state_dict[name].shape
+                            ):
+                                tensor = tensor_parallel_tensors[0].contiguous()
+                            else:
+                                tensor = torch.cat(
+                                    tensor_parallel_tensors,
+                                    dim=json_data["param_mappings"][tt_name][
+                                        "tp_shard_dim"
+                                    ],
+                                ).contiguous()
+
+                        else:
+                            tensor = tensor_parallel_tensors[0].contiguous()
                 else:
-                    raise ValueError(
-                        f"Tensor {name} has shape {shape} and needs permute, but is not 1D or 2D"
+                    # No fsdp?
+                    tensor = torch.cat(
+                        tensor_list,
+                        dim=json_data["param_mappings"][tt_name]["tp_shard_dim"],
+                    ).contiguous()
+                if tensor.dtype != state_dict[name].dtype:
+                    tensor = tensor.to(state_dict[name].dtype)
+
+                def _debug_diff(name, old, new):
+                    if SGLANG_UPDATE_PROC_DEBUG:
+                        diff = (new.float() - old.float()).abs()
+                        print(
+                            f"[WEIGHT DIFF] {name}: mean={diff.mean().item():.6e}, "
+                            f"std={diff.std().item():.6e}, "
+                            f"old_mean={old.float().mean().item():.6e}, "
+                            f"new_mean={new.float().mean().item():.6e}",
+                            flush=True,
+                        )
+                        print(
+                            f"[STRIDE COMP] {name}: new: {new.stride()}, "
+                            f"old: {old.stride()}",
+                            flush=True,
+                        )
+
+                # Check if this is a LoRA parameter by looking at the name
+                if is_lora_param(name):
+                    # Handle LoRA weights - they should NOT be permuted
+                    if json_data["param_mappings"][tt_name]["needs_permute"]:
+                        raise NotImplementedError(
+                            f"LoRA weights do not support permutation at this "
+                            f"time, but {tt_name} has needs_permute=True."
+                        )
+
+                    # Reshape LoRA tensor to match vLLM stacked format
+                    vllm_shape = state_dict[name].shape
+                    tensor = reshape_lora_for_vllm(tensor, name, vllm_shape)
+
+                    _debug_diff(name, state_dict[name].data, tensor)
+                    state_dict[name].data.copy_(tensor)
+                elif "qkv_proj.weight" in name:
+                    key_val = (
+                        "q" if ".wq." in tt_name else "v" if ".wv." in tt_name else "k"
                     )
-                _debug_diff(name, state_dict[name].data, tensor)
-                state_dict[name].data.copy_(tensor)
-            else:
-                _debug_diff(name, state_dict[name].data, tensor)
-                state_dict[name].data.copy_(tensor)
+                    if (
+                        key_val == "q"
+                        and json_data["param_mappings"][tt_name]["needs_permute"]
+                    ):
+                        tensor = permute(tensor, q_heads)
+                    elif (
+                        key_val == "k"
+                        and json_data["param_mappings"][tt_name]["needs_permute"]
+                    ):
+                        tensor = permute(tensor, kv_heads)
+                    qkv_buffer[name][key_val] = tensor
+                    if len(qkv_buffer[name]) == 3:
+                        # cat them all together
+                        tensor = torch.cat(
+                            [
+                                qkv_buffer[name]["q"],
+                                qkv_buffer[name]["k"],
+                                qkv_buffer[name]["v"],
+                            ],
+                            dim=0,
+                        ).contiguous()
+                        del qkv_buffer[name]
+                        _debug_diff(name, state_dict[name].data, tensor)
+                        state_dict[name].data.copy_(tensor)
+                elif "gate_up_proj.weight" in name:
+                    key_val = "w1" if ".w1." in tt_name else "w3"
+                    gate_up_buffer[name][key_val] = tensor
+                    if len(gate_up_buffer[name]) == 2:
+                        # cat them all together
+                        tensor = torch.cat(
+                            [gate_up_buffer[name]["w1"], gate_up_buffer[name]["w3"]],
+                            dim=0,
+                        ).contiguous()
+                        del gate_up_buffer[name]
+                        _debug_diff(name, state_dict[name].data, tensor)
+                        state_dict[name].data.copy_(tensor)
+                elif "w13_weight" in name:
+                    key_val = "w1" if ".w1" in tt_name else "w3"
+                    w1w3_buffer[name][key_val] = tensor
+                    if len(w1w3_buffer[name]) == 2:
+                        tensor = torch.cat(
+                            [w1w3_buffer[name]["w1"], w1w3_buffer[name]["w3"]], dim=1
+                        ).contiguous()
+                        del w1w3_buffer[name]
+                        _debug_diff(name, state_dict[name].data, tensor)
+                        state_dict[name].data.copy_(tensor)
+                elif "qkv_proj.bias" in name:
+                    key_val = (
+                        "q" if ".wq." in tt_name else "v" if ".wv." in tt_name else "k"
+                    )
+                    if (
+                        key_val == "q"
+                        and json_data["param_mappings"][tt_name]["needs_permute"]
+                    ):
+                        tensor = permute_1d(tensor, q_heads)
+                    elif (
+                        key_val == "k"
+                        and json_data["param_mappings"][tt_name]["needs_permute"]
+                    ):
+                        tensor = permute_1d(tensor, kv_heads)
+                    qkv_bias_buffer[name][key_val] = tensor
+                    if len(qkv_bias_buffer[name]) == 3:
+                        # cat them all together
+                        tensor = torch.cat(
+                            [
+                                qkv_bias_buffer[name]["q"],
+                                qkv_bias_buffer[name]["k"],
+                                qkv_bias_buffer[name]["v"],
+                            ],
+                            dim=0,
+                        ).contiguous()
+                        del qkv_bias_buffer[name]
+                        _debug_diff(name, state_dict[name].data, tensor)
+                        state_dict[name].data.copy_(tensor)
+                elif json_data["param_mappings"][tt_name]["needs_permute"]:
+                    if len(shape) == 2:
+                        tensor = permute(tensor, shape[0]).contiguous()
+                    elif len(shape) == 1:
+                        if ("q_norm" in name or "k_norm" in name) and json_data[
+                            "param_mappings"
+                        ][tt_name]["needs_permute"]:
+                            tensor = permute_1d(tensor, 1).contiguous()
+                        else:
+                            tensor = permute_1d(tensor, shape[0]).contiguous()
+                    else:
+                        raise ValueError(
+                            f"Tensor {name} has shape {shape} and needs "
+                            f"permute, but is not 1D or 2D"
+                        )
+                    _debug_diff(name, state_dict[name].data, tensor)
+                    state_dict[name].data.copy_(tensor)
+                else:
+                    _debug_diff(name, state_dict[name].data, tensor)
+                    state_dict[name].data.copy_(tensor)

@@ -3,7 +3,11 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+from dataclasses import dataclass, field
+from typing import Callable
+
 import torch
+from torch import Tensor
 
 from torchtitan.config.job_config import JobConfig
 from torchtitan.grpo.importance_sampling import compute_rollout_importance_weights
@@ -516,3 +520,164 @@ def compute_grpo_loss_from_predictions(
             )
 
     return loss, metrics, logp
+
+
+@dataclass
+class GRPOPPLossContext:
+    """Mutable state for the GRPO PP loss closure.
+
+    Updated before each pp_schedule.step() call with the current nanobatch's
+    auxiliary data.  The PP schedule splits the batch into ``n_microbatches``
+    chunks and calls the loss closure once per chunk.  We pre-chunk the
+    context tensors to match and use an internal counter to track which
+    chunk we're on.
+
+    Fields split into three groups:
+      - Config/utilities (set once at init)
+      - Per-nanobatch data (updated via ``update()`` before each step)
+      - Internal chunk tracking
+    """
+
+    # ── Config & utilities (set once at init) ──────────────────────
+    loss_fn: Callable = None
+    entropy_loss_fn: Callable = None
+    job_config: JobConfig = None
+    device: torch.device = None
+    use_ref_model: bool = False
+    grpo_by_token: bool = False
+
+    # ── Per-nanobatch scalars ──────────────────────────────────────
+    dynamic_scale: float = 1.0
+    dynamic_grad_accum_size: float = 1.0
+    total_masked_tokens: int = 1
+
+    # ── Chunk tracking (internal) ──────────────────────────────────
+    _tensor_chunks: dict = field(default_factory=dict)
+    _n_microbatches: int = 1
+    _mb_idx: int = 0
+    _chunk_metrics: list = field(default_factory=list)
+
+    # ── Output (merged after pp_schedule.step) ─────────────────────
+    metrics: dict = field(default_factory=dict)
+
+    # Tensor field names that get chunked along the batch dimension
+    _TENSOR_FIELDS = frozenset(
+        {
+            "mask",
+            "reward",
+            "old_logp",
+            "old_ref_logp",
+            "inf_logps",
+            "input_ids",
+        }
+    )
+
+    def update(self, n_microbatches: int = 1, **kwargs):
+        """Update per-nanobatch fields, pre-chunking tensors for PP microbatches."""
+        self._n_microbatches = n_microbatches
+        self._mb_idx = 0
+        self._chunk_metrics = []
+
+        for k, v in kwargs.items():
+            if k in self._TENSOR_FIELDS:
+                if v is not None and isinstance(v, Tensor) and v.dim() >= 1:
+                    self._tensor_chunks[k] = list(v.chunk(n_microbatches, dim=0))
+                else:
+                    self._tensor_chunks[k] = [v] * n_microbatches
+            else:
+                setattr(self, k, v)
+
+    def _get(self, name: str):
+        """Get the current microbatch chunk for a tensor field."""
+        return self._tensor_chunks[name][self._mb_idx]
+
+    def merge_chunk_metrics(self) -> dict:
+        """Merge metrics across PP microbatch chunks.
+
+        Simple averaging for normal metrics, min/max for extremes.
+        """
+        if not self._chunk_metrics:
+            return {}
+        if len(self._chunk_metrics) == 1:
+            self.metrics = self._chunk_metrics[0]
+            return self.metrics
+
+        merged = {}
+        all_keys = set()
+        for m in self._chunk_metrics:
+            all_keys.update(m.keys())
+
+        for key in sorted(all_keys):
+            values = [m[key] for m in self._chunk_metrics if key in m]
+            if not values:
+                continue
+            if "min" in key:
+                merged[key] = min(values)
+            elif "max" in key:
+                merged[key] = max(values)
+            else:
+                merged[key] = sum(values) / len(values)
+
+        self.metrics = merged
+        return merged
+
+
+def create_grpo_pp_loss_fn(ctx: GRPOPPLossContext) -> Callable:
+    """Create a closure-based loss_fn for the PP schedule.
+
+    Returns a function with signature ``loss_fn(pred, labels) -> scalar_loss``
+    that computes the full GRPO loss using data from *ctx*.  The PP schedule
+    calls this on the **last stage only**, once per PP microbatch chunk.
+
+    Scaling notes:
+      - ``rescale_accumulated_loss`` wraps this and divides by ``n_microbatches``
+      - Per-sequence: ``mean(chunk)`` is correct — averaging chunks then dividing
+        by n_microbatches equals the global mean.
+      - Per-token: we use ``total_masked_tokens / n_microbatches`` as denominator
+        so that after the rescale division the effective denominator is
+        ``total_masked_tokens``.
+    """
+
+    def grpo_pp_loss_fn(pred, labels):
+        chunk_mask = ctx._get("mask")
+        chunk_reward = ctx._get("reward")
+
+        mb_loss, metrics, _ = compute_grpo_loss_from_predictions(
+            pred=pred,
+            labels=labels,
+            reward=chunk_reward,
+            mask=chunk_mask,
+            loss_fn=ctx.loss_fn,
+            entropy_loss_fn=ctx.entropy_loss_fn,
+            job_config=ctx.job_config,
+            device=ctx.device,
+            old_logp=ctx._get("old_logp"),
+            old_ref_logp=ctx._get("old_ref_logp"),
+            ref_pred=None,
+            ref_model=None,
+            input_ids=ctx._get("input_ids"),
+            use_ref_model=ctx.use_ref_model,
+            inf_logps=ctx._get("inf_logps"),
+        )
+
+        # Apply GRPO-specific reduction
+        if not ctx.grpo_by_token:
+            # Per-sequence: mean across sequences in this chunk.
+            # rescale_accumulated_loss divides by n_microbatches, and
+            # sum_chunks(mean_chunk) / n_microbatches = global_mean. ✓
+            scalar_loss = (mb_loss * chunk_mask).sum(-1) / chunk_mask.sum(-1)
+            scalar_loss = scalar_loss.mean()
+            scalar_loss = ctx.dynamic_scale * scalar_loss / ctx.dynamic_grad_accum_size
+        else:
+            # Per-token: use total / n_microbatches as denominator so that
+            # after rescale division the effective denominator is total. ✓
+            scalar_loss = (mb_loss * chunk_mask).sum() / (
+                ctx.total_masked_tokens / ctx._n_microbatches
+            )
+
+        ctx._chunk_metrics.append(metrics)
+        ctx._mb_idx += 1
+        del pred  # free memory before backward
+        return scalar_loss
+
+    return grpo_pp_loss_fn

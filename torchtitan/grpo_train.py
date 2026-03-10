@@ -15,6 +15,7 @@ import numpy as np
 import torch
 import tqdm
 from torch.distributed.elastic.multiprocessing.errors import record
+from torch.distributed.pipelining.schedules import PipelineScheduleMulti
 from torch.distributed.tensor import (  # noqa: F401
     DeviceMesh,
     distribute_tensor,
@@ -26,6 +27,7 @@ from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.components.dataloader import DataloaderExhaustedError
 from torchtitan.components.ft import FTManager, maybe_semi_sync_training
 from torchtitan.components.metrics import (
+    _get_metrics_rank,
     build_metrics_processor,
     ensure_pp_loss_visible,
 )
@@ -35,13 +37,17 @@ from torchtitan.grpo.data_handling import OnlineDataHandler
 from torchtitan.grpo.grpo_step import (
     compute_grpo_loss_from_predictions,
     compute_logp_from_model,
+    create_grpo_pp_loss_fn,
+    GRPOPPLossContext,
     scale_rewards,
 )
 from torchtitan.grpo.sglang_handling import (
     get_hostname_url,
     get_sglang_urls,
+    new_group,
     param_to_sglang_data,
     send_param,
+    send_start_update,
     setup_group,
     wait_for_sglang,
 )
@@ -148,9 +154,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         else:
             self.cp_degree = 1
 
+        if parallel_dims.ep_enabled:
+            self.ep_degree = world_mesh["ep"].size()
+            self.ep_rank = world_mesh["ep"].get_local_rank()
+        else:
+            self.ep_degree = 1
+            self.ep_rank = 0
         if parallel_dims.dp_shard_enabled:
-            self.dp_shard_degree = world_mesh["dp_shard"].size()
-            self.dp_shard_rank = world_mesh["dp_shard"].get_local_rank()
+            shard_key = "dp_shard_mod_ep" if parallel_dims.ep_enabled else "dp_shard"
+            self.dp_shard_degree = world_mesh[shard_key].size()
+            self.dp_shard_rank = world_mesh[shard_key].get_local_rank()
         else:
             self.dp_shard_degree = 1
             self.dp_shard_rank = 0
@@ -163,6 +176,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         if parallel_dims.pp_enabled:
             pp_mesh = world_mesh["pp"]  # type: DeviceMesh
+            self.pp_rank = pp_mesh.get_local_rank()
+            self.train_pp_size = pp_mesh.size()
+        else:
+            self.pp_rank = 0
+            self.train_pp_size = 1
+
+        # Validate PP compatibility with vLLM
+        self.sglang_pp = job_config.grpo.sglang_pp
+        assert self.train_pp_size % self.sglang_pp == 0, (
+            f"train_pp ({self.train_pp_size}) must be a multiple of "
+            f"sglang_pp ({self.sglang_pp})"
+        )
 
         if parallel_dims.tp_enabled:
             self.tp_mesh = world_mesh["tp"]  # type: DeviceMesh
@@ -200,7 +225,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             else None
         )
 
-        self.data_handler = OnlineDataHandler()
+        self.metrics_rank = _get_metrics_rank(parallel_dims, job_config)
+        self.data_handler = OnlineDataHandler(metrics_rank=self.metrics_rank)
 
         # build model (using meta init)
         model_args = self.train_spec.model_args[job_config.model.flavor]
@@ -298,12 +324,46 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
 
         # apply parallelisms and initialization
         self.ref_model_parts = None
+        self.grpo_pp_context = None  # set below if PP enabled
+        self.pp_n_microbatches = 1
         if parallel_dims.pp_enabled:
             if not self.train_spec.pipelining_fn:
                 raise RuntimeError(
                     f"Pipeline Parallel is enabled but {self.job_config.model.name} "
                     f"does not support pipelining"
                 )
+
+            # ── Validate PP constraints (Phase 1) ─────────────────
+            assert (
+                job_config.grpo.kl_beta == 0
+            ), "Reference model (kl_beta > 0) not yet supported with PP"
+            assert (
+                job_config.grpo.num_microbatches == 1
+            ), "Multiple GRPO microbatches not yet supported with PP"
+            # PP schedule requires n_microbatches >= pp_degree.
+            pp_mbs = job_config.parallelism.pipeline_parallel_microbatch_size
+            lbs = job_config.training.local_batch_size
+            assert lbs % pp_mbs == 0, (
+                f"local_batch_size ({lbs}) must be divisible by "
+                f"pipeline_parallel_microbatch_size ({pp_mbs})"
+            )
+            self.pp_n_microbatches = lbs // pp_mbs
+            assert self.pp_n_microbatches >= parallel_dims.pp, (
+                f"PP n_microbatches ({self.pp_n_microbatches}) must be >= "
+                f"pp_degree ({parallel_dims.pp}). Increase local_batch_size "
+                f"or decrease pipeline_parallel_microbatch_size."
+            )
+
+            # ── Create GRPO PP loss context and closure ────────────
+            self.grpo_pp_context = GRPOPPLossContext(
+                loss_fn=self.loss_fn,
+                entropy_loss_fn=self.entropy_loss_fn,
+                job_config=job_config,
+                device=self.device,
+                use_ref_model=False,  # deferred to Phase 2
+                grpo_by_token=job_config.grpo.grpo_by_token,
+            )
+            grpo_pp_loss_fn = create_grpo_pp_loss_fn(self.grpo_pp_context)
 
             # apply both PT-D Pipeline Parallel and SPMD-style PT-D techniques
             (
@@ -318,20 +378,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 self.device,
                 model_args,
                 self.train_spec.parallelize_fn,
-                self.loss_fn,
+                grpo_pp_loss_fn,  # GRPO loss closure instead of standard CE
+                vllm_mode=self.sglang_pp > 1,
             )
             # when PP is enabled, `model` obj is no longer used after this point,
             # model_parts is used instead
             del model
             if self.use_ref_model:
                 (_, self.ref_model_parts, _, _,) = self.train_spec.pipelining_fn(
-                    model,
+                    ref_model,
                     parallel_dims,
                     job_config,
                     self.device,
                     model_args,
                     self.train_spec.parallelize_fn,
                     self.loss_fn,
+                    vllm_mode=self.sglang_pp > 1,
                 )
                 del ref_model
 
@@ -470,6 +532,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"DP GROUP: {torch.distributed.get_process_group_ranks(dp_mesh.get_group()) if dp_mesh else None}, "
             f"DP Replicate Rank: {self.dp_replicate_rank}, "
             f"DP Shard Rank: {self.dp_shard_rank}, "
+            f"EP Degree: {self.ep_degree}, "
+            f"EP Rank: {self.ep_rank}, "
+            f"PP Rank: {self.pp_rank}, "
+            f"PP Size: {self.train_pp_size}, "
         )
         # Wait for SGlang servers to be ready
         job_config.grpo.sglang_urls = get_sglang_urls(job_config)
@@ -482,45 +548,131 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                 "Please set the environment variable to point to the "
                 "LOGDIR directory where the log files are stored."
             )
-        self.param_name_to_send_list = []
-        # only do this one on rank
+        # -- PP layer name remapping --
+        # pipeline_module_split re-indexes nn.ModuleList from 0 per stage,
+        # so both stage 0 and stage 1 produce "layers.0.xxx" names.  Build
+        # a remap to recover the original layer indices.
+        if parallel_dims.pp_enabled:
+            (
+                self._pp_local_to_original,
+                self._pp_original_to_local,
+            ) = self._build_pp_layer_remap()
+        else:
+            self._pp_local_to_original = {}
+            self._pp_original_to_local = {}
+
+        # ── Build global param list across all PP stages ──────────────
+        # Each PP stage has different params (different layers). We need the
+        # GLOBAL sorted param list so both training and vLLM iterate in the
+        # same deterministic order.
+        local_param_info = {}
+        for model_part in self.model_parts:
+            for param_name, param in sorted(
+                model_part.named_parameters(), key=lambda item: item[0]
+            ):  # type: str, DTensor
+                if param.requires_grad:
+                    # Remap local PP name to original layer index
+                    original_name = self._pp_local_to_original.get(
+                        param_name, param_name
+                    )
+                    new_name, needs_permute = param_to_sglang_data(
+                        original_name, self.job_config.model.name != "qwen3"
+                    )
+                    local_shape = list(param.to_local().shape)
+                    local_param_info[original_name] = {
+                        "sglang_name": new_name,
+                        "needs_permute": needs_permute,
+                        "tp_shard_dim": param.placements[-1].dim
+                        if param.placements[-1].is_shard()
+                        else 0,
+                        "local_shape": local_shape,
+                        "ep_enabled": "moe.expert" in param_name,
+                        "shape": param.shape,
+                        "dtype": str(param.dtype).split(".")[-1],
+                        "train_pp_stage": self.pp_rank,
+                    }
+
+        # Gather param info from all PP stages
+        if parallel_dims.pp_enabled:
+            all_param_infos = [None] * self.train_pp_size
+            torch.distributed.all_gather_object(
+                all_param_infos, local_param_info, group=pp_mesh.get_group()
+            )
+            global_param_info = {}
+            for stage_info in all_param_infos:
+                global_param_info.update(stage_info)
+        else:
+            global_param_info = local_param_info
+
+        # Global sorted param list — both sides iterate this in lockstep
+        self.param_name_to_send_list = sorted(global_param_info.keys())
+        # Map from param name → which PP stage owns it
+        self.param_pp_stages = {
+            name: info["train_pp_stage"] for name, info in global_param_info.items()
+        }
+        # Local param names (only those on this PP stage)
+        self.local_param_names = set(local_param_info.keys())
+
+        logger.info(
+            f"PP rank {self.pp_rank}/{self.train_pp_size}: "
+            f"{len(self.local_param_names)} local params, "
+            f"{len(self.param_name_to_send_list)} global params"
+        )
+
+        # Write sglang_json with PP info
         sglang_json = {
             "dp_shard_degree": self.dp_shard_degree,
             "tp_degree": self.tp_degree,
-            "param_mappings": {},
+            "ep_degree": self.ep_degree,
+            "train_pp_size": self.train_pp_size,
+            "param_mappings": global_param_info,
         }
-        for param_name, param in sorted(
-            self.model_parts[0].named_parameters(), key=lambda item: item[0]
-        ):  # type: str, DTensor
-            if param.requires_grad:
-                new_name, needs_permute = param_to_sglang_data(
-                    param_name, self.job_config.model.name != "qwen3"
-                )
-                self.param_name_to_send_list.append(param_name)
-                local_shape = list(param.to_local().shape)
-                sglang_json["param_mappings"][param_name] = {
-                    "sglang_name": new_name,
-                    "needs_permute": needs_permute,
-                    "tp_shard_dim": param.placements[-1].dim
-                    if param.placements[-1].is_shard()
-                    else 0,
-                    "local_shape": local_shape,
-                    "shape": param.shape,
-                    "dtype": str(param.dtype).split(".")[-1],
-                }
-            self.param_name_to_send_list.sort()
         if torch.distributed.get_rank() == 0:
             with open(os.path.join(slurm_logdir, "sglang_json.json"), "w") as f:
                 json.dump(sglang_json, f, indent=2)
-            self.data_handler.register_atropos(job_config, self.step, global_batch_size)
+            # Dump the sorted send list with PP stages for debugging
+            train_send_order = [
+                {"name": n, "pp_stage": self.param_pp_stages[n]}
+                for n in self.param_name_to_send_list
+            ]
+            with open(os.path.join(slurm_logdir, "train_send_order.json"), "w") as f:
+                json.dump(train_send_order, f, indent=2)
+        self.data_handler.register_atropos(job_config, self.step, global_batch_size)
 
-        # setup sglang process
-        self.total_group_size = self.dp_degree * self.tp_degree
-        self.total_group_size += (
-            len(job_config.grpo.sglang_urls) * job_config.grpo.sglang_tp
+        # ── Setup weight-sync process groups ──────────────────────────
+        vllm_total_ranks = (
+            len(job_config.grpo.sglang_urls)
+            * job_config.grpo.sglang_tp
+            * self.sglang_pp
         )
-        local_rank = self.dp_shard_rank * self.tp_degree + self.tp_rank
+        # Signal group: ALL training dp_replicate_rank==0 ranks (across PP
+        # stages) + ALL vLLM ranks.  Used for heartbeat/start signals only.
+        signal_training_size = (
+            self.train_pp_size
+            * self.dp_shard_degree
+            * max(self.tp_degree, self.ep_degree)
+        )
+        signal_group_size = signal_training_size + vllm_total_ranks
+        signal_local_rank = (
+            self.pp_rank * self.dp_shard_degree * max(self.tp_degree, self.ep_degree)
+            + self.dp_shard_rank * max(self.tp_degree, self.ep_degree)
+            + max(self.tp_rank, self.ep_rank)
+        )
+
+        # Per-PP data group: training dp_shard*tp ranks for THIS PP stage +
+        # the vLLM ranks on the mapped vLLM PP stage.
+        vllm_ranks_per_pp = vllm_total_ranks // self.sglang_pp
+        pp_data_group_size = (
+            self.dp_shard_degree * max(self.tp_degree, self.ep_degree)
+            + vllm_ranks_per_pp
+        )
+        pp_data_local_rank = self.dp_shard_rank * max(
+            self.tp_degree, self.ep_degree
+        ) + max(self.tp_rank, self.ep_rank)
+
         self.sglang_nccl_group, self.sglang_gloo_group = None, None
+        self.pp_data_nccl_group = None
+        self.pp_data_group_size = pp_data_group_size
         self.weight_dtypes = {}
         if self.dp_replicate_rank == 0:
             logger.debug("Grabbing sglang dtypes...")
@@ -529,14 +681,27 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             with open(f"{os.environ['LOGDIR']}/sglang_dtypes.json", "r") as f:
                 self.weight_dtypes = json.load(f)
             logger.debug(
-                f"Setting up SGlang process groups, dp_shard_degree: {self.dp_shard_degree}, tp_degree: {self.tp_degree}"
+                f"Setting up weight-sync groups: signal group "
+                f"(size={signal_group_size}, rank={signal_local_rank}), "
+                f"PP data group (size={pp_data_group_size}, "
+                f"rank={pp_data_local_rank})"
             )
-            hostname = "localhost" if local_rank < 8 else get_hostname_url()
-            logger.debug(
-                f"total: {self.total_group_size}, rank: {self.dp_shard_rank * self.tp_degree + self.tp_rank}, pg_server: {hostname}"
-            )
+            # assumes 8 GPUs per node, which should be the case for anything we're deploying this to
+            hostname = "localhost" if pp_data_local_rank < 8 else get_hostname_url()
+            # Signal group (heartbeat + start-update)
             self.sglang_nccl_group, self.sglang_gloo_group = setup_group(
-                hostname, job_config.grpo.sglang_port, self.total_group_size, local_rank
+                hostname,
+                job_config.grpo.sglang_port,
+                signal_group_size,
+                signal_local_rank,
+            )
+            # Per-PP data group — subgroup of the signal group's PG.
+            self.pp_data_nccl_group = new_group(
+                self.sglang_nccl_group,
+                "nccl",
+                pp_data_group_size,
+                pp_data_local_rank,
+                f"weight_data_pp{self.pp_rank}",
             )
         if job_config.grpo.ptx_mixin_batchsize > 0:
             self.dataloader = self.train_spec.build_dataloader_fn(
@@ -564,6 +729,167 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
             f"total steps {job_config.training.steps} "
             f"(warmup {job_config.lr_scheduler.warmup_steps})"
         )
+
+    def _build_pp_layer_remap(self):
+        """Build layer index remapping for PP name collision fix.
+
+        pipeline_module_split re-indexes nn.ModuleList layers from 0 in each
+        PP stage, causing name collisions (both stages have 'layers.0.xxx').
+        This method computes the original layer indices from the stage layout
+        and builds bidirectional name mappings so the global param list uses
+        unique, original layer indices.
+
+        Returns:
+            local_to_original: dict mapping local param name -> original name
+            original_to_local: dict mapping original name -> local param name
+        """
+        import math
+
+        from torch.distributed.pipelining.schedules import (
+            get_schedule_class,
+            PipelineScheduleSingle,
+            ScheduleZBVZeroBubble,
+        )
+
+        from torchtitan.distributed.pipeline_parallel import (
+            generate_llm_fqn_per_model_part,
+        )
+
+        job_config = self.job_config
+        model_args = self.model_args
+
+        # Recompute module_names_per_stage (same logic as pipeline_llm)
+        module_names_per_stage = job_config.parallelism.module_fqns_per_model_part
+        if module_names_per_stage is None:
+            schedule_class = get_schedule_class(
+                job_config.parallelism.pipeline_parallel_schedule
+            )
+            is_single = issubclass(schedule_class, PipelineScheduleSingle)
+            lps = job_config.parallelism.pipeline_parallel_layers_per_stage
+            iw = job_config.parallelism.pipeline_parallel_first_stage_less_layers
+            ow = job_config.parallelism.pipeline_parallel_last_stage_less_layers
+            if lps is not None:
+                nvs = math.ceil((model_args.n_layers + iw + ow) / lps)
+            else:
+                spr = 1 if is_single else 2
+                nvs = self.parallel_dims.pp * spr
+            module_names_per_stage = generate_llm_fqn_per_model_part(
+                nvs,
+                model_args.n_layers,
+                iw,
+                ow,
+                vllm_mode=self.sglang_pp > 1,
+            )
+
+        # Determine this rank's virtual stage indices
+        num_stages = len(module_names_per_stage)
+        spr = num_stages // self.train_pp_size
+        schedule_class = get_schedule_class(
+            job_config.parallelism.pipeline_parallel_schedule
+        )
+        try:
+            from torchtitan.distributed.pipeline_parallel import ScheduleDualPipeV
+
+            is_v = schedule_class in (
+                ScheduleZBVZeroBubble,
+                ScheduleDualPipeV,
+            )
+        except (ImportError, AttributeError):
+            is_v = schedule_class is ScheduleZBVZeroBubble
+        if is_v:
+            stage_indices = (
+                self.pp_rank,
+                num_stages - 1 - self.pp_rank,
+            )
+        else:
+            stage_indices = tuple(
+                self.pp_rank + s * self.train_pp_size for s in range(spr)
+            )
+
+        local_to_original = {}
+        original_to_local = {}
+
+        for mp_idx, stage_idx in enumerate(stage_indices):
+            stage_modules = module_names_per_stage[stage_idx]
+            # Extract sorted original layer indices for this stage
+            orig_layer_indices = sorted(
+                int(m.split(".")[1]) for m in stage_modules if m.startswith("layers.")
+            )
+
+            # Detect whether pipeline_module_split preserved original keys
+            # (nn.ModuleDict) or re-indexed from 0 (nn.ModuleList).
+            # If the model_part already uses original indices, no remap needed.
+            actual_layer_indices = set()
+            for pname, _ in self.model_parts[mp_idx].named_parameters():
+                parts = pname.split(".")
+                if len(parts) >= 2 and parts[0] == "layers" and parts[1].isdigit():
+                    actual_layer_indices.add(int(parts[1]))
+
+            needs_remap = actual_layer_indices != set(orig_layer_indices)
+            if needs_remap:
+                # nn.ModuleList: local index i -> original layer index
+                idx_map = dict(enumerate(orig_layer_indices))
+            else:
+                # nn.ModuleDict: keys already match original indices
+                idx_map = None
+
+            logger.info(
+                f"PP rank {self.pp_rank} is building stage_idx {stage_idx} "
+                f"with modules {stage_modules} "
+                f"(needs_remap={needs_remap}, actual={sorted(actual_layer_indices)})"
+            )
+
+            for pname, _ in self.model_parts[mp_idx].named_parameters():
+                parts = pname.split(".")
+                if (
+                    idx_map is not None
+                    and len(parts) >= 2
+                    and parts[0] == "layers"
+                    and parts[1].isdigit()
+                ):
+                    local_idx = int(parts[1])
+                    if local_idx in idx_map:
+                        parts[1] = str(idx_map[local_idx])
+                orig_name = ".".join(parts)
+                local_to_original[pname] = orig_name
+                original_to_local[orig_name] = pname
+
+        logger.info(
+            f"PP rank {self.pp_rank}: built layer remap for "
+            f"{len(local_to_original)} params "
+            f"(stages {list(stage_indices)})"
+        )
+        return local_to_original, original_to_local
+
+    def _reset_pp_shape_cache(self, input_ids: torch.Tensor):
+        """Reset PP schedule shape cache if input shape changed.
+
+        GRPO's variable packing produces nanobatches with different [B, S]
+        shapes.  The PP schedule caches shapes from the first step() call and
+        validates all subsequent calls against them — causing
+        PipeliningShapeError.  We only reset when the shape actually changes
+        to avoid unnecessary shape re-inference P2P overhead (expensive at
+        high PP degrees).
+        """
+        # TODO: Ensure private variables are used the same when updating torch versions
+        new_shape = input_ids.shape
+        if (
+            hasattr(self, "_pp_cached_input_shape")
+            and self._pp_cached_input_shape == new_shape
+        ):
+            return  # Shape unchanged, skip reset
+        self._pp_cached_input_shape = new_shape
+
+        if isinstance(self.pp_schedule, PipelineScheduleMulti):
+            self.pp_schedule._stages_initialized = False
+            for stage in self.pp_schedule._stages:
+                stage.inputs_meta = None
+                stage._outputs_meta = None
+        else:
+            # PipelineScheduleSingle / GPipe / etc.
+            self.pp_schedule._stage_initialized = False
+            self.pp_schedule._stage.inputs_meta = None
+            self.pp_schedule._stage._outputs_meta = None
 
     def forward_backward_step(
         self,
@@ -639,8 +965,59 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         )
 
         if parallel_dims.pp_enabled:
-            # TODO: get this working sometime
-            raise RuntimeError("PipelineParallelism is not yet supported for GRPO.")
+            # ── PP forward / backward ─────────────────────────────
+            # Update the closure's mutable context with this nanobatch's data.
+            # Tensors are pre-chunked into n_microbatches pieces to match
+            # the PP schedule's internal batch splitting.
+            self.grpo_pp_context.update(
+                n_microbatches=self.pp_n_microbatches,
+                mask=mask,
+                reward=reward,
+                old_logp=batch_dict["logp"],
+                old_ref_logp=batch_dict["ref_logp"],
+                inf_logps=inf_logps,
+                input_ids=input_ids,
+                dynamic_scale=dynamic_scale,
+                dynamic_grad_accum_size=dynamic_grad_accum_size,
+                total_masked_tokens=total_masked_tokens,
+            )
+
+            # Reset PP schedule shape cache if shape changed — avoids
+            # PipeliningShapeError from GRPO's variable packing while
+            # skipping expensive shape re-inference when shapes are stable.
+            self._reset_pp_shape_cache(input_ids)
+
+            with self.train_context(optional_context_parallel_ctx):
+                targets, losses = (
+                    (labels, []) if self.pp_has_last_stage else (None, None)
+                )
+                if self.pp_has_first_stage:
+                    self.pp_schedule.step(
+                        input_ids,
+                        **extra_inputs,
+                        **extra_kwargs,
+                        target=targets,
+                        losses=losses,
+                    )
+                else:
+                    self.pp_schedule.step(
+                        **extra_kwargs,
+                        target=targets,
+                        losses=losses,
+                    )
+
+            # Collect loss — only meaningful on last stage
+            loss = (
+                torch.sum(torch.stack(losses)).to(self.device)
+                if self.pp_has_last_stage
+                else torch.tensor([-1.0], device=self.device)
+            )
+
+            # Metrics — merge across PP microbatch chunks (last stage only)
+            if self.pp_has_last_stage:
+                metrics = self.grpo_pp_context.merge_chunk_metrics()
+            else:
+                metrics = {}
         else:
             # Non-PP forward / backward
             with self.train_context(optional_context_parallel_ctx):
@@ -1151,7 +1528,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
                     / nanobatch["dynamic_grad_accum_size"]
                 )
                 nb_loss = nb_loss
-                loss += nb_loss.mean().item() / len(microbatches)
+                if not parallel_dims.pp_enabled or self.pp_has_last_stage:
+                    loss += nb_loss.mean().item() / len(microbatches)
                 self.ntokens_seen += n_tokens_seen
                 # Accumulate tokens for MFU/throughput computation
                 self.metrics_processor.ntokens_since_last_log += n_tokens_seen
@@ -1353,33 +1731,65 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
         torch.distributed.barrier()
 
     def send_weights(self):
-        named_params = {k: v for (k, v) in self.model_parts[0].named_parameters()}
-        for name in named_params:
-            param = named_params[name]
-            logger.debug(
-                f"name: {name}, requires_grad: {param.requires_grad}, "
-                f"shape: {param.shape}, local_shape: {param.to_local().shape}, placements: {param.placements}"
+        rank = torch.distributed.get_rank()
+        # Build named_params from all local model_parts
+        named_params = {}
+        for model_part in self.model_parts:
+            named_params.update({k: v for (k, v) in model_part.named_parameters()})
+
+        if self.dp_replicate_rank == 0:
+            # Signal on the signal group -- all vLLM ranks receive this.
+            logger.info(
+                f"[rank {rank}] send_weights: broadcasting start signal "
+                f"(PP stage {self.pp_rank})"
             )
-            if param.requires_grad:
-                if self.dp_replicate_rank == 0:
-                    logger.debug(
-                        f"rank {torch.distributed.get_rank()} sending sglang params for {name}"
-                    )
-                    local_param = param.to_local()
-                    send_param(
-                        local_param,
-                        name,
-                        param.shape,
-                        self.weight_dtypes,
-                        self.tp_degree,
-                        self.dp_shard_degree,
-                        self.total_group_size,
-                        self.sglang_gloo_group,
-                        self.sglang_nccl_group,
-                        self.param_name_to_send_list.index(name),
-                    )
-        # To account for fun with updating sglang...
+            send_start_update(self.sglang_nccl_group, self.device)
+
+            # Iterate global sorted param list.  Only send params that belong
+            # to this PP stage (other stages send theirs on their own groups).
+            sent_count = 0
+            my_total = sum(
+                1
+                for n in self.param_name_to_send_list
+                if self.param_pp_stages[n] == self.pp_rank
+            )
+            for name in self.param_name_to_send_list:
+                if self.param_pp_stages[name] != self.pp_rank:
+                    continue  # belongs to another PP stage's group
+                # Look up by local name (PP re-indexes layers from 0)
+                local_name = self._pp_original_to_local.get(name, name)
+                param = named_params[local_name]
+                sent_count += 1
+                logger.info(
+                    f"[rank {rank}] send_weights: [{sent_count}/{my_total}] "
+                    f"sending {name} (PP stage {self.pp_rank}, "
+                    f"shape={param.shape})"
+                )
+                local_param = param.to_local()
+                send_param(
+                    local_param,
+                    name,
+                    param.shape,
+                    self.weight_dtypes,
+                    max(self.tp_degree, self.ep_degree),
+                    self.dp_shard_degree,
+                    self.pp_data_nccl_group,
+                    self.pp_data_group_size,
+                )
+            logger.info(
+                f"[rank {rank}] send_weights: done sending {sent_count} "
+                f"params, entering barrier"
+            )
+        else:
+            logger.info(
+                f"[rank {rank}] send_weights: dp_replicate_rank="
+                f"{self.dp_replicate_rank}, skipping send, entering barrier"
+            )
+        # Sync across all ranks (including dp_replicate > 0)
+        torch.cuda.synchronize()
+        logger.info(f"[rank {rank}] send_weights: cuda synced, calling barrier")
         torch.distributed.barrier()
+        logger.info(f"[rank {rank}] send_weights: barrier passed")
 
     def batch_generator(
         self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
