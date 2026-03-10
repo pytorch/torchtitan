@@ -20,7 +20,11 @@ from torchtitan.distributed import ParallelDims
 
 from torchtitan.distributed.activation_checkpoint import apply_ac
 from torchtitan.distributed.tensor_parallel import maybe_enable_async_tp
-from torchtitan.models.deepseek_v3.parallelize import apply_moe_ep_tp, apply_non_moe_tp
+from torchtitan.models.deepseek_v3.parallelize import (
+    _op_sac_save_list,
+    apply_moe_ep_tp,
+    apply_non_moe_tp,
+)
 from torchtitan.protocols.model_converter import ModelConvertersContainer
 from torchtitan.tools.logging import logger
 
@@ -115,7 +119,25 @@ def parallelize_deepseekv3(
         )
 
     if ac_config.mode != "none":
-        apply_ac(model, ac_config)
+        if parallel_dims.ep_enabled:
+            # EP collectives (all_to_all) must be saved, not recomputed, because
+            # recomputing MoE routing can produce different token assignments
+            # across ranks, causing cross-rank mismatches in grouped_mm.
+            # Only op-level selective AC honours _op_sac_save_list; full AC and
+            # layer-level selective AC recompute everything including collectives.
+            if ac_config.mode != "selective" or ac_config.selective_ac_option != "op":
+                raise ValueError(
+                    "EP requires op-level selective AC "
+                    "(--activation-checkpoint.mode selective "
+                    "--activation-checkpoint.selective-ac-option op). "
+                    f"Got mode={ac_config.mode}, "
+                    f"selective_ac_option={ac_config.selective_ac_option}."
+                )
+        apply_ac(
+            model,
+            ac_config,
+            op_sac_save_list=_op_sac_save_list,
+        )
 
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
@@ -183,6 +205,12 @@ def parallelize_deepseekv3(
     if compile_config.enable:
         torch._inductor.config.reorder_for_peak_memory = False
         torch._dynamo.config.capture_scalar_outputs = True
+        # EP's token dispatch (expert_parallel.py:134) mutates ExpertParallel
+        # state (input_splits) inside forward, which dynamo flags as an unsafe
+        # side effect under checkpoint HOP. This skips replaying that mutation
+        # in the backward recompute, which is safe because the saved all_to_all
+        # outputs already encode the correct routing.
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
 
         match parallelism.fsdp_reshard_after_forward:
             case "always":
