@@ -17,7 +17,7 @@ class TestNumerics(unittest.TestCase):
         """Test Llama3 with FSDP + TP configuration."""
         result = run_numerics_test(
             ngpu=4,
-            config_file="./torchtitan/models/llama3/train_configs/debug_model.toml",
+            config_file="./torchtitan/models/llama3/config_registry.py",
             dp_shard_degree=2,
             tp_degree=2,
             cp_degree=1,
@@ -34,7 +34,7 @@ class TestNumerics(unittest.TestCase):
     def test_llama3_fsdp_tp_autobucketing(self):
         result = run_numerics_test(
             ngpu=4,
-            config_file="./torchtitan/models/llama3/train_configs/debug_model.toml",
+            config_file="./torchtitan/models/llama3/config_registry.py",
             dp_shard_degree=2,
             tp_degree=2,
             cp_degree=1,
@@ -52,7 +52,7 @@ class TestNumerics(unittest.TestCase):
     def test_llama3_fsdp_tp_manualbucketing(self):
         result = run_numerics_test(
             ngpu=4,
-            config_file="./torchtitan/models/llama3/train_configs/debug_model.toml",
+            config_file="./torchtitan/models/llama3/config_registry.py",
             dp_shard_degree=2,
             tp_degree=2,
             cp_degree=1,
@@ -71,7 +71,7 @@ class TestNumerics(unittest.TestCase):
         """Test DeepSeek V3 with FSDP + TP + EP configuration."""
         result = run_numerics_test(
             ngpu=4,
-            config_file="./torchtitan/models/deepseek_v3/train_configs/debug_model.toml",
+            config_file="./torchtitan/models/deepseek_v3/config_registry.py",
             dp_shard_degree=2,
             tp_degree=2,
             cp_degree=1,

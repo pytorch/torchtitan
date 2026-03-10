@@ -8,15 +8,12 @@
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
 
-from typing import List
-
 import torch
-
-# pyrefly: ignore[import-error]
 from transformers import CLIPTokenizer, T5Tokenizer
 
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
-from torchtitan.config import JobConfig
+
+from .configs import Encoder
 
 
 class FluxTestTokenizer(BaseTokenizer):
@@ -26,13 +23,13 @@ class FluxTestTokenizer(BaseTokenizer):
     """
 
     def __init__(self, model_path: str = "t5-small", max_length: int = 77, **hf_kwargs):
-        self.tiktokenizer = HuggingFaceTokenizer(model_path, **hf_kwargs)
+        self.tiktokenizer = HuggingFaceTokenizer(tokenizer_path=model_path, **hf_kwargs)
         self._max_length = max_length
         self.pad_id = 0
 
     def _pad_and_chunk_tokens(
-        self, tokens: List[int], max_length: int, pad_token: int
-    ) -> List[int]:
+        self, tokens: list[int], max_length: int, pad_token: int
+    ) -> list[int]:
         # Pad the token sequence to max_length
         if len(tokens) < max_length:
             # If tokens are shorter than max_length, pad with pad_id or eos_id if pad_id is not defined
@@ -76,7 +73,7 @@ class FluxTestTokenizer(BaseTokenizer):
             return torch.tensor(tokens)
 
     # pyrefly: ignore [bad-override]
-    def decode(self, t: List[int]) -> str:
+    def decode(self, t: list[int]) -> str:
         """
         Decode function. This function will not be called.
         """
@@ -128,7 +125,7 @@ class FluxTokenizer(BaseTokenizer):
             return_length=False,
             return_overflowing_tokens=False,
             padding="max_length",
-            return_tensors="pt",  # return pytorch tensors, default return List[int]
+            return_tensors="pt",  # return pytorch tensors, default return list[int]
         )["input_ids"]
         return tokens
 
@@ -137,25 +134,28 @@ class FluxTokenizer(BaseTokenizer):
         """
         Decode function. This function will not be called.
         """
-        return self._tokenizer.decode(t)  # pyrefly: ignore[bad-return]
+        return self._tokenizer.decode(t)
 
 
-def build_flux_tokenizer(job_config: JobConfig) -> tuple[BaseTokenizer, BaseTokenizer]:
+def build_flux_tokenizer(
+    encoder_config: Encoder,
+    hf_assets_path: str,
+) -> tuple[BaseTokenizer, BaseTokenizer]:
     """
     Build the tokenizer for Flux.
     """
     # pyrefly: ignore [missing-attribute]
-    t5_tokenizer_path = job_config.encoder.t5_encoder
+    t5_tokenizer_path = encoder_config.t5_encoder
     # pyrefly: ignore [missing-attribute]
-    clip_tokenzier_path = job_config.encoder.clip_encoder
+    clip_tokenzier_path = encoder_config.clip_encoder
     # pyrefly: ignore [missing-attribute]
-    max_t5_encoding_len = job_config.encoder.max_t5_encoding_len
+    max_t5_encoding_len = encoder_config.max_t5_encoding_len
 
     # NOTE: This tokenizer is used for offline CI and testing only, borrowed from llama3 tokenizer
     # pyrefly: ignore [missing-attribute]
-    if job_config.training.test_mode:
+    if encoder_config.test_mode:
         tokenizer_class = FluxTestTokenizer
-        t5_tokenizer_path = clip_tokenzier_path = job_config.model.hf_assets_path
+        t5_tokenizer_path = clip_tokenzier_path = hf_assets_path
     else:
         tokenizer_class = FluxTokenizer
 

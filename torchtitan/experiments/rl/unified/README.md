@@ -8,68 +8,60 @@ This work is inspired by https://github.com/vllm-project/vllm/pull/28685.
 The integration consists of two main components:
 
 1. **Model Adapter** (`model/qwen3.py`): A custom model class that extends vLLM's `Qwen3ForCausalLM` to handle TorchTitan checkpoint naming conventions
-2. **Inference Script** (`infer.py`): A simple script to register the model and run inference
+2. **Inference Script** (`inference_example.py`): A simple script to register the model and run inference
 
 
 ## Quick Start
 ### Prerequisites
 
-1. Install PyTorch nightly for torchtitan:
-```
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
-```
-
-
-2. Install vLLM from source [vllm-use-an-existing-pytorch-installation](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#use-an-existing-pytorch-installation):
+0. Create and activate environment with uv:
 ```bash
-# install PyTorch first, either from PyPI or from source
-git clone https://github.com/vllm-project/vllm.git
-cd vllm
-python use_existing_torch.py
-uv pip install -r requirements/build.txt
-uv pip install --no-build-isolation -e .
+uv venv --python 3.12 titan-rl
+source titan-rl/bin/activate
+```
+
+1. Install Monarch:
+```bash
+uv pip install torchmonarch
 ```
 
 
-NOTE: If `flash_attn_varlen_func` hits error "torch.AcceleratorError: CUDA error: the provided PTX was compiled with an unsupported toolchain" during forward path, this is due to GPU driver version is not compatible with vLLM/PyTorch compiled version. Use the following command to recompile vLLM.
-
+2. Install PyTorch nightly for torchtitan, and pre-built vllm wheels (based on PyTorch nightly version).
+```bash
+# Install vllm with nightly torch
+uv pip install torch vllm xformers  --pre \
+--extra-index-url https://download.pytorch.org/whl/nightly/cu128 \
+--index-strategy unsafe-best-match
 ```
-# Set CUDA version environment variable
-export CUDA_HOME=/usr/local/cuda-12.4
-export PATH=/usr/local/cuda-12.4/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64:$LD_LIBRARY_PATH
 
-# Clean previous build
-rm -rf build dist *.egg-info
-uv pip uninstall -y vllm
+**NOTE:** The pre-built vLLM wheels are only compatible with CUDA 12.8, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu128, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
 
-# Rebuild vLLM from source with CUDA 12.4
+
+3. Install TorchTitan in editable mode:
+```bash
 uv pip install -e .
-
 ```
 
-3. Download Qwen/Qwen3-0.6B checkpoint from HuggingFace and put into `torchtitan/experiments/rl/example_checkpoint` folder.
-```
+4. Download `Qwen/Qwen3-0.6B` checkpoint from HuggingFace to `torchtitan/experiments/rl/example_checkpoint` folder.
+```bash
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3-0.6B --local_dir torchtitan/experiments/rl/example_checkpoint --all --hf_token=...
 ```
 
-4. Run inference:
-```
-python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint>
-```
-
-Run with TP: (work in progress)
-```
-python torchtitan/experiments/rl/unified/infer.py --model-ckpt-path <path_to_model_checkpoint> --tensor-parallel-size 2
-
+5. Run inference with unified model definition:
+```bash
+torchrun --nproc_per_node=2 torchtitan/experiments/rl/unified/inference_example.py
 ```
 
-5. Run simple rl loop
+**NOTE:**: Set `--nproc_per_node` to the world size, which should match the `tensor_parallel_degree` in the `VLLMGenerator` config.
+
+6. Run simple GRPO RL loop
+```bash
+python torchtitan/experiments/rl/unified/simple_grpo.py --module rl.unified --config rl_grpo_qwen3_0_6b
 ```
-VLLM_BATCH_INVARIANT=1 VLLM_ATTENTION_BACKEND=FLASH_ATTN python3 torchtitan/experiments/rl/unified/simple_rl_multiprocess.py
-```
-Right now we only support VLLM_COMPAT mode, which could achieve trainer and generator bitwise identical. We are working on support UNIFIED mode,
-which uses a unified model definition for trainer and generator.
+
+**NOTE:** If you downloaded your HF model to a different path than the one in step 4, specify it in your command with `--hf_assets_path=<path_to_model_checkpoint>`.
+
+We use a unified model definition for the trainer and generator, ensuring bitwise-identical models to address a class of subtle correctness bugs in RL for LLMs.
 
 ## TODO
 Work on batch invariance:
@@ -85,4 +77,4 @@ Work on the RL loop:
     replace `vllm_to_torchtitan` and `torchtitan_to_vllm` calls to TorchTitan [state dict adaptor](https://github.com/pytorch/torchtitan/blob/main/torchtitan/models/qwen3/model/state_dict_adapter.py).
 5. Right now we only support trainer run on multiple processes using DDP, and generator using TP, need to onboard more parallelism.
 6. Right now we only support VLLM_COMPAT mode to achieve batch invariance and bitwise determinism, need to support UNIFIED mode.
-7. In the longer term, need to add trajectory queue to achieve async, right now trainer and generator are running synchronously.
+7. In the longer term, need to add episode queue to achieve async, right now trainer and generator are running synchronously.

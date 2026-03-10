@@ -68,11 +68,11 @@ We look forward to your contributions!
 7. DDP and HSDP
 8. [TorchFT](https://github.com/pytorch/torchft) integration
 9. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](docs/datasets.md)
-10. Gradient accumulation, enabled by giving an additional `--training.global_batch_size` argument in configuration
+10. Gradient accumulation, enabled by giving an additional `--training.global_batch_size` argument on the CLI
 11. Flexible learning rate scheduler (warmup-stable-decay)
 12. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
 13. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
-14. All options easily configured via [toml files](torchtitan/models/llama3/train_configs/)
+14. All options easily configured via [Python config registry](torchtitan/models/llama3/config_registry.py) with `--module` and `--config` CLI flags
 15. [Helper scripts](scripts/) to
     - download tokenizers from Hugging Face
     - convert original Llama 3 checkpoints into the expected DCP format
@@ -108,11 +108,11 @@ pip install -r requirements.txt
 
 ### Nightly builds
 
-This method requires the nightly build of PyTorch. You can replace `cu126` with another version of cuda (e.g. `cu128`) or an AMD GPU (e.g. `rocm6.3`).
+This method requires the nightly build of PyTorch. You can replace `cu128` with another version of cuda or an AMD GPU (e.g. `rocm6.3`).
 
 ```sh
-pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126 --force-reinstall
-pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu126
+pip3 install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu128 --force-reinstall
+pip install --pre torchtitan --index-url https://download.pytorch.org/whl/nightly/cu128
 ```
 
 ### Stable releases
@@ -142,7 +142,7 @@ python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets 
 Llama 3 8B model locally on 8 GPUs
 
 ```bash
-CONFIG_FILE="./torchtitan/models/llama3/train_configs/llama3_8b.toml" ./run_train.sh
+MODULE=llama3 CONFIG=llama3_8b ./run_train.sh
 ```
 
 ### Multi-Node Training

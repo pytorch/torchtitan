@@ -3,16 +3,16 @@
 `torchtitan` provides direct and indirect support for validation to support user's training goals. Direct support is provided by the `Validator` class which interacts directly with the training loop, and indirect support is provided through [HuggingFace checkpoint conversion](https://github.com/pytorch/torchtitan/blob/main/docs/checkpoint.md#huggingface) for users who want to do evaluation using external tools such as ELeutherAI's `lm_eval`.
 
 ## Validation
-For users who want to perform validation directly during the training loop, we provide the `Validator` class which can be conveniently overloaded through the `TrainSpec` or configured in `JobConfig`. The validator class has access to and reuses many of the trainer's functions such as its parallelization, including pipelining.
+For users who want to perform validation directly during the training loop, we provide the `Validator` class which can be conveniently configured via `Validator.Config` in your config_registry function. The validator class has access to and reuses many of the trainer's functions such as its parallelization, including pipelining.
 
 Below is an example validation config:
 
-```toml
-[validation]
-enable = true
-dataset = "c4_validation"
-freq = 500
-steps = -1 # consumes the entire validation set
+```python
+validator=Validator.Config(
+    freq=500,
+    dataset="c4_validation",
+    steps=-1,  # consumes the entire validation set
+),
 ```
 
 ## Third-Party Evaluation

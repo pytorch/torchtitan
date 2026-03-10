@@ -54,7 +54,12 @@ from torch.distributed.tensor.parallel import (
     RowwiseParallel,
 )
 from torch.profiler import profile, ProfilerActivity, schedule
-from torchtitan.experiments.rl import unified  # noqa: F401
+from torchtitan.experiments.rl.unified.models.parallelize import parallelize_qwen3
+from torchtitan.experiments.rl.unified.plugin import (
+    register_model_to_vllm_model_registry,
+    VLLM_MODEL_NAME,
+)
+from torchtitan.models.qwen3 import model_registry
 
 
 # Must set spawn method before any CUDA operations or vLLM imports
@@ -267,7 +272,7 @@ class VLLMNativeBenchmark:
                 model=self.config.model_path,
                 trust_remote_code=True,
                 dtype="bfloat16",
-                gpu_memory_utilization=0.9,
+                gpu_memory_utilization=0.5,
                 tensor_parallel_size=self.config.tp,
                 distributed_executor_backend=distributed_backend,
                 compilation_config=compilation_config,
@@ -379,8 +384,13 @@ class VLLMTorchTitanBenchmark:
     def setup(self):
         """Initialize vLLM engine with TorchTitan Qwen3 model."""
         try:
-            # Import unified module to register TorchTitan models with vLLM
             from vllm import LLM, SamplingParams
+
+            # Register TorchTitan model with vLLM before engine creation
+            model_spec = model_registry("1.7B")
+            # Patch to use RL-specific parallelize function that supports vLLM
+            model_spec.parallelize_fn = parallelize_qwen3
+            register_model_to_vllm_model_registry(model_spec)
 
             print("Loading vLLM with TorchTitan Qwen3 model...")
             print(f"Model: {self.config.model_path}")
@@ -415,12 +425,12 @@ class VLLMTorchTitanBenchmark:
                 model=self.config.model_path,
                 hf_overrides={
                     # Override architectures to use our registered TorchTitan model class
-                    "architectures": ["Qwen3TorchTitanForCausalLM"],
+                    "architectures": [VLLM_MODEL_NAME],
                 },
                 dtype="bfloat16",
                 trust_remote_code=True,
                 enforce_eager=enforce_eager,
-                gpu_memory_utilization=0.9,
+                gpu_memory_utilization=0.5,
                 tensor_parallel_size=self.config.tp,
                 distributed_executor_backend=distributed_backend,
                 compilation_config=compilation_config,
