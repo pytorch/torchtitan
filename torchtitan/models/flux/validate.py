@@ -170,7 +170,9 @@ class FluxValidator(Validator):
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if save_img_count != -1 and save_img_count <= 0:
                     break
-                img_size = self.config.dataloader.img_size
+                img_size = (
+                    self.config.dataloader.img_size
+                )  # pyrefly: ignore [missing-attribute]
                 image = generate_image(
                     device=self.device,
                     dtype=self._dtype,
@@ -179,9 +181,11 @@ class FluxValidator(Validator):
                     enable_classifier_free_guidance=self.config.sampling.enable_classifier_free_guidance,
                     denoising_steps=self.config.sampling.denoising_steps,
                     classifier_free_guidance_scale=self.config.sampling.classifier_free_guidance_scale,
+                    # pyrefly: ignore [bad-argument-type]
                     model=model,
                     prompt=p,
                     autoencoder=self.autoencoder,
+                    # pyrefly: ignore [bad-argument-type]
                     tokenizer=self.tokenizer,
                     t5_encoder=self.t5_encoder,
                     clip_encoder=self.clip_encoder,

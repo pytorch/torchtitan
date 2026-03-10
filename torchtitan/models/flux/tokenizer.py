@@ -61,7 +61,7 @@ class FluxTokenizerContainer(BaseTokenizer):
         return {
             "clip_tokens": self.clip_tokenizer.encode(text),
             "t5_tokens": self.t5_tokenizer.encode(text),
-        }
+        }  # pyrefly: ignore [bad-return]
 
     # pyrefly: ignore [bad-override]
     def decode(self, tokens: dict[str, list[int]]) -> dict[str, str]:
