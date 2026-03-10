@@ -81,14 +81,6 @@ def parallelize_qwen3(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}).
         """
 
-    attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
-    if parallelism.context_parallel_degree > 1 and attn_backend != "sdpa":
-        raise NotImplementedError(
-            f"Context Parallel only supports SDPA attention. "
-            f"Got attn_backend='{attn_backend}'. "
-            f"FlexAttention and varlen attention are not supported with CP."
-        )
-
     model_compile_enabled = (
         compile_config.enable and "model" in compile_config.components
     )
@@ -131,8 +123,8 @@ def parallelize_qwen3(
             ep_etp_mesh=parallel_dims.get_optional_mesh(["ep", "etp"]),
             dual_pipe_v=dual_pipe_v,
         )
-
     if parallel_dims.cp_enabled:
+        attn_backend = getattr(model.config.layer.attention, "attn_backend", "sdpa")
         apply_cp_to_attention_module(
             # pyrefly: ignore [missing-attribute, not-callable]
             [block.attention.inner_attention for block in model.layers.values()],
