@@ -20,9 +20,10 @@ uv venv --python 3.12 titan-rl
 source titan-rl/bin/activate
 ```
 
-1. Install Monarch:
+1. Install Monarch and TorchStore from main:
 ```bash
 uv pip install torchmonarch==0.3.0
+uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 ```
 
 
@@ -40,10 +41,6 @@ uv pip install torch vllm xformers  --pre \
 3. Install TorchTitan in editable mode:
 ```bash
 uv pip install -e .
-```
-
-```
-uv pip install --no-deps -e /home/daniellepintz/torchstore
 ```
 
 4. Download `Qwen/Qwen3-0.6B` checkpoint from HuggingFace to `torchtitan/experiments/rl/example_checkpoint` folder.

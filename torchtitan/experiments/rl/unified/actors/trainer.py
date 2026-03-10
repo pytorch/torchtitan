@@ -14,12 +14,12 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torchstore as ts
 from monarch.actor import Actor, endpoint
-from torchstore.direct_weight_sync import DirectWeightSyncSource
 from torch.distributed._tensor import DTensor
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
 )
+from torchstore.direct_weight_sync import DirectWeightSyncSource
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import CommConfig, Configurable, TORCH_DTYPE_MAP

@@ -327,14 +327,16 @@ class RLTrainer(Configurable):
             t_refresh = time.perf_counter() - t0
             self.generator.pull_weights.call(metrics["policy_version"]).get()
             t_total = time.perf_counter() - t0
-            logger.info(
-                f"Weight sync: refresh={t_refresh:.3f}s, total={t_total:.3f}s"
-            )
+            logger.info(f"Weight sync: refresh={t_refresh:.3f}s, total={t_total:.3f}s")
 
             # Verify weight sync after first training step
             if step == 0:
-                trainer_checksums = self.trainer.get_weight_checksums.call().get().item(gpus=0)
-                gen_checksums = self.generator.get_weight_checksums.call().get().item(gpus=0)
+                trainer_checksums = (
+                    self.trainer.get_weight_checksums.call().get().item(gpus=0)
+                )
+                gen_checksums = (
+                    self.generator.get_weight_checksums.call().get().item(gpus=0)
+                )
                 mismatches = []
                 for name in trainer_checksums:
                     if name not in gen_checksums:
