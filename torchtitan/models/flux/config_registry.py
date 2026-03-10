@@ -13,7 +13,7 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
-from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
+from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
 from torchtitan.models.flux.flux_datasets import FluxDataLoader
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.trainer import FluxTrainer
@@ -61,9 +61,11 @@ def flux_debugmodel() -> FluxTrainer.Config:
         validator=FluxValidator.Config(
             freq=5,
             steps=48,
-            enable_classifier_free_guidance=True,
-            classifier_free_guidance_scale=5.0,
-            denoising_steps=4,
+            sampling=SamplingConfig(
+                enable_classifier_free_guidance=True,
+                classifier_free_guidance_scale=5.0,
+                denoising_steps=4,
+            ),
             dataloader=FluxDataLoader.Config(
                 dataset="coco-validation",
                 prompt_dropout_prob=0.0,
@@ -115,9 +117,11 @@ def flux_dev() -> FluxTrainer.Config:
         validator=FluxValidator.Config(
             freq=1000,
             steps=12,
-            enable_classifier_free_guidance=True,
-            classifier_free_guidance_scale=5.0,
-            denoising_steps=50,
+            sampling=SamplingConfig(
+                enable_classifier_free_guidance=True,
+                classifier_free_guidance_scale=5.0,
+                denoising_steps=50,
+            ),
             dataloader=FluxDataLoader.Config(
                 dataset="coco-validation",
                 prompt_dropout_prob=0,
@@ -164,9 +168,11 @@ def flux_schnell() -> FluxTrainer.Config:
         validator=FluxValidator.Config(
             freq=1000,
             steps=6,
-            enable_classifier_free_guidance=True,
-            classifier_free_guidance_scale=5.0,
-            denoising_steps=50,
+            sampling=SamplingConfig(
+                enable_classifier_free_guidance=True,
+                classifier_free_guidance_scale=5.0,
+                denoising_steps=50,
+            ),
             dataloader=FluxDataLoader.Config(
                 dataset="coco-validation",
                 prompt_dropout_prob=0,

@@ -48,15 +48,37 @@ class FluxTokenizerContainer(BaseTokenizer):
         )
         self.clip_tokenizer: BaseTokenizer = tokenizer_class(clip_path, max_length=77)
 
-    def encode(self, *args, **kwargs) -> list[int]:
-        raise NotImplementedError(
-            "Use t5_tokenizer.encode() or clip_tokenizer.encode() directly"
-        )
+    # pyrefly: ignore [bad-override]
+    def encode(self, text: str | list[str]) -> dict[str, torch.Tensor]:
+        """Encode text using both T5 and CLIP tokenizers.
 
-    def decode(self, *args, **kwargs) -> str:
-        raise NotImplementedError(
-            "Use t5_tokenizer.decode() or clip_tokenizer.decode() directly"
-        )
+        Args:
+            text: A string or list of strings to encode.
+
+        Returns:
+            A dict with keys "clip_tokens" and "t5_tokens", each mapping to a torch.Tensor.
+        """
+        return {
+            "clip_tokens": self.clip_tokenizer.encode(text),
+            "t5_tokens": self.t5_tokenizer.encode(text),
+        }
+
+    # pyrefly: ignore [bad-override]
+    def decode(self, tokens: dict[str, list[int]]) -> dict[str, str]:
+        """Decode token IDs using both T5 and CLIP tokenizers.
+
+        Args:
+            tokens: A dict with keys "clip_tokens" and/or "t5_tokens".
+
+        Returns:
+            A dict with keys "clip_text" and/or "t5_text".
+        """
+        result = {}
+        if "t5_tokens" in tokens:
+            result["t5_text"] = self.t5_tokenizer.decode(tokens["t5_tokens"])
+        if "clip_tokens" in tokens:
+            result["clip_text"] = self.clip_tokenizer.decode(tokens["clip_tokens"])
+        return result
 
     def get_vocab_size(self) -> int:
         return self.t5_tokenizer.get_vocab_size()

@@ -21,6 +21,7 @@ from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.tools.logging import logger
 
+from .configs import SamplingConfig
 from .flux_datasets import FluxDataLoader
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
@@ -65,30 +66,8 @@ class FluxValidator(Validator):
         save_img_folder: str = "validation_images"
         """Folder to save validation images"""
 
-        enable_classifier_free_guidance: bool = False
-        """Whether to use classifier-free guidance (CFG) during validation image generation.
-
-        When enabled, the model runs two forward passes per denoising step — one with
-        the text prompt and one without — then interpolates the results using
-        `classifier_free_guidance_scale` to produce images that more closely follow
-        the prompt. This typically yields higher-quality, more prompt-adherent images
-        but doubles the compute cost per sampling step.
-
-        Note: This only affects the image generation/sampling path (controlled by
-        `save_img_count`), NOT the validation loss computation.
-        """
-
-        classifier_free_guidance_scale: float = 5.0
-        """Interpolation weight for classifier-free guidance during sampling.
-
-        Higher values steer the output more strongly toward the text prompt, producing
-        sharper and more prompt-adherent images, but may reduce diversity or introduce
-        artifacts. Typical values range from 1.0 (no guidance) to 10.0 (strong guidance).
-        Only takes effect when `enable_classifier_free_guidance` is True.
-        """
-
-        denoising_steps: int = 50
-        """How many denoising steps to sample when generating an image"""
+        sampling: SamplingConfig = field(default_factory=SamplingConfig)
+        """Sampling configuration for validation image generation"""
 
     validation_dataloader: BaseDataLoader
 
@@ -120,8 +99,6 @@ class FluxValidator(Validator):
 
         assert isinstance(config.dataloader, FluxDataLoader.Config)
         assert isinstance(tokenizer, FluxTokenizerContainer)
-        self.t5_tokenizer = tokenizer.t5_tokenizer
-        self.clip_tokenizer = tokenizer.clip_tokenizer
 
         dl_config = replace(
             config.dataloader,
@@ -199,14 +176,13 @@ class FluxValidator(Validator):
                     dtype=self._dtype,
                     img_height=16 * (img_size // 16),
                     img_width=16 * (img_size // 16),
-                    enable_classifier_free_guidance=self.config.enable_classifier_free_guidance,
-                    denoising_steps=self.config.denoising_steps,
-                    classifier_free_guidance_scale=self.config.classifier_free_guidance_scale,
+                    enable_classifier_free_guidance=self.config.sampling.enable_classifier_free_guidance,
+                    denoising_steps=self.config.sampling.denoising_steps,
+                    classifier_free_guidance_scale=self.config.sampling.classifier_free_guidance_scale,
                     model=model,
                     prompt=p,
                     autoencoder=self.autoencoder,
-                    t5_tokenizer=self.t5_tokenizer,
-                    clip_tokenizer=self.clip_tokenizer,
+                    tokenizer=self.tokenizer,
                     t5_encoder=self.t5_encoder,
                     clip_encoder=self.clip_encoder,
                 )

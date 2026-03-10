@@ -40,8 +40,6 @@ def inference(config: FluxTrainer.Config):
 
     # Build tokenizers from the config
     tokenizer_container = config.tokenizer.build()
-    t5_tokenizer = tokenizer_container.t5_tokenizer
-    clip_tokenizer = tokenizer_container.clip_tokenizer
 
     if global_rank == 0:
         logger.info("Starting inference...")
@@ -68,17 +66,16 @@ def inference(config: FluxTrainer.Config):
                 img_height=16 * (img_size // 16),
                 img_width=16 * (img_size // 16),
                 # pyrefly: ignore [missing-attribute]
-                enable_classifier_free_guidance=config.inference.enable_classifier_free_guidance,
+                enable_classifier_free_guidance=config.inference.sampling.enable_classifier_free_guidance,
                 # pyrefly: ignore [missing-attribute]
-                denoising_steps=config.inference.denoising_steps,
+                denoising_steps=config.inference.sampling.denoising_steps,
                 # pyrefly: ignore [missing-attribute]
-                classifier_free_guidance_scale=config.inference.classifier_free_guidance_scale,
+                classifier_free_guidance_scale=config.inference.sampling.classifier_free_guidance_scale,
                 # pyrefly: ignore [bad-argument-type]
                 model=trainer.model_parts[0],
                 prompt=prompts[i : i + bs],
                 autoencoder=trainer.autoencoder,
-                t5_tokenizer=t5_tokenizer,
-                clip_tokenizer=clip_tokenizer,
+                tokenizer=tokenizer_container,
                 t5_encoder=trainer.t5_encoder,
                 clip_encoder=trainer.clip_encoder,
             )

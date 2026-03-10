@@ -21,7 +21,7 @@ from torch.utils.data import IterableDataset
 from torchtitan.components.dataloader import ParallelAwareDataloader
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.hf_datasets import DatasetConfig
-from torchtitan.models.flux.tokenizer import FluxTokenizer, FluxTokenizerContainer
+from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.tools.logging import logger
 
 
@@ -77,8 +77,7 @@ def _process_cc12m_image(
 
 def _cc12m_wds_data_processor(
     sample: dict[str, Any],
-    t5_tokenizer: FluxTokenizer,
-    clip_tokenizer: FluxTokenizer,
+    tokenizer: FluxTokenizerContainer,
     output_size: int = 256,
 ) -> dict[str, Any]:
     """
@@ -86,27 +85,23 @@ def _cc12m_wds_data_processor(
 
     Args:
         sample: A sample from dataset
-        t5_tokenizer: T5 tokenizer
-        clip_tokenizer: CLIP tokenizer
+        tokenizer: FluxTokenizerContainer that encodes text with both T5 and CLIP
         output_size: The output image size
 
     """
     img = _process_cc12m_image(sample["jpg"], output_size=output_size)
-    t5_tokens = t5_tokenizer.encode(sample["txt"])
-    clip_tokens = clip_tokenizer.encode(sample["txt"])
+    tokens = tokenizer.encode(sample["txt"])
 
     return {
         "image": img,
-        "clip_tokens": clip_tokens,  # type: List[int]
-        "t5_tokens": t5_tokens,  # type: List[int]
-        "prompt": sample["txt"],  # type: str
+        **tokens,
+        "prompt": sample["txt"],
     }
 
 
 def _coco_data_processor(
     sample: dict[str, Any],
-    t5_tokenizer: FluxTokenizer,
-    clip_tokenizer: FluxTokenizer,
+    tokenizer: FluxTokenizerContainer,
     output_size: int = 256,
 ) -> dict[str, Any]:
     """
@@ -114,8 +109,7 @@ def _coco_data_processor(
 
     Args:
         sample: A sample from dataset
-        t5_tokenizer: T5 tokenizer
-        clip_tokenizer: CLIP tokenizer
+        tokenizer: FluxTokenizerContainer that encodes text with both T5 and CLIP
         output_size: The output image size
 
     """
@@ -123,14 +117,12 @@ def _coco_data_processor(
     prompt = sample["caption"]
     if isinstance(prompt, list):
         prompt = prompt[0]
-    t5_tokens = t5_tokenizer.encode(prompt)
-    clip_tokens = clip_tokenizer.encode(prompt)
+    tokens = tokenizer.encode(prompt)
 
     return {
         "image": img,
-        "clip_tokens": clip_tokens,  # type: List[int]
-        "t5_tokens": t5_tokens,  # type: List[int]
-        "prompt": prompt,  # type: str
+        **tokens,
+        "prompt": prompt,
     }
 
 
@@ -187,8 +179,7 @@ class FluxDataset(IterableDataset, Stateful):
         self,
         dataset_name: str,
         dataset_path: str | None,
-        t5_tokenizer: BaseTokenizer,
-        clip_tokenizer: BaseTokenizer,
+        tokenizer: FluxTokenizerContainer,
         prompt_dropout_prob: float,
         img_size: int,
         dp_rank: int = 0,
@@ -207,10 +198,10 @@ class FluxDataset(IterableDataset, Stateful):
         self.dataset_name = dataset_name
         self._data = split_dataset_by_node(ds, dp_rank, dp_world_size)
 
-        self._t5_tokenizer = t5_tokenizer
-        self._t5_empty_token = t5_tokenizer.encode("")
-        self._clip_tokenizer = clip_tokenizer
-        self._clip_empty_token = clip_tokenizer.encode("")
+        self._tokenizer = tokenizer
+        empty_tokens = tokenizer.encode("")
+        self._t5_empty_token = empty_tokens["t5_tokens"]
+        self._clip_empty_token = empty_tokens["clip_tokens"]
         self._data_processor = data_processor
         self.prompt_dropout_prob = prompt_dropout_prob
         self.img_size = img_size
@@ -263,8 +254,7 @@ class FluxDataset(IterableDataset, Stateful):
             # Use the dataset-specific preprocessor
             sample_dict = self._data_processor(
                 sample,
-                self._t5_tokenizer,
-                self._clip_tokenizer,
+                self._tokenizer,
                 output_size=self.img_size,
             )
 
@@ -319,8 +309,7 @@ class FluxValidationDataset(FluxDataset):
         self,
         dataset_name: str,
         dataset_path: str | None,
-        t5_tokenizer: BaseTokenizer,
-        clip_tokenizer: BaseTokenizer,
+        tokenizer: FluxTokenizerContainer,
         prompt_dropout_prob: float,
         img_size: int,
         dp_rank: int = 0,
@@ -332,8 +321,7 @@ class FluxValidationDataset(FluxDataset):
         super().__init__(
             dataset_name=dataset_name,
             dataset_path=dataset_path,
-            t5_tokenizer=t5_tokenizer,
-            clip_tokenizer=clip_tokenizer,
+            tokenizer=tokenizer,
             prompt_dropout_prob=prompt_dropout_prob,
             img_size=img_size,
             dp_rank=dp_rank,
@@ -393,11 +381,10 @@ class FluxDataLoader(ParallelAwareDataloader):
 
         def __post_init__(self):
             if self.generate_timesteps and self.prompt_dropout_prob != 0.0:
-                logger.warning(
-                    f"prompt_dropout_prob={self.prompt_dropout_prob} "
-                    "overridden to 0.0 for validation (generate_timesteps=True)."
+                raise ValueError(
+                    f"prompt_dropout_prob must be 0.0 when generate_timesteps=True "
+                    f"(for validation), but got {self.prompt_dropout_prob}."
                 )
-                self.prompt_dropout_prob = 0.0
 
     def __init__(
         self,
@@ -415,15 +402,12 @@ class FluxDataLoader(ParallelAwareDataloader):
                 "FluxDataLoader requires a FluxTokenizerContainer as tokenizer. "
                 "Set tokenizer=FluxTokenizerContainer.Config(...) in your trainer config."
             )
-        t5_tokenizer = tokenizer.t5_tokenizer
-        clip_tokenizer = tokenizer.clip_tokenizer
 
         if config.generate_timesteps:
             ds = FluxValidationDataset(
                 dataset_name=config.dataset,
                 dataset_path=config.dataset_path,
-                t5_tokenizer=t5_tokenizer,
-                clip_tokenizer=clip_tokenizer,
+                tokenizer=tokenizer,
                 prompt_dropout_prob=config.prompt_dropout_prob,
                 img_size=config.img_size,
                 dp_rank=dp_rank,
@@ -435,8 +419,7 @@ class FluxDataLoader(ParallelAwareDataloader):
             ds = FluxDataset(
                 dataset_name=config.dataset,
                 dataset_path=config.dataset_path,
-                t5_tokenizer=t5_tokenizer,
-                clip_tokenizer=clip_tokenizer,
+                tokenizer=tokenizer,
                 prompt_dropout_prob=config.prompt_dropout_prob,
                 img_size=config.img_size,
                 dp_rank=dp_rank,

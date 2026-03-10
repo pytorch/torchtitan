@@ -12,10 +12,10 @@ import torch
 from einops import rearrange
 from PIL import ExifTags, Image
 from torch import Tensor
-from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.models.flux.model.model import FluxModel
+from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
     generate_noise_latent,
@@ -78,8 +78,7 @@ def generate_image(
     model: FluxModel,
     prompt: str | list[str],
     autoencoder: AutoEncoder,
-    t5_tokenizer: BaseTokenizer,
-    clip_tokenizer: BaseTokenizer,
+    tokenizer: FluxTokenizerContainer,
     t5_encoder: FluxEmbedder,
     clip_encoder: FluxEmbedder,
 ) -> torch.Tensor:
@@ -92,9 +91,10 @@ def generate_image(
     if isinstance(prompt, str):
         prompt = [prompt]
 
-    # Tokenize the prompt. Unsqueeze to add a batch dimension.
-    clip_tokens = clip_tokenizer.encode(prompt)
-    t5_tokens = t5_tokenizer.encode(prompt)
+    # Tokenize the prompt using the container's encode method.
+    tokens = tokenizer.encode(prompt)
+    clip_tokens = tokens["clip_tokens"]
+    t5_tokens = tokens["t5_tokens"]
     if len(prompt) == 1:
         # pyrefly: ignore [missing-attribute]
         clip_tokens = clip_tokens.unsqueeze(0)
@@ -117,12 +117,11 @@ def generate_image(
     if enable_classifier_free_guidance:
         num_images = len(prompt)
 
-        empty_clip_tokens = clip_tokenizer.encode("")
-        empty_t5_tokens = t5_tokenizer.encode("")
+        empty_tokens = tokenizer.encode("")
         # pyrefly: ignore [missing-attribute]
-        empty_clip_tokens = empty_clip_tokens.repeat(num_images, 1)
+        empty_clip_tokens = empty_tokens["clip_tokens"].repeat(num_images, 1)
         # pyrefly: ignore [missing-attribute]
-        empty_t5_tokens = empty_t5_tokens.repeat(num_images, 1)
+        empty_t5_tokens = empty_tokens["t5_tokens"].repeat(num_images, 1)
 
         empty_batch = preprocess_data(
             device=device,
