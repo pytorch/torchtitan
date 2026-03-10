@@ -508,7 +508,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         if config.comm.use_torchcomms:
             try:
-                import torchcomms  # noqa: F401
+                import torchcomms  # noqa: F401  # pyrefly: ignore [missing-import]
             except ImportError:
                 raise ImportError(
                     "torchcomms package is required for --comm.use_torchcomms. "

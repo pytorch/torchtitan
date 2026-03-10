@@ -32,41 +32,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             [
                 [
-                    "--comm.use_torchcomms",
-                ],
-            ],
-            "1D FSDP with torchcomms",
-            "torchcomms_1d",
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--comm.use_torchcomms",
-                    "--parallelism.context_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--compile.enable",
-                ],
-            ],
-            "FSDP+CP+PP+compile with torchcomms",
-            "torchcomms_3d_dp+cp+pp+compile",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
-                    "--comm.use_torchcomms",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--parallelism.pipeline_parallel_degree 2",
-                    "--compile.enable",
-                ],
-            ],
-            "FSDP+TP+PP+compile with torchcomms",
-            "torchcomms_3d_dp+tp+pp+compile",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            [
-                [
                     "--profiling.enable_profiling",
                     "--metrics.enable_tensorboard",
                 ],
@@ -593,6 +558,32 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             "Float8 emulation test",
             "float8_emulation",
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--comm.use_torchcomms",
+                    "--parallelism.context_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--compile.enable",
+                ],
+            ],
+            "FSDP+CP+PP+compile with torchcomms",
+            "torchcomms_3d_dp+cp+pp+compile",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--comm.use_torchcomms",
+                    "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--compile.enable",
+                ],
+            ],
+            "FSDP+TP+PP+compile with torchcomms",
+            "torchcomms_3d_dp+tp+pp+compile",
+            ngpu=8,
         ),
     ]
 
