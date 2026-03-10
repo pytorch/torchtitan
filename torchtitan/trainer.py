@@ -30,6 +30,7 @@ from torchtitan.components.optimizer import (
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
+from torchtitan.components.loss import Loss
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     ActivationCheckpointConfig,
@@ -104,6 +105,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         compile: CompileConfig = field(default_factory=CompileConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         validator: Validator.Config = field(default_factory=Validator.Config)
+        loss: Loss.Config = field(default_factory=Loss.Config)
         debug: DebugConfig = field(default_factory=DebugConfig)
 
         def __post_init__(self):
@@ -314,9 +316,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = model_spec.build_loss_fn(
-            config.compile, parallel_dims=parallel_dims
-        )
+        self.loss_fn = config.loss.build()
 
         # verify batch sizes
         global_batch_size = config.training.global_batch_size
@@ -676,7 +676,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 with self.maybe_enable_amp:
                     pred = model_parts[0](inputs, **extra_inputs, **extra_kwargs)
                     # Compute loss sum (reduction='sum')
-                    loss_sum = self.loss_fn(pred, labels)
+                    loss_sum = self.loss_fn(pred, labels).main
 
                     # Scale the loss by the inverse of the total weight denominator before backward
                     # This ensures gradients are properly normalized across all microbatches
