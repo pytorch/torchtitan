@@ -187,8 +187,12 @@ class ReplicateComputation(torch.nn.Module):
             dp_mesh = self.device_mesh
 
             # Compute grad placements for non-DP mesh dims so that
-            # backward properly reduces gradients (e.g., Replicate -> Partial
-            # for RMSNorm weights on the TP mesh that see Shard inputs).
+            # backward properly reduces gradients.
+            # TODO: We assume Replicate -> Partial here, which is correct
+            # when using Sequence Parallel (Shard inputs produce partial
+            # gradients). Without SP, the grad placement depends on
+            # downstream operations and may not be Partial. This could be
+            # fixed by enforcing spmd_types.
             non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
             non_dp_grad_placements = tuple(
                 Partial() if isinstance(p, Replicate) else p for p in non_dp_placements
